@@ -94,9 +94,20 @@ def constant_integrand(t, *args):
 
 
 def assert_time_ordering(integral_output):
-    """Assert that all time points in the output are non-decreasing."""
+    """Assert that all time points in the output are non-decreasing.
+
+    Allows ULP-level float rounding at panel boundaries: the last
+    node of panel i (at c=1.0, evaluating to barrier_i + h_i) and the
+    first node of panel i+1 (at c=0.0, evaluating to barrier_{i+1})
+    are mathematically equal but can differ by 1 ULP when the
+    subtraction h_i = barrier_{i+1} - barrier_i isn't exactly
+    representable. The tolerance scales with the integration domain.
+    """
     t_flat = torch.flatten(integral_output.nodes, start_dim=0, end_dim=1)
-    assert torch.all(t_flat[1:] - t_flat[:-1] >= 0), (
+    eps = torch.finfo(t_flat.dtype).eps
+    scale = t_flat.abs().max().clamp_min(1.0)
+    tol = 8 * eps * scale  # generous bound for accumulated rounding
+    assert torch.all(t_flat[1:] - t_flat[:-1] >= -tol), (
         "Time points are not non-decreasing"
     )
 

@@ -108,8 +108,8 @@ torchpathdiffeq/
 ├── methods/               # quadrature method registries
 │   ├── _base.py             # _Tableau, MethodClass
 │   ├── runge_kutta.py       # adaptive_heun, fehlberg2, bosh3, dopri5
-│   ├── gauss_kronrod.py     # gk15, gk21, gk31  (with builder)
-│   ├── clenshaw_curtis.py   # cc17, cc33, cc65  (with FFT-based weights)
+│   ├── gauss_kronrod.py     # gk7, gk15, gk21, gk31  (with builder)
+│   ├── clenshaw_curtis.py   # cc5, cc9, cc17, cc33, cc65  (with FFT-based weights)
 │   └── interpolatory.py     # variable adaptive_heun, interpolatory3_variable
 ├── quadrature/            # adaptive integration engine
 │   ├── base.py              # AdaptiveQuadrature ABC + main integrate loop
@@ -161,14 +161,17 @@ from torchpathdiffeq import (
 
 ```
 methods/runge_kutta.py:    adaptive_heun, fehlberg2, bosh3, dopri5
-methods/gauss_kronrod.py:  gk15, gk21 (default), gk31
-methods/clenshaw_curtis.py: cc17, cc33, cc65
+methods/gauss_kronrod.py:  gk7, gk15, gk21 (default), gk31
+methods/clenshaw_curtis.py: cc5, cc9, cc17, cc33, cc65
 methods/interpolatory.py:  adaptive_heun (variable), interpolatory3_variable
 ```
 
 For smooth integrands at academic-grade precision, prefer `gk21`
 (default) or `cc33`. RK methods are kept for backwards-compatibility and
-as low-order baselines.
+as low-order baselines. The low-point methods (`gk7`, `cc5`, `cc9`) fill
+the gap between the RK rules and the headline `gk15`/`cc17`: useful when
+the adaptive controller refines aggressively and a high-node rule wastes
+evaluations on smooth regions.
 
 ### Tensor shape conventions
 

@@ -348,7 +348,6 @@ class AdaptiveQuadrature(SolverBase):
             random_initial_mesh,
             N_init_steps,
         )
-        nodes, y = None, None
 
         record = {}
         # === Main integration loop ===
@@ -361,8 +360,9 @@ class AdaptiveQuadrature(SolverBase):
             else:
                 max_steps = int(self._get_max_f_evals(total_mem_usage) // self.C)
 
-            if y is not None:
-                assert max_steps >= len(y), f"{max_steps}  {len(y)}"
+            # From earlier debugging
+            # if y is not None:
+            #    assert max_steps >= len(y), f"{max_steps}  {len(y)}"
 
             # --- Step 1: Select a batch of unevaluated steps ---
             # Find barrier indices where mesh_trackers is True, take up to max_steps
@@ -371,15 +371,16 @@ class AdaptiveQuadrature(SolverBase):
             step_idxs = step_idxs[:max_steps]
             # Place C quadrature points within each selected step
             nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
-            t_flat = torch.flatten(nodes, start_dim=0, end_dim=1)
-            assert torch.all(t_flat[1:] - t_flat[:-1] + self.atol_assert >= 0)
             error_ratios = None
 
             # --- Step 2: Evaluate the integrand at all quadrature points ---
             # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
             N, C, _T = nodes.shape
-            y_step_eval = f(torch.flatten(nodes, start_dim=0, end_dim=-2), *f_args)
+            nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
+            assert torch.all(nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0)
+            y_step_eval = f(nodes_flat, *f_args)
             y_step_eval = torch.reshape(y_step_eval, (N, C, -1))
+            del nodes_flat
 
             # --- Step 3: Compute integral contributions via qudrature formula ---
             t0 = time.time()
@@ -1363,9 +1364,9 @@ class AdaptiveQuadrature(SolverBase):
         memory cost (f_unit_mem_size) is then used throughout integration
         to dynamically compute how many steps can fit in one batch.
 
-        When take_gradient=True, a 2.1x safety factor is applied to the measured memory to account
-        for intermediate allocations during integration (RK computation,
-        error estimation, etc.).
+        When take_gradient=True, a 2.1x safety factor is applied to the measured
+        memory to account for intermediate allocations during integration (RK
+        computation, error estimation, etc.).
 
         Args:
             f: The integrand function to benchmark.

@@ -54,10 +54,13 @@ UNIFORM_EXACTNESS = {
     # 2n-1, so the embedded G estimate is exact for degree 19 (G10),
     # 13 (G7), or 29 (G15); the b_error indicator picks up the gap
     # between K and G.
+    "gk7": 10,  # G3-K7: K7 exactness = 3*3 + 1 = 10
     "gk15": 22,  # G7-K15: K15 exactness = 3*7 + 1 = 22
     "gk21": 31,  # G10-K21: K21 exactness = 3*10 + 1 = 31
     "gk31": 46,  # G15-K31: K31 exactness = 3*15 + 1 = 46
     # Clenshaw-Curtis CC_n integrates polynomials of degree n exactly.
+    "cc5": 4,
+    "cc9": 8,
     "cc17": 16,
     "cc33": 32,
     "cc65": 64,

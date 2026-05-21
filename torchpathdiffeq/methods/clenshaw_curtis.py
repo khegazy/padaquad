@@ -100,9 +100,19 @@ def _build_clenshaw_curtis_tableau(n: int) -> _Tableau:
     )
 
 
+# CC_4 (5 nodes): polynomial exactness 4, error vs CC_2 (3 nodes, exactness 2)
+_CLENSHAW_CURTIS_5 = MethodClass(
+    order=5,  # CC_n exactness = n; convergence rate ~ n + 1 in RK convention
+    tableau=_build_clenshaw_curtis_tableau(4),
+)
+# CC_8 (9 nodes): polynomial exactness 8, error vs CC_4 (5 nodes, exactness 4)
+_CLENSHAW_CURTIS_9 = MethodClass(
+    order=9,
+    tableau=_build_clenshaw_curtis_tableau(8),
+)
 # CC_16 (17 nodes): polynomial exactness 16, error vs CC_8 (9 nodes, exactness 8)
 _CLENSHAW_CURTIS_17 = MethodClass(
-    order=17,  # CC_n exactness = n; convergence rate ~ n + 1 in RK convention
+    order=17,
     tableau=_build_clenshaw_curtis_tableau(16),
 )
 # CC_32 (33 nodes): polynomial exactness 32, error vs CC_16 (17 nodes, exactness 16)
@@ -117,6 +127,8 @@ _CLENSHAW_CURTIS_65 = MethodClass(
 )
 
 CC_METHODS = {
+    "cc5": _CLENSHAW_CURTIS_5,
+    "cc9": _CLENSHAW_CURTIS_9,
     "cc17": _CLENSHAW_CURTIS_17,
     "cc33": _CLENSHAW_CURTIS_33,
     "cc65": _CLENSHAW_CURTIS_65,

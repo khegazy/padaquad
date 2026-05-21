@@ -165,6 +165,39 @@ _GAUSS_KRONROD_21 = MethodClass(
 )
 
 
+# G3-K7 (Gauss-Kronrod 7-point). K7 polynomial exactness = 10.
+# G3 (odd n=3) has a center node — note wg_at_center below.
+# Source: Patterson 1968 Math. Comp. 22 #104 Table 1.
+_GK7_XGK_HALF = [
+    0.960491268708020283423507092629,
+    0.774596669241483377035853079956,  # G3 node = sqrt(3/5)
+    0.434243749346802558002071502345,
+    0.0,  # center, also a G3 node
+]
+_GK7_WGK_HALF = [
+    0.104656226026467265193823857192,
+    0.268488089868333440728569280666,
+    0.401397414775962222905051818618,
+    0.450916538658474142345110087045,
+]
+# G3 weight at the positive G3 node (K7 positive-half index 1). G3 weight = 5/9.
+_GK7_WG = [0.555555555555555555555555555556]
+_GK7_G_INDICES = [1]
+# G3 weight at the center node 0.0 = 8/9 (G3 has odd n, so it includes 0.0).
+_GK7_WG_CENTER = 0.888888888888888888888888888889
+
+_GAUSS_KRONROD_7 = MethodClass(
+    order=11,  # K7 polynomial exactness 10, global convergence rate 11
+    tableau=_build_gauss_kronrod_tableau(
+        _GK7_XGK_HALF,
+        _GK7_WGK_HALF,
+        _GK7_WG,
+        _GK7_G_INDICES,
+        wg_at_center=_GK7_WG_CENTER,
+    ),
+)
+
+
 # G7-K15 (Gauss-Kronrod 15-point). K15 polynomial exactness = 22.
 # G7 (odd n=7) has a center node — note wg_at_center below.
 _GK15_XGK_HALF = [
@@ -273,6 +306,7 @@ _GAUSS_KRONROD_31 = MethodClass(
 
 
 GK_METHODS = {
+    "gk7": _GAUSS_KRONROD_7,
     "gk15": _GAUSS_KRONROD_15,
     "gk21": _GAUSS_KRONROD_21,
     "gk31": _GAUSS_KRONROD_31,

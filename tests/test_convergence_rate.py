@@ -31,6 +31,9 @@ UNIFORM_RATE = {
     "fehlberg2": 2,
     "bosh3": 3,
     "dopri5": 5,
+    "cc5": 5,
+    "cc9": 9,
+    "gk7": 11,
 }
 
 # High-order rules saturate to float64 machine epsilon at small N
@@ -40,6 +43,9 @@ UNIFORM_RATE = {
 # anchored by test_exactness (polynomial-exactness) and
 # test_scipy_agreement.
 _CONVERGENCE_TEST_SKIP = {
+    "cc5",
+    "cc9",
+    "gk7",
     "gk15",
     "gk21",
     "gk31",

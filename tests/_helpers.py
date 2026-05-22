@@ -44,6 +44,14 @@ UNIFORM_METHOD_NAMES = list(UNIFORM_METHODS.keys())
 VARIABLE_METHOD_NAMES = list(VARIABLE_METHODS.keys())
 INTEGRAND_NAMES = list(integrand_dict.keys())
 
+# ``take_gradient`` is a parameter of ``.integrate()`` (not the solver
+# constructor). The two modes share numerics in the current implementation
+# but diverge in memory/backward behavior. Tests that exercise the
+# integration loop are parametrized over both so the upcoming
+# ``take_gradient`` code-path split can be validated independently.
+TAKE_GRADIENT_VALUES = [True, False]
+TAKE_GRADIENT_IDS = ["grad", "no_grad"]
+
 
 # ---------------------------------------------------------------------------
 # Helpers

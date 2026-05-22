@@ -22,6 +22,8 @@ from _helpers import (
     SEED,
     T_FINAL,
     T_INIT,
+    TAKE_GRADIENT_IDS,
+    TAKE_GRADIENT_VALUES,
     UNIFORM_METHOD_NAMES,
 )
 from scipy import integrate as scipy_integrate
@@ -39,8 +41,9 @@ def _wolf_schlegel_scalar(t_value: float) -> float:
     return wolf_schlegel(t_tensor).item()
 
 
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 @pytest.mark.parametrize("method_name", UNIFORM_METHOD_NAMES)
-def test_wolf_schlegel_parallel_vs_scipy(method_name):
+def test_wolf_schlegel_parallel_vs_scipy(method_name, take_gradient):
     """Parallel integration of Wolf-Schlegel matches scipy.integrate.quad."""
     torch.manual_seed(SEED)
     parallel_solver = adaptive_quadrature(
@@ -52,7 +55,9 @@ def test_wolf_schlegel_parallel_vs_scipy(method_name):
         f=wolf_schlegel,
     )
 
-    parallel_output = parallel_solver.integrate(mesh_init=T_INIT, mesh_final=T_FINAL)
+    parallel_output = parallel_solver.integrate(
+        mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=take_gradient
+    )
 
     scipy_value, scipy_err = scipy_integrate.quad(
         _wolf_schlegel_scalar,

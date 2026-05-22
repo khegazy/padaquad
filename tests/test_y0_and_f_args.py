@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import math
 
+import pytest
 import torch
+from tests._helpers import TAKE_GRADIENT_IDS, TAKE_GRADIENT_VALUES
 
 from torchpathdiffeq import adaptive_quadrature, integrate, steps
 
@@ -36,7 +38,8 @@ from torchpathdiffeq import adaptive_quadrature, integrate, steps
 # -----------------------------------------------------------------------------
 
 
-def test_f_forwards_to_integrand():
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_f_forwards_to_integrand(take_gradient):
     """``f(t, *f_args)`` is what the solver calls; verify directly."""
 
     def f(t: torch.Tensor, scale: float, offset: float) -> torch.Tensor:
@@ -54,6 +57,7 @@ def test_f_forwards_to_integrand():
         mesh_init=torch.tensor([a], dtype=torch.float64),
         mesh_final=torch.tensor([b], dtype=torch.float64),
         f_args=(3.0, 0.5),
+        take_gradient=take_gradient,
     )
     # ∫ (3 sin t + 0.5) dt over [0, π] = 3*2 + 0.5*π = 6 + π/2.
     expected = 6.0 + 0.5 * math.pi
@@ -62,7 +66,8 @@ def test_f_forwards_to_integrand():
     )
 
 
-def test_f_default_empty_tuple_works_with_zero_arg_integrand():
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_f_default_empty_tuple_works_with_zero_arg_integrand(take_gradient):
     """Default ``f_args=()`` calls f with just t. Make sure that path
     is exercised: ``f(t)`` succeeds when no extras are passed.
 
@@ -78,11 +83,13 @@ def test_f_default_empty_tuple_works_with_zero_arg_integrand():
         rtol=1e-9,
         mesh_init=torch.tensor([0.0], dtype=torch.float64),
         mesh_final=torch.tensor([math.pi], dtype=torch.float64),
+        take_gradient=take_gradient,
     )
     assert abs(result.integral.item() - 2.0) < 1e-7
 
 
-def test_f_with_tensor_value():
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_f_with_tensor_value(take_gradient):
     """``f_args`` can be tensors too — the solver doesn't unpack them
     or care about types beyond positional forwarding to f.
     """
@@ -102,6 +109,7 @@ def test_f_with_tensor_value():
         mesh_init=torch.tensor([0.0], dtype=torch.float64),
         mesh_final=torch.tensor([math.pi], dtype=torch.float64),
         f_args=(scale,),
+        take_gradient=take_gradient,
     )
     assert abs(result.integral.item() - 4.0) < 1e-7
 
@@ -112,7 +120,8 @@ def test_f_with_tensor_value():
 # -----------------------------------------------------------------------------
 
 
-def test_y0_default_zero_gives_pure_integral():
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_y0_default_zero_gives_pure_integral(take_gradient):
     """With the default ``y0`` (zero), ``result.integral == ∫f``. This
     is the well-defined common case.
     """
@@ -123,11 +132,13 @@ def test_y0_default_zero_gives_pure_integral():
         rtol=1e-12,
         mesh_init=torch.tensor([0.0], dtype=torch.float64),
         mesh_final=torch.tensor([1.0], dtype=torch.float64),
+        take_gradient=take_gradient,
     )
     assert abs(result.integral.item() - 1.0) < 1e-9
 
 
-def test_y0_offsets_the_result_per_documentation():
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_y0_offsets_the_result_per_documentation(take_gradient):
     """User-supplied y0 adds an offset to the integral: result.integral = y0 + ∫f."""
     result = integrate(
         f=torch.ones_like,
@@ -137,6 +148,7 @@ def test_y0_offsets_the_result_per_documentation():
         mesh_init=torch.tensor([0.0], dtype=torch.float64),
         mesh_final=torch.tensor([1.0], dtype=torch.float64),
         y0=torch.tensor([5.0], dtype=torch.float64),
+        take_gradient=take_gradient,
     )
     # ∫_0^1 1 dt = 1. With y0=5, expected = 6.
     assert abs(result.integral.item() - 6.0) < 1e-9, (
@@ -144,7 +156,8 @@ def test_y0_offsets_the_result_per_documentation():
     )
 
 
-def test_y0_difference_equals_y0_for_same_integral():
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_y0_difference_equals_y0_for_same_integral(take_gradient):
     """Running the same integral with y0=0 and y0=c must differ by exactly c.
 
     This is the core contract of y0: it is an additive offset on the
@@ -160,6 +173,7 @@ def test_y0_difference_equals_y0_for_same_integral():
         "rtol": 1e-10,
         "mesh_init": torch.tensor([0.0], dtype=torch.float64),
         "mesh_final": torch.tensor([math.pi], dtype=torch.float64),
+        "take_gradient": take_gradient,
     }
     offset = torch.tensor([7.5], dtype=torch.float64)
 

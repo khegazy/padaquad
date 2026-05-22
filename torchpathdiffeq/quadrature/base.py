@@ -350,6 +350,7 @@ class AdaptiveQuadrature(SolverBase):
         )
 
         record = {}
+        y_step_bucket = None
         # === Main integration loop ===
         # Continues until all steps have been evaluated and accepted
         # (mesh_trackers[i] == False for all i)
@@ -365,22 +366,28 @@ class AdaptiveQuadrature(SolverBase):
             #    assert max_steps >= len(y), f"{max_steps}  {len(y)}"
 
             # --- Step 1: Select a batch of unevaluated steps ---
-            # Find barrier indices where mesh_trackers is True, take up to max_steps
-            step_idxs = torch.arange(len(mesh), device=self.device)
-            step_idxs = step_idxs[mesh_trackers]
-            step_idxs = step_idxs[:max_steps]
-            # Place C quadrature points within each selected step
-            nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
-            error_ratios = None
+            nodes_flat, step_idxs = self._get_flattened_nodes(
+                take_gradient, mesh, mesh_trackers, max_steps
+            )
+            # # Find barrier indices where mesh_trackers is True, take up to max_steps
+            # step_idxs = torch.arange(len(mesh), device=self.device)
+            # step_idxs = step_idxs[mesh_trackers]
+            # step_idxs = step_idxs[:max_steps]
+            # # Place C quadrature points within each selected step
+            # nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
 
             # --- Step 2: Evaluate the integrand at all quadrature points ---
             # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
-            N, C, _T = nodes.shape
-            nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
+            # N, C, _T = nodes.shape
+            # nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
             assert torch.all(nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0)
             y_step_eval = f(nodes_flat, *f_args)
-            y_step_eval = torch.reshape(y_step_eval, (N, C, -1))
-            del nodes_flat
+            # y_step_eval = torch.reshape(y_step_eval, (nodes_shape[0], nodes_shape[1], -1))
+            # del nodes_flat
+
+            nodes, y_step_eval, _y_step_bucket = self._sort_evals_into_mesh(
+                take_gradient, nodes_flat, y_step_eval, y_step_bucket
+            )
 
             # --- Step 3: Compute integral contributions via qudrature formula ---
             t0 = time.time()
@@ -667,6 +674,48 @@ class AdaptiveQuadrature(SolverBase):
             mesh_trackers_new,
             error_ratios[keep_mask],
         )
+
+    def _get_flattened_nodes(self, take_gradient, mesh, mesh_trackers, max_steps):
+        if take_gradient:
+            return self._get_flattened_full_nodes(
+                mesh=mesh, mesh_trackers=mesh_trackers, max_steps=max_steps
+            )
+        else:
+            return self._get_flattened_full_nodes(
+                mesh=mesh, mesh_trackers=mesh_trackers, max_steps=max_steps
+            )
+
+    def _get_flattened_full_nodes(self, mesh, mesh_trackers, max_steps):
+        # Find barrier indices where mesh_trackers is True, take up to max_steps
+        step_idxs = torch.arange(len(mesh), device=self.device)
+        step_idxs = step_idxs[mesh_trackers]
+        step_idxs = step_idxs[:max_steps]
+        # Place C quadrature points within each selected step
+        nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
+
+        # --- Step 2: Evaluate the integrand at all quadrature points ---
+        # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
+        # shape = nodes.shape
+        return torch.flatten(nodes, start_dim=0, end_dim=-2), step_idxs
+
+    def _sort_evals_into_mesh(
+        self, take_gradient, nodes_flat, y_step_eval, y_step_bucket
+    ):
+        if take_gradient:
+            return self._sort_evals_into_mesh_full_nodes(
+                nodes_flat, y_step_eval, y_step_bucket
+            )
+        else:
+            return self._sort_evals_into_mesh_full_nodes(
+                nodes_flat, y_step_eval, y_step_bucket
+            )
+
+    def _sort_evals_into_mesh_full_nodes(self, nodes_flat, y_step_eval, y_step_bucket):
+        assert len(nodes_flat) % self.C == 0
+        N = len(nodes_flat) // self.C
+        y_step_eval = torch.reshape(y_step_eval, (N, self.C, -1))
+        nodes = torch.reshape(nodes_flat, (N, self.C, -1))
+        return nodes, y_step_eval, y_step_bucket
 
     def _prune_excess_mesh(
         self, nodes, mesh_quadratures, mesh_quadrature_errors, error_ratios_2steps

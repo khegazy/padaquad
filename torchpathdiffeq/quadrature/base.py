@@ -351,6 +351,7 @@ class AdaptiveQuadrature(SolverBase):
 
         record = {}
         y_step_bucket = None
+        node_bucket = None
         # === Main integration loop ===
         # Continues until all steps have been evaluated and accepted
         # (mesh_trackers[i] == False for all i)
@@ -366,8 +367,8 @@ class AdaptiveQuadrature(SolverBase):
             #    assert max_steps >= len(y), f"{max_steps}  {len(y)}"
 
             # --- Step 1: Select a batch of unevaluated steps ---
-            nodes_flat, step_idxs = self._get_flattened_nodes(
-                take_gradient, mesh, mesh_trackers, max_steps
+            nodes_flat, step_idxs, node_bucket = self._get_flattened_nodes(
+                take_gradient, mesh, mesh_trackers, max_steps, node_bucket
             )
             # # Find barrier indices where mesh_trackers is True, take up to max_steps
             # step_idxs = torch.arange(len(mesh), device=self.device)
@@ -675,17 +676,25 @@ class AdaptiveQuadrature(SolverBase):
             error_ratios[keep_mask],
         )
 
-    def _get_flattened_nodes(self, take_gradient, mesh, mesh_trackers, max_steps):
+    def _get_flattened_nodes(
+        self, take_gradient, mesh, mesh_trackers, max_steps, node_bucket
+    ):
         if take_gradient:
             return self._get_flattened_full_nodes(
-                mesh=mesh, mesh_trackers=mesh_trackers, max_steps=max_steps
+                mesh=mesh,
+                mesh_trackers=mesh_trackers,
+                max_steps=max_steps,
+                node_bucket=node_bucket,
             )
         else:
             return self._get_flattened_full_nodes(
-                mesh=mesh, mesh_trackers=mesh_trackers, max_steps=max_steps
+                mesh=mesh,
+                mesh_trackers=mesh_trackers,
+                max_steps=max_steps,
+                node_bucket=node_bucket,
             )
 
-    def _get_flattened_full_nodes(self, mesh, mesh_trackers, max_steps):
+    def _get_flattened_full_nodes(self, mesh, mesh_trackers, max_steps, node_bucket):
         # Find barrier indices where mesh_trackers is True, take up to max_steps
         step_idxs = torch.arange(len(mesh), device=self.device)
         step_idxs = step_idxs[mesh_trackers]
@@ -696,7 +705,7 @@ class AdaptiveQuadrature(SolverBase):
         # --- Step 2: Evaluate the integrand at all quadrature points ---
         # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
         # shape = nodes.shape
-        return torch.flatten(nodes, start_dim=0, end_dim=-2), step_idxs
+        return torch.flatten(nodes, start_dim=0, end_dim=-2), step_idxs, node_bucket
 
     def _sort_evals_into_mesh(
         self, take_gradient, nodes_flat, y_step_eval, y_step_bucket

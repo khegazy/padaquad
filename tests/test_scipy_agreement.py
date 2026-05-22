@@ -25,7 +25,12 @@ import numpy as np
 import pytest
 import torch
 from scipy import integrate as scipy_integrate
-from tests._helpers import SEED, UNIFORM_METHOD_NAMES
+from tests._helpers import (
+    SEED,
+    TAKE_GRADIENT_IDS,
+    TAKE_GRADIENT_VALUES,
+    UNIFORM_METHOD_NAMES,
+)
 
 from torchpathdiffeq import integrate
 
@@ -84,12 +89,13 @@ def _ids():
     return out
 
 
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 @pytest.mark.parametrize(
     ("method", "integrand_name", "a", "b"),
     _ids(),
     ids=lambda v: str(v).replace(".", "p"),
 )
-def test_method_agrees_with_scipy_quad(method, integrand_name, a, b):
+def test_method_agrees_with_scipy_quad(method, integrand_name, a, b, take_gradient):
     """Library's integrate matches ``scipy.integrate.quad`` to ``10*atol``."""
     # Seed for deterministic initial-mesh placement; otherwise this test's
     # outcome depends on whatever random state was left by the previous test.
@@ -107,6 +113,7 @@ def test_method_agrees_with_scipy_quad(method, integrand_name, a, b):
         rtol=RTOL,
         mesh_init=torch.tensor([a], dtype=torch.float64),
         mesh_final=torch.tensor([b], dtype=torch.float64),
+        take_gradient=take_gradient,
     )
     library_value = library_result.integral.item()
 

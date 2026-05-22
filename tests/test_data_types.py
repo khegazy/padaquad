@@ -8,6 +8,8 @@ import torch
 from _helpers import (
     ATOL_MED,
     RTOL_MED,
+    TAKE_GRADIENT_IDS,
+    TAKE_GRADIENT_VALUES,
     UNIFORM_METHOD_NAMES,
     assert_optimal_mesh_ordering,
     assert_step_continuity,
@@ -20,12 +22,13 @@ from torchpathdiffeq import integrand_dict
 INTEGRAND_NAME = "damped_sine"
 
 
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 @pytest.mark.parametrize("method_name", UNIFORM_METHOD_NAMES)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64], ids=["f32", "f64"])
 class TestDtypeHandling:
     """Verify integration works correctly across floating-point precisions."""
 
-    def _integrate(self, method_name, dtype):
+    def _integrate(self, method_name, dtype, take_gradient):
         """Run damped_sine integration at the given dtype."""
         f, solution_fxn, _ = integrand_dict[INTEGRAND_NAME]
         correct = solution_fxn(
@@ -44,12 +47,13 @@ class TestDtypeHandling:
             f,
             mesh_init=torch.tensor([0], dtype=dtype),
             mesh_final=torch.tensor([1], dtype=dtype),
+            take_gradient=take_gradient,
         )
         return output, correct, cutoff
 
-    def test_integral_accuracy(self, method_name, dtype):
+    def test_integral_accuracy(self, method_name, dtype, take_gradient):
         """Integral is accurate at both float32 and float64 precision."""
-        output, correct, cutoff = self._integrate(method_name, dtype)
+        output, correct, cutoff = self._integrate(method_name, dtype, take_gradient)
         rel_error = torch.abs((output.integral.cpu() - correct) / correct)
         assert rel_error < cutoff, (
             f"{method_name} ({dtype}) failed on {INTEGRAND_NAME}: "
@@ -57,17 +61,17 @@ class TestDtypeHandling:
             f"rel_error={rel_error.item():.2e} >= cutoff={cutoff:.2e}"
         )
 
-    def test_time_ordering(self, method_name, dtype):
+    def test_time_ordering(self, method_name, dtype, take_gradient):
         """Time points are non-decreasing regardless of dtype."""
-        output, _, _ = self._integrate(method_name, dtype)
+        output, _, _ = self._integrate(method_name, dtype, take_gradient)
         assert_time_ordering(output)
 
-    def test_optimal_mesh_ordering(self, method_name, dtype):
+    def test_optimal_mesh_ordering(self, method_name, dtype, take_gradient):
         """Optimal mesh is non-decreasing regardless of dtype."""
-        output, _, _ = self._integrate(method_name, dtype)
+        output, _, _ = self._integrate(method_name, dtype, take_gradient)
         assert_optimal_mesh_ordering(output)
 
-    def test_step_continuity(self, method_name, dtype):
+    def test_step_continuity(self, method_name, dtype, take_gradient):
         """Consecutive steps share boundary points regardless of dtype."""
-        output, _, _ = self._integrate(method_name, dtype)
+        output, _, _ = self._integrate(method_name, dtype, take_gradient)
         assert_step_continuity(output)

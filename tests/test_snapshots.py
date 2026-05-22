@@ -36,6 +36,8 @@ from _helpers import (
     SEED,
     T_FINAL,
     T_INIT,
+    TAKE_GRADIENT_IDS,
+    TAKE_GRADIENT_VALUES,
     UNIFORM_METHOD_NAMES,
     make_uniform_solver,
 )
@@ -60,7 +62,13 @@ def _case_key(method: str, integrand: str, tol_label: str) -> str:
     return f"{method}|{integrand}|{tol_label}"
 
 
-def _run_case(method: str, integrand: str, atol: float, rtol: float) -> dict:
+def _run_case(
+    method: str,
+    integrand: str,
+    atol: float,
+    rtol: float,
+    take_gradient: bool = True,
+) -> dict:
     """Run one solver call and record the values we want to pin.
 
     Sets the manual seed before each call so the random initial mesh
@@ -72,6 +80,10 @@ def _run_case(method: str, integrand: str, atol: float, rtol: float) -> dict:
     float32 solver constructed in a *later* test (their initial mesh
     silently becomes float64 and trips dtype-mismatch assertions deep
     in the adaptive loop).
+
+    ``take_gradient`` controls the integration code path but must not
+    perturb the numerical result — the snapshot file stores a single
+    set of expected values, and both modes must hit it.
     """
     os.environ["CUDA_VISIBLE_DEVICES"] = ""
     previous_default_dtype = torch.get_default_dtype()
@@ -80,7 +92,12 @@ def _run_case(method: str, integrand: str, atol: float, rtol: float) -> dict:
         torch.manual_seed(SEED)
         f, _solution_fxn, _cutoff = integrand_dict[integrand]
         solver = make_uniform_solver(method, atol=atol, rtol=rtol)
-        output = solver.integrate(f, mesh_init=T_INIT, mesh_final=T_FINAL)
+        output = solver.integrate(
+            f,
+            mesh_init=T_INIT,
+            mesh_final=T_FINAL,
+            take_gradient=take_gradient,
+        )
         return {
             "integral": output.integral.tolist(),
             "integral_error": output.integral_error.tolist(),
@@ -137,13 +154,22 @@ def _ids() -> list[tuple[str, str, str]]:
     ]
 
 
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 @pytest.mark.parametrize(
     ("method", "integrand", "tol_label"),
     _ids(),
     ids=str,
 )
-def test_snapshot(snapshots, method, integrand, tol_label):
-    """Current solver output matches the committed snapshot to 1e-12."""
+def test_snapshot(snapshots, method, integrand, tol_label, take_gradient):
+    """Current solver output matches the committed snapshot to 1e-12.
+
+    Both ``take_gradient=True`` and ``take_gradient=False`` must hit
+    the same stored value — the snapshot key intentionally omits
+    ``take_gradient`` because the two modes are expected to produce
+    identical numerics. After the upcoming code-path split, any
+    divergence between modes will fail this test against the single
+    stored value, surfacing the bug.
+    """
     key = _case_key(method, integrand, tol_label)
     expected = snapshots.get(key)
     if expected is None:
@@ -151,7 +177,7 @@ def test_snapshot(snapshots, method, integrand, tol_label):
             f"No snapshot for {key}; regenerate with TPD_REGENERATE_SNAPSHOTS=1."
         )
     atol, rtol = TOLERANCES[tol_label]
-    got = _run_case(method, integrand, atol, rtol)
+    got = _run_case(method, integrand, atol, rtol, take_gradient=take_gradient)
 
     # Compare element-wise, allowing 1e-12 absolute drift.
     for field, expected_val in expected.items():

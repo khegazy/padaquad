@@ -40,7 +40,11 @@ import math
 
 import pytest
 import torch
-from tests._helpers import make_uniform_solver
+from tests._helpers import (
+    TAKE_GRADIENT_IDS,
+    TAKE_GRADIENT_VALUES,
+    make_uniform_solver,
+)
 
 from torchpathdiffeq import IntegrationResult, integrate
 
@@ -49,7 +53,8 @@ from torchpathdiffeq import IntegrationResult, integrate
 # -----------------------------------------------------------------------------
 
 
-def test_no_warm_start_path_correctness():
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_no_warm_start_path_correctness(take_gradient):
     """A single fresh-solver call must produce an integral within the
     solver's reported error estimate. This anchors the no-warm-start
     path so Phase 1 fixes cannot accidentally regress it.
@@ -61,6 +66,7 @@ def test_no_warm_start_path_correctness():
         rtol=1e-8,
         mesh_init=torch.tensor([-2.0], dtype=torch.float64),
         mesh_final=torch.tensor([2.0], dtype=torch.float64),
+        take_gradient=take_gradient,
     )
     expected = math.sqrt(math.pi) * math.erf(2.0)
     actual = out.integral.item()
@@ -79,7 +85,8 @@ def test_no_warm_start_path_correctness():
 # -----------------------------------------------------------------------------
 
 
-def test_lambda_cache_key_distinguishes_different_lambdas():
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_lambda_cache_key_distinguishes_different_lambdas(take_gradient):
     """After integrating lambda1 then lambda2, the solver's cached
     'previous integrand' identifier must distinguish the two —
     otherwise the warm-start mechanism cannot be made correct.
@@ -97,10 +104,14 @@ def test_lambda_cache_key_distinguishes_different_lambdas():
     mesh_init = torch.tensor([0.0], dtype=torch.float64)
     mesh_final = torch.tensor([math.pi], dtype=torch.float64)
 
-    solver.integrate(f=f1, mesh_init=mesh_init, mesh_final=mesh_final)
+    solver.integrate(
+        f=f1, mesh_init=mesh_init, mesh_final=mesh_final, take_gradient=take_gradient
+    )
     key_after_f1 = solver.previous_f_id
 
-    solver.integrate(f=f2, mesh_init=mesh_init, mesh_final=mesh_final)
+    solver.integrate(
+        f=f2, mesh_init=mesh_init, mesh_final=mesh_final, take_gradient=take_gradient
+    )
     key_after_f2 = solver.previous_f_id
 
     assert key_after_f1 != key_after_f2, (
@@ -116,7 +127,8 @@ def test_lambda_cache_key_distinguishes_different_lambdas():
 # -----------------------------------------------------------------------------
 
 
-def test_warm_start_with_new_t_final_yields_correct_mesh():
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_warm_start_with_new_t_final_yields_correct_mesh(take_gradient):
     """After Phase 1's reuse_mesh opt-in, calling the solver a second
     time with ``reuse_mesh=True`` and a *different* ``mesh_final`` than
     the first call must still produce a monotone mesh that ends at
@@ -130,7 +142,10 @@ def test_warm_start_with_new_t_final_yields_correct_mesh():
 
     mesh_init = torch.tensor([0.0], dtype=torch.float64)
     out_first = solver.integrate(
-        f=f, mesh_init=mesh_init, mesh_final=torch.tensor([1.0], dtype=torch.float64)
+        f=f,
+        mesh_init=mesh_init,
+        mesh_final=torch.tensor([1.0], dtype=torch.float64),
+        take_gradient=take_gradient,
     )
     expected_first = 1.0 - math.cos(1.0)
     assert abs(out_first.integral.item() - expected_first) < 1e-5
@@ -140,6 +155,7 @@ def test_warm_start_with_new_t_final_yields_correct_mesh():
         mesh_init=mesh_init,
         mesh_final=torch.tensor([1.5], dtype=torch.float64),
         reuse_mesh=True,
+        take_gradient=take_gradient,
     )
     assert out_second is not None
     expected_second = 1.0 - math.cos(1.5)
@@ -163,7 +179,8 @@ def test_warm_start_with_new_t_final_yields_correct_mesh():
 # -----------------------------------------------------------------------------
 
 
-def test_max_path_change_returns_integral_output_not_none():
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_max_path_change_returns_integral_output_not_none(take_gradient):
     """When ``max_path_change`` triggers early exit on a user-provided
     mesh, the solver must return an ``IntegrationResult`` with
     ``converged=False``, not ``None``. Phase 1's Bug B6 fix.
@@ -178,6 +195,7 @@ def test_max_path_change_returns_integral_output_not_none():
     out = solver.integrate(
         f=lambda t, *_: torch.sin(10 * t) * torch.exp(-0.1 * t),
         mesh=t,
+        take_gradient=take_gradient,
     )
     assert isinstance(out, IntegrationResult), (
         f"max_path_change early-exit returned {type(out).__name__}, "
@@ -189,7 +207,8 @@ def test_max_path_change_returns_integral_output_not_none():
     )
 
 
-def test_normal_completion_has_converged_true():
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_normal_completion_has_converged_true(take_gradient):
     """A normal integration call returns ``converged=True``. Pins the
     default value of the new field.
     """
@@ -200,6 +219,7 @@ def test_normal_completion_has_converged_true():
         rtol=1e-6,
         mesh_init=torch.tensor([0.0], dtype=torch.float64),
         mesh_final=torch.tensor([math.pi], dtype=torch.float64),
+        take_gradient=take_gradient,
     )
     assert out.converged is True
 

@@ -49,8 +49,16 @@ INTEGRAND_NAMES = list(integrand_dict.keys())
 # but diverge in memory/backward behavior. Tests that exercise the
 # integration loop are parametrized over both so the upcoming
 # ``take_gradient`` code-path split can be validated independently.
+#
+# The parametrize IDs ``take_grad_True`` / ``take_grad_False`` are chosen
+# to be unique substrings that do NOT appear anywhere else in the test
+# suite. This lets ``pytest -k "take_grad_True"`` cleanly select only
+# the gradient-bearing parametrized tests without sweeping in the
+# dedicated gradient test files (test_gradient.py,
+# test_gradient_integration.py, test_autodiff_consistency.py), whose
+# filenames contain ``grad`` and would otherwise be matched.
 TAKE_GRADIENT_VALUES = [True, False]
-TAKE_GRADIENT_IDS = ["grad", "no_grad"]
+TAKE_GRADIENT_IDS = ["take_grad_True", "take_grad_False"]
 
 
 # ---------------------------------------------------------------------------

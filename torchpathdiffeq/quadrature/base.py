@@ -697,11 +697,15 @@ class AdaptiveQuadrature(SolverBase):
         total_mem_usage,
         split_node_state,
     ):
-        # Determine how many steps fit in one batch based on memory
+        # Determine how many f evaluations fit in one batch based on memory
         if force_max_batch is not None:
             max_batch = force_max_batch
         else:
             max_batch = self._get_max_f_evals(total_mem_usage)
+
+        # max_batch should not exceed the remaining number of f evaluations
+        batches_left = torch.sum(mesh_trackers) * self.C
+        max_batch = max_batch if max_batch < batches_left else batches_left
         max_mesh_steps = max_batch // self.C
 
         step_idxs = torch.arange(len(mesh), device=self.device)
@@ -809,14 +813,11 @@ class AdaptiveQuadrature(SolverBase):
         if split_mesh_idx:
             split_nodes = torch.concatenate(
                 [split_nodes, nodes_flat[:num_remaining_split_nodes]],
-                dim=1,
-                device=self.device,
+                dim=0,
             ).unsqueeze(0)
             nodes_flat = nodes_flat[num_remaining_split_nodes:]
             split_f_evals = torch.concatenate(
-                [split_f_evals, f_evals[0][:num_remaining_split_nodes]],
-                dim=1,
-                device=self.device,
+                [split_f_evals, f_evals[0][:num_remaining_split_nodes]], dim=0
             ).unsqueeze(0)
             f_evals[0] = f_evals[0][num_remaining_split_nodes:]
 
@@ -841,11 +842,11 @@ class AdaptiveQuadrature(SolverBase):
             )
 
         if split_mesh_idx is None:
-            f_evals = torch.concatenate(f_evals, dim=0, device=self.device)
+            f_evals = torch.concatenate(f_evals, dim=0)
+            f_evals = torch.reshape(f_evals, (num_mesh_steps, self.C, -1))
         else:
-            f_evals = torch.concatenate(
-                split_f_evals + f_evals, dim=0, device=self.device
-            )
+            f_evals = torch.concatenate(split_f_evals + f_evals, dim=0)
+            f_evals = torch.reshape(f_evals, (num_mesh_steps - 1, self.C, -1))
 
         split_node_state = (residual_nodes, residual_f_evals, residual_mesh_idx)
 

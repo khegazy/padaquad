@@ -295,7 +295,7 @@ class AdaptiveQuadrature(SolverBase):
         mesh_init, mesh_final = self._setup_integral_bounds(mesh, mesh_init, mesh_final)
 
         # Replace max_batch if default it given
-        max_batch = self.max_batch if max_batch is None else max_batch
+        force_max_batch = self.max_batch if max_batch is None else max_batch
 
         # Get variables or populate with default values, send to correct device
         f, mesh_init, mesh_final, y0 = self._check_variables(
@@ -316,7 +316,7 @@ class AdaptiveQuadrature(SolverBase):
             self.previous_f_id is not None and id(f) == self.previous_f_id
         )
         # Benchmark memory footprint on first call with a new integrand
-        if not same_integrand_fxn and max_batch is None:
+        if not same_integrand_fxn and force_max_batch is None:
             self._setup_memory_checks(
                 f, mesh_init, take_gradient=take_gradient, f_args=f_args
             )
@@ -350,113 +350,170 @@ class AdaptiveQuadrature(SolverBase):
         )
 
         record = {}
-        y_step_bucket = None
-        node_bucket = None
+        split_node_state = (None, None, None)
         # === Main integration loop ===
         # Continues until all steps have been evaluated and accepted
         # (mesh_trackers[i] == False for all i)
         while torch.any(mesh_trackers):
-            # Determine how many steps fit in one batch based on memory
-            if max_batch is not None:
-                max_steps = max_batch // self.C
-            else:
-                max_steps = int(self._get_max_f_evals(total_mem_usage) // self.C)
-
             # From earlier debugging
             # if y is not None:
             #    assert max_steps >= len(y), f"{max_steps}  {len(y)}"
 
-            # --- Step 1: Select a batch of unevaluated steps ---
-            nodes_flat, step_idxs, node_bucket = self._get_flattened_nodes(
-                take_gradient, mesh, mesh_trackers, max_steps, node_bucket
+            nodes, y_step_eval, step_idxs, split_node_state = self._evaluate_f_on_mesh(
+                f,
+                f_args,
+                mesh,
+                mesh_trackers,
+                take_gradient,
+                force_max_batch,
+                total_mem_usage,
+                split_node_state,
             )
-            # # Find barrier indices where mesh_trackers is True, take up to max_steps
-            # step_idxs = torch.arange(len(mesh), device=self.device)
-            # step_idxs = step_idxs[mesh_trackers]
-            # step_idxs = step_idxs[:max_steps]
-            # # Place C quadrature points within each selected step
-            # nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
+            # # --- Step 1: Select a batch of unevaluated steps ---
+            # nodes_flat, step_idxs, split_node_state = self._get_flattened_nodes(
+            #     take_gradient, mesh, mesh_trackers, max_batch, split_node_state
+            # )
+            # # # Find barrier indices where mesh_trackers is True, take up to max_steps
+            # # step_idxs = torch.arange(len(mesh), device=self.device)
+            # # step_idxs = step_idxs[mesh_trackers]
+            # # step_idxs = step_idxs[:max_steps]
+            # # # Place C quadrature points within each selected step
+            # # nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
 
-            # --- Step 2: Evaluate the integrand at all quadrature points ---
-            # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
-            # N, C, _T = nodes.shape
-            # nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
-            assert torch.all(nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0)
-            y_step_eval = f(nodes_flat, *f_args)
-            # y_step_eval = torch.reshape(y_step_eval, (nodes_shape[0], nodes_shape[1], -1))
-            # del nodes_flat
+            # # --- Step 2: Evaluate the integrand at all quadrature points ---
+            # # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
+            # # N, C, _T = nodes.shape
+            # # nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
+            # assert torch.all(nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0)
+            # y_step_eval = f(nodes_flat, *f_args)
+            # # y_step_eval = torch.reshape(y_step_eval, (nodes_shape[0], nodes_shape[1], -1))
+            # # del nodes_flat
 
-            nodes, y_step_eval, _y_step_bucket = self._sort_evals_into_mesh(
-                take_gradient, nodes_flat, y_step_eval, y_step_bucket
-            )
+            # nodes, y_step_eval, _y_step_bucket = self._sort_evals_into_mesh(
+            #     take_gradient, nodes_flat, y_step_eval, y_step_bucket
+            # )
 
-            # --- Step 3: Compute integral contributions via qudrature formula ---
-            t0 = time.time()
-            method_output = self._calculate_integral(
-                nodes,
-                y_step_eval,
-                y0=torch.zeros(1, device=self.device, dtype=self.dtype),
-            )
-            if len(record) == 0:
-                # First batch: integral is just this batch's contribution
-                current_integral = method_output.integral.detach()
-                all_mesh_quadratures = method_output.mesh_quadratures.detach()
-                cum_mesh_quadratures = torch.cumsum(all_mesh_quadratures, 0)
-            else:
-                # Subsequent batches: add to previously recorded integral
-                current_integral = record["integral"] + method_output.integral.detach()
-                # Merge new steps into the sorted record to compute cumulative sums
-                idxs_keep, idxs_input = self._get_sorted_indices(
-                    record["nodes"][:, 0, 0], nodes[:, 0, 0]
+            if nodes is not None:
+                # --- Step 3: Compute integral contributions via qudrature formula ---
+                t0 = time.time()
+                method_output = self._calculate_integral(
+                    nodes,
+                    y_step_eval,
+                    y0=torch.zeros(1, device=self.device, dtype=self.dtype),
                 )
-                all_mesh_quadratures = self._insert_sorted_results(
-                    record["mesh_quadratures"],
-                    idxs_keep,
-                    method_output.mesh_quadratures,
-                    idxs_input,
-                )
-                cum_mesh_quadratures = torch.cumsum(all_mesh_quadratures, 0)[idxs_input]
-            if self.speed_logger:
-                self.speed_logger.debug("calc integrals: %s", time.time() - t0)
-
-            # --- Step 4: Compute error ratios for each step ---
-            t0 = time.time()
-            error_ratios, error_ratios_2steps = self._compute_error_ratios(
-                mesh_quadrature_errors=method_output.mesh_quadrature_errors,
-                cum_mesh_quadratures=cum_mesh_quadratures,
-                integral=current_integral,
-            )
-            if self.speed_logger:
-                self.speed_logger.debug("calculate errors: %s", time.time() - t0)
-            assert len(y_step_eval) == len(error_ratios)
-            assert len(y_step_eval) - 1 == len(error_ratios_2steps), (
-                f" y: {y_step_eval.shape} | ratios: {error_ratios_2steps.shape} | nodes: {nodes.shape}"
-            )
-            logger.debug("error_ratios: %s", error_ratios)
-            logger.debug("error_ratios_2steps: %s", error_ratios_2steps)
-
-            # Early exit if too many steps fail and user-provided mesh is given.
-            # Bug B6 fix: previously returned bare `None`, breaking the
-            # documented return-type contract. Now returns an
-            # IntegrationResult with converged=False populated from the
-            # most-recent batch's intermediate result so callers can
-            # inspect partial state instead of having to special-case
-            # None.
-            if mesh_is_given and self.max_path_change is not None:
-                fail_ratio = torch.sum(error_ratios > 1.0).to(float) / len(error_ratios)
-                if fail_ratio >= self.max_path_change:
-                    logger.warning(
-                        "%.1f%% of integration steps failed error requirements, "
-                        "which is greater than max_path_change (%s), now exiting.",
-                        fail_ratio * 100,
-                        self.max_path_change,
+                if len(record) == 0:
+                    # First batch: integral is just this batch's contribution
+                    current_integral = method_output.integral.detach()
+                    all_mesh_quadratures = method_output.mesh_quadratures.detach()
+                    cum_mesh_quadratures = torch.cumsum(all_mesh_quadratures, 0)
+                else:
+                    # Subsequent batches: add to previously recorded integral
+                    current_integral = (
+                        record["integral"] + method_output.integral.detach()
                     )
-                    return IntegrationResult(
+                    # Merge new steps into the sorted record to compute cumulative sums
+                    idxs_keep, idxs_input = self._get_sorted_indices(
+                        record["nodes"][:, 0, 0], nodes[:, 0, 0]
+                    )
+                    all_mesh_quadratures = self._insert_sorted_results(
+                        record["mesh_quadratures"],
+                        idxs_keep,
+                        method_output.mesh_quadratures,
+                        idxs_input,
+                    )
+                    cum_mesh_quadratures = torch.cumsum(all_mesh_quadratures, 0)[
+                        idxs_input
+                    ]
+                if self.speed_logger:
+                    self.speed_logger.debug("calc integrals: %s", time.time() - t0)
+
+                # --- Step 4: Compute error ratios for each step ---
+                t0 = time.time()
+                error_ratios, error_ratios_2steps = self._compute_error_ratios(
+                    mesh_quadrature_errors=method_output.mesh_quadrature_errors,
+                    cum_mesh_quadratures=cum_mesh_quadratures,
+                    integral=current_integral,
+                )
+                if self.speed_logger:
+                    self.speed_logger.debug("calculate errors: %s", time.time() - t0)
+                assert len(y_step_eval) == len(error_ratios)
+                assert len(y_step_eval) - 1 == len(error_ratios_2steps), (
+                    f" y: {y_step_eval.shape} | ratios: {error_ratios_2steps.shape} | nodes: {nodes.shape}"
+                )
+                logger.debug("error_ratios: %s", error_ratios)
+                logger.debug("error_ratios_2steps: %s", error_ratios_2steps)
+
+                # Early exit if too many steps fail and user-provided mesh is given.
+                # Bug B6 fix: previously returned bare `None`, breaking the
+                # documented return-type contract. Now returns an
+                # IntegrationResult with converged=False populated from the
+                # most-recent batch's intermediate result so callers can
+                # inspect partial state instead of having to special-case
+                # None.
+                if mesh_is_given and self.max_path_change is not None:
+                    fail_ratio = torch.sum(error_ratios > 1.0).to(float) / len(
+                        error_ratios
+                    )
+                    if fail_ratio >= self.max_path_change:
+                        logger.warning(
+                            "%.1f%% of integration steps failed error requirements, "
+                            "which is greater than max_path_change (%s), now exiting.",
+                            fail_ratio * 100,
+                            self.max_path_change,
+                        )
+                        return IntegrationResult(
+                            integral=method_output.integral,
+                            integral_error=method_output.integral_error,
+                            mesh_optimal=mesh,
+                            mesh_init=mesh_init,
+                            mesh_final=mesh_final,
+                            nodes=nodes,
+                            h=method_output.h,
+                            y=y_step_eval,
+                            mesh_quadratures=method_output.mesh_quadratures,
+                            mesh_quadrature_errors=torch.abs(
+                                method_output.mesh_quadrature_errors
+                            ),
+                            error_ratios=error_ratios,
+                            loss=None,
+                            gradient_taken=take_gradient,
+                            y0=y0,
+                            converged=False,
+                        )
+
+                # --- Step 5: Adaptive refinement ---
+                # Split steps with error_ratio >= 1, keep steps with error_ratio < 1,
+                # and update barriers/trackers accordingly
+                (
+                    method_output,
+                    y_step_eval,
+                    nodes,
+                    mesh,
+                    mesh_trackers,
+                    error_ratios,
+                ) = self._adaptively_increase_mesh(
+                    method_output=method_output,
+                    error_ratios=error_ratios,
+                    y_step_eval=y_step_eval,
+                    nodes=nodes,
+                    mesh=mesh,
+                    mesh_idxs=step_idxs,
+                    mesh_trackers=mesh_trackers,
+                )
+                # Verify barrier ordering after adaptive refinement
+                mesh_diff = mesh[1:, 0] - mesh[:-1, 0]
+                assert torch.all(mesh_diff + self.atol_assert > 0) or torch.all(
+                    mesh_diff - self.atol_assert < 0
+                )
+
+                # --- Step 6: Record accepted results and handle gradients ---
+                if nodes.shape[0] > 0:
+                    # take_gradient = take_gradient or (
+                    #    self.training and (torch.any(mesh_trackers) or take_gradient)
+                    # )
+                    intermediate_results = IntegrationResult(
                         integral=method_output.integral,
                         integral_error=method_output.integral_error,
-                        mesh_optimal=mesh,
-                        mesh_init=mesh_init,
-                        mesh_final=mesh_final,
                         nodes=nodes,
                         h=method_output.h,
                         y=y_step_eval,
@@ -467,72 +524,25 @@ class AdaptiveQuadrature(SolverBase):
                         error_ratios=error_ratios,
                         loss=None,
                         gradient_taken=take_gradient,
-                        y0=y0,
-                        converged=False,
+                        mesh_init=mesh_init,
+                        mesh_final=mesh_final,
+                        y0=0,
                     )
 
-            # --- Step 5: Adaptive refinement ---
-            # Split steps with error_ratio >= 1, keep steps with error_ratio < 1,
-            # and update barriers/trackers accordingly
-            (
-                method_output,
-                y_step_eval,
-                nodes,
-                mesh,
-                mesh_trackers,
-                error_ratios,
-            ) = self._adaptively_increase_mesh(
-                method_output=method_output,
-                error_ratios=error_ratios,
-                y_step_eval=y_step_eval,
-                nodes=nodes,
-                mesh=mesh,
-                mesh_idxs=step_idxs,
-                mesh_trackers=mesh_trackers,
-            )
-            # Verify barrier ordering after adaptive refinement
-            mesh_diff = mesh[1:, 0] - mesh[:-1, 0]
-            assert torch.all(mesh_diff + self.atol_assert > 0) or torch.all(
-                mesh_diff - self.atol_assert < 0
-            )
+                    # TODO make sure growing string loss center is a time not the number of evals because eval number is meaningless here.
+                    # Compute loss and accumulate into the record
+                    loss = loss_fxn(intermediate_results)
+                    intermediate_results.loss = loss
+                    record = self._record_results(
+                        record=record,
+                        take_gradient=take_gradient,
+                        results=intermediate_results,
+                    )
 
-            # --- Step 6: Record accepted results and handle gradients ---
-            if nodes.shape[0] > 0:
-                # take_gradient = take_gradient or (
-                #    self.training and (torch.any(mesh_trackers) or take_gradient)
-                # )
-                intermediate_results = IntegrationResult(
-                    integral=method_output.integral,
-                    integral_error=method_output.integral_error,
-                    nodes=nodes,
-                    h=method_output.h,
-                    y=y_step_eval,
-                    mesh_quadratures=method_output.mesh_quadratures,
-                    mesh_quadrature_errors=torch.abs(
-                        method_output.mesh_quadrature_errors
-                    ),
-                    error_ratios=error_ratios,
-                    loss=None,
-                    gradient_taken=take_gradient,
-                    mesh_init=mesh_init,
-                    mesh_final=mesh_final,
-                    y0=0,
-                )
-
-                # TODO make sure growing string loss center is a time not the number of evals because eval number is meaningless here.
-                # Compute loss and accumulate into the record
-                loss = loss_fxn(intermediate_results)
-                intermediate_results.loss = loss
-                record = self._record_results(
-                    record=record,
-                    take_gradient=take_gradient,
-                    results=intermediate_results,
-                )
-
-                # Backpropagate gradients through the integration if requested
-                if take_gradient and loss.requires_grad:
-                    loss.backward()
-            del y_step_eval
+                    # Backpropagate gradients through the integration if requested
+                    if take_gradient and loss.requires_grad:
+                        loss.backward()
+                del y_step_eval
 
         # === Post-convergence: sort results and optimize the mesh ===
         record = self._sort_record(record)
@@ -676,36 +686,184 @@ class AdaptiveQuadrature(SolverBase):
             error_ratios[keep_mask],
         )
 
-    def _get_flattened_nodes(
-        self, take_gradient, mesh, mesh_trackers, max_steps, node_bucket
+    def _evaluate_f_on_mesh(
+        self,
+        f,
+        f_args,
+        mesh,
+        mesh_trackers,
+        take_gradient,
+        force_max_batch,
+        total_mem_usage,
+        split_node_state,
     ):
-        if take_gradient:
-            return self._get_flattened_full_nodes(
-                mesh=mesh,
-                mesh_trackers=mesh_trackers,
-                max_steps=max_steps,
-                node_bucket=node_bucket,
-            )
+        # Determine how many steps fit in one batch based on memory
+        if force_max_batch is not None:
+            max_batch = force_max_batch
         else:
-            return self._get_flattened_full_nodes(
-                mesh=mesh,
-                mesh_trackers=mesh_trackers,
-                max_steps=max_steps,
-                node_bucket=node_bucket,
-            )
+            max_batch = self._get_max_f_evals(total_mem_usage)
+        max_mesh_steps = max_batch // self.C
 
-    def _get_flattened_full_nodes(self, mesh, mesh_trackers, max_steps, node_bucket):
-        # Find barrier indices where mesh_trackers is True, take up to max_steps
         step_idxs = torch.arange(len(mesh), device=self.device)
         step_idxs = step_idxs[mesh_trackers]
-        step_idxs = step_idxs[:max_steps]
+
+        if take_gradient:
+            return self._evaluate_f_on_full_nodes(
+                f, f_args, mesh, step_idxs, max_mesh_steps
+            )
+        else:
+            return self._evaluate_f_on_split_nodes(
+                f, f_args, mesh, step_idxs, max_batch, max_mesh_steps, split_node_state
+            )
+
+    def _evaluate_f_on_full_nodes(self, f, f_args, mesh, step_idxs, max_mesh_steps):
+        assert max_mesh_steps >= 1, (
+            "Not enough free memory to run 1 integration steps for take_gradient=True. Set take_gradient=False if the gradient of the integral is not needed and consider increasing total_mem_usage"
+        )
+        # Find barrier indices where mesh_trackers is True, take up to max_steps
+        step_idxs = step_idxs[:max_mesh_steps]
         # Place C quadrature points within each selected step
         nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
 
-        # --- Step 2: Evaluate the integrand at all quadrature points ---
         # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
-        # shape = nodes.shape
-        return torch.flatten(nodes, start_dim=0, end_dim=-2), step_idxs, node_bucket
+        nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
+        assert torch.all(nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0)
+        node_evals = f(nodes_flat, *f_args)
+
+        # Reshape nodes and evaluations before returning
+        unflatten = (len(step_idxs), self.C, -1)
+        nodes = torch.reshape(nodes_flat, unflatten)
+        f_evals = torch.reshape(node_evals, unflatten)
+
+        return nodes, f_evals, step_idxs, (None, None, None)
+
+    def _evaluate_f_on_split_nodes(
+        self, f, f_args, mesh, step_idxs, max_batch, max_mesh_steps, split_node_state
+    ):
+        split_nodes, split_f_evals, split_mesh_idx = split_node_state
+        num_split_nodes = 0 if split_mesh_idx is None else len(split_nodes)
+        num_remaining_split_nodes = self.C - num_split_nodes
+
+        if split_mesh_idx is None:
+            evaluate_all = (max_mesh_steps * self.C) % max_batch == 0
+            num_mesh_steps = max_mesh_steps if evaluate_all else max_mesh_steps + 1
+
+            step_idxs = step_idxs[:num_mesh_steps]
+
+            # Place C quadrature points within each selected step
+            nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
+
+            # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
+            nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
+
+            if evaluate_all:
+                num_accumulation_iters = (num_mesh_steps * self.C) // max_batch
+            else:
+                num_accumulation_iters = (max_mesh_steps * self.C) // max_batch + 1
+                num_residual_nodes = max_batch - (max_mesh_steps * self.C % max_batch)
+        else:
+            num_mesh_steps = max_mesh_steps + 1
+            # Add another mesh step if number of saved split nodes is too small
+            if (
+                num_remaining_split_nodes
+                < ((max_mesh_steps * self.C) % max_batch) - max_batch
+            ):
+                num_mesh_steps += 1
+
+            # Get mesh step indices
+            step_idxs = step_idxs[:num_mesh_steps]
+
+            # Move the previously split mesh index to the front
+            split_idx = torch.where(step_idxs == split_mesh_idx)[0]
+            if len(split_idx):
+                split_idx = split_idx[0]
+                step_idxs[1 : split_idx + 1] = step_idxs[:split_idx]
+            else:
+                step_idxs[1:] = step_idxs[:-1]
+            step_idxs[0] = split_mesh_idx
+
+            # Place C quadrature points within each selected step
+            nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
+
+            # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
+            nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
+            nodes_flat = nodes_flat[len(split_nodes) :]
+            num_eval_nodes = len(nodes_flat)
+            evaluate_all = num_eval_nodes % max_batch == 0
+
+            if evaluate_all:
+                num_accumulation_iters = num_eval_nodes // max_batch
+            else:
+                num_accumulation_iters = (max_mesh_steps * self.C) // max_batch + 1
+                num_residual_nodes = max_batch - (
+                    max_mesh_steps * self.C % max_batch
+                )  # Check this
+
+        # Evaluate the integrand over all batches
+        f_evals = [
+            f(nodes_flat[i * max_batch : (i + 1) * max_batch], *f_args)
+            for i in range(num_accumulation_iters)
+        ]
+
+        # Combine split evaluation and nodes
+        if split_mesh_idx:
+            split_nodes = torch.concatenate(
+                [split_nodes, nodes_flat[:num_remaining_split_nodes]],
+                dim=1,
+                device=self.device,
+            ).unsqueeze(0)
+            nodes_flat = nodes_flat[num_remaining_split_nodes:]
+            split_f_evals = torch.concatenate(
+                [split_f_evals, f_evals[0][:num_remaining_split_nodes]],
+                dim=1,
+                device=self.device,
+            ).unsqueeze(0)
+            f_evals[0] = f_evals[0][num_remaining_split_nodes:]
+
+        # Get the residual evaluations of the last mesh step
+        if evaluate_all:
+            residual_f_evals = None
+            residual_nodes = None
+            residual_mesh_idx = None
+        else:
+            residual_nodes = nodes_flat[-1 * self.C : -1 * self.C + num_residual_nodes]
+            residual_f_evals = f_evals[-1][-1 * num_residual_nodes :]
+            f_evals[-1] = f_evals[-1][: -1 * num_residual_nodes]
+            residual_mesh_idx = step_idxs[-1]
+
+        # Reshape and combine outputs
+        if evaluate_all:
+            nodes = torch.reshape(nodes_flat, (num_mesh_steps, self.C, -1))
+        else:
+            step_idxs = step_idxs[:-1]
+            nodes = torch.reshape(
+                nodes_flat[: -self.C], (num_mesh_steps - 1, self.C, -1)
+            )
+
+        if split_mesh_idx is None:
+            f_evals = torch.concatenate(f_evals, dim=0, device=self.device)
+        else:
+            f_evals = torch.concatenate(
+                split_f_evals + f_evals, dim=0, device=self.device
+            )
+
+        split_node_state = (residual_nodes, residual_f_evals, residual_mesh_idx)
+
+        return nodes, f_evals, step_idxs, split_node_state
+
+        # node_split_state = (split_nodes)
+        # return torch.flatten(nodes, start_dim=0, end_dim=-2), step_idxs,
+        # # Find barrier indices where mesh_trackers is True, take up to max_steps
+        # step_idxs = torch.arange(len(mesh), device=self.device)
+        # step_idxs = step_idxs[mesh_trackers]
+        # step_idxs = step_idxs[:max_steps]
+        # # Place C quadrature points within each selected step
+        # nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
+
+        # # --- Step 2: Evaluate the integrand at all quadrature points ---
+        # # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
+        # # shape = nodes.shape
+        # return torch.flatten(nodes, start_dim=0, end_dim=-2), step_idxs, node_bucket
 
     def _sort_evals_into_mesh(
         self, take_gradient, nodes_flat, y_step_eval, y_step_bucket

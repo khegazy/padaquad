@@ -178,12 +178,12 @@ for epoch in range(N_epochs):
 
 ## Available methods
 
-The library ships ten quadrature rules across three families:
+The library ships thirteen quadrature rules across three families:
 
 | Family | Methods | Polynomial exactness | Notes |
 |---|---|---|---|
-| Gauss-Kronrod | `gk15`, `gk21`, `gk31` | 22 / 31 / 46 | Embedded G_n / K_(2n+1) pair, the canonical adaptive-quadrature workhorse since 1965 (Laurie 1997). `gk21` is the default. |
-| Clenshaw-Curtis | `cc17`, `cc33`, `cc65` | 16 / 32 / 64 | Chebyshev nodes, **nested** by doubling. Excellent on analytic integrands (Trefethen 2008). |
+| Gauss-Kronrod | `gk7`, `gk15`, `gk21`, `gk31` | 10 / 22 / 31 / 46 | Embedded G_n / K_(2n+1) pair, the canonical adaptive-quadrature workhorse since 1965 (Laurie 1997). `gk21` is the default. `gk7` (G3-K7, 9 evaluation slots) fills the low-node end. |
+| Clenshaw-Curtis | `cc5`, `cc9`, `cc17`, `cc33`, `cc65` | 4 / 8 / 16 / 32 / 64 | Chebyshev nodes, **nested** by doubling. Excellent on analytic integrands (Trefethen 2008). |
 | Runge-Kutta | `adaptive_heun`, `fehlberg2`, `bosh3`, `dopri5` | 1 / 1 / 2 / 4 | Embedded RK pairs from the ODE-solver literature. |
 
 Plus two variable-node methods (`adaptive_heun` and
@@ -191,8 +191,11 @@ Plus two variable-node methods (`adaptive_heun` and
 splits — useful when integrand evaluations are expensive.
 
 For smooth integrands at moderate-to-high accuracy, prefer `gk21` or
-`cc33`. The RK methods are kept for backwards-compatibility and as
-baselines.
+`cc33`. The low-node methods (`gk7`, `cc5`, `cc9`) fill the gap between
+the RK rules and the headline `gk15`/`cc17`: useful when the adaptive
+controller refines aggressively and a high-node rule would waste
+evaluations on smooth regions. The RK methods are kept for
+backwards-compatibility and as baselines.
 
 ## Use cases
 

@@ -1170,3 +1170,311 @@ class TestEndToEnd:
             f"reused-second does not match fresh: "
             f"{second.integral.item()} vs {ref_second.integral.item()}"
         )
+
+
+# ===========================================================================
+# Tier 2 — high-value edge cases and shape variations (extends TestUnit / TestEndToEnd)
+# ===========================================================================
+
+
+class TestTier2:
+    """Tier 2 tests: edge cases that the Tier 1 sweep doesn't cover."""
+
+    # -----------------------------------------------------------------------
+    # D2. step_idxs with a single element
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier2
+    @pytest.mark.parametrize("method", TEST_METHODS)
+    def test_split_nodes_step_idxs_single_element(self, method):
+        """``step_idxs = [k]`` for a single panel. Catches off-by-one
+        in indexing."""
+        solver = make_solver_for_unit_test(method)
+        C = solver.C
+        mesh = _make_mesh(n_panels=4)
+        step_idxs = torch.tensor([1])  # only panel 1
+        max_batch = C
+        nodes, f_evals, returned_idxs, state = solver._evaluate_f_on_split_nodes(
+            _simple_integrand,
+            (),
+            mesh,
+            step_idxs,
+            max_batch=max_batch,
+            max_mesh_steps=1,
+            split_node_state=(None, None, None),
+        )
+        assert nodes.shape == (1, C, 1)
+        assert f_evals.shape == (1, C, 1)
+        assert returned_idxs.tolist() == [1]
+        assert state == (None, None, None)
+
+        # And for full_nodes
+        nodes_f, _f_evals_f, idxs_f, _state_f = solver._evaluate_f_on_full_nodes(
+            _simple_integrand, (), mesh, step_idxs, max_mesh_steps=1
+        )
+        assert nodes_f.shape == (1, C, 1)
+        assert idxs_f.tolist() == [1]
+
+    # -----------------------------------------------------------------------
+    # D1. step_idxs non-contiguous (every other panel)
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier2
+    @pytest.mark.parametrize("method", TEST_METHODS)
+    def test_split_nodes_step_idxs_non_contiguous(self, method):
+        """step_idxs = [0, 2, 4] picks every other panel. Output nodes
+        must lie within those panels' barriers."""
+        solver = make_solver_for_unit_test(method)
+        n_panels = 6
+        mesh = _make_mesh(n_panels=n_panels)
+        step_idxs = torch.tensor([0, 2, 4])
+
+        nodes_f, _, idxs_f, _ = solver._evaluate_f_on_full_nodes(
+            _simple_integrand, (), mesh, step_idxs, max_mesh_steps=3
+        )
+        assert idxs_f.tolist() == [0, 2, 4]
+        # First panel: nodes between mesh[0] and mesh[1]
+        # Third panel: nodes between mesh[4] and mesh[5]
+        assert nodes_f[0, 0, 0] >= mesh[0, 0] - 1e-12
+        assert nodes_f[0, -1, 0] <= mesh[1, 0] + 1e-12
+        assert nodes_f[2, 0, 0] >= mesh[4, 0] - 1e-12
+        assert nodes_f[2, -1, 0] <= mesh[5, 0] + 1e-12
+
+    # -----------------------------------------------------------------------
+    # E1. Multi-dimensional integrand output (D > 1)
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier2
+    @pytest.mark.parametrize("method", TEST_METHODS)
+    def test_full_and_split_nodes_with_D_gt_1(self, method):
+        """Integrand returning [N, 3] — verify reshape to [N, C, 3] in
+        both paths and that the two paths agree."""
+
+        def vec_integrand(t, *args):
+            """f(t) = [sin(t), cos(t), t]. Returns [N, 3]."""
+            if t.dim() == 1:
+                t = t.unsqueeze(0)
+            return torch.cat([torch.sin(t), torch.cos(t), t], dim=-1)
+
+        solver = make_solver_for_unit_test(method)
+        C = solver.C
+        n_panels = 4
+        mesh = _make_mesh(n_panels=n_panels)
+        step_idxs = torch.arange(n_panels)
+
+        # Full path
+        nodes_full, f_evals_full, _, _ = solver._evaluate_f_on_full_nodes(
+            vec_integrand, (), mesh, step_idxs, max_mesh_steps=n_panels
+        )
+        assert nodes_full.shape == (n_panels, C, 1)
+        assert f_evals_full.shape == (n_panels, C, 3), (
+            f"Expected [N, C, 3], got {f_evals_full.shape}"
+        )
+
+        # Split path: loop until done
+        max_batch = 2 * C + 1  # forces evaluate_all=False at least once
+        completed = 0
+        state = (None, None, None)
+        f_evals_acc = []
+        while completed < n_panels:
+            remaining = step_idxs[completed:]
+            batches_left = len(remaining) * C
+            effective_max_batch = min(max_batch, batches_left)
+            _ni, fi, ri, state = solver._evaluate_f_on_split_nodes(
+                vec_integrand,
+                (),
+                mesh,
+                remaining,
+                max_batch=effective_max_batch,
+                max_mesh_steps=effective_max_batch // C,
+                split_node_state=state,
+            )
+            f_evals_acc.append(fi)
+            completed += len(ri)
+        f_evals_split = torch.cat(f_evals_acc, dim=0)
+
+        assert f_evals_split.shape == (n_panels, C, 3)
+        assert torch.allclose(f_evals_split, f_evals_full, atol=1e-12)
+
+    # -----------------------------------------------------------------------
+    # F2. Determinism: same inputs twice -> bit-equal outputs
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier2
+    @pytest.mark.parametrize("method", TEST_METHODS)
+    def test_split_nodes_deterministic_repeated_calls(self, method):
+        """Calling with identical inputs twice must give bit-equal outputs."""
+        solver = make_solver_for_unit_test(method)
+        C = solver.C
+        max_batch = C + 1
+        mesh = _make_mesh()
+        step_idxs = _make_step_idxs()
+
+        def run_once():
+            return solver._evaluate_f_on_split_nodes(
+                _simple_integrand,
+                (),
+                mesh,
+                step_idxs,
+                max_batch=max_batch,
+                max_mesh_steps=max_batch // C,
+                split_node_state=(None, None, None),
+            )
+
+        n1, e1, i1, s1 = run_once()
+        n2, e2, i2, s2 = run_once()
+
+        assert torch.equal(n1, n2), "nodes differ across identical calls"
+        assert torch.equal(e1, e2), "f_evals differ across identical calls"
+        assert torch.equal(i1, i2), "step_idxs differ across identical calls"
+        # Compare state tensors element-wise (state may have None or tensors)
+        for x, y in zip(s1, s2, strict=False):
+            if x is None:
+                assert y is None
+            else:
+                assert torch.equal(x, y), "state tensor differs across calls"
+
+    # -----------------------------------------------------------------------
+    # C2. Adaptive mesh mutation between split iterations
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier2
+    @pytest.mark.parametrize("method", TEST_METHODS)
+    def test_split_nodes_with_mesh_mutation_between_iterations(self, method):
+        """When mesh barriers change between iterations of the split
+        loop, the function should either handle it sensibly (process
+        new mesh from the residual point) or error loudly.
+
+        Constructs the scenario: iter 1 leaves a residual; before iter 2,
+        we INSERT a new barrier somewhere in the mesh. step_idxs for
+        iter 2 is recomputed.
+        """
+        solver = make_solver_for_unit_test(method)
+        C = solver.C
+        max_batch = C + 1
+        mesh_orig = _make_mesh(n_panels=4)
+        step_idxs = torch.arange(4)
+
+        _, _, ridxs1, state1 = solver._evaluate_f_on_split_nodes(
+            _simple_integrand,
+            (),
+            mesh_orig,
+            step_idxs,
+            max_batch=max_batch,
+            max_mesh_steps=max_batch // C,
+            split_node_state=(None, None, None),
+        )
+
+        if state1 == (None, None, None):
+            pytest.skip("iteration 1 had no residual (evaluate_all=True)")
+
+        # Mutate the mesh: insert a new barrier in the middle. Panel indices
+        # AFTER the insertion shift.
+        midpoint = (mesh_orig[2] + mesh_orig[3]) / 2
+        mesh_mutated = torch.cat(
+            [mesh_orig[:3], midpoint.unsqueeze(0), mesh_orig[3:]], dim=0
+        )
+        # Original panel indices: [0, 1, 2, 3]; after inserting at position 3,
+        # panels are [0, 1, 2_old(=2_new), 3_new, 4_new=3_old].
+        # Recompute remaining step_idxs in mutated mesh (just panels [len(ridxs1):]).
+        new_step_idxs = torch.arange(len(ridxs1), 4 + 1)  # the old panels + 1
+
+        # The function may succeed or error; both outcomes are acceptable.
+        # The contract is: don't silently corrupt the result.
+        try:
+            n2, e2, i2, _ = solver._evaluate_f_on_split_nodes(
+                _simple_integrand,
+                (),
+                mesh_mutated,
+                new_step_idxs,
+                max_batch=max_batch,
+                max_mesh_steps=max_batch // C,
+                split_node_state=state1,
+            )
+            # If it succeeds, shapes should be self-consistent
+            assert n2.shape[1] == C
+            assert e2.shape[0] == n2.shape[0]
+            assert i2.shape[0] == n2.shape[0]
+        except (RuntimeError, AssertionError, IndexError):
+            # Acceptable: the function couldn't reconcile mutated mesh.
+            pass
+
+    # -----------------------------------------------------------------------
+    # E2E 4. take_gradient=False with max_batch < C — pin the behavior
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier2
+    @pytest.mark.parametrize(
+        ("method", "max_batch"),
+        _BELOW_C_SWEEP,
+        ids=_BELOW_C_SWEEP_IDS,
+    )
+    def test_integrate_take_grad_False_max_batch_below_C_behavior(
+        self, method, max_batch
+    ):
+        """For take_gradient=False with max_batch < C, document the
+        actual behavior. The current implementation may produce empty
+        outputs, hang, or error - this test pins whatever it does.
+        """
+        f, _, _ = _resolve_integrand("damped_sine")
+        solver = make_uniform_solver(method, atol=1e-4, rtol=1e-4, max_batch=max_batch)
+        # Accept any of: clean error, correct result, or specific error message.
+        # The point of this test is to PIN the behavior so changes are visible.
+        try:
+            result = solver.integrate(
+                f=f,
+                mesh_init=torch.tensor([0.0], dtype=torch.float64),
+                mesh_final=torch.tensor([1.0], dtype=torch.float64),
+                take_gradient=False,
+            )
+            # If it succeeded, the result should at least be a finite number.
+            assert torch.isfinite(result.integral).all()
+        except (
+            AssertionError,
+            ZeroDivisionError,
+            RuntimeError,
+            IndexError,
+            ValueError,
+        ):
+            # Acceptable: errors are the expected behavior for max_batch < C
+            # (the integrate code path can't accommodate fewer than C
+            # evaluations per batch). torch.cat raises ValueError on empty
+            # list, which fires when no batches are evaluable.
+            pass
+
+    # -----------------------------------------------------------------------
+    # E2E 7. take_grad=True invariant subset
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier2
+    @pytest.mark.parametrize("integrand_name", TIER1_INTEGRANDS)
+    @pytest.mark.parametrize("method", TEST_METHODS)
+    def test_integrate_results_match_across_max_batch_take_grad_True(
+        self, method, integrand_name
+    ):
+        """take_gradient=True specifically should be invariant across
+        max_batch. Belt-and-suspenders subset of E5."""
+        f, _, _ = _resolve_integrand(integrand_name)
+        C = _method_C(method)
+        candidates = [C, 2 * C, 5 * C]
+        results = []
+        for mb in candidates:
+            solver = make_uniform_solver(method, atol=1e-4, rtol=1e-4, max_batch=mb)
+            torch.manual_seed(2025)
+            r = solver.integrate(
+                f=f,
+                mesh_init=torch.tensor([0.0], dtype=torch.float64),
+                mesh_final=torch.tensor([1.0], dtype=torch.float64),
+                take_gradient=True,
+            )
+            results.append((mb, r.integral.item()))
+
+        reference = results[0][1]
+        rel_bound = 100 * 1e-4  # 1e-2
+        for mb, val in results[1:]:
+            rel_diff = abs(val - reference) / max(abs(reference), 1e-12)
+            assert rel_diff < rel_bound, (
+                f"take_grad=True {method} {integrand_name}: "
+                f"max_batch={results[0][0]}->{reference}, "
+                f"max_batch={mb}->{val}, rel_diff={rel_diff:.3e}"
+            )

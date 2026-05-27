@@ -696,3 +696,250 @@ class TestUnit:
             # Acceptable: the fallback can't reconcile a stale residual.
             # Document this by passing.
             pass
+
+    # -----------------------------------------------------------------------
+    # 18. split_node_state contract: exact shapes and content
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier1
+    @pytest.mark.parametrize(
+        ("method", "max_batch"),
+        _SPLIT_VALID_SWEEP,
+        ids=_SPLIT_VALID_SWEEP_IDS,
+    )
+    def test_split_nodes_residual_handoff_contract(self, method, max_batch):
+        """Pin the exact contract of ``split_node_state``:
+
+        * ``residual_nodes.shape[0] == num_residual``
+        * ``residual_nodes.shape[1] == T`` (= mesh dimensionality, 1 here)
+        * ``residual_f_evals`` matches ``residual_nodes`` in leading dim
+        * ``residual_mesh_idx`` is a 0-d or 1-element tensor pointing to
+          a valid panel in step_idxs
+        """
+        solver = make_solver_for_unit_test(method)
+        C = solver.C
+        max_mesh_steps = max_batch // C
+        if max_mesh_steps < 1:
+            pytest.skip("max_mesh_steps < 1 — degenerate")
+        evaluate_all = (max_mesh_steps * C) % max_batch == 0
+        if evaluate_all:
+            pytest.skip("evaluate_all=True — no residual to inspect")
+
+        mesh = _make_mesh(n_panels=max(6, 3 * max_mesh_steps + 2))
+        step_idxs = torch.arange(mesh.shape[0] - 1)
+        _n, _e, _idxs, state = solver._evaluate_f_on_split_nodes(
+            _simple_integrand,
+            (),
+            mesh,
+            step_idxs,
+            max_batch=max_batch,
+            max_mesh_steps=max_mesh_steps,
+            split_node_state=(None, None, None),
+        )
+
+        residual_nodes, residual_f_evals, residual_mesh_idx = state
+        assert residual_nodes is not None
+        assert residual_f_evals is not None
+        assert residual_mesh_idx is not None
+
+        num_residual = max_batch - (max_mesh_steps * C) % max_batch
+        assert residual_nodes.shape[0] == num_residual, (
+            f"residual_nodes.shape[0]={residual_nodes.shape[0]}, "
+            f"expected {num_residual}"
+        )
+        # T-dimension preserved
+        assert residual_nodes.shape[1] == mesh.shape[1]
+        # f_evals leading dim matches nodes
+        assert residual_f_evals.shape[0] == num_residual
+
+        # residual_mesh_idx is a valid panel index in the input step_idxs
+        # (specifically, the (max_mesh_steps + 1)-th element, the partial one)
+        residual_mesh_idx_val = int(residual_mesh_idx.item())
+        assert residual_mesh_idx_val in step_idxs.tolist()
+
+
+# ===========================================================================
+# TestIntegration
+# ===========================================================================
+
+
+class TestIntegration:
+    """Tests of ``_evaluate_f_on_mesh`` dispatcher and multi-call loop."""
+
+    # -----------------------------------------------------------------------
+    # I1. Dispatcher routes to the right sub-function based on take_gradient
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier1
+    @pytest.mark.parametrize("method", TEST_METHODS)
+    def test_dispatcher_routes_by_take_gradient(self, method, monkeypatch):
+        """take_gradient=True routes to _evaluate_f_on_full_nodes;
+        take_gradient=False routes to _evaluate_f_on_split_nodes."""
+        solver = make_solver_for_unit_test(method)
+        C = solver.C
+        mesh = _make_mesh()
+        mesh_trackers = torch.ones(mesh.shape[0], dtype=torch.bool)
+        mesh_trackers[-1] = False  # last barrier is not a panel start
+
+        calls = {"full": 0, "split": 0}
+
+        def fake_full(*args, **kwargs):
+            calls["full"] += 1
+            # Return values that match the expected output shape so the
+            # dispatcher's caller (if any) doesn't choke.
+            return (
+                torch.zeros(1, C, 1),
+                torch.zeros(1, C, 1),
+                torch.arange(1),
+                (None, None, None),
+            )
+
+        def fake_split(*args, **kwargs):
+            calls["split"] += 1
+            return (
+                torch.zeros(1, C, 1),
+                torch.zeros(1, C, 1),
+                torch.arange(1),
+                (None, None, None),
+            )
+
+        monkeypatch.setattr(solver, "_evaluate_f_on_full_nodes", fake_full)
+        monkeypatch.setattr(solver, "_evaluate_f_on_split_nodes", fake_split)
+
+        # Route 1: take_gradient=True
+        solver._evaluate_f_on_mesh(
+            _simple_integrand,
+            (),
+            mesh,
+            mesh_trackers,
+            take_gradient=True,
+            force_max_batch=10 * C,
+            total_mem_usage=0.9,
+            split_node_state=(None, None, None),
+        )
+        assert calls == {"full": 1, "split": 0}
+
+        # Route 2: take_gradient=False
+        solver._evaluate_f_on_mesh(
+            _simple_integrand,
+            (),
+            mesh,
+            mesh_trackers,
+            take_gradient=False,
+            force_max_batch=10 * C,
+            total_mem_usage=0.9,
+            split_node_state=(None, None, None),
+        )
+        assert calls == {"full": 1, "split": 1}
+
+    # -----------------------------------------------------------------------
+    # I2. Multi-call loop through _evaluate_f_on_mesh covers entire mesh
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier1
+    @pytest.mark.parametrize("take_gradient", [True, False])
+    @pytest.mark.parametrize(
+        ("method", "max_batch"),
+        _AT_OR_ABOVE_C_SWEEP,
+        ids=_AT_OR_ABOVE_C_SWEEP_IDS,
+    )
+    def test_loop_accumulates_full_mesh(self, method, max_batch, take_gradient):
+        """Drive ``_evaluate_f_on_mesh`` to completion, mimicking the
+        integrate loop's call pattern. Verify:
+
+          * All initial panels covered (sum of returned step_idxs lengths)
+          * Final split_node_state is (None, None, None)
+          * Total nodes accumulated equals (n_panels, C, T)
+        """
+        solver = make_solver_for_unit_test(method)
+        C = solver.C
+        n_panels = max(6, 3 * (max_batch // C) + 2)
+        mesh = _make_mesh(n_panels=n_panels)
+        mesh_trackers = torch.ones(mesh.shape[0], dtype=torch.bool)
+        mesh_trackers[-1] = False
+
+        state = (None, None, None)
+        completed_panels = set()
+        nodes_acc, f_evals_acc = [], []
+        max_iters = n_panels + 5
+        for _ in range(max_iters):
+            if not torch.any(mesh_trackers):
+                break
+            nodes_i, f_evals_i, idxs_i, state = solver._evaluate_f_on_mesh(
+                _simple_integrand,
+                (),
+                mesh,
+                mesh_trackers,
+                take_gradient=take_gradient,
+                force_max_batch=max_batch,
+                total_mem_usage=0.9,
+                split_node_state=state,
+            )
+            nodes_acc.append(nodes_i)
+            f_evals_acc.append(f_evals_i)
+            for idx in idxs_i.tolist():
+                completed_panels.add(idx)
+                mesh_trackers[idx] = False
+
+        assert completed_panels == set(range(n_panels)), (
+            f"Missing panels: {set(range(n_panels)) - completed_panels}"
+        )
+        assert state == (None, None, None), f"Final state should be empty, got {state}"
+        all_nodes = torch.cat(nodes_acc, dim=0)
+        assert all_nodes.shape == (n_panels, C, 1)
+
+    # -----------------------------------------------------------------------
+    # I3. Loop outputs match across take_gradient True vs False
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier1
+    @pytest.mark.parametrize(
+        ("method", "max_batch"),
+        _AT_OR_ABOVE_C_SWEEP,
+        ids=_AT_OR_ABOVE_C_SWEEP_IDS,
+    )
+    def test_loop_results_match_take_gradient_True_and_False(self, method, max_batch):
+        """The two dispatcher paths must produce identical accumulated
+        outputs (numerics is mode-independent in the current design)."""
+        solver = make_solver_for_unit_test(method)
+        n_panels = max(6, 3 * (max_batch // solver.C) + 2)
+
+        def run(take_gradient):
+            mesh = _make_mesh(n_panels=n_panels)
+            mesh_trackers = torch.ones(mesh.shape[0], dtype=torch.bool)
+            mesh_trackers[-1] = False
+            state = (None, None, None)
+            completed = set()
+            nodes_acc, f_evals_acc = [], []
+            for _ in range(n_panels + 5):
+                if not torch.any(mesh_trackers):
+                    break
+                ni, ei, ii, state = solver._evaluate_f_on_mesh(
+                    _simple_integrand,
+                    (),
+                    mesh,
+                    mesh_trackers,
+                    take_gradient=take_gradient,
+                    force_max_batch=max_batch,
+                    total_mem_usage=0.9,
+                    split_node_state=state,
+                )
+                nodes_acc.append(ni)
+                f_evals_acc.append(ei)
+                for idx in ii.tolist():
+                    completed.add(idx)
+                    mesh_trackers[idx] = False
+            return torch.cat(nodes_acc, dim=0), torch.cat(f_evals_acc, dim=0)
+
+        nodes_true, f_evals_true = run(True)
+        nodes_false, f_evals_false = run(False)
+
+        assert torch.equal(nodes_true, nodes_false), (
+            f"nodes differ between take_gradient modes for {method} "
+            f"max_batch={max_batch}"
+        )
+        # f_evals may have summation-order drift in the False path
+        max_diff = (f_evals_true - f_evals_false).abs().max().item()
+        assert max_diff < 1e-14, (
+            f"f_evals drift {max_diff:.3e} between take_gradient modes"
+        )

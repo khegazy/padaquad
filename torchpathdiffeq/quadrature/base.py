@@ -791,7 +791,7 @@ class AdaptiveQuadrature(SolverBase):
             nodes_flat = nodes_flat[num_remaining_split_nodes:]
             split_f_evals = torch.concatenate(
                 [split_f_evals, f_evals[0][:num_remaining_split_nodes]], dim=0
-            ).unsqueeze(0)
+            )
             f_evals[0] = f_evals[0][num_remaining_split_nodes:]
 
         # Get the residual evaluations of the last mesh step
@@ -807,19 +807,19 @@ class AdaptiveQuadrature(SolverBase):
 
         # Reshape and combine outputs
         if evaluate_all:
-            nodes = torch.reshape(nodes_flat, (num_mesh_steps, self.C, -1))
+            nodes = torch.reshape(nodes_flat, (-1, self.C, nodes_flat.shape[-1]))
         else:
             step_idxs = step_idxs[:-1]
             nodes = torch.reshape(
-                nodes_flat[: -self.C], (num_mesh_steps - 1, self.C, -1)
+                nodes_flat[: -self.C], (-1, self.C, nodes_flat.shape[-1])
             )
 
         if split_mesh_idx is None:
             f_evals = torch.concatenate(f_evals, dim=0)
-            f_evals = torch.reshape(f_evals, (num_mesh_steps, self.C, -1))
+            f_evals = torch.reshape(f_evals, (-1, self.C, f_evals.shape[-1]))
         else:
             f_evals = torch.concatenate([split_f_evals, *f_evals], dim=0)
-            f_evals = torch.reshape(f_evals, (num_mesh_steps - 1, self.C, -1))
+            f_evals = torch.reshape(f_evals, (-1, self.C, f_evals.shape[-1]))
 
         split_node_state = (residual_nodes, residual_f_evals, residual_mesh_idx)
 

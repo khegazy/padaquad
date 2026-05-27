@@ -765,16 +765,16 @@ class AdaptiveQuadrature(SolverBase):
             nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
             nodes_flat = nodes_flat[len(split_nodes) :]
             num_eval_nodes = len(nodes_flat)
-            evaluate_all = num_eval_nodes % max_batch == 0
 
-            # Determine the number of evaluation iterations based on split
-            if evaluate_all:
-                num_accumulation_iters = num_eval_nodes // max_batch
-            else:
-                num_accumulation_iters = (max_mesh_steps * self.C) // max_batch + 1
-                num_residual_nodes = max_batch - (
-                    max_mesh_steps * self.C % max_batch
-                )  # Check this
+            # One batch of up to max_batch new evals per call. After
+            # completing the carry-over panel (num_remaining_split_nodes
+            # evals), the rest splits into full new panels plus a partial
+            # residual; if num_eval_nodes < max_batch the layout's tail
+            # already ends cleanly, so the residual is zero.
+            num_accumulation_iters = 1
+            actual_evals = min(max_batch, num_eval_nodes)
+            num_residual_nodes = (actual_evals - num_remaining_split_nodes) % self.C
+            evaluate_all = num_residual_nodes == 0
 
         # Evaluate the integrand over all batches
         f_evals = [

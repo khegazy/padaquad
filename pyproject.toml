@@ -72,6 +72,11 @@ xfail_strict = true
 log_cli_level = "warn"
 pythonpath = "torchpathdiffeq"
 testpaths = ["tests"]
+markers = [
+  "tier1: must-have correctness tests for the split integration paths",
+  "tier2: high-value edge-case and shape-variation tests",
+  "tier3: polish, fuzz, and gradient-behavior tests",
+]
 
 [tool.coverage.run]
 source = ["torchpathdiffeq"]

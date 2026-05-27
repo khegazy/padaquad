@@ -295,7 +295,7 @@ class AdaptiveQuadrature(SolverBase):
         mesh_init, mesh_final = self._setup_integral_bounds(mesh, mesh_init, mesh_final)
 
         # Replace max_batch if default it given
-        max_batch = self.max_batch if max_batch is None else max_batch
+        force_max_batch = self.max_batch if max_batch is None else max_batch
 
         # Get variables or populate with default values, send to correct device
         f, mesh_init, mesh_final, y0 = self._check_variables(
@@ -316,7 +316,7 @@ class AdaptiveQuadrature(SolverBase):
             self.previous_f_id is not None and id(f) == self.previous_f_id
         )
         # Benchmark memory footprint on first call with a new integrand
-        if not same_integrand_fxn and max_batch is None:
+        if not same_integrand_fxn and force_max_batch is None:
             self._setup_memory_checks(
                 f, mesh_init, take_gradient=take_gradient, f_args=f_args
             )
@@ -348,38 +348,27 @@ class AdaptiveQuadrature(SolverBase):
             random_initial_mesh,
             N_init_steps,
         )
-        nodes, y = None, None
 
         record = {}
+        split_node_state = (None, None, None)
         # === Main integration loop ===
         # Continues until all steps have been evaluated and accepted
         # (mesh_trackers[i] == False for all i)
         while torch.any(mesh_trackers):
-            # Determine how many steps fit in one batch based on memory
-            if max_batch is not None:
-                max_steps = max_batch // self.C
-            else:
-                max_steps = int(self._get_max_f_evals(total_mem_usage) // self.C)
+            # From earlier debugging
+            # if y is not None:
+            #    assert max_steps >= len(y), f"{max_steps}  {len(y)}"
 
-            if y is not None:
-                assert max_steps >= len(y), f"{max_steps}  {len(y)}"
-
-            # --- Step 1: Select a batch of unevaluated steps ---
-            # Find barrier indices where mesh_trackers is True, take up to max_steps
-            step_idxs = torch.arange(len(mesh), device=self.device)
-            step_idxs = step_idxs[mesh_trackers]
-            step_idxs = step_idxs[:max_steps]
-            # Place C quadrature points within each selected step
-            nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
-            t_flat = torch.flatten(nodes, start_dim=0, end_dim=1)
-            assert torch.all(t_flat[1:] - t_flat[:-1] + self.atol_assert >= 0)
-            error_ratios = None
-
-            # --- Step 2: Evaluate the integrand at all quadrature points ---
-            # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
-            N, C, _T = nodes.shape
-            y_step_eval = f(torch.flatten(nodes, start_dim=0, end_dim=-2), *f_args)
-            y_step_eval = torch.reshape(y_step_eval, (N, C, -1))
+            nodes, y_step_eval, step_idxs, split_node_state = self._evaluate_f_on_mesh(
+                f,
+                f_args,
+                mesh,
+                mesh_trackers,
+                take_gradient,
+                force_max_batch,
+                total_mem_usage,
+                split_node_state,
+            )
 
             # --- Step 3: Compute integral contributions via qudrature formula ---
             t0 = time.time()
@@ -666,6 +655,225 @@ class AdaptiveQuadrature(SolverBase):
             mesh_trackers_new,
             error_ratios[keep_mask],
         )
+
+    def _evaluate_f_on_mesh(
+        self,
+        f,
+        f_args,
+        mesh,
+        mesh_trackers,
+        take_gradient,
+        force_max_batch,
+        total_mem_usage,
+        split_node_state,
+    ):
+        # Determine how many f evaluations fit in one batch based on memory
+        if force_max_batch is not None:
+            max_batch = force_max_batch
+        else:
+            max_batch = self._get_max_f_evals(total_mem_usage)
+
+        # max_batch should not exceed the remaining number of f evaluations
+        batches_left = torch.sum(mesh_trackers) * self.C
+        max_batch = max_batch if max_batch < batches_left else batches_left
+        max_mesh_steps = max_batch // self.C
+
+        step_idxs = torch.arange(len(mesh), device=self.device)
+        step_idxs = step_idxs[mesh_trackers]
+
+        if take_gradient:
+            return self._evaluate_f_on_full_nodes(
+                f, f_args, mesh, step_idxs, max_mesh_steps
+            )
+        else:
+            return self._evaluate_f_on_split_nodes(
+                f, f_args, mesh, step_idxs, max_batch, max_mesh_steps, split_node_state
+            )
+
+    def _evaluate_f_on_full_nodes(self, f, f_args, mesh, step_idxs, max_mesh_steps):
+        assert max_mesh_steps >= 1, (
+            "Not enough free memory to run 1 integration steps for take_gradient=True. Set take_gradient=False if the gradient of the integral is not needed and consider increasing total_mem_usage"
+        )
+        # Find barrier indices where mesh_trackers is True, take up to max_steps
+        step_idxs = step_idxs[:max_mesh_steps]
+        # Place C quadrature points within each selected step
+        nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
+
+        # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
+        nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
+        assert torch.all(nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0)
+        node_evals = f(nodes_flat, *f_args)
+
+        # Reshape nodes and evaluations before returning
+        unflatten = (len(step_idxs), self.C, -1)
+        nodes = torch.reshape(nodes_flat, unflatten)
+        f_evals = torch.reshape(node_evals, unflatten)
+
+        return nodes, f_evals, step_idxs, (None, None, None)
+
+    def _evaluate_f_on_split_nodes(
+        self, f, f_args, mesh, step_idxs, max_batch, max_mesh_steps, split_node_state
+    ):
+        # Gather nodes and evaluations from previous split. split_mesh_idx
+        # stores the residual panel's left-barrier *coordinate* (not an
+        # integer index), so it survives mesh refinement: the calling
+        # integrate loop inserts midpoints between iterations, shifting
+        # any cached integer index. Barriers themselves are never removed
+        # mid-loop, so a stored coordinate stays resolvable.
+        split_nodes, split_f_evals, split_mesh_idx = split_node_state
+        num_split_nodes = 0 if split_mesh_idx is None else len(split_nodes)
+        num_remaining_split_nodes = self.C - num_split_nodes
+
+        if split_mesh_idx is not None:
+            # Translate the cached barrier coordinate back to an index in
+            # the current (possibly refined) mesh.
+            split_mesh_idx = torch.where((mesh == split_mesh_idx).all(dim=-1))[0][0]
+
+        if split_mesh_idx is None:
+            evaluate_all = (max_mesh_steps * self.C) % max_batch == 0
+            num_mesh_steps = max_mesh_steps if evaluate_all else max_mesh_steps + 1
+
+            step_idxs = step_idxs[:num_mesh_steps]
+
+            # Place C quadrature points within each selected step
+            nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
+
+            # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
+            nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
+
+            # Determine the number of evaluation iterations based on split
+            if evaluate_all:
+                num_accumulation_iters = (num_mesh_steps * self.C) // max_batch
+            else:
+                num_accumulation_iters = (max_mesh_steps * self.C) // max_batch + 1
+                num_residual_nodes = max_batch - (max_mesh_steps * self.C % max_batch)
+        else:
+            num_mesh_steps = max_mesh_steps + 1
+            # Add another mesh step if number of saved split nodes is too small
+            if (
+                num_remaining_split_nodes
+                < ((max_mesh_steps * self.C) % max_batch) - max_batch
+            ):
+                num_mesh_steps += 1
+
+            # Get mesh step indices
+            step_idxs = step_idxs[:num_mesh_steps]
+
+            # Move the previously split mesh index to the front
+            split_idx = torch.where(step_idxs == split_mesh_idx)[0]
+            if len(split_idx):
+                split_idx = split_idx[0]
+                step_idxs[1 : split_idx + 1] = step_idxs[:split_idx].clone()
+            else:
+                step_idxs[1:] = step_idxs[:-1].clone()
+            step_idxs[0] = split_mesh_idx
+
+            # Place C quadrature points within each selected step
+            nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
+
+            # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
+            nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
+            nodes_flat = nodes_flat[len(split_nodes) :]
+            num_eval_nodes = len(nodes_flat)
+
+            # One batch of up to max_batch new evals per call. After
+            # completing the carry-over panel (num_remaining_split_nodes
+            # evals), the rest splits into full new panels plus a partial
+            # residual; if num_eval_nodes < max_batch the layout's tail
+            # already ends cleanly, so the residual is zero.
+            num_accumulation_iters = 1
+            actual_evals = min(max_batch, num_eval_nodes)
+            num_residual_nodes = (actual_evals - num_remaining_split_nodes) % self.C
+            evaluate_all = num_residual_nodes == 0
+
+        # Evaluate the integrand over all batches
+        f_evals = [
+            f(nodes_flat[i * max_batch : (i + 1) * max_batch], *f_args)
+            for i in range(num_accumulation_iters)
+        ]
+
+        # Get the residual evaluations of the last mesh step
+        if evaluate_all:
+            residual_f_evals = None
+            residual_nodes = None
+            residual_mesh_idx = None
+        else:
+            residual_nodes = nodes_flat[-self.C : -self.C + num_residual_nodes]
+            nodes_flat = nodes_flat[: -self.C]
+            residual_f_evals = f_evals[-1][-num_residual_nodes:]
+            f_evals[-1] = f_evals[-1][:-num_residual_nodes]
+            # Store the residual panel's barrier coordinate, not its
+            # integer index — see the note at the top of this method.
+            residual_mesh_idx = mesh[step_idxs[-1]].clone()
+            step_idxs = step_idxs[:-1]
+
+        # Combine split evaluations and nodes
+        if split_mesh_idx is not None:
+            nodes_flat = torch.concatenate([split_nodes, nodes_flat], dim=0)
+            f_evals = torch.concatenate([split_f_evals, *f_evals], dim=0)
+        else:
+            f_evals = torch.concatenate(f_evals, dim=0)
+
+        # Reshape and combine outputs
+        nodes = torch.reshape(nodes_flat, (-1, self.C, nodes_flat.shape[-1]))
+        f_evals = torch.reshape(f_evals, (-1, self.C, f_evals.shape[-1]))
+
+        # Path B may have laid out panels with the residual panel first
+        # regardless of its position in time order — fine for the
+        # split-prefix bookkeeping above, but the caller's
+        # _adaptively_increase_mesh requires step_idxs sorted ascending
+        # (its barrier-insertion offset scan walks left-to-right). Sort
+        # step_idxs and permute the per-panel outputs to match.
+        if split_mesh_idx is not None and len(step_idxs) > 1:
+            sort_perm = torch.argsort(step_idxs)
+            step_idxs = step_idxs[sort_perm]
+            nodes = nodes[sort_perm]
+            f_evals = f_evals[sort_perm]
+
+        # if split_mesh_idx is None:
+        #     f_evals = torch.concatenate(f_evals, dim=0)
+        #     f_evals = torch.reshape(f_evals, (-1, self.C, f_evals.shape[-1]))
+        # else:
+        #     nodes = torch.cat([split_nodes, nodes], dim=0)
+        #     f_evals = torch.concatenate([split_f_evals, *f_evals], dim=0)
+        #     f_evals = torch.reshape(f_evals, (-1, self.C, f_evals.shape[-1]))
+
+        split_node_state = (residual_nodes, residual_f_evals, residual_mesh_idx)
+
+        return nodes, f_evals, step_idxs, split_node_state
+
+        # node_split_state = (split_nodes)
+        # return torch.flatten(nodes, start_dim=0, end_dim=-2), step_idxs,
+        # # Find barrier indices where mesh_trackers is True, take up to max_steps
+        # step_idxs = torch.arange(len(mesh), device=self.device)
+        # step_idxs = step_idxs[mesh_trackers]
+        # step_idxs = step_idxs[:max_steps]
+        # # Place C quadrature points within each selected step
+        # nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
+
+        # # --- Step 2: Evaluate the integrand at all quadrature points ---
+        # # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
+        # # shape = nodes.shape
+        # return torch.flatten(nodes, start_dim=0, end_dim=-2), step_idxs, node_bucket
+
+    def _sort_evals_into_mesh(
+        self, take_gradient, nodes_flat, y_step_eval, y_step_bucket
+    ):
+        if take_gradient:
+            return self._sort_evals_into_mesh_full_nodes(
+                nodes_flat, y_step_eval, y_step_bucket
+            )
+        else:
+            return self._sort_evals_into_mesh_full_nodes(
+                nodes_flat, y_step_eval, y_step_bucket
+            )
+
+    def _sort_evals_into_mesh_full_nodes(self, nodes_flat, y_step_eval, y_step_bucket):
+        assert len(nodes_flat) % self.C == 0
+        N = len(nodes_flat) // self.C
+        y_step_eval = torch.reshape(y_step_eval, (N, self.C, -1))
+        nodes = torch.reshape(nodes_flat, (N, self.C, -1))
+        return nodes, y_step_eval, y_step_bucket
 
     def _prune_excess_mesh(
         self, nodes, mesh_quadratures, mesh_quadrature_errors, error_ratios_2steps
@@ -1363,9 +1571,9 @@ class AdaptiveQuadrature(SolverBase):
         memory cost (f_unit_mem_size) is then used throughout integration
         to dynamically compute how many steps can fit in one batch.
 
-        When take_gradient=True, a 2.1x safety factor is applied to the measured memory to account
-        for intermediate allocations during integration (RK computation,
-        error estimation, etc.).
+        When take_gradient=True, a 2.1x safety factor is applied to the measured
+        memory to account for intermediate allocations during integration (RK
+        computation, error estimation, etc.).
 
         Args:
             f: The integrand function to benchmark.

@@ -25,6 +25,7 @@ import math
 
 import pytest
 import torch
+from tests._helpers import TAKE_GRADIENT_IDS, TAKE_GRADIENT_VALUES
 
 from torchpathdiffeq import VARIABLE_METHODS, integrate
 from torchpathdiffeq.methods import UNIFORM_METHODS
@@ -53,8 +54,9 @@ def _truth(a: float, b: float) -> torch.Tensor:
     )
 
 
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 @pytest.mark.parametrize("method", ["dopri5", "gk21", "cc33"])
-def test_uniform_methods_integrate_vector_valued_integrand(method):
+def test_uniform_methods_integrate_vector_valued_integrand(method, take_gradient):
     """3-component vector integrand integrated correctly element-wise."""
     a, b = 0.0, math.pi / 2
 
@@ -66,6 +68,7 @@ def test_uniform_methods_integrate_vector_valued_integrand(method):
         rtol=RTOL,
         mesh_init=torch.tensor([a], dtype=torch.float64),
         mesh_final=torch.tensor([b], dtype=torch.float64),
+        take_gradient=take_gradient,
     )
 
     truth = _truth(a, b)
@@ -79,7 +82,8 @@ def test_uniform_methods_integrate_vector_valued_integrand(method):
     )
 
 
-def test_integration_result_shapes_for_multi_d():
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_integration_result_shapes_for_multi_d(take_gradient):
     """All result fields that depend on D have the right last dim."""
     a, b = 0.0, math.pi / 2
 
@@ -90,6 +94,7 @@ def test_integration_result_shapes_for_multi_d():
         rtol=RTOL,
         mesh_init=torch.tensor([a], dtype=torch.float64),
         mesh_final=torch.tensor([b], dtype=torch.float64),
+        take_gradient=take_gradient,
     )
 
     assert result.integral.shape == (D,)
@@ -101,8 +106,9 @@ def test_integration_result_shapes_for_multi_d():
     assert result.mesh_quadrature_errors.shape[-1] == D
 
 
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 @pytest.mark.parametrize("method", list(VARIABLE_METHODS.keys()))
-def test_variable_methods_integrate_vector_valued_integrand(method):
+def test_variable_methods_integrate_vector_valued_integrand(method, take_gradient):
     """Variable solvers also handle D > 1."""
     a, b = 0.0, math.pi / 2
 
@@ -114,6 +120,7 @@ def test_variable_methods_integrate_vector_valued_integrand(method):
         rtol=ATOL,  # generous; variable is order-2/3
         mesh_init=torch.tensor([a], dtype=torch.float64),
         mesh_final=torch.tensor([b], dtype=torch.float64),
+        take_gradient=take_gradient,
     )
 
     truth = _truth(a, b)
@@ -125,7 +132,8 @@ def test_variable_methods_integrate_vector_valued_integrand(method):
     )
 
 
-def test_per_method_independence_across_output_dimensions():
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_per_method_independence_across_output_dimensions(take_gradient):
     """Each output dim should integrate to the same value as it would
     if integrated alone — i.e., the multi-D path is just D parallel
     scalar integrations, no cross-dimension contamination.
@@ -140,6 +148,7 @@ def test_per_method_independence_across_output_dimensions():
         rtol=1e-10,
         mesh_init=torch.tensor([a], dtype=torch.float64),
         mesh_final=torch.tensor([b], dtype=torch.float64),
+        take_gradient=take_gradient,
     )
 
     # Scalar integration of each component.
@@ -152,6 +161,7 @@ def test_per_method_independence_across_output_dimensions():
             rtol=1e-10,
             mesh_init=torch.tensor([a], dtype=torch.float64),
             mesh_final=torch.tensor([b], dtype=torch.float64),
+            take_gradient=take_gradient,
         )
         scalar_results.append(scalar_result.integral.item())
 

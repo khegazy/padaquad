@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import math
 
+import pytest
 import torch
+from tests._helpers import TAKE_GRADIENT_IDS, TAKE_GRADIENT_VALUES
 
 import torchpathdiffeq
 from torchpathdiffeq import (
@@ -62,10 +64,11 @@ class TestPublicExports:
         assert hasattr(torchpathdiffeq, "__name__")
 
 
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 class TestOdePathIntegralEntryPoint:
     """The free function `integrate` works for the simplest case."""
 
-    def test_simple_sine_integral(self):
+    def test_simple_sine_integral(self, take_gradient):
         result = integrate(
             f=torch.sin,
             method="dopri5",
@@ -73,12 +76,13 @@ class TestOdePathIntegralEntryPoint:
             rtol=1e-6,
             mesh_init=torch.tensor([0.0], dtype=torch.float64),
             mesh_final=torch.tensor([math.pi], dtype=torch.float64),
+            take_gradient=take_gradient,
         )
         assert isinstance(result, IntegrationResult)
         # int_0^pi sin(t) dt = 2
         assert abs(result.integral.item() - 2.0) < 1e-6
 
-    def test_constant_integral(self):
+    def test_constant_integral(self, take_gradient):
         # int_0^1 1 dt = 1
         result = integrate(
             f=torch.ones_like,
@@ -87,10 +91,12 @@ class TestOdePathIntegralEntryPoint:
             rtol=1e-10,
             mesh_init=torch.tensor([0.0], dtype=torch.float64),
             mesh_final=torch.tensor([1.0], dtype=torch.float64),
+            take_gradient=take_gradient,
         )
         assert abs(result.integral.item() - 1.0) < 1e-9
 
 
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 class TestIntegrationResultFields:
     """The IntegrationResult dataclass exposes the documented fields.
 
@@ -98,7 +104,7 @@ class TestIntegrationResultFields:
     ODE-flavored names integral/integral_error/t_optimal/t/mesh_init/mesh_final.
     """
 
-    def _run(self):
+    def _run(self, take_gradient):
         return integrate(
             f=torch.sin,
             method="dopri5",
@@ -106,10 +112,11 @@ class TestIntegrationResultFields:
             rtol=1e-6,
             mesh_init=torch.tensor([0.0], dtype=torch.float64),
             mesh_final=torch.tensor([math.pi], dtype=torch.float64),
+            take_gradient=take_gradient,
         )
 
-    def test_documented_fields_present(self):
-        r = self._run()
+    def test_documented_fields_present(self, take_gradient):
+        r = self._run(take_gradient)
         for name in (
             "integral",
             "integral_error",

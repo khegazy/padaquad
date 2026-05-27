@@ -4,7 +4,16 @@ from __future__ import annotations
 
 import pytest
 import torch
-from _helpers import ATOL_MED, RTOL_MED, SEED, T_FINAL, T_INIT, UNIFORM_METHOD_NAMES
+from _helpers import (
+    ATOL_MED,
+    RTOL_MED,
+    SEED,
+    T_FINAL,
+    T_INIT,
+    TAKE_GRADIENT_IDS,
+    TAKE_GRADIENT_VALUES,
+    UNIFORM_METHOD_NAMES,
+)
 
 from torchpathdiffeq import (
     UniformAdaptiveQuadrature,
@@ -17,8 +26,9 @@ def _integrand(t, y=0):
     return torch.exp(-5 * (t - 0.5) ** 2) * 4 * torch.cos(3 * t**2)
 
 
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 @pytest.mark.parametrize("method_name", UNIFORM_METHOD_NAMES)
-def test_wrapper_matches_direct_solver_uniform(method_name):
+def test_wrapper_matches_direct_solver_uniform(method_name, take_gradient):
     """integrate(sampling='uniform') matches direct RK solver."""
     torch.manual_seed(SEED)
 
@@ -32,6 +42,7 @@ def test_wrapper_matches_direct_solver_uniform(method_name):
         mesh_final=T_FINAL,
         y0=torch.tensor([0], dtype=torch.float64),
         mesh=None,
+        take_gradient=take_gradient,
     )
 
     torch.manual_seed(SEED)
@@ -42,7 +53,9 @@ def test_wrapper_matches_direct_solver_uniform(method_name):
         rtol=RTOL_MED,
         f=_integrand,
     )
-    direct_output = direct_solver.integrate(mesh_init=T_INIT, mesh_final=T_FINAL)
+    direct_output = direct_solver.integrate(
+        mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=take_gradient
+    )
 
     assert torch.allclose(wrapper_output.integral, direct_output.integral), (
         f"Integral mismatch for {method_name}: "

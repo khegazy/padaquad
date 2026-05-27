@@ -714,10 +714,20 @@ class AdaptiveQuadrature(SolverBase):
     def _evaluate_f_on_split_nodes(
         self, f, f_args, mesh, step_idxs, max_batch, max_mesh_steps, split_node_state
     ):
-        # Gather nodes and evaluations from previous split
+        # Gather nodes and evaluations from previous split. split_mesh_idx
+        # stores the residual panel's left-barrier *coordinate* (not an
+        # integer index), so it survives mesh refinement: the calling
+        # integrate loop inserts midpoints between iterations, shifting
+        # any cached integer index. Barriers themselves are never removed
+        # mid-loop, so a stored coordinate stays resolvable.
         split_nodes, split_f_evals, split_mesh_idx = split_node_state
         num_split_nodes = 0 if split_mesh_idx is None else len(split_nodes)
         num_remaining_split_nodes = self.C - num_split_nodes
+
+        if split_mesh_idx is not None:
+            # Translate the cached barrier coordinate back to an index in
+            # the current (possibly refined) mesh.
+            split_mesh_idx = torch.where((mesh == split_mesh_idx).all(dim=-1))[0][0]
 
         if split_mesh_idx is None:
             evaluate_all = (max_mesh_steps * self.C) % max_batch == 0
@@ -792,7 +802,9 @@ class AdaptiveQuadrature(SolverBase):
             nodes_flat = nodes_flat[: -self.C]
             residual_f_evals = f_evals[-1][-num_residual_nodes:]
             f_evals[-1] = f_evals[-1][:-num_residual_nodes]
-            residual_mesh_idx = step_idxs[-1]
+            # Store the residual panel's barrier coordinate, not its
+            # integer index — see the note at the top of this method.
+            residual_mesh_idx = mesh[step_idxs[-1]].clone()
             step_idxs = step_idxs[:-1]
 
         # Combine split evaluations and nodes
@@ -805,6 +817,18 @@ class AdaptiveQuadrature(SolverBase):
         # Reshape and combine outputs
         nodes = torch.reshape(nodes_flat, (-1, self.C, nodes_flat.shape[-1]))
         f_evals = torch.reshape(f_evals, (-1, self.C, f_evals.shape[-1]))
+
+        # Path B may have laid out panels with the residual panel first
+        # regardless of its position in time order — fine for the
+        # split-prefix bookkeeping above, but the caller's
+        # _adaptively_increase_mesh requires step_idxs sorted ascending
+        # (its barrier-insertion offset scan walks left-to-right). Sort
+        # step_idxs and permute the per-panel outputs to match.
+        if split_mesh_idx is not None and len(step_idxs) > 1:
+            sort_perm = torch.argsort(step_idxs)
+            step_idxs = step_idxs[sort_perm]
+            nodes = nodes[sort_perm]
+            f_evals = f_evals[sort_perm]
 
         # if split_mesh_idx is None:
         #     f_evals = torch.concatenate(f_evals, dim=0)

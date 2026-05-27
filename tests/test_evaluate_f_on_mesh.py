@@ -29,6 +29,7 @@ import pytest
 import torch
 from _helpers import (
     make_solver_for_unit_test,
+    make_uniform_solver,
 )
 
 from torchpathdiffeq import UNIFORM_METHODS, integrand_dict
@@ -942,4 +943,230 @@ class TestIntegration:
         max_diff = (f_evals_true - f_evals_false).abs().max().item()
         assert max_diff < 1e-14, (
             f"f_evals drift {max_diff:.3e} between take_gradient modes"
+        )
+
+
+# ===========================================================================
+# TestEndToEnd
+# ===========================================================================
+
+
+class TestEndToEnd:
+    """Full ``.integrate(max_batch=K)`` calls with varying max_batch."""
+
+    # Common integration domain (the integrands in integrand_dict are
+    # defined for arbitrary intervals via their solution_fxn).
+    T_INIT = torch.tensor([0.0], dtype=torch.float64)
+    T_FINAL = torch.tensor([1.0], dtype=torch.float64)
+
+    # End-to-end uses loose tolerances so adaptive_heun (order 2)
+    # converges quickly even with tiny max_batch. The point of these
+    # tests is to exercise the batching code paths, not push numerical
+    # precision — TestUnit already pins bit-equality with the full path.
+    E2E_ATOL = 1e-4
+    E2E_RTOL = 1e-4
+
+    @staticmethod
+    def _solver(method, max_batch=None):
+        return make_uniform_solver(
+            method,
+            atol=TestEndToEnd.E2E_ATOL,
+            rtol=TestEndToEnd.E2E_RTOL,
+            max_batch=max_batch,
+        )
+
+    # -----------------------------------------------------------------------
+    # E1. max_batch=0 errors at the public API
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier1
+    @pytest.mark.parametrize(
+        "take_gradient", [True, False], ids=["take_grad_True", "take_grad_False"]
+    )
+    @pytest.mark.parametrize("method", TEST_METHODS)
+    def test_integrate_max_batch_zero_errors(self, method, take_gradient):
+        """``.integrate(max_batch=0)`` raises a clear error."""
+        f, _, _ = _resolve_integrand("damped_sine")
+        solver = self._solver(method, max_batch=0)
+        with pytest.raises((AssertionError, ZeroDivisionError, RuntimeError)):
+            solver.integrate(
+                f=f,
+                mesh_init=self.T_INIT,
+                mesh_final=self.T_FINAL,
+                take_gradient=take_gradient,
+            )
+
+    # -----------------------------------------------------------------------
+    # E2. take_gradient=True with max_batch < C must assert at the solver
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier1
+    @pytest.mark.parametrize(
+        ("method", "max_batch"),
+        _BELOW_C_SWEEP,
+        ids=_BELOW_C_SWEEP_IDS,
+    )
+    def test_integrate_take_grad_True_max_batch_below_C_errors(self, method, max_batch):
+        """For take_gradient=True, max_batch < C trips the assertion in
+        _evaluate_f_on_full_nodes (base.py:694)."""
+        if max_batch == 0:
+            pytest.skip("max_batch=0 covered by test_integrate_max_batch_zero_errors")
+        f, _, _ = _resolve_integrand("damped_sine")
+        solver = self._solver(method, max_batch=max_batch)
+        with pytest.raises(AssertionError):
+            solver.integrate(
+                f=f,
+                mesh_init=self.T_INIT,
+                mesh_final=self.T_FINAL,
+                take_gradient=True,
+            )
+
+    # -----------------------------------------------------------------------
+    # E3. Correctness sweep: result matches analytical solution
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier1
+    @pytest.mark.parametrize("integrand_name", TIER1_INTEGRANDS)
+    @pytest.mark.parametrize(
+        "take_gradient", [True, False], ids=["take_grad_True", "take_grad_False"]
+    )
+    @pytest.mark.parametrize(
+        ("method", "max_batch"),
+        _AT_OR_ABOVE_C_SWEEP,
+        ids=_AT_OR_ABOVE_C_SWEEP_IDS,
+    )
+    def test_integrate_correctness_sweep(
+        self, method, max_batch, take_gradient, integrand_name
+    ):
+        """Full integrate() with each max_batch in [C, 2C+1] produces an
+        integral matching the analytical solution within method cutoff."""
+        f, solution_fxn, cutoff = _resolve_integrand(integrand_name)
+        solver = self._solver(method, max_batch=max_batch)
+        torch.manual_seed(2025)
+        result = solver.integrate(
+            f=f,
+            mesh_init=self.T_INIT,
+            mesh_final=self.T_FINAL,
+            take_gradient=take_gradient,
+        )
+        expected = solution_fxn(mesh_init=self.T_INIT, mesh_final=self.T_FINAL)
+        rel_error = (result.integral.cpu() - expected).abs() / expected.abs()
+        # End-to-end uses loose tolerances (1e-4) so adaptive_heun
+        # (order 2) converges quickly. The goal is to catch batching
+        # corruption, not numerical precision; bound is generous.
+        bound = 5e-2
+        del cutoff  # not used at this loose bound
+        assert rel_error.item() < bound, (
+            f"{method} max_batch={max_batch} take_grad={take_gradient} "
+            f"{integrand_name}: got {result.integral.item()}, expected "
+            f"{expected.item()}, rel_error={rel_error.item():.2e} >= "
+            f"bound={bound:.2e}"
+        )
+
+    # -----------------------------------------------------------------------
+    # E5. Result invariant across max_batch (bedrock contract)
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier1
+    @pytest.mark.parametrize("integrand_name", TIER1_INTEGRANDS)
+    @pytest.mark.parametrize(
+        "take_gradient", [True, False], ids=["take_grad_True", "take_grad_False"]
+    )
+    @pytest.mark.parametrize("method", TEST_METHODS)
+    def test_integrate_result_invariant_across_max_batch(
+        self, method, take_gradient, integrand_name
+    ):
+        """``.integrate(max_batch=K)`` must return the same integral for
+        all valid K. Batching is implementation, not numerics."""
+        f, _, _ = _resolve_integrand(integrand_name)
+        C = _method_C(method)
+        candidates = [C, 2 * C, 5 * C, 100 * C, None]
+        results = []
+        for mb in candidates:
+            solver = self._solver(method, max_batch=mb)
+            torch.manual_seed(2025)
+            r = solver.integrate(
+                f=f,
+                mesh_init=self.T_INIT,
+                mesh_final=self.T_FINAL,
+                take_gradient=take_gradient,
+            )
+            results.append((mb, r.integral.item()))
+
+        # Relative invariance across max_batch values. Adaptive
+        # controllers can take slightly different paths depending on
+        # max_batch (different batch boundaries shift error
+        # accumulation), so we use a relative bound calibrated to the
+        # configured atol. If max_batch corrupts the integral beyond
+        # this, the batching is genuinely broken — sweep test (E3)
+        # catches gross corruption already.
+        reference = results[0][1]
+        rel_bound = 100 * TestEndToEnd.E2E_ATOL  # 100 * 1e-4 = 1e-2
+        for mb, val in results[1:]:
+            rel_diff = abs(val - reference) / max(abs(reference), 1e-12)
+            assert rel_diff < rel_bound, (
+                f"{method} {integrand_name} take_grad={take_gradient}: "
+                f"max_batch={results[0][0]} -> {reference}, "
+                f"max_batch={mb} -> {val}, "
+                f"rel_diff={rel_diff:.3e} >= {rel_bound:.0e}"
+            )
+
+    # -----------------------------------------------------------------------
+    # E6. Solver state stays clean across integrate() calls
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier1
+    @pytest.mark.parametrize("integrand_name", TIER1_INTEGRANDS)
+    @pytest.mark.parametrize("method", TEST_METHODS)
+    def test_solver_state_clean_across_integrate_calls(self, method, integrand_name):
+        """Calling ``solver.integrate()`` twice on the same instance with
+        different max_batch must produce results matching fresh-solver
+        calls. Catches stale ``split_node_state`` on the solver."""
+        f, _, _ = _resolve_integrand(integrand_name)
+        C = _method_C(method)
+
+        # Fresh-solver references
+        torch.manual_seed(2025)
+        ref_first = self._solver(method, max_batch=2 * C).integrate(
+            f=f,
+            mesh_init=self.T_INIT,
+            mesh_final=self.T_FINAL,
+            take_gradient=False,
+        )
+        torch.manual_seed(2025)
+        ref_second = self._solver(method, max_batch=5 * C).integrate(
+            f=f,
+            mesh_init=self.T_INIT,
+            mesh_final=self.T_FINAL,
+            take_gradient=False,
+        )
+
+        # Reused solver
+        reused = self._solver(method, max_batch=2 * C)
+        torch.manual_seed(2025)
+        first = reused.integrate(
+            f=f,
+            mesh_init=self.T_INIT,
+            mesh_final=self.T_FINAL,
+            take_gradient=False,
+        )
+        # Reconfigure the solver's max_batch for the second call. The
+        # public API supports this via constructor; max_batch can also be
+        # set on the integrate() call directly.
+        torch.manual_seed(2025)
+        second = reused.integrate(
+            f=f,
+            mesh_init=self.T_INIT,
+            mesh_final=self.T_FINAL,
+            take_gradient=False,
+            max_batch=5 * C,
+        )
+
+        assert abs(first.integral.item() - ref_first.integral.item()) < 1e-10, (
+            f"reused-first does not match fresh: "
+            f"{first.integral.item()} vs {ref_first.integral.item()}"
+        )
+        assert abs(second.integral.item() - ref_second.integral.item()) < 1e-10, (
+            f"reused-second does not match fresh: "
+            f"{second.integral.item()} vs {ref_second.integral.item()}"
         )

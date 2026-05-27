@@ -782,44 +782,37 @@ class AdaptiveQuadrature(SolverBase):
             for i in range(num_accumulation_iters)
         ]
 
-        # Combine split evaluations and nodes
-        if split_mesh_idx:
-            split_nodes = torch.concatenate(
-                [split_nodes, nodes_flat[:num_remaining_split_nodes]],
-                dim=0,
-            ).unsqueeze(0)
-            nodes_flat = nodes_flat[num_remaining_split_nodes:]
-            split_f_evals = torch.concatenate(
-                [split_f_evals, f_evals[0][:num_remaining_split_nodes]], dim=0
-            )
-            f_evals[0] = f_evals[0][num_remaining_split_nodes:]
-
         # Get the residual evaluations of the last mesh step
         if evaluate_all:
             residual_f_evals = None
             residual_nodes = None
             residual_mesh_idx = None
         else:
-            residual_nodes = nodes_flat[-1 * self.C : -1 * self.C + num_residual_nodes]
-            residual_f_evals = f_evals[-1][-1 * num_residual_nodes :]
-            f_evals[-1] = f_evals[-1][: -1 * num_residual_nodes]
+            residual_nodes = nodes_flat[-self.C : -self.C + num_residual_nodes]
+            nodes_flat = nodes_flat[: -self.C]
+            residual_f_evals = f_evals[-1][-num_residual_nodes:]
+            f_evals[-1] = f_evals[-1][:-num_residual_nodes]
             residual_mesh_idx = step_idxs[-1]
+            step_idxs = step_idxs[:-1]
+
+        # Combine split evaluations and nodes
+        if split_mesh_idx is not None:
+            nodes_flat = torch.concatenate([split_nodes, nodes_flat], dim=0)
+            f_evals = torch.concatenate([split_f_evals, *f_evals], dim=0)
+        else:
+            f_evals = torch.concatenate(f_evals, dim=0)
 
         # Reshape and combine outputs
-        if evaluate_all:
-            nodes = torch.reshape(nodes_flat, (-1, self.C, nodes_flat.shape[-1]))
-        else:
-            step_idxs = step_idxs[:-1]
-            nodes = torch.reshape(
-                nodes_flat[: -self.C], (-1, self.C, nodes_flat.shape[-1])
-            )
+        nodes = torch.reshape(nodes_flat, (-1, self.C, nodes_flat.shape[-1]))
+        f_evals = torch.reshape(f_evals, (-1, self.C, f_evals.shape[-1]))
 
-        if split_mesh_idx is None:
-            f_evals = torch.concatenate(f_evals, dim=0)
-            f_evals = torch.reshape(f_evals, (-1, self.C, f_evals.shape[-1]))
-        else:
-            f_evals = torch.concatenate([split_f_evals, *f_evals], dim=0)
-            f_evals = torch.reshape(f_evals, (-1, self.C, f_evals.shape[-1]))
+        # if split_mesh_idx is None:
+        #     f_evals = torch.concatenate(f_evals, dim=0)
+        #     f_evals = torch.reshape(f_evals, (-1, self.C, f_evals.shape[-1]))
+        # else:
+        #     nodes = torch.cat([split_nodes, nodes], dim=0)
+        #     f_evals = torch.concatenate([split_f_evals, *f_evals], dim=0)
+        #     f_evals = torch.reshape(f_evals, (-1, self.C, f_evals.shape[-1]))
 
         split_node_state = (residual_nodes, residual_f_evals, residual_mesh_idx)
 

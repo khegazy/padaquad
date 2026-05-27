@@ -753,9 +753,9 @@ class AdaptiveQuadrature(SolverBase):
             split_idx = torch.where(step_idxs == split_mesh_idx)[0]
             if len(split_idx):
                 split_idx = split_idx[0]
-                step_idxs[1 : split_idx + 1] = step_idxs[:split_idx]
+                step_idxs[1 : split_idx + 1] = step_idxs[:split_idx].clone()
             else:
-                step_idxs[1:] = step_idxs[:-1]
+                step_idxs[1:] = step_idxs[:-1].clone()
             step_idxs[0] = split_mesh_idx
 
             # Place C quadrature points within each selected step

@@ -26,7 +26,7 @@ import numpy as np
 import torch
 from einops import rearrange
 
-from torchpathdiffeq.methods import VARIABLE_METHODS
+from padaquad.methods import VARIABLE_METHODS
 
 from .base import AdaptiveQuadrature
 

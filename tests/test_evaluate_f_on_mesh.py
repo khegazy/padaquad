@@ -32,7 +32,7 @@ from _helpers import (
     make_uniform_solver,
 )
 
-from torchpathdiffeq import UNIFORM_METHODS, integrand_dict
+from padaquad import UNIFORM_METHODS, integrand_dict
 
 # ---------------------------------------------------------------------------
 # Constants

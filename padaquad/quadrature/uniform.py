@@ -25,8 +25,8 @@ from typing import TYPE_CHECKING
 import torch
 from einops import rearrange
 
-from torchpathdiffeq.base import steps
-from torchpathdiffeq.methods import UNIFORM_METHODS, _get_method
+from padaquad.base import steps
+from padaquad.methods import UNIFORM_METHODS, _get_method
 
 from .base import AdaptiveQuadrature
 

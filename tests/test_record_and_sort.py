@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from _helpers import make_solver_for_unit_test
 
-from torchpathdiffeq.results import IntegrationResult
+from padaquad.results import IntegrationResult
 
 
 def _make_integral_output(t_start, t_end, N=2, C=4, D=1):

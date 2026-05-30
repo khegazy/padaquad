@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import torch
 
-from torchpathdiffeq import UNIFORM_METHODS
-from torchpathdiffeq.methods import (
+from padaquad import UNIFORM_METHODS
+from padaquad.methods import (
     _VARIABLE_SECOND_ORDER,
     _Interpolatory3Variable,
     _Tableau,

@@ -26,7 +26,7 @@ from _helpers import (
     assert_time_ordering,
 )
 
-from torchpathdiffeq import adaptive_quadrature, integrand_dict, steps
+from padaquad import adaptive_quadrature, integrand_dict, steps
 
 
 def _make_variable_solver(method_name, atol=ATOL_TIGHT, rtol=RTOL_TIGHT):

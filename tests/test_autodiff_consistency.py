@@ -42,7 +42,7 @@ import pytest
 import torch
 from tests._helpers import make_uniform_solver
 
-from torchpathdiffeq import integrate
+from padaquad import integrate
 
 ATOL = 1e-8
 RTOL = 1e-8

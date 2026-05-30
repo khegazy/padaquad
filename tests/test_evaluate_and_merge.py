@@ -9,7 +9,7 @@ from _helpers import (
     make_variable_solver_for_unit_test,
 )
 
-from torchpathdiffeq import UNIFORM_METHODS
+from padaquad import UNIFORM_METHODS
 
 # ---------------------------------------------------------------------------
 # Uniform _evaluate_adaptive_nodes

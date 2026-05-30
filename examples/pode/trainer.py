@@ -13,7 +13,7 @@ import torch
 import yaml
 from torchdiffeq import odeint
 
-import torchpathdiffeq as tpd
+import padaquad as tpd
 
 from curriculum import CurriculumClass
 

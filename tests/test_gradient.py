@@ -13,7 +13,7 @@ from _helpers import (
     make_variable_solver_for_unit_test,
 )
 
-from torchpathdiffeq.runge_kutta import _RK_integral
+from padaquad.runge_kutta import _RK_integral
 
 # ---------------------------------------------------------------------------
 # Helpers

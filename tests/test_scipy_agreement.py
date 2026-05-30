@@ -32,7 +32,7 @@ from tests._helpers import (
     UNIFORM_METHOD_NAMES,
 )
 
-from torchpathdiffeq import integrate
+from padaquad import integrate
 
 # Canonical smooth integrands. Each is a tuple of:
 #   (name, torch_callable, scipy_callable, intervals_to_test)

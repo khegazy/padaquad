@@ -25,7 +25,7 @@ Submodules:
     recomputed per-step from the actual ``c``.
 
 The concrete classes that users instantiate (``UniformAdaptiveQuadrature``
-and ``VariableAdaptiveQuadrature``) live in ``torchpathdiffeq.runge_kutta``
+and ``VariableAdaptiveQuadrature``) live in ``padaquad.runge_kutta``
 together with the RK-specific ``_calculate_integral`` implementation.
 """
 

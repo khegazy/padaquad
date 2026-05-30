@@ -20,7 +20,7 @@ from _helpers import (
     make_uniform_solver,
 )
 
-from torchpathdiffeq import integrand_dict
+from padaquad import integrand_dict
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)

@@ -13,8 +13,8 @@ from _helpers import (
 )
 from torch import nn
 
-from torchpathdiffeq import adaptive_quadrature, steps
-from torchpathdiffeq.examples import _WS_MIN_FINAL, _WS_MIN_INIT
+from padaquad import adaptive_quadrature, steps
+from padaquad.examples import _WS_MIN_FINAL, _WS_MIN_INIT
 
 GRADIENT_METHODS = ["bosh3", "dopri5"]
 T_INIT = torch.tensor([0], dtype=torch.float64)

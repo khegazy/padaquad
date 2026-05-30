@@ -31,7 +31,7 @@ import pytest
 import torch
 from tests._helpers import TAKE_GRADIENT_IDS, TAKE_GRADIENT_VALUES
 
-from torchpathdiffeq import adaptive_quadrature, integrate, steps
+from padaquad import adaptive_quadrature, integrate, steps
 
 # -----------------------------------------------------------------------------
 # f_args — extra args forwarded to the integrand.

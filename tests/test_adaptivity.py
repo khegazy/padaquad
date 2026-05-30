@@ -17,7 +17,7 @@ from _helpers import (
     assert_time_ordering,
 )
 
-from torchpathdiffeq import UniformAdaptiveQuadrature
+from padaquad import UniformAdaptiveQuadrature
 
 
 def _integrand(t):

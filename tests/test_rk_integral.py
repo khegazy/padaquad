@@ -5,8 +5,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-from torchpathdiffeq import UNIFORM_METHODS
-from torchpathdiffeq.runge_kutta import _RK_integral
+from padaquad import UNIFORM_METHODS
+from padaquad.runge_kutta import _RK_integral
 
 
 class TestRKIntegralBasic:

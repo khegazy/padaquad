@@ -10,8 +10,8 @@ from _helpers import (
     make_variable_solver_for_unit_test,
 )
 
-from torchpathdiffeq.base import steps
-from torchpathdiffeq.runge_kutta import (
+from padaquad.base import steps
+from padaquad.runge_kutta import (
     UniformAdaptiveQuadrature,
     VariableAdaptiveQuadrature,
     adaptive_quadrature,

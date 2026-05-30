@@ -31,7 +31,7 @@ import math
 
 import torch
 
-from torchpathdiffeq import adaptive_quadrature, integrate, steps
+from padaquad import adaptive_quadrature, integrate, steps
 
 # Common settings.
 MESH_INIT = torch.tensor([0.0])

@@ -33,7 +33,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from torchpathdiffeq import UNIFORM_METHODS, VARIABLE_METHODS
+from padaquad import UNIFORM_METHODS, VARIABLE_METHODS
 
 EXACTNESS_TOL = 1e-13  # absolute tolerance in float64
 INEXACTNESS_MARGIN = 1e-6  # one degree past exactness must miss by at least this

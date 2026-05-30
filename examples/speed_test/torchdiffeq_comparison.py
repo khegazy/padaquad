@@ -6,8 +6,8 @@ import time
 import torch
 from torchdiffeq import odeint
 
-import torchpathdiffeq as tpdiffeq
-from torchpathdiffeq.examples import (
+import padaquad as tpdiffeq
+from padaquad.examples import (
     damped_sine,
     exp,
     sine_squared,
@@ -71,10 +71,10 @@ for f in integrands:
 
 
 #######################################
-#####  torchpathdiffeq Speed Test #####
+#####  padaquad Speed Test #####
 #######################################
 
-logger.info("torchpathdiffeq api")
+logger.info("padaquad api")
 tpdiffeq_api_results = []
 for f in integrands:
     total_time = 0
@@ -95,7 +95,7 @@ for f in integrands:
     tpdiffeq_api_results.append(total_time / n_runs)
 
 
-logger.info("torchpathdiffeq integrator")
+logger.info("padaquad integrator")
 tpdiffeq_int_results = []
 for f in integrands:
     total_time = 0
@@ -117,7 +117,7 @@ for f in integrands:
     tpdiffeq_int_results.append(total_time / n_runs)
 
 # Log Results
-message = "Problem \\ Method|    torchdiffeq    |    torchpathdiffeq API\t  ratio    |    torchpathdiffeq Integrator\t  ratio\n"
+message = "Problem \\ Method|    torchdiffeq    |    padaquad API\t  ratio    |    padaquad Integrator\t  ratio\n"
 for idx, fxn in enumerate(integrands):
     td_out = tdiffeq_results[idx]
     tpd_api_out = tpdiffeq_api_results[idx]

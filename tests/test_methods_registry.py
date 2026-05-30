@@ -26,9 +26,9 @@ from __future__ import annotations
 
 import torch
 
-from torchpathdiffeq import UNIFORM_METHODS, VARIABLE_METHODS, adaptive_quadrature
-from torchpathdiffeq.base import steps
-from torchpathdiffeq.methods import (
+from padaquad import UNIFORM_METHODS, VARIABLE_METHODS, adaptive_quadrature
+from padaquad.base import steps
+from padaquad.methods import (
     CC_METHODS,
     GK_METHODS,
     INTERPOLATORY_METHODS,
@@ -36,7 +36,7 @@ from torchpathdiffeq.methods import (
     MethodClass,
     _get_method,
 )
-from torchpathdiffeq.methods._base import _Tableau
+from padaquad.methods._base import _Tableau
 
 
 def test_uniform_registry_is_disjoint_union_of_family_registries():

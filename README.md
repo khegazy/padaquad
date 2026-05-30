@@ -1,4 +1,4 @@
-# torchpathdiffeq
+# padaquad
 
 **A PyTorch library for adaptive numerical quadrature — computing
 $\int_{a}^{b} f(t)\, dt$ for a known integrand $f$, in parallel batches,
@@ -16,7 +16,7 @@ integration where the next state depends on the previous), so it must
 evaluate steps sequentially even when the integrand has no
 state-coupling.
 
-torchpathdiffeq fills the gap: it is **adaptive quadrature**, not ODE
+padaquad fills the gap: it is **adaptive quadrature**, not ODE
 solving, and it exploits the lack of state coupling to **evaluate many
 panels in parallel** on GPU. With full autograd through the integration
 loop, it is suitable for:
@@ -56,14 +56,14 @@ loop, it is suitable for:
 ## Installation
 
 ```bash
-pip install torchpathdiffeq
+pip install padaquad
 ```
 
 Or from source:
 
 ```bash
-git clone https://github.com/khegazy/torchpathdiffeq.git
-cd torchpathdiffeq
+git clone https://github.com/khegazy/padaquad.git
+cd padaquad
 pip install -e .
 ```
 
@@ -84,7 +84,7 @@ The dev extras add pytest, ruff, mypy, pre-commit, typos, and torchdiffeq
 ```python
 import math
 import torch
-from torchpathdiffeq import integrate
+from padaquad import integrate
 
 result = integrate(
     f=lambda t: torch.sin(t),
@@ -111,7 +111,7 @@ $\nabla_\theta \int f_\theta(t)\,dt$:
 
 ```python
 import torch
-from torchpathdiffeq import adaptive_quadrature, steps
+from padaquad import adaptive_quadrature, steps
 
 theta = torch.tensor(1.7, dtype=torch.float64, requires_grad=True)
 mesh_init = torch.tensor([0.0])
@@ -226,7 +226,7 @@ uses of `integrate(f, ...)` with the right `f`.
 ### Free function
 
 ```text
-torchpathdiffeq.integrate(
+padaquad.integrate(
     f, method="gk21", sampling="uniform",
     atol=1e-5, rtol=1e-5,
     mesh=None, mesh_init=None, mesh_final=None,
@@ -244,7 +244,7 @@ warm-start cache state persists across iterations.
 ### Class API
 
 ```text
-torchpathdiffeq.adaptive_quadrature(
+padaquad.adaptive_quadrature(
     sampling_type, method="gk21", atol=1e-5, rtol=1e-5,
     mesh_init=None, mesh_final=None, f=None,
     remove_cut=0.1, max_batch=None, total_mem_usage=0.9,
@@ -316,7 +316,7 @@ solver.integrate(
 | `scipy.integrate.quad` | ✓ | ✗ | ✗ | classical one-shot smooth quadrature |
 | `torchquad` | ✗ | ✓ | ✓ | uniform-grid Monte-Carlo / Trapezoidal |
 | `torchdiffeq` | ✓ | ✓ | ✗ | true state-coupled ODEs $\dot y = f(t, y)$ |
-| **torchpathdiffeq** | ✓ | ✓ | ✓ | path integrals, learned-integrand integration, PINN-style residuals |
+| **padaquad** | ✓ | ✓ | ✓ | path integrals, learned-integrand integration, PINN-style residuals |
 
 For one-shot scalar quadrature with no autograd, `scipy.integrate.quad`
 is fine. The library's value is when the integrand is a learnable

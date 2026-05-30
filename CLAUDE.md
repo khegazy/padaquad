@@ -5,7 +5,7 @@ with code in this repository.
 
 ## Project overview
 
-**torchpathdiffeq** is a PyTorch library for **adaptive numerical
+**padaquad** is a PyTorch library for **adaptive numerical
 quadrature**: it computes definite integrals
 $\int_a^b f(t)\,dt$ for a known integrand $f$ by evaluating many
 quadrature panels in parallel batches on GPU, with full autograd through
@@ -29,7 +29,7 @@ python -m venv .venv
 .venv/bin/pytest tests/ -v
 
 # Run all tests with coverage
-.venv/bin/pytest --cov=torchpathdiffeq --cov-report=xml
+.venv/bin/pytest --cov=padaquad --cov-report=xml
 
 # Run a single test file
 .venv/bin/pytest tests/test_integrals.py -v
@@ -41,10 +41,10 @@ python -m venv .venv
 TPD_REGENERATE_SNAPSHOTS=1 .venv/bin/pytest tests/test_snapshots.py
 
 # Lint with ruff
-.venv/bin/ruff check torchpathdiffeq/
+.venv/bin/ruff check padaquad/
 
 # Type check
-.venv/bin/mypy torchpathdiffeq/
+.venv/bin/mypy padaquad/
 ```
 
 ## Test structure
@@ -101,7 +101,7 @@ Regenerate with `TPD_REGENERATE_SNAPSHOTS=1 pytest tests/test_snapshots.py`.
 ### Package layout
 
 ```
-torchpathdiffeq/
+padaquad/
 ├── __init__.py            # public API exports
 ├── base.py                # SolverBase, steps enum, get_sampling_type
 ├── results.py             # IntegrationResult, MethodOutput dataclasses
@@ -143,7 +143,7 @@ inherit from.
 ### Public API
 
 ```python
-from torchpathdiffeq import (
+from padaquad import (
     integrate,  # one-shot quadrature
     adaptive_quadrature,  # factory for repeated calls
     UniformAdaptiveQuadrature,  # concrete uniform-sampling solver

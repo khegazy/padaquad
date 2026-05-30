@@ -126,6 +126,7 @@ class TestIntegrationResultFields:
             "nodes",
             "h",
             "y",
+            "tracked_variables",
             "mesh_quadratures",
             "mesh_quadrature_errors",
             "error_ratios",
@@ -135,6 +136,30 @@ class TestIntegrationResultFields:
             "converged",
         ):
             assert hasattr(r, name), f"IntegrationResult missing field {name!r}"
+
+    def test_tracked_variables_none_by_default(self, take_gradient):
+        """A bare-tensor integrand leaves tracked_variables as None."""
+        r = self._run(take_gradient)
+        assert r.tracked_variables is None
+
+    def test_tracked_variables_populated_from_tuple_output(self, take_gradient):
+        """An integrand returning (integrand, (tracked,)) populates the field."""
+
+        def f(t):
+            return torch.sin(t), (t**2,)
+
+        r = integrate(
+            f=f,
+            method="dopri5",
+            atol=1e-8,
+            rtol=1e-6,
+            mesh_init=torch.tensor([0.0], dtype=torch.float64),
+            mesh_final=torch.tensor([math.pi], dtype=torch.float64),
+            take_gradient=take_gradient,
+        )
+        assert isinstance(r.tracked_variables, tuple)
+        assert len(r.tracked_variables) == 1
+        assert r.tracked_variables[0].shape[:2] == r.nodes.shape[:2]
 
 
 class TestSolverFactory:

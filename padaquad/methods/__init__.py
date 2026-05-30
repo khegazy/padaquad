@@ -42,7 +42,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from torchpathdiffeq.base import steps
+from padaquad.base import steps
 
 from ._base import MethodClass, _Tableau
 from .clenshaw_curtis import CC_METHODS

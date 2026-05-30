@@ -1,5 +1,5 @@
 """
-Base classes and data structures for the torchpathdiffeq integration library.
+Base classes and data structures for the padaquad integration library.
 
 Defines the core abstractions that all solvers build on:
 
@@ -133,7 +133,7 @@ class SolverBase(ABC, DistributedEnvironment):
             mesh_final: Upper bound of integration. Shape: [T].
             output_speed_info: If True, logs timing information for each
                 sub-operation during integration to a dedicated file
-                ``torchpathdiffeq_speed.log``.
+                ``padaquad_speed.log``.
             dtype: Floating point precision for all computations. Supported:
                 torch.float64 (default, academic-grade), torch.float32 (fast
                 on GPU). torch.float16 is refused: its ~1e-3 precision floor
@@ -149,10 +149,10 @@ class SolverBase(ABC, DistributedEnvironment):
 
         # Speed timing logger — writes to a dedicated file, no other output
         if output_speed_info:
-            self.speed_logger = logging.getLogger("torchpathdiffeq.speed")
+            self.speed_logger = logging.getLogger("padaquad.speed")
             self.speed_logger.propagate = False
             self.speed_logger.setLevel(logging.DEBUG)
-            handler = logging.FileHandler("torchpathdiffeq_speed.log")
+            handler = logging.FileHandler("padaquad_speed.log")
             handler.setFormatter(logging.Formatter("%(asctime)s - %(message)s"))
             self.speed_logger.addHandler(handler)
         else:

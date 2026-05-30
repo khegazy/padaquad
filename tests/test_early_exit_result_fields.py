@@ -37,7 +37,7 @@ from __future__ import annotations
 import torch
 from tests._helpers import make_uniform_solver
 
-from torchpathdiffeq import IntegrationResult
+from padaquad import IntegrationResult
 
 
 def _wiggly() -> callable:

@@ -49,8 +49,8 @@ from typing import TYPE_CHECKING
 import psutil
 import torch
 
-from torchpathdiffeq.base import SolverBase
-from torchpathdiffeq.results import IntegrationResult, MethodOutput
+from padaquad.base import SolverBase
+from padaquad.results import IntegrationResult, MethodOutput
 
 logger = logging.getLogger(__name__)
 

@@ -17,7 +17,7 @@ import math
 
 import torch
 
-from torchpathdiffeq import adaptive_quadrature, integrate, steps
+from padaquad import adaptive_quadrature, integrate, steps
 
 
 def _check(label: str, got: float, expected: float, tol: float = 1e-6) -> None:

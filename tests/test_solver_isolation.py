@@ -29,9 +29,9 @@ from __future__ import annotations
 import torch
 from tests._helpers import make_uniform_solver
 
-from torchpathdiffeq import UNIFORM_METHODS
-from torchpathdiffeq.base import steps
-from torchpathdiffeq.methods import _get_method
+from padaquad import UNIFORM_METHODS
+from padaquad.base import steps
+from padaquad.methods import _get_method
 
 
 def _b_values(solver):

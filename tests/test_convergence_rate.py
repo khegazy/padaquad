@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 import torch
 
-from torchpathdiffeq import UNIFORM_METHODS, VARIABLE_METHODS
+from padaquad import UNIFORM_METHODS, VARIABLE_METHODS
 
 # Each method's expected convergence rate (= polynomial-exactness + 1, the
 # number of orders by which error scales as panel size shrinks).

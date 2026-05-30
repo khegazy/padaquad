@@ -6,7 +6,7 @@ import pytest
 import torch
 from _helpers import UNIFORM_METHOD_NAMES, make_solver_for_unit_test
 
-from torchpathdiffeq import UNIFORM_METHODS
+from padaquad import UNIFORM_METHODS
 
 
 @pytest.mark.parametrize("method_name", UNIFORM_METHOD_NAMES)

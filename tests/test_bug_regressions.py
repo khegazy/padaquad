@@ -46,7 +46,7 @@ from tests._helpers import (
     make_uniform_solver,
 )
 
-from torchpathdiffeq import IntegrationResult, integrate
+from padaquad import IntegrationResult, integrate
 
 # -----------------------------------------------------------------------------
 # Anchor: the no-warm-start path is correct as-is. Phase 1 must not regress it.

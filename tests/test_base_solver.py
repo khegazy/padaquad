@@ -6,8 +6,8 @@ import pytest
 import torch
 from _helpers import make_solver_for_unit_test
 
-from torchpathdiffeq import UNIFORM_METHODS
-from torchpathdiffeq.results import IntegrationResult
+from padaquad import UNIFORM_METHODS
+from padaquad.results import IntegrationResult
 
 
 def _save_tableau(method_name):

@@ -20,7 +20,7 @@ jobs:
         run: pip install ruff
 
       - name: Ruff lint
-        run: ruff check --output-format=github torchpathdiffeq/
+        run: ruff check --output-format=github padaquad/
 
       - name: Ruff format check
-        run: ruff format --check torchpathdiffeq/
+        run: ruff format --check padaquad/

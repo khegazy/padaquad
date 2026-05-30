@@ -17,7 +17,7 @@ from _helpers import (
     make_uniform_solver,
 )
 
-from torchpathdiffeq import integrand_dict
+from padaquad import integrand_dict
 
 INTEGRAND_NAME = "damped_sine"
 

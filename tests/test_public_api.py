@@ -19,8 +19,8 @@ import pytest
 import torch
 from tests._helpers import TAKE_GRADIENT_IDS, TAKE_GRADIENT_VALUES
 
-import torchpathdiffeq
-from torchpathdiffeq import (
+import padaquad
+from padaquad import (
     UNIFORM_METHODS,
     VARIABLE_METHODS,
     IntegrationResult,
@@ -61,7 +61,7 @@ class TestPublicExports:
         assert hasattr(steps, "FIXED")
 
     def test_module_has_dunder_attributes(self):
-        assert hasattr(torchpathdiffeq, "__name__")
+        assert hasattr(padaquad, "__name__")
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)

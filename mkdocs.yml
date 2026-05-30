@@ -1,7 +1,7 @@
-site_name: torchpathdiffeq
+site_name: padaquad
 site_author: Kareem Hegazy
 site_description: >-
-  This is the torchpathdiffeq package!
+  This is the padaquad package!
 nav:
   - Home: index.md
   - Overview:
@@ -33,7 +33,7 @@ nav:
       - example_docs/about/conduct.md
       - example_docs/about/license.md
 
-repo_url: https://github.com/khegazy/torchpathdiffeq/
+repo_url: https://github.com/khegazy/padaquad/
 edit_uri: blob/main/docs/
 
 theme:

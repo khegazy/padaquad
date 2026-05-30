@@ -28,7 +28,7 @@ from _helpers import (
 )
 from scipy import integrate as scipy_integrate
 
-from torchpathdiffeq import (
+from padaquad import (
     adaptive_quadrature,
     steps,
     wolf_schlegel,

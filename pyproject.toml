@@ -3,7 +3,7 @@ requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "torchpathdiffeq"
+name = "padaquad"
 description = "PyTorch library for parallelized adaptive numerical quadrature with full autograd support."
 version = "0.2.0"
 readme = "README.md"
@@ -54,15 +54,15 @@ docs = [
 ]
 
 [project.urls]
-repository = "https://github.com/khegazy/torchpathdiffeq"
-documentation = "https://khegazy.github.io/torchpathdiffeq/"
-changelog = "https://github.com/khegazy/torchpathdiffeq/blob/main/CHANGELOG.md"
+repository = "https://github.com/khegazy/padaquad"
+documentation = "https://khegazy.github.io/padaquad/"
+changelog = "https://github.com/khegazy/padaquad/blob/main/CHANGELOG.md"
 
 [tool.setuptools.package-data]
-torchpathdiffeq = ["py.typed"]
+padaquad = ["py.typed"]
 
 [tool.pyright]
-include = ["torchpathdiffeq"]
+include = ["padaquad"]
 exclude = ["**/__pycache__"]
 
 [tool.pytest.ini_options]
@@ -70,7 +70,7 @@ minversion = "6.0"
 addopts = ["-p no:warnings", "--import-mode=importlib"]
 xfail_strict = true
 log_cli_level = "warn"
-pythonpath = "torchpathdiffeq"
+pythonpath = "padaquad"
 testpaths = ["tests"]
 markers = [
   "tier1: must-have correctness tests for the split integration paths",
@@ -79,7 +79,7 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["torchpathdiffeq"]
+source = ["padaquad"]
 
 [tool.coverage.report]
 exclude_also = [
@@ -90,7 +90,7 @@ exclude_also = [
 
 [tool.ruff]
 line-length = 88
-src = ["torchpathdiffeq"]
+src = ["padaquad"]
 extend-include = ["*.ipynb"]
 exclude = ["examples/pode/**"]
 
@@ -151,7 +151,7 @@ unfixable = [
 pydocstyle.convention = "numpy"
 
 [tool.ruff.lint.isort]
-known-first-party = ["torchpathdiffeq"]
+known-first-party = ["padaquad"]
 required-imports = ["from __future__ import annotations"]
 
 [tool.ruff.lint.per-file-ignores]

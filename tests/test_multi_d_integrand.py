@@ -27,8 +27,8 @@ import pytest
 import torch
 from tests._helpers import TAKE_GRADIENT_IDS, TAKE_GRADIENT_VALUES
 
-from torchpathdiffeq import VARIABLE_METHODS, integrate
-from torchpathdiffeq.methods import UNIFORM_METHODS
+from padaquad import VARIABLE_METHODS, integrate
+from padaquad.methods import UNIFORM_METHODS
 
 D = 3
 ATOL = 1e-8

@@ -12,9 +12,9 @@ from _helpers import (
     VARIABLE_METHOD_NAMES,
 )
 
-from torchpathdiffeq import UNIFORM_METHODS, integrand_dict
-from torchpathdiffeq.base import get_sampling_type, steps
-from torchpathdiffeq.examples import (
+from padaquad import UNIFORM_METHODS, integrand_dict
+from padaquad.base import get_sampling_type, steps
+from padaquad.examples import (
     damped_sine,
     exp_solution,
     identity,
@@ -24,13 +24,13 @@ from torchpathdiffeq.examples import (
     t_squared,
     t_squared_solution,
 )
-from torchpathdiffeq.examples import (
+from padaquad.examples import (
     exp as exp_fn,
 )
-from torchpathdiffeq.examples import (
+from padaquad.examples import (
     t as t_fn,
 )
-from torchpathdiffeq.methods import _get_method, _Interpolatory3Variable
+from padaquad.methods import _get_method, _Interpolatory3Variable
 
 # ---------------------------------------------------------------------------
 # get_sampling_type

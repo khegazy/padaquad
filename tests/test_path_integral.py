@@ -15,7 +15,7 @@ from _helpers import (
     UNIFORM_METHOD_NAMES,
 )
 
-from torchpathdiffeq import (
+from padaquad import (
     UniformAdaptiveQuadrature,
     integrate,
 )

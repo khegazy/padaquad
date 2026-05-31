@@ -4,6 +4,21 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1] - 2026-05-30
+
+### Added
+
+- Tracked variables: the integrand `f` may now return a 2-tuple `(integrand, tracked_variables)` to emit extra per-node quantities that are evaluated at every quadrature node but **not** integrated. They are carried through the adaptive loop and returned at the accepted nodes in the new `IntegrationResult.tracked_variables` field, a tuple of tensors each shaped `[N, C, *var_dims]` and aligned with `nodes`/`y`. Values are detached (diagnostic-only). Works across both sampling modes, both `take_gradient` paths, and `float32`/`float64`, and supports non-float (e.g. integer/boolean) tracked tensors.
+
+### Changed
+
+- `IntegrationResult` gained the optional `tracked_variables` field (defaults to `None`).
+- The sorted-insert step of the record is now dtype/device-aware, enabling non-float tracked variables to be recorded and sorted alongside the integrand evaluations.
+
+### Compatibility
+
+- Fully backward compatible and opt-in: an integrand returning a bare tensor behaves exactly as before, with `result.tracked_variables = None`. A single tracked tensor is wrapped into a 1-tuple, and `(integrand, None)` is accepted.
+
 ## [1.0.0] - 2026-05-30
 
 First stable release. The project, formerly `torchpathdiffeq` (an ODE / path-integral library), has been rebuilt and renamed to **`padaquad`**, a PyTorch library for **parallelized adaptive numerical quadrature**: it computes definite integrals $\int_a^b f(t)\,dt$ for a known integrand `f` by evaluating many quadrature panels in parallel batches on GPU/CPU, with full autograd through the integration loop.
@@ -21,7 +36,6 @@ The integrand `f` depends only on `t` (and optional extra args), **not** on accu
   - Variable-sampling rules: `adaptive_heun`, `interpolatory3_variable`
 - Uniform and variable sampling modes (fixed tableau-`c` node positions, or arbitrary node positions with weights computed dynamically).
 - Full autograd through integration, including a memory-frugal per-batch-backward mode (`take_gradient`) for training learnable integrands whose full graph would not fit in memory.
-- Tracked variables: `f` may return `(integrand, tracked_variables)` to emit extra per-node quantities that are carried through the adaptive loop but not integrated, returned at the accepted nodes in `IntegrationResult.tracked_variables`. Opt-in and backward compatible; supports non-float (e.g. integer/boolean) tracked tensors.
 - `y0` additive offset (`result.integral = y0 + ∫f`) and positional `f_args` forwarding to `f(t, *f_args)`.
 - Public API: `integrate`, `adaptive_quadrature`, `UniformAdaptiveQuadrature`, `VariableAdaptiveQuadrature`, `IntegrationResult`, `UNIFORM_METHODS`, `VARIABLE_METHODS`, `integrand_dict`, `wolf_schlegel`, `steps`.
 

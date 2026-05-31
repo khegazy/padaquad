@@ -4,6 +4,23 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.2] - 2026-05-30
+
+### Added
+
+- `max_adaptive_splits`: a configurable ceiling on adaptive refinement depth.
+  Each panel tracks how many times it has been split (children of a depth-`N`
+  panel are depth `N+1`); once a panel reaches `max_adaptive_splits` it is
+  accepted even if it still fails the error tolerance, instead of being split
+  further. Defaults to `None` (uncapped). Can be set at solver construction or
+  passed to the integration call, with the per-call value taking priority.
+  Applies to both uniform and variable sampling.
+
+### Changed
+
+- Capped panels retain their failing `error_ratios` (>= 1) in the result, so
+  regions that hit the depth cap are visible; the run still completes normally.
+
 ## [1.0.1] - 2026-05-30
 
 ### Added

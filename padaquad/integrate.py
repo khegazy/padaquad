@@ -36,6 +36,7 @@ def integrate(
     total_mem_usage: float = 0.9,
     use_absolute_error_ratio: bool = True,
     take_gradient: bool = True,
+    max_adaptive_splits: int | None = None,
     device: str | None = None,
     **kwargs,
 ) -> IntegrationResult:
@@ -95,6 +96,10 @@ def integrate(
             total integral value as the reference. If False, uses the
             cumulative integral up to each step (more like traditional
             ODE error control).
+        max_adaptive_splits: Maximum number of times a panel may be split
+            during adaptive refinement. A panel split this many times is
+            accepted even if it still fails the error tolerance, rather than
+            being split further. If None (default), refinement is uncapped.
         device: Device to run on (e.g. 'cuda', 'cpu'). If None,
             auto-detects.
         **kwargs: Additional keyword arguments forwarded to the solver
@@ -146,4 +151,5 @@ def integrate(
         mesh_final=mesh_final,
         total_mem_usage=total_mem_usage,
         take_gradient=take_gradient,
+        max_adaptive_splits=max_adaptive_splits,
     )

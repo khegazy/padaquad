@@ -100,6 +100,7 @@ class AdaptiveQuadrature(SolverBase):
         max_batch: int | None = None,
         total_mem_usage: float = 0.9,
         max_path_change: float | None = None,
+        max_adaptive_splits: int | None = None,
         use_absolute_error_ratio: bool = True,
         error_calc_idx: int | None = None,
         *args,
@@ -119,6 +120,12 @@ class AdaptiveQuadrature(SolverBase):
             max_path_change: If set, and the user provides a mesh (mesh is not
                 None), integration stops early if this fraction of steps fail
                 the error tolerance. Useful for iterative optimization.
+            max_adaptive_splits: Maximum number of times a panel may be split
+                during adaptive refinement. A panel that has been split this
+                many times is accepted even if it still fails the error
+                tolerance, instead of being split further. If None (default),
+                refinement is uncapped. Can be overridden per call via
+                ``integrate(max_adaptive_splits=...)``.
             use_absolute_error_ratio: If True, error ratios use the total
                 (converging) integral value. If False, uses cumulative sum up
                 to each step. Default: True.
@@ -130,9 +137,11 @@ class AdaptiveQuadrature(SolverBase):
 
         super().__init__(*args, **kwargs)
         assert remove_cut < 1.0
+        assert max_adaptive_splits is None or max_adaptive_splits >= 0
         self.remove_cut = remove_cut
         self.max_batch = max_batch
         self.max_path_change = max_path_change
+        self.max_adaptive_splits = max_adaptive_splits
         self.use_absolute_error_ratio = use_absolute_error_ratio
 
         self.method = None
@@ -213,6 +222,7 @@ class AdaptiveQuadrature(SolverBase):
         total_mem_usage: float | None = None,
         loss_fxn: Callable | None = None,
         max_batch: int | None = None,
+        max_adaptive_splits: int | None = None,
     ) -> IntegrationResult:
         """
         Perform parallel adaptive numerical integration of f.
@@ -253,6 +263,12 @@ class AdaptiveQuadrature(SolverBase):
                 scalar tensor. If None, uses the integral value itself.
             max_batch: Maximum evaluations per batch. Overrides dynamic memory
                 calculation if provided.
+            max_adaptive_splits: Maximum number of times a panel may be split
+                during adaptive refinement; a panel split this many times is
+                accepted even if it still fails the tolerance. If None
+                (default), falls back to the value from construction (also
+                None ⇒ uncapped). When both are set, this per-call value takes
+                priority.
             random_initial_mesh: When True (default), the fresh initial
                 mesh is built with random sub-barrier offsets within each
                 top-level segment. Randomness is essential here, not
@@ -296,6 +312,13 @@ class AdaptiveQuadrature(SolverBase):
 
         # Replace max_batch if default it given
         force_max_batch = self.max_batch if max_batch is None else max_batch
+
+        # Per-call max_adaptive_splits takes priority over the constructor value.
+        max_adaptive_splits = (
+            self.max_adaptive_splits
+            if max_adaptive_splits is None
+            else max_adaptive_splits
+        )
 
         # Get variables or populate with default values, send to correct device
         f, mesh_init, mesh_final, y0 = self._check_variables(
@@ -352,6 +375,14 @@ class AdaptiveQuadrature(SolverBase):
 
         record = {}
         split_node_state = (None, None, None, None)
+        # Per-panel split counter, parallel to mesh/mesh_trackers. Only
+        # maintained when a depth cap is active (None ⇒ zero overhead, no
+        # behavior change).
+        split_counts = (
+            torch.zeros(len(mesh), dtype=torch.long, device=self.device)
+            if max_adaptive_splits is not None
+            else None
+        )
         # === Main integration loop ===
         # Continues until all steps have been evaluated and accepted
         # (mesh_trackers[i] == False for all i)
@@ -470,6 +501,7 @@ class AdaptiveQuadrature(SolverBase):
                 mesh,
                 mesh_trackers,
                 error_ratios,
+                split_counts,
             ) = self._adaptively_increase_mesh(
                 method_output=method_output,
                 error_ratios=error_ratios,
@@ -479,6 +511,8 @@ class AdaptiveQuadrature(SolverBase):
                 mesh_idxs=step_idxs,
                 mesh_trackers=mesh_trackers,
                 tracked_step_eval=tracked_step_eval,
+                split_counts=split_counts,
+                max_adaptive_splits=max_adaptive_splits,
             )
             # Verify barrier ordering after adaptive refinement
             mesh_diff = mesh[1:, 0] - mesh[:-1, 0]
@@ -570,6 +604,8 @@ class AdaptiveQuadrature(SolverBase):
         mesh_idxs: torch.Tensor,
         mesh_trackers: torch.Tensor,
         tracked_step_eval: tuple[torch.Tensor, ...] | None = None,
+        split_counts: torch.Tensor | None = None,
+        max_adaptive_splits: int | None = None,
     ) -> tuple[
         MethodOutput | None,
         torch.Tensor | None,
@@ -578,6 +614,7 @@ class AdaptiveQuadrature(SolverBase):
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        torch.Tensor | None,
     ]:
         """
         Accept accurate steps and split inaccurate ones.
@@ -591,6 +628,12 @@ class AdaptiveQuadrature(SolverBase):
 
         The midpoint barrier is placed at the average of the two neighboring
         barriers: mesh_new = (mesh_left + mesh_right) / 2.
+
+        When ``split_counts`` and ``max_adaptive_splits`` are provided, a step
+        whose split count has already reached ``max_adaptive_splits`` is
+        accepted even if its error_ratio >= 1.0 (it is not split further). Each
+        split increments the count: both children of a depth-N step are depth
+        N+1.
 
         Args:
             method_output: RK results from the current batch (may be None when
@@ -608,10 +651,16 @@ class AdaptiveQuadrature(SolverBase):
                 the current batch, each shape [N_batch, C, *var_dims]. Filtered
                 to accepted steps alongside y_step_eval. None when the integrand
                 emits no tracked variables.
+            split_counts: Optional per-panel split-count array aligned with
+                mesh. Shape: [M]. None disables depth tracking (the
+                post-convergence caller passes None).
+            max_adaptive_splits: Optional cap on the per-panel split count.
+                Panels at or above this count are accepted instead of split.
+                None disables the cap.
 
         Returns:
             Tuple of (method_output, y_step_eval, tracked_step_eval, nodes,
-            mesh_new, mesh_trackers_new, error_ratios_kept):
+            mesh_new, mesh_trackers_new, error_ratios_kept, split_counts_new):
                 - method_output: Updated with rejected steps removed.
                 - y_step_eval: Kept evaluations only.
                 - tracked_step_eval: Kept tracked variables only (or None).
@@ -619,13 +668,21 @@ class AdaptiveQuadrature(SolverBase):
                 - mesh_new: Barriers with new midpoints inserted.
                 - mesh_trackers_new: Updated tracker with new steps marked True.
                 - error_ratios_kept: Error ratios for accepted steps only.
+                - split_counts_new: Per-panel split counts for mesh_new, with
+                  split children incremented (or None if split_counts is None).
         """
         # Steps that pass the error tolerance are accepted (done)
         keep_mask = error_ratios < 1.0
-        mesh_trackers[mesh_idxs[keep_mask]] = False
-
         # Steps that fail the error tolerance need to be split
         remove_mask = error_ratios >= 1.0
+        # Panels that have already been split the maximum number of times are
+        # accepted as-is rather than split further.
+        if max_adaptive_splits is not None and split_counts is not None:
+            at_max = remove_mask & (split_counts[mesh_idxs] >= max_adaptive_splits)
+            keep_mask = keep_mask | at_max
+            remove_mask = remove_mask & ~at_max
+        mesh_trackers[mesh_idxs[keep_mask]] = False
+
         N_t_add = torch.sum(remove_mask)
         # Allocate new barriers array with room for inserted midpoints
         mesh_new = torch.nan * torch.ones(
@@ -657,6 +714,21 @@ class AdaptiveQuadrature(SolverBase):
         assert torch.sum(torch.isnan(mesh_new)) == 0
         assert len(idxs_new) + len(idxs_transfer) == len(mesh_new)
 
+        # Expand the per-panel split counts the same way as the barriers: carry
+        # existing counts to their new positions, then bump both children of
+        # each split panel to parent_count + 1.
+        if split_counts is not None:
+            split_counts_new = torch.zeros(
+                len(mesh_new), dtype=torch.long, device=self.device
+            )
+            split_counts_new[idxs_transfer] = split_counts.clone()
+            parent_counts = split_counts[mesh_idxs[remove_mask]]
+            # left child = transferred parent barrier; right child = new midpoint
+            split_counts_new[idxs_transfer[mesh_idxs[remove_mask]]] = parent_counts + 1
+            split_counts_new[idxs_new] = parent_counts + 1
+        else:
+            split_counts_new = None
+
         if method_output is not None:
             method_output.mesh_quadratures = method_output.mesh_quadratures[keep_mask]
             method_output.mesh_quadrature_errors = method_output.mesh_quadrature_errors[
@@ -681,6 +753,7 @@ class AdaptiveQuadrature(SolverBase):
             mesh_new,
             mesh_trackers_new,
             error_ratios[keep_mask],
+            split_counts_new,
         )
 
     @staticmethod
@@ -1073,7 +1146,7 @@ class AdaptiveQuadrature(SolverBase):
             mesh_idxs=torch.arange(len(mesh_pruned) - 1, device=self.device),
             mesh_trackers=torch.zeros(len(mesh_pruned), dtype=bool, device=self.device),
         )
-        _, _, _, _, mesh_optimal, _, _ = adaptive_step
+        _, _, _, _, mesh_optimal, _, _, _ = adaptive_step
 
         return mesh_optimal
 

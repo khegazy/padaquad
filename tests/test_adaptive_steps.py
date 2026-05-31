@@ -33,7 +33,7 @@ class TestAdaptivelyAddSteps:
         error_ratios = torch.tensor([0.5, 0.3])
         mo = _make_method_output(2)
 
-        mo_out, _, _, _, barriers_new, trackers_new, er_kept = (
+        mo_out, _, _, _, barriers_new, trackers_new, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
                 mo, error_ratios, None, None, barriers, idxs, trackers
             )
@@ -51,7 +51,7 @@ class TestAdaptivelyAddSteps:
         error_ratios = torch.tensor([2.0, 1.5])
         mo = _make_method_output(2)
 
-        mo_out, _, _, _, barriers_new, _trackers_new, er_kept = (
+        mo_out, _, _, _, barriers_new, _trackers_new, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
                 mo, error_ratios, None, None, barriers, idxs, trackers
             )
@@ -69,7 +69,7 @@ class TestAdaptivelyAddSteps:
         error_ratios = torch.tensor([0.5, 2.0])
         mo = _make_method_output(2)
 
-        mo_out, _, _, _, barriers_new, _trackers_new, er_kept = (
+        mo_out, _, _, _, barriers_new, _trackers_new, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
                 mo, error_ratios, None, None, barriers, idxs, trackers
             )
@@ -86,7 +86,7 @@ class TestAdaptivelyAddSteps:
         idxs = torch.tensor([0, 1])
         error_ratios = torch.tensor([2.0, 0.5])
 
-        mo_out, y_out, _tracked, t_out, barriers_new, _, _ = (
+        mo_out, y_out, _tracked, t_out, barriers_new, _, _, _ = (
             self.solver._adaptively_increase_mesh(
                 None, error_ratios, None, None, barriers, idxs, trackers
             )
@@ -104,7 +104,7 @@ class TestAdaptivelyAddSteps:
         idxs = torch.tensor([0])
         error_ratios = torch.tensor([3.0])
 
-        _, _, _, _, barriers_new, _, _ = self.solver._adaptively_increase_mesh(
+        _, _, _, _, barriers_new, _, _, _ = self.solver._adaptively_increase_mesh(
             None, error_ratios, None, None, barriers, idxs, trackers
         )
         assert torch.allclose(barriers_new[1], torch.tensor([0.5], dtype=torch.float64))
@@ -116,7 +116,7 @@ class TestAdaptivelyAddSteps:
         idxs = torch.tensor([0, 1, 2])
         error_ratios = torch.tensor([2.0, 2.0, 2.0])
 
-        _, _, _, _, barriers_new, _, _ = self.solver._adaptively_increase_mesh(
+        _, _, _, _, barriers_new, _, _, _ = self.solver._adaptively_increase_mesh(
             None, error_ratios, None, None, barriers, idxs, trackers
         )
         diffs = barriers_new[1:, 0] - barriers_new[:-1, 0]
@@ -129,8 +129,10 @@ class TestAdaptivelyAddSteps:
         idxs = torch.tensor([0])
         error_ratios = torch.tensor([2.0])
 
-        _, _, _, _, _barriers_new, trackers_new, _ = self.solver._adaptively_increase_mesh(
-            None, error_ratios, None, None, barriers, idxs, trackers
+        _, _, _, _, _barriers_new, trackers_new, _, _ = (
+            self.solver._adaptively_increase_mesh(
+                None, error_ratios, None, None, barriers, idxs, trackers
+            )
         )
         # After split: barriers = [0, 0.5, 1]. Both step 0 and step 1 need eval.
         assert trackers_new[0] == True  # noqa: E712
@@ -144,7 +146,7 @@ class TestAdaptivelyAddSteps:
         error_ratios = torch.tensor([0.5, 2.0, 0.3])
         mo = _make_method_output(3)
 
-        mo_out, _, _, _, _, _, er_kept = self.solver._adaptively_increase_mesh(
+        mo_out, _, _, _, _, _, er_kept, _ = self.solver._adaptively_increase_mesh(
             mo, error_ratios, None, None, barriers, idxs, trackers
         )
         assert mo_out.mesh_quadratures.shape[0] == 2
@@ -158,7 +160,7 @@ class TestAdaptivelyAddSteps:
         idxs = torch.tensor([0])
         error_ratios = torch.tensor([0.5])
 
-        _, _, _, _, barriers_new, trackers_new, er_kept = (
+        _, _, _, _, barriers_new, trackers_new, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
                 None, error_ratios, None, None, barriers, idxs, trackers
             )

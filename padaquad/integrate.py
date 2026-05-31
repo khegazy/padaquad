@@ -63,7 +63,12 @@ def integrate(
 
     Args:
         f: The integrand function. Takes time points of shape [N, T]
-            and returns evaluations of shape [N, D].
+            and returns evaluations of shape [N, D]. Optionally, f may
+            instead return a 2-tuple ``(integrand, tracked_variables)``
+            where ``tracked_variables`` is a tuple of tensors (or None).
+            Tracked variables are evaluated at every node but NOT
+            integrated; they are returned at the accepted nodes in
+            ``result.tracked_variables``.
         method: Name of the quadrature method. Available:
             uniform sampling: 'adaptive_heun', 'fehlberg2', 'bosh3',
               'dopri5', 'gk15', 'gk21', 'gk31', 'cc17', 'cc33', 'cc65';

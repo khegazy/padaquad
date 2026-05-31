@@ -44,6 +44,12 @@ class IntegrationResult:
         h: Step sizes (right - left) for each integration step.
             Shape: [N, T].
         y: Integrand evaluations at each node. Shape: [N, C, D].
+        tracked_variables: Optional extra quantities emitted by the
+            integrand alongside the integrand value. These are evaluated at
+            every node but NOT integrated; they are returned at the accepted
+            nodes. A tuple of detached tensors, each shaped [N, C, *var_dims]
+            and aligned with ``nodes``/``y``. ``None`` when the integrand
+            returns only the integrand value (no tracked variables).
         mesh_quadratures: Weighted contribution of each step to the total
             integral (h * sum(b_i * y_i) per step). Shape: [N, D].
         mesh_quadrature_errors: Per-step error estimates from the difference
@@ -70,6 +76,7 @@ class IntegrationResult:
     nodes: torch.Tensor = None
     h: torch.Tensor = None
     y: torch.Tensor = None
+    tracked_variables: tuple[torch.Tensor, ...] | None = None
     mesh_quadratures: torch.Tensor = None
     mesh_quadrature_errors: torch.Tensor = None
     error_ratios: torch.Tensor = None

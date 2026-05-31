@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "padaquad"
 description = "PyTorch library for parallelized adaptive numerical quadrature with full autograd support."
-version = "0.2.0"
+version = "1.0.1"
 readme = "README.md"
 license = "CC-BY-4.0"
 authors = [{ name = "Kareem Hegazy", email = "khegazy@berkeley.edu" }]

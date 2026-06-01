@@ -37,6 +37,7 @@ Tests in this file:
 from __future__ import annotations
 
 import math
+import threading
 
 import pytest
 import torch
@@ -239,3 +240,155 @@ def test_float16_construction_raises():
     """
     with pytest.raises(ValueError, match=r"float16|coarse"):
         make_uniform_solver("dopri5", atol=1e-5, rtol=1e-5, dtype=torch.float16)
+
+
+# -----------------------------------------------------------------------------
+# NaN/Inf integrand: a non-finite error ratio used to fall into neither
+# keep_mask nor remove_mask in _adaptively_increase_mesh, so its mesh_trackers
+# entry was never cleared and `while torch.any(mesh_trackers)` spun forever.
+# Found by the popcornn project (a singular parameter-Jacobian integrand).
+# Fix: the guard accepts non-finite panels (never hangs); by default the
+# integrand is also checked at the source and a located ValueError is raised.
+# -----------------------------------------------------------------------------
+
+
+def _run_with_timeout(fn, seconds=20):
+    """Run ``fn()`` on a daemon thread; fail the test if it doesn't finish.
+
+    The guard guarantees termination, so a healthy build finishes far under the
+    timeout. If the guard regresses (infinite loop), ``join`` times out and we
+    convert the hang into a deterministic test failure instead of stalling the
+    whole suite. ``pytest-timeout`` is not a project dependency, so this stdlib
+    watchdog is used instead.
+    """
+    box: dict = {}
+
+    def target():
+        try:
+            box["value"] = fn()
+        except BaseException as exc:
+            box["error"] = exc
+
+    thread = threading.Thread(target=target, daemon=True)
+    thread.start()
+    thread.join(seconds)
+    if thread.is_alive():
+        pytest.fail(
+            f"integrate() did not terminate within {seconds}s — the NaN/Inf "
+            f"keep_mask guard in _adaptively_increase_mesh has regressed "
+            f"(infinite loop)."
+        )
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+def _nan_on_left_half(t, *args):
+    """f(t) = NaN on [0, 0.5), t**2 on [0.5, 1].
+
+    Region-based (not a single point) so that some quadrature node always
+    lands in the NaN region regardless of the method's node placement,
+    reproducing popcornn's singular-integrand case where f returns NaN/Inf at
+    certain t.
+    """
+    return torch.where(t < 0.5, torch.full_like(t, float("nan")), t**2)
+
+
+_NONFINITE_CASES = [("uniform", "gk21"), ("variable", "adaptive_heun")]
+_NONFINITE_IDS = ["uniform_gk21", "variable_adaptive_heun"]
+
+
+@pytest.mark.parametrize(("sampling", "method"), _NONFINITE_CASES, ids=_NONFINITE_IDS)
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_nonfinite_integrand_does_not_hang(sampling, method, take_gradient):
+    """With ``error_on_nonfinite=False`` a NaN-returning integrand must
+    terminate (not hang) and return a NaN-containing result.
+
+    This is the core regression: before the fix, the non-finite panel was in
+    neither mask, so the main loop never exited.
+    """
+    out = _run_with_timeout(
+        lambda: integrate(
+            f=_nan_on_left_half,
+            method=method,
+            sampling=sampling,
+            atol=1e-6,
+            rtol=1e-6,
+            mesh_init=torch.tensor([0.0], dtype=torch.float64),
+            mesh_final=torch.tensor([1.0], dtype=torch.float64),
+            take_gradient=take_gradient,
+            error_on_nonfinite=False,
+            # Pin CPU so this NaN-logic regression is deterministic regardless
+            # of whether a GPU is visible (NaN handling is device-agnostic).
+            device="cpu",
+        )
+    )
+    assert isinstance(out, IntegrationResult)
+    # The non-finite contribution propagates into the integral (honest result).
+    assert torch.isnan(out.integral).any()
+    # The loop "converged" by accepting the non-finite panel rather than hanging.
+    assert out.converged is True
+
+
+@pytest.mark.parametrize(("sampling", "method"), _NONFINITE_CASES, ids=_NONFINITE_IDS)
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_nonfinite_integrand_raises_by_default(sampling, method, take_gradient):
+    """By default (``error_on_nonfinite=True``) a NaN/Inf integrand raises a
+    clear, located ``ValueError`` instead of hanging or silently returning NaN.
+    """
+    with pytest.raises(ValueError, match=r"non-finite"):
+        integrate(
+            f=_nan_on_left_half,
+            method=method,
+            sampling=sampling,
+            atol=1e-6,
+            rtol=1e-6,
+            mesh_init=torch.tensor([0.0], dtype=torch.float64),
+            mesh_final=torch.tensor([1.0], dtype=torch.float64),
+            take_gradient=take_gradient,
+            device="cpu",
+        )
+
+
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_finite_integrand_unaffected_by_nonfinite_check(take_gradient):
+    """The default-on finiteness check must not false-trigger on a smooth
+    integrand: the integral is still correct and finite.
+    """
+    out = integrate(
+        f=torch.sin,
+        method="gk21",
+        atol=1e-8,
+        rtol=1e-8,
+        mesh_init=torch.tensor([0.0], dtype=torch.float64),
+        mesh_final=torch.tensor([math.pi], dtype=torch.float64),
+        take_gradient=take_gradient,
+        device="cpu",
+    )
+    assert torch.isfinite(out.integral).all()
+    assert abs(out.integral.item() - 2.0) < 1e-6
+
+
+def test_check_f_output_finite_helper():
+    """Unit-test the finiteness helper directly across its branches."""
+    solver = make_uniform_solver("gk21", atol=1e-6, rtol=1e-6)
+    nodes = torch.tensor([[0.1], [0.2], [0.3]], dtype=torch.float64)
+    good = torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float64)
+    bad = torch.tensor([[1.0], [float("nan")], [3.0]], dtype=torch.float64)
+
+    # Finite tensor: never raises.
+    solver._check_f_output_finite(good, nodes, True)
+    # Non-finite tensor with the flag off: no raise (guard keeps the run alive).
+    solver._check_f_output_finite(bad, nodes, False)
+    # Non-finite tensor with the flag on: raises and localizes the offending t.
+    with pytest.raises(ValueError, match=r"non-finite") as excinfo:
+        solver._check_f_output_finite(bad, nodes, True)
+    assert "0.2" in str(excinfo.value), (
+        f"offending t not reported: {excinfo.value}"
+    )
+
+    # Bare-scalar branch (e.g. f returning a Python number): finite passes,
+    # non-finite raises.
+    solver._check_f_output_finite(1.0, nodes, True)
+    with pytest.raises(ValueError, match=r"non-finite"):
+        solver._check_f_output_finite(float("inf"), nodes, True)

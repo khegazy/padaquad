@@ -37,6 +37,7 @@ def integrate(
     use_absolute_error_ratio: bool = True,
     take_gradient: bool = True,
     max_adaptive_splits: int | None = None,
+    error_on_nonfinite: bool = True,
     device: str | None = None,
     **kwargs,
 ) -> IntegrationResult:
@@ -100,6 +101,10 @@ def integrate(
             during adaptive refinement. A panel split this many times is
             accepted even if it still fails the error tolerance, rather than
             being split further. If None (default), refinement is uncapped.
+        error_on_nonfinite: If True (default), raise a ValueError naming the
+            offending ``t`` when the integrand returns NaN/Inf. If False, those
+            panels are accepted and the non-finite value propagates into the
+            result. The integration never hangs in either case.
         device: Device to run on (e.g. 'cuda', 'cpu'). If None,
             auto-detects.
         **kwargs: Additional keyword arguments forwarded to the solver
@@ -152,4 +157,5 @@ def integrate(
         total_mem_usage=total_mem_usage,
         take_gradient=take_gradient,
         max_adaptive_splits=max_adaptive_splits,
+        error_on_nonfinite=error_on_nonfinite,
     )

@@ -294,22 +294,42 @@ def _nan_on_left_half(t, *args):
     return torch.where(t < 0.5, torch.full_like(t, float("nan")), t**2)
 
 
+def _nan_on_right_half(t, *args):
+    """f(t) = t**2 on [0, 0.5], NaN on (0.5, 1]. Mirror of _nan_on_left_half.
+
+    Covers the NaN landing in the *last* panels. In the default absolute-error
+    mode this is symmetric with the left case (a single NaN poisons the global
+    tolerance, so every panel's ratio is NaN), but it differs under cumulative
+    error mode where the denominator is a running cumsum -- see
+    test_nonfinite_cumulative_error_mode_terminates.
+    """
+    return torch.where(t > 0.5, torch.full_like(t, float("nan")), t**2)
+
+
 _NONFINITE_CASES = [("uniform", "gk21"), ("variable", "adaptive_heun")]
 _NONFINITE_IDS = ["uniform_gk21", "variable_adaptive_heun"]
 
+# NaN region position: left vs right half. The guard is position-agnostic
+# (~torch.isfinite catches NaN anywhere in the error-ratio vector), so both
+# must terminate / raise identically.
+_NAN_SIDE_CASES = [_nan_on_left_half, _nan_on_right_half]
+_NAN_SIDE_IDS = ["nan_left", "nan_right"]
 
+
+@pytest.mark.parametrize("nan_f", _NAN_SIDE_CASES, ids=_NAN_SIDE_IDS)
 @pytest.mark.parametrize(("sampling", "method"), _NONFINITE_CASES, ids=_NONFINITE_IDS)
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
-def test_nonfinite_integrand_does_not_hang(sampling, method, take_gradient):
+def test_nonfinite_integrand_does_not_hang(nan_f, sampling, method, take_gradient):
     """With ``error_on_nonfinite=False`` a NaN-returning integrand must
-    terminate (not hang) and return a NaN-containing result.
+    terminate (not hang) and return a NaN-containing result, whether the NaN
+    falls in the first panels (nan_left) or the last panels (nan_right).
 
     This is the core regression: before the fix, the non-finite panel was in
     neither mask, so the main loop never exited.
     """
     out = _run_with_timeout(
         lambda: integrate(
-            f=_nan_on_left_half,
+            f=nan_f,
             method=method,
             sampling=sampling,
             atol=1e-6,
@@ -330,15 +350,17 @@ def test_nonfinite_integrand_does_not_hang(sampling, method, take_gradient):
     assert out.converged is True
 
 
+@pytest.mark.parametrize("nan_f", _NAN_SIDE_CASES, ids=_NAN_SIDE_IDS)
 @pytest.mark.parametrize(("sampling", "method"), _NONFINITE_CASES, ids=_NONFINITE_IDS)
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
-def test_nonfinite_integrand_raises_by_default(sampling, method, take_gradient):
+def test_nonfinite_integrand_raises_by_default(nan_f, sampling, method, take_gradient):
     """By default (``error_on_nonfinite=True``) a NaN/Inf integrand raises a
-    clear, located ``ValueError`` instead of hanging or silently returning NaN.
+    clear, located ``ValueError`` instead of hanging or silently returning NaN,
+    for NaN in either the first or last panels.
     """
     with pytest.raises(ValueError, match=r"non-finite"):
         integrate(
-            f=_nan_on_left_half,
+            f=nan_f,
             method=method,
             sampling=sampling,
             atol=1e-6,
@@ -348,6 +370,37 @@ def test_nonfinite_integrand_raises_by_default(sampling, method, take_gradient):
             take_gradient=take_gradient,
             device="cpu",
         )
+
+
+@pytest.mark.parametrize("nan_f", _NAN_SIDE_CASES, ids=_NAN_SIDE_IDS)
+def test_nonfinite_cumulative_error_mode_terminates(nan_f):
+    """Same guard, but under cumulative error mode (``use_absolute_error_ratio=
+    False``), where the per-step tolerance denominator is a running cumsum.
+
+    Unlike the default absolute mode (where one NaN poisons the global
+    denominator so every panel's ratio is NaN regardless of position), here the
+    NaN's position changes which panels get a finite vs non-finite ratio. This
+    exercises the position-dependent path for both nan_left and nan_right; both
+    must still terminate with a NaN-containing result.
+    """
+    out = _run_with_timeout(
+        lambda: integrate(
+            f=nan_f,
+            method="gk21",
+            sampling="uniform",
+            atol=1e-6,
+            rtol=1e-6,
+            mesh_init=torch.tensor([0.0], dtype=torch.float64),
+            mesh_final=torch.tensor([1.0], dtype=torch.float64),
+            take_gradient=False,
+            error_on_nonfinite=False,
+            use_absolute_error_ratio=False,
+            device="cpu",
+        )
+    )
+    assert isinstance(out, IntegrationResult)
+    assert torch.isnan(out.integral).any()
+    assert out.converged is True
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)

@@ -96,8 +96,12 @@ def test_early_exit_mesh_fields_populated():
     assert out.mesh_init is not None, "mesh_init lost on early-exit"
     assert out.mesh_final is not None, "mesh_final lost on early-exit"
     # The integration region must be the user-supplied bounds.
-    assert torch.isclose(out.mesh_init, torch.tensor([0.0], dtype=torch.float64)).all()
-    assert torch.isclose(out.mesh_final, torch.tensor([4.0], dtype=torch.float64)).all()
+    assert torch.isclose(
+        out.mesh_init.cpu(), torch.tensor([0.0], dtype=torch.float64)
+    ).all()
+    assert torch.isclose(
+        out.mesh_final.cpu(), torch.tensor([4.0], dtype=torch.float64)
+    ).all()
     # mesh_optimal[0] should match mesh_init and mesh_optimal[-1] should
     # match mesh_final — barrier endpoints are preserved across the
     # adaptive loop.

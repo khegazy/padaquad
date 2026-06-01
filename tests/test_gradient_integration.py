@@ -119,7 +119,13 @@ class _DerivativeNet(nn.Module):
 
 
 def _make_solver(method_name, f):
-    """Create a solver with loose tolerances for gradient tests."""
+    """Create a solver with loose tolerances for gradient tests.
+
+    Pinned to CPU: these gradient-correctness tests use nn.Module integrands
+    whose parameters live on CPU, so the solver must be on CPU too (otherwise it
+    auto-selects CUDA on a GPU machine and f(cuda_nodes) clashes with the CPU
+    parameters). Gradient flow is device-agnostic, so CPU is appropriate.
+    """
     return adaptive_quadrature(
         sampling_type=steps.ADAPTIVE_UNIFORM,
         method=method_name,
@@ -127,6 +133,7 @@ def _make_solver(method_name, f):
         rtol=RTOL_LOOSE,
         remove_cut=REMOVE_CUT,
         f=f,
+        device="cpu",
     )
 
 

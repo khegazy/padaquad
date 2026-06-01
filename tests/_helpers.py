@@ -79,26 +79,37 @@ def make_uniform_solver(method_name, atol=ATOL_TIGHT, rtol=RTOL_TIGHT, **kwargs)
 
 
 def make_solver_for_unit_test(method_name="bosh3", atol=1e-6, rtol=1e-6):
-    """Create a minimal solver for testing internal methods (no f needed)."""
+    """Create a minimal solver for testing internal methods (no f needed).
+
+    Pinned to CPU: these unit tests call internal methods directly with
+    hand-built CPU tensors, so the solver device must match (otherwise the
+    solver auto-selects CUDA on a GPU machine and the internal device-side
+    allocations clash with the CPU inputs).
+    """
     return adaptive_quadrature(
         sampling_type=steps.ADAPTIVE_UNIFORM,
         method=method_name,
         atol=atol,
         rtol=rtol,
         remove_cut=REMOVE_CUT,
+        device="cpu",
     )
 
 
 def make_variable_solver_for_unit_test(
     method_name="adaptive_heun", atol=1e-6, rtol=1e-6
 ):
-    """Create a minimal variable solver for testing internal methods."""
+    """Create a minimal variable solver for testing internal methods.
+
+    Pinned to CPU for the same reason as ``make_solver_for_unit_test``.
+    """
     return adaptive_quadrature(
         sampling_type=steps.ADAPTIVE_VARIABLE,
         method=method_name,
         atol=atol,
         rtol=rtol,
         remove_cut=REMOVE_CUT,
+        device="cpu",
     )
 
 

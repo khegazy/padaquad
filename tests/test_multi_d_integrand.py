@@ -75,10 +75,11 @@ def test_uniform_methods_integrate_vector_valued_integrand(method, take_gradient
     assert result.integral.shape == (D,), (
         f"integral has shape {result.integral.shape}, expected ({D},)"
     )
-    assert torch.allclose(result.integral, truth, atol=1e-5), (
-        f"{method}: got {result.integral.tolist()}, "
+    integral_cpu = result.integral.cpu()
+    assert torch.allclose(integral_cpu, truth, atol=1e-5), (
+        f"{method}: got {integral_cpu.tolist()}, "
         f"expected {truth.tolist()}, diff "
-        f"{(result.integral - truth).abs().tolist()}"
+        f"{(integral_cpu - truth).abs().tolist()}"
     )
 
 
@@ -127,7 +128,7 @@ def test_variable_methods_integrate_vector_valued_integrand(method, take_gradien
     assert result.integral.shape == (D,)
     # Looser tolerance for low-order variable methods; this test
     # checks shape correctness, not max accuracy.
-    assert torch.allclose(result.integral, truth, atol=1e-3), (
+    assert torch.allclose(result.integral.cpu(), truth, atol=1e-3), (
         f"{method}: got {result.integral.tolist()}, expected {truth.tolist()}"
     )
 

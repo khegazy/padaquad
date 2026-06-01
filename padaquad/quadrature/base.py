@@ -346,6 +346,12 @@ class AdaptiveQuadrature(SolverBase):
         f, mesh_init, mesh_final, y0 = self._check_variables(
             f, mesh_init, mesh_final, y0
         )
+        # Coerce any tensor in f_args onto the solver device too (it is forwarded
+        # to f(t, *f_args)); DistributedEnvironment owns the device and every
+        # input is moved onto it.
+        f_args = tuple(
+            a.to(self.device) if torch.is_tensor(a) else a for a in f_args
+        )
         total_mem_usage = (
             self.total_mem_usage if total_mem_usage is None else total_mem_usage
         )
@@ -1358,6 +1364,12 @@ class AdaptiveQuadrature(SolverBase):
         N_init_steps,
     ):
         if mesh is not None:
+            # The user-provided mesh enters the loop here; _setup_integral_bounds
+            # only moved a local copy for its assertions, so coerce it onto the
+            # solver's device (DistributedEnvironment owns the device; inputs are
+            # moved to it). Without this, the loop indexes a CPU mesh with
+            # device-side indices and crashes on GPU.
+            mesh = mesh.to(self.dtype).to(self.device)
             mesh_is_given = True
         elif reuse_mesh and self.mesh_previous is not None:
             mesh_is_given = False

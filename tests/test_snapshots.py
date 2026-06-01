@@ -91,7 +91,11 @@ def _run_case(
     try:
         torch.manual_seed(SEED)
         f, _solution_fxn, _cutoff = integrand_dict[integrand]
-        solver = make_uniform_solver(method, atol=atol, rtol=rtol)
+        # Snapshots pin exact float64 values for cross-machine determinism and
+        # must run on CPU. Setting CUDA_VISIBLE_DEVICES here is too late once
+        # torch has initialized CUDA earlier in the session, so pin the solver
+        # device explicitly.
+        solver = make_uniform_solver(method, atol=atol, rtol=rtol, device="cpu")
         output = solver.integrate(
             f,
             mesh_init=T_INIT,

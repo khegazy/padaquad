@@ -423,25 +423,33 @@ def test_finite_integrand_unaffected_by_nonfinite_check(take_gradient):
 
 
 def test_check_f_output_finite_helper():
-    """Unit-test the finiteness helper directly across its branches."""
+    """Unit-test the finiteness helper directly across its branches.
+
+    The helper reads ``self.error_on_nonfinite`` (set from the
+    ``integrate(error_on_nonfinite=...)`` argument), so toggle it on the solver.
+    """
     solver = make_uniform_solver("gk21", atol=1e-6, rtol=1e-6)
     nodes = torch.tensor([[0.1], [0.2], [0.3]], dtype=torch.float64)
     good = torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float64)
     bad = torch.tensor([[1.0], [float("nan")], [3.0]], dtype=torch.float64)
 
+    solver.error_on_nonfinite = True
     # Finite tensor: never raises.
-    solver._check_f_output_finite(good, nodes, True)
-    # Non-finite tensor with the flag off: no raise (guard keeps the run alive).
-    solver._check_f_output_finite(bad, nodes, False)
+    solver._check_f_output_finite(good, nodes)
     # Non-finite tensor with the flag on: raises and localizes the offending t.
     with pytest.raises(ValueError, match=r"non-finite") as excinfo:
-        solver._check_f_output_finite(bad, nodes, True)
+        solver._check_f_output_finite(bad, nodes)
     assert "0.2" in str(excinfo.value), (
         f"offending t not reported: {excinfo.value}"
     )
 
+    # Flag off: no raise (the guard keeps the run alive instead).
+    solver.error_on_nonfinite = False
+    solver._check_f_output_finite(bad, nodes)
+
     # Bare-scalar branch (e.g. f returning a Python number): finite passes,
     # non-finite raises.
-    solver._check_f_output_finite(1.0, nodes, True)
+    solver.error_on_nonfinite = True
+    solver._check_f_output_finite(1.0, nodes)
     with pytest.raises(ValueError, match=r"non-finite"):
-        solver._check_f_output_finite(float("inf"), nodes, True)
+        solver._check_f_output_finite(float("inf"), nodes)

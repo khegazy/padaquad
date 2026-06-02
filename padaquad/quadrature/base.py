@@ -156,6 +156,9 @@ class AdaptiveQuadrature(SolverBase):
         self.C = None
         self.Cm1 = None
         self.error_calc_idx = error_calc_idx
+        # Construction-time default; the active value lives in
+        # self.error_on_nonfinite and is (re)set each integrate() call.
+        self.init_error_on_nonfinite = error_on_nonfinite
         self.error_on_nonfinite = error_on_nonfinite
         self.total_mem_usage = total_mem_usage
 
@@ -336,8 +339,10 @@ class AdaptiveQuadrature(SolverBase):
         )
 
         # Per-call error_on_nonfinite takes priority over the constructor value.
-        error_on_nonfinite = (
-            self.error_on_nonfinite
+        # Stored on self so the evaluation helpers can read it without threading
+        # it through every signature.
+        self.error_on_nonfinite = (
+            self.init_error_on_nonfinite
             if error_on_nonfinite is None
             else error_on_nonfinite
         )
@@ -434,7 +439,6 @@ class AdaptiveQuadrature(SolverBase):
                 force_max_batch,
                 total_mem_usage,
                 split_node_state,
-                error_on_nonfinite,
             )
 
             # --- Step 3: Compute integral contributions via qudrature formula ---
@@ -825,15 +829,15 @@ class AdaptiveQuadrature(SolverBase):
             return integrand, tuple(tracked)
         return out, None
 
-    @staticmethod
-    def _check_f_output_finite(integrand, nodes_flat, error_on_nonfinite, max_report=5):
+    def _check_f_output_finite(self, integrand, nodes_flat, max_report=5):
         """
         Raise a located ``ValueError`` if an integrand batch is non-finite.
 
         A NaN/Inf integrand value poisons the panel's error ratio. Detecting it
         at the source (rather than letting it silently propagate into a NaN
         result, or stall the adaptive loop) gives the user an actionable error
-        naming the offending ``t``.
+        naming the offending ``t``. Gated on ``self.error_on_nonfinite`` (set
+        from the ``integrate(error_on_nonfinite=...)`` argument).
 
         Args:
             integrand: The integrand tensor for this batch (shape ``[B, D]``,
@@ -843,14 +847,15 @@ class AdaptiveQuadrature(SolverBase):
                 ``math.isfinite`` and no node localization is reported.
             nodes_flat: The flattened node coordinates fed to ``f`` for this
                 batch. Shape ``[B, T]``. Used only to report offending ``t``.
-            error_on_nonfinite: When False this is a no-op; the always-on
-                ``_adaptively_increase_mesh`` guard keeps the run alive instead.
             max_report: Maximum number of offending ``t`` values to list.
 
         Raises:
-            ValueError: If ``error_on_nonfinite`` and any value is non-finite.
+            ValueError: If ``self.error_on_nonfinite`` and any value is
+                non-finite. When ``self.error_on_nonfinite`` is False this is a
+                no-op; the always-on ``_adaptively_increase_mesh`` guard keeps
+                the run alive instead.
         """
-        if not error_on_nonfinite:
+        if not self.error_on_nonfinite:
             return
         if not torch.is_tensor(integrand):
             # Bare scalar (e.g. examples.identity returns int 1). math.isfinite
@@ -892,7 +897,6 @@ class AdaptiveQuadrature(SolverBase):
         force_max_batch,
         total_mem_usage,
         split_node_state,
-        error_on_nonfinite=True,
     ):
         # Determine how many f evaluations fit in one batch based on memory
         if force_max_batch is not None:
@@ -910,7 +914,7 @@ class AdaptiveQuadrature(SolverBase):
 
         if take_gradient:
             return self._evaluate_f_on_full_nodes(
-                f, f_args, mesh, step_idxs, max_mesh_steps, error_on_nonfinite
+                f, f_args, mesh, step_idxs, max_mesh_steps
             )
         else:
             return self._evaluate_f_on_split_nodes(
@@ -921,12 +925,9 @@ class AdaptiveQuadrature(SolverBase):
                 max_batch,
                 max_mesh_steps,
                 split_node_state,
-                error_on_nonfinite,
             )
 
-    def _evaluate_f_on_full_nodes(
-        self, f, f_args, mesh, step_idxs, max_mesh_steps, error_on_nonfinite=True
-    ):
+    def _evaluate_f_on_full_nodes(self, f, f_args, mesh, step_idxs, max_mesh_steps):
         assert max_mesh_steps >= 1, (
             "Not enough free memory to run 1 integration steps for take_gradient=True. Set take_gradient=False if the gradient of the integral is not needed and consider increasing total_mem_usage"
         )
@@ -939,7 +940,7 @@ class AdaptiveQuadrature(SolverBase):
         nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
         assert torch.all(nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0)
         node_evals, tracked = self._split_f_output(f(nodes_flat, *f_args))
-        self._check_f_output_finite(node_evals, nodes_flat, error_on_nonfinite)
+        self._check_f_output_finite(node_evals, nodes_flat)
 
         # Reshape nodes and evaluations before returning
         unflatten = (len(step_idxs), self.C, -1)
@@ -966,7 +967,6 @@ class AdaptiveQuadrature(SolverBase):
         max_batch,
         max_mesh_steps,
         split_node_state,
-        error_on_nonfinite=True,
     ):
         # Gather nodes and evaluations from previous split. split_mesh_idx
         # stores the residual panel's left-barrier *coordinate* (not an
@@ -1053,7 +1053,6 @@ class AdaptiveQuadrature(SolverBase):
             self._check_f_output_finite(
                 integrand,
                 nodes_flat[i * max_batch : (i + 1) * max_batch],
-                error_on_nonfinite,
             )
             f_evals.append(integrand)
             if tracked is not None:

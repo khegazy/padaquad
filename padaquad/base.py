@@ -161,18 +161,21 @@ class SolverBase(ABC, DistributedEnvironment):
         self.method_name = method.lower()
         self.atol = atol
         self.rtol = rtol
-        self.f = f
-        self.y0 = (
+        # Construction-time defaults; each integrate() call falls back to these
+        # when its corresponding argument is None (the active value is the local
+        # resolved in _check_variables).
+        self.init_f = f
+        self.init_y0 = (
             y0.to(self.device)
             if y0 is not None
             else torch.tensor([0], dtype=torch.float64, device=self.device)
         )
-        self.mesh_init = (
+        self.init_mesh_init = (
             mesh_init.to(self.device)
             if mesh_init is not None
             else torch.tensor([0], dtype=torch.float64, device=self.device)
         )
-        self.mesh_final = (
+        self.init_mesh_final = (
             mesh_final.to(self.device)
             if mesh_final is not None
             else torch.tensor([1], dtype=torch.float64, device=self.device)
@@ -319,9 +322,9 @@ class SolverBase(ABC, DistributedEnvironment):
             )
 
         self.dtype = dtype
-        self.y0 = self.y0.to(self.dtype)
-        self.mesh_init = self.mesh_init.to(self.dtype)
-        self.mesh_final = self.mesh_final.to(self.dtype)
+        self.init_y0 = self.init_y0.to(self.dtype)
+        self.init_mesh_init = self.init_mesh_init.to(self.dtype)
+        self.init_mesh_final = self.init_mesh_final.to(self.dtype)
         if self.mesh_previous is not None:
             self.mesh_previous = self.mesh_previous.to(self.dtype)
 
@@ -379,19 +382,19 @@ class SolverBase(ABC, DistributedEnvironment):
         and moved to the solver's device.
 
         Args:
-            f: Integrand function, or None to use self.f.
-            mesh_init: Lower integration bound, or None to use self.mesh_init.
-            mesh_final: Upper integration bound, or None to use self.mesh_final.
-            y0: Initial integral value, or None to use self.y0.
+            f: Integrand function, or None to use self.init_f.
+            mesh_init: Lower integration bound, or None to use self.init_mesh_init.
+            mesh_final: Upper integration bound, or None to use self.init_mesh_final.
+            y0: Initial integral value, or None to use self.init_y0.
 
         Returns:
             Tuple of (f, mesh_init, mesh_final, y0) with defaults filled
             in and tensors on the correct device/dtype.
         """
-        f = self.f if f is None else f
-        mesh_init = self.mesh_init if mesh_init is None else mesh_init
-        mesh_final = self.mesh_final if mesh_final is None else mesh_final
-        y0 = self.y0 if y0 is None else y0
+        f = self.init_f if f is None else f
+        mesh_init = self.init_mesh_init if mesh_init is None else mesh_init
+        mesh_final = self.init_mesh_final if mesh_final is None else mesh_final
+        y0 = self.init_y0 if y0 is None else y0
 
         mesh_init = mesh_init.to(self.dtype).to(self.device)
         mesh_final = mesh_final.to(self.dtype).to(self.device)

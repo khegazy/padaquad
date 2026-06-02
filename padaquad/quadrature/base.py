@@ -146,9 +146,11 @@ class AdaptiveQuadrature(SolverBase):
         assert remove_cut < 1.0
         assert max_adaptive_splits is None or max_adaptive_splits >= 0
         self.remove_cut = remove_cut
-        self.max_batch = max_batch
+        # Construction-time defaults; each integrate() call falls back to these
+        # when its corresponding argument is None.
+        self.init_max_batch = max_batch
         self.max_path_change = max_path_change
-        self.max_adaptive_splits = max_adaptive_splits
+        self.init_max_adaptive_splits = max_adaptive_splits
         self.use_absolute_error_ratio = use_absolute_error_ratio
 
         self.method = None
@@ -160,7 +162,7 @@ class AdaptiveQuadrature(SolverBase):
         # self.error_on_nonfinite and is (re)set each integrate() call.
         self.init_error_on_nonfinite = error_on_nonfinite
         self.error_on_nonfinite = error_on_nonfinite
-        self.total_mem_usage = total_mem_usage
+        self.init_total_mem_usage = total_mem_usage
 
     # -------------------------------------------------------------------------------- #
     #                                 ABSTRACT METHODS                                 #
@@ -329,11 +331,11 @@ class AdaptiveQuadrature(SolverBase):
         mesh_init, mesh_final = self._setup_integral_bounds(mesh, mesh_init, mesh_final)
 
         # Replace max_batch if default it given
-        force_max_batch = self.max_batch if max_batch is None else max_batch
+        force_max_batch = self.init_max_batch if max_batch is None else max_batch
 
         # Per-call max_adaptive_splits takes priority over the constructor value.
         max_adaptive_splits = (
-            self.max_adaptive_splits
+            self.init_max_adaptive_splits
             if max_adaptive_splits is None
             else max_adaptive_splits
         )
@@ -358,7 +360,7 @@ class AdaptiveQuadrature(SolverBase):
             a.to(self.device) if torch.is_tensor(a) else a for a in f_args
         )
         total_mem_usage = (
-            self.total_mem_usage if total_mem_usage is None else total_mem_usage
+            self.init_total_mem_usage if total_mem_usage is None else total_mem_usage
         )
         MEM_ERROR = "total_mem_usage is a ratio and must be 0 < total_mem_usage <= 1"
         assert total_mem_usage <= 1.0, MEM_ERROR
@@ -1342,8 +1344,8 @@ class AdaptiveQuadrature(SolverBase):
                 "Integrator requires mesh_init < mesh_final, consider switching them and multiplying the integral by -1. Please also consider effects to your f."
             )
         else:
-            mesh_init = self.mesh_init if mesh_init is None else mesh_init
-            mesh_final = self.mesh_final if mesh_final is None else mesh_final
+            mesh_init = self.init_mesh_init if mesh_init is None else mesh_init
+            mesh_final = self.init_mesh_final if mesh_final is None else mesh_final
         mesh_init = mesh_init.to(self.dtype).to(self.device)
         mesh_final = mesh_final.to(self.dtype).to(self.device)
 

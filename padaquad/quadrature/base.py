@@ -356,9 +356,7 @@ class AdaptiveQuadrature(SolverBase):
         # Coerce any tensor in f_args onto the solver device too (it is forwarded
         # to f(t, *f_args)); DistributedEnvironment owns the device and every
         # input is moved onto it.
-        f_args = tuple(
-            a.to(self.device) if torch.is_tensor(a) else a for a in f_args
-        )
+        f_args = tuple(a.to(self.device) if torch.is_tensor(a) else a for a in f_args)
         total_mem_usage = (
             self.init_total_mem_usage if total_mem_usage is None else total_mem_usage
         )

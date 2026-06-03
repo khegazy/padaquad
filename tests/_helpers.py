@@ -78,13 +78,19 @@ def make_uniform_solver(method_name, atol=ATOL_TIGHT, rtol=RTOL_TIGHT, **kwargs)
     )
 
 
-def make_solver_for_unit_test(method_name="bosh3", atol=1e-6, rtol=1e-6):
+def make_solver_for_unit_test(
+    method_name="bosh3", atol=1e-6, rtol=1e-6, dtype=torch.float64, **kwargs
+):
     """Create a minimal solver for testing internal methods (no f needed).
 
     Pinned to CPU: these unit tests call internal methods directly with
     hand-built CPU tensors, so the solver device must match (otherwise the
     solver auto-selects CUDA on a GPU machine and the internal device-side
     allocations clash with the CPU inputs).
+
+    ``dtype`` and any extra ``kwargs`` (e.g. ``error_norm``,
+    ``mesh_failure_tolerance``, ``use_absolute_error_ratio``) are forwarded to
+    the solver constructor so internal-method tests can pin them directly.
     """
     return adaptive_quadrature(
         sampling_type=steps.ADAPTIVE_UNIFORM,
@@ -93,6 +99,8 @@ def make_solver_for_unit_test(method_name="bosh3", atol=1e-6, rtol=1e-6):
         rtol=rtol,
         remove_cut=REMOVE_CUT,
         device="cpu",
+        dtype=dtype,
+        **kwargs,
     )
 
 

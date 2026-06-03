@@ -193,6 +193,7 @@ def test_per_method_independence_across_output_dimensions(take_gradient):
         )
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64], ids=["f32", "f64"])
 @pytest.mark.parametrize(
     "error_norm",
     [
@@ -203,23 +204,31 @@ def test_per_method_independence_across_output_dimensions(take_gradient):
         pytest.param(_l2_norm, id="callable_l2"),
     ],
 )
-def test_error_norm_schemes_integrate_accurately(error_norm):
-    """Every error_norm scheme integrates the vector integrand accurately."""
+def test_error_norm_schemes_integrate_accurately(error_norm, dtype):
+    """Every error_norm scheme integrates the vector integrand accurately, at
+    both float32 and float64, and preserves the input dtype in the result."""
     a, b = 0.0, math.pi / 2
+    # float32 cannot resolve 1e-8; use a dtype-appropriate tolerance/cutoff.
+    tol = 1e-8 if dtype == torch.float64 else 1e-6
+    cutoff = 1e-5 if dtype == torch.float64 else 1e-4
     result = integrate(
         f=_vector_integrand,
         method="gk21",
-        atol=ATOL,
-        rtol=RTOL,
-        mesh_init=torch.tensor([a], dtype=torch.float64),
-        mesh_final=torch.tensor([b], dtype=torch.float64),
+        atol=tol,
+        rtol=tol,
+        mesh_init=torch.tensor([a], dtype=dtype),
+        mesh_final=torch.tensor([b], dtype=dtype),
         error_norm=error_norm,
         take_gradient=False,
     )
     truth = _truth(a, b)
     assert result.integral.shape == (D,)
-    assert torch.allclose(result.integral.cpu(), truth, atol=1e-5), (
-        f"error_norm={error_norm}: got {result.integral.cpu().tolist()}, "
+    assert result.integral.dtype == dtype, (
+        f"error_norm={error_norm}: result dtype {result.integral.dtype} != {dtype}"
+    )
+    got = result.integral.cpu().double()
+    assert torch.allclose(got, truth, atol=cutoff), (
+        f"error_norm={error_norm} ({dtype}): got {got.tolist()}, "
         f"expected {truth.tolist()}"
     )
 

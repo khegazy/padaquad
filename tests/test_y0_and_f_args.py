@@ -193,4 +193,4 @@ def test_y0_difference_equals_y0_for_same_integral(take_gradient):
 
     # y0 field on the result should echo what was passed in.
     assert result_offset.y0 is not None
-    assert torch.allclose(result_offset.y0, offset)
+    assert torch.allclose(result_offset.y0.cpu(), offset)

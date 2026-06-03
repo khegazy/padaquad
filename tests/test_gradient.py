@@ -94,7 +94,7 @@ class TestGradientFlowThroughIntegrate:
         torch.manual_seed(SEED)
         integrand = ScaledIntegrand(scale=2.0)
         solver = make_uniform_solver(
-            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand
+            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device="cpu"
         )
         result = solver.integrate(
             mesh_init=torch.tensor([0], dtype=torch.float64),
@@ -111,7 +111,7 @@ class TestGradientFlowThroughIntegrate:
         torch.manual_seed(SEED)
         integrand = ScaledIntegrand(scale=2.0)
         solver = make_uniform_solver(
-            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand
+            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device="cpu"
         )
         result = solver.integrate(
             mesh_init=torch.tensor([0], dtype=torch.float64),
@@ -128,7 +128,7 @@ class TestGradientFlowThroughIntegrate:
         torch.manual_seed(SEED)
         integrand = ScaledIntegrand(scale=2.0)
         solver = make_uniform_solver(
-            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand
+            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device="cpu"
         )
         result = solver.integrate(
             mesh_init=torch.tensor([0], dtype=torch.float64),
@@ -201,7 +201,7 @@ class TestCustomLoss:
         integrand = ScaledIntegrand(scale=2.0)
         integrand.eval()
         solver = make_uniform_solver(
-            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand
+            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device="cpu"
         )
         result = solver.integrate(
             mesh_init=torch.tensor([0], dtype=torch.float64),
@@ -216,7 +216,7 @@ class TestCustomLoss:
         integrand = ScaledIntegrand(scale=2.0)
         integrand.eval()
         solver = make_uniform_solver(
-            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand
+            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device="cpu"
         )
 
         def double_loss(output):
@@ -237,7 +237,7 @@ class TestCustomLoss:
         torch.manual_seed(SEED)
         integrand = ScaledIntegrand(scale=2.0)
         solver = make_uniform_solver(
-            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand
+            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device="cpu"
         )
 
         def square_loss(output):

@@ -89,7 +89,7 @@ class TestSetDtype:
         solver = make_solver_for_unit_test()
         try:
             solver._set_dtype(torch.float32)
-            assert solver.y0.dtype == torch.float32
+            assert solver.init_y0.dtype == torch.float32
         finally:
             _restore_tableau("bosh3", saved)
 
@@ -99,8 +99,8 @@ class TestSetDtype:
         solver = make_solver_for_unit_test()
         try:
             solver._set_dtype(torch.float32)
-            assert solver.mesh_init.dtype == torch.float32
-            assert solver.mesh_final.dtype == torch.float32
+            assert solver.init_mesh_init.dtype == torch.float32
+            assert solver.init_mesh_final.dtype == torch.float32
         finally:
             _restore_tableau("bosh3", saved)
 
@@ -197,9 +197,9 @@ class TestCheckVariables:
         assert mesh_init is not None
         assert mesh_final is not None
         assert y0 is not None
-        assert torch.equal(mesh_init, solver.mesh_init)
-        assert torch.equal(mesh_final, solver.mesh_final)
-        assert torch.equal(y0, solver.y0)
+        assert torch.equal(mesh_init, solver.init_mesh_init)
+        assert torch.equal(mesh_final, solver.init_mesh_final)
+        assert torch.equal(y0, solver.init_y0)
 
     def test_overrides_with_args(self):
         """Explicit args override stored defaults."""

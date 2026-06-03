@@ -22,7 +22,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
 from einops import rearrange
 
@@ -70,6 +69,13 @@ class _VariableAdaptiveQuadratureBase(AdaptiveQuadrature):
         )
         self.method = VARIABLE_METHODS[self.method_name]()
         self.method.to_dtype(self.dtype)
+        # Move the method's tensors onto the solver device. The uniform solver
+        # does this via _get_method(..., self.device, ...); the variable solver
+        # built its method without a device, so its tensors (e.g. b_delta) would
+        # otherwise stay on CPU and clash with device-side nodes during
+        # tableau_b(c). DistributedEnvironment owns the device; the method is
+        # moved onto it.
+        self.method.to_device(self.device)
         self.order = self.method.order
         self.C = self.method.n_tableau_c
         self.Cm1 = self.C - 1
@@ -253,7 +259,7 @@ class _VariableAdaptiveQuadratureBase(AdaptiveQuadrature):
         assert torch.all(
             nodes_pruned_flat[1:] - nodes_pruned_flat[:-1] + self.atol_assert >= 0
         )
-        assert np.allclose(
+        assert torch.allclose(
             nodes_pruned[:-1, -1, :],
             nodes_pruned[1:, 0, :],
             atol=self.atol_assert,

@@ -37,7 +37,7 @@ from tests._helpers import make_uniform_solver
 
 
 def _make_synthetic_inputs(n: int, step_error: float, step_value: float, dtype):
-    """Hand-crafted inputs to ``_compute_error_ratios_*``.
+    """Hand-crafted inputs to ``_compute_error_ratios``.
 
     Returns:
       ``mesh_quadratures`` of shape [N, 1] with every step contributing
@@ -66,7 +66,8 @@ def test_absolute_mode_treats_steps_uniformly():
         n, step_error, step_value, dtype
     )
 
-    error_ratios, _ = solver._compute_error_ratios_absolute(
+    solver.use_absolute_error_ratio = True
+    error_ratios, _, _ = solver._compute_error_ratios(
         mesh_quadrature_errors=mesh_quadrature_errors, integral=integral
     )
 
@@ -104,7 +105,8 @@ def test_cumulative_mode_tightens_at_small_cumsum():
         n, step_error, step_value, dtype
     )
 
-    error_ratios, _ = solver._compute_error_ratios_cumulative(
+    solver.use_absolute_error_ratio = False
+    error_ratios, _, _ = solver._compute_error_ratios(
         mesh_quadrature_errors=mesh_quadrature_errors, mesh_quadratures=mesh_quadratures
     )
 
@@ -139,10 +141,12 @@ def test_modes_agree_when_cumsum_equals_total_at_last_step():
         n, step_error, step_value, dtype
     )
 
-    abs_ratios, _ = solver._compute_error_ratios_absolute(
+    solver.use_absolute_error_ratio = True
+    abs_ratios, _, _ = solver._compute_error_ratios(
         mesh_quadrature_errors=mesh_quadrature_errors, integral=integral
     )
-    cum_ratios, _ = solver._compute_error_ratios_cumulative(
+    solver.use_absolute_error_ratio = False
+    cum_ratios, _, _ = solver._compute_error_ratios(
         mesh_quadrature_errors=mesh_quadrature_errors, mesh_quadratures=mesh_quadratures
     )
 

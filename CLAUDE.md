@@ -215,9 +215,37 @@ is a boolean array where `True` means the panel still needs evaluation.
 
 ### Error computation modes
 
-Two modes selected by `use_absolute_error_ratio`:
-- **Absolute** (default): `error_ratio = |step_error| / (atol + rtol * |total_integral|)`. Every panel uses the same denominator. Best for path integrals where the total is the meaningful quantity.
-- **Cumulative**: `error_ratio = |step_error| / (atol + rtol * |cumsum_to_step|)`. The denominator grows with the running integral, mimicking traditional ODE error control. Per-panel ratios *decrease* as integration progresses.
+Two orthogonal axes control the adaptive accept/reject decision: the
+**tolerance reference** (`use_absolute_error_ratio`) and the **vector-error
+reduction scheme** (`error_norm`).
+
+**Tolerance reference** (`use_absolute_error_ratio`):
+- **Absolute** (default): denominator is `atol + rtol * |total_integral|`. Every panel uses the same denominator. Best for path integrals where the total is the meaningful quantity.
+- **Cumulative**: denominator is `atol + rtol * |cumsum_to_step|`, growing with the running integral (traditional ODE-style). Per-panel ratios *decrease* as integration progresses.
+
+**Vector-error reduction** (`error_norm`, modeled on
+`scipy.integrate.quad_vec`'s `norm`): for vector-valued integrands (`D > 1`)
+the per-step error must be reduced to one accept/reject decision. Two families,
+both reducing to `|error| / (atol + rtol*|I|) < 1` when `D == 1`:
+- **Norm family** — *reduce-then-compare* (scipy style): reduce the error
+  vector to a scalar with the norm, compare to `atol + rtol * norm(integral)`.
+  Accept when `< 1`. Options: `"2"` (default, L2 = `sqrt(sum(e²))`), `"max"`
+  (L∞), `"rms"` (`sqrt(mean(e²))`, padaquad's historical reduction), or a
+  callable reducing the last (`D`) axis.
+- **`"failure_fraction"`** — *per-component*: each output element is compared
+  against its own `atol + rtol*|I_d|`; a panel is accepted when the fraction of
+  failing elements is `<= mesh_failure_tolerance` (default 0.0 ⇒ every element
+  must pass). This bounds the error of *every* output dimension rather than an
+  aggregate.
+
+Both families accept a panel with any non-finite (NaN/Inf) element (splitting
+cannot fix it; see `_adaptively_increase_mesh`) and apply a scipy-style
+machine-precision **rounding floor** (`_round_floor`) so refinement stops once a
+panel's error is at/below round-off. The scheme is set at construction
+(`error_norm=`, `mesh_failure_tolerance=`) and overridable per call in
+`integrate()`. `_compute_error_ratios` dispatches to `_error_ratios_norm` /
+`_error_ratios_failure_fraction`; `_accept_reject_masks` turns the result into
+keep/split masks consumed by `_adaptively_increase_mesh`.
 
 `error_ratios_2steps`: combined error of consecutive step pairs, used for
 merging. When `error_ratio_2steps < remove_cut` (default 0.1), pairs are

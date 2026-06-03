@@ -35,6 +35,8 @@ def integrate(
     remove_cut: float = 0.1,
     total_mem_usage: float = 0.9,
     use_absolute_error_ratio: bool = True,
+    error_norm: str | Callable = "2",
+    mesh_failure_tolerance: float = 0.0,
     take_gradient: bool = True,
     max_adaptive_splits: int | None = None,
     error_on_nonfinite: bool = True,
@@ -97,6 +99,14 @@ def integrate(
             total integral value as the reference. If False, uses the
             cumulative integral up to each step (more like traditional
             ODE error control).
+        error_norm: How a vector-valued (D > 1) per-step error is reduced to a
+            single accept/reject decision. One of "2" (default, scipy-style L2),
+            "max" (L-infinity), "rms" (root-mean-square), "failure_fraction"
+            (per-component control), or a callable reducing the last axis. See
+            ``AdaptiveQuadrature.__init__`` for details.
+        mesh_failure_tolerance: Fraction in [0, 1] of output elements allowed to
+            exceed tolerance while a panel is still accepted; used only when
+            ``error_norm == "failure_fraction"``. Default 0.0.
         max_adaptive_splits: Maximum number of times a panel may be split
             during adaptive refinement. A panel split this many times is
             accepted even if it still fails the error tolerance, rather than
@@ -108,7 +118,7 @@ def integrate(
         device: Device to run on (e.g. 'cuda', 'cpu'). If None,
             auto-detects.
         **kwargs: Additional keyword arguments forwarded to the solver
-            constructor (e.g. max_batch, max_path_change, error_calc_idx).
+            constructor (e.g. max_batch, max_path_change).
 
     Returns:
         IntegrationResult containing the computed integral, error estimates,
@@ -145,6 +155,8 @@ def integrate(
         mesh_init=mesh_init,
         mesh_final=mesh_final,
         use_absolute_error_ratio=use_absolute_error_ratio,
+        error_norm=error_norm,
+        mesh_failure_tolerance=mesh_failure_tolerance,
         device=device,
         **kwargs,
     )

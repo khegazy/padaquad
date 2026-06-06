@@ -40,11 +40,11 @@ Class hierarchy (defined here):
 
 from __future__ import annotations
 
+import gc
 import logging
 import math
 import time
 import warnings
-import gc
 from abc import abstractmethod
 from typing import TYPE_CHECKING
 
@@ -1169,7 +1169,7 @@ class AdaptiveQuadrature(SolverBase):
                 if max_batch == 1:
                     raise torch.OutOfMemoryError(
                         f"{e}\n\nSingle integrand (f) evaluation failed to fit in memory, batch size cannot be reduced."
-                    )
+                    ) from e
                 free_mem, total_mem = self._get_memory()
                 gc.collect()
                 if torch.cuda.is_available():
@@ -1184,9 +1184,9 @@ class AdaptiveQuadrature(SolverBase):
                 self._oom_max_batch = torch.int(torch.round(0.75 * self._oom_max_batch))
                 logger.warning(
                     f"Caught OOM with {free_mem} GB free of {total_mem} GB. "
-                    + f"Reducing max_batch from {max_batch} to {self._oom_max_batch}."
-                    + "If this warning appears often, consider reducing max_batch to "
-                    + "avoid deleting and rerunning evaluations."
+                     f"Reducing max_batch from {max_batch} to {self._oom_max_batch}."
+                     "If this warning appears often, consider reducing max_batch to "
+                     "avoid deleting and rerunning evaluations."
                 )
                 max_batch = self._oom_max_batch
                 self.previous_max_batch = self._oom_max_batch
@@ -2155,7 +2155,7 @@ class AdaptiveQuadrature(SolverBase):
             # Catch OOM errors
             try:
                 result = f(t_input, *f_args)
-            except torch.OutOfMemoryError as e:
+            except torch.OutOfMemoryError:
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()

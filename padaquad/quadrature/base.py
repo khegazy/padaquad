@@ -169,6 +169,11 @@ class AdaptiveQuadrature(SolverBase):
         assert remove_cut < 1.0
         assert max_adaptive_splits is None or max_adaptive_splits >= 0
         self.remove_cut = remove_cut
+        
+        # Memory handling variables
+        self._oom_max_batch = None
+        self.previous_max_batch = None
+        
         # Construction-time defaults; each integrate() call falls back to these
         # when its corresponding argument is None.
         self.init_max_batch = max_batch
@@ -180,7 +185,6 @@ class AdaptiveQuadrature(SolverBase):
         self.order = None
         self.C = None
         self.Cm1 = None
-        self._oom_max_batch = None
         # Construction-time defaults; the active values live in self.error_norm
         # and self.mesh_failure_tolerance and are (re)set each integrate() call.
         self._check_error_norm(error_norm)
@@ -446,6 +450,10 @@ class AdaptiveQuadrature(SolverBase):
         same_integrand_fxn = (
             self.previous_f_id is not None and id(f) == self.previous_f_id
         )
+        # Use the previous max_batch, running memory check everytime is slow
+        if force_max_batch is None:
+            force_max_batch = self.previous_max_batch
+            
         # Benchmark memory footprint on first call with a new integrand
         if not same_integrand_fxn and force_max_batch is None:
             self._setup_memory_checks(
@@ -997,6 +1005,7 @@ class AdaptiveQuadrature(SolverBase):
             max_batch = force_max_batch
         else:
             max_batch = self._get_max_f_evals(total_mem_usage)
+        self.previous_max_batch = max_batch
 
         # max_batch should not exceed the remaining number of f evaluations
         batches_left = torch.sum(mesh_trackers) * self.C
@@ -1182,6 +1191,7 @@ class AdaptiveQuadrature(SolverBase):
                     + "avoid deleting and rerunning evaluations."
                 )
                 max_batch = self._oom_max_batch
+                self.previous_max_batch = self._oom_max_batch
                 continue
             
             integrand, tracked = self._split_f_output(f_output)

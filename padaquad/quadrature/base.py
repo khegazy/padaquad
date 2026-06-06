@@ -1184,9 +1184,9 @@ class AdaptiveQuadrature(SolverBase):
                 self._oom_max_batch = torch.int(torch.round(0.75 * self._oom_max_batch))
                 logger.warning(
                     f"Caught OOM with {free_mem} GB free of {total_mem} GB. "
-                     f"Reducing max_batch from {max_batch} to {self._oom_max_batch}."
-                     "If this warning appears often, consider reducing max_batch to "
-                     "avoid deleting and rerunning evaluations."
+                    f"Reducing max_batch from {max_batch} to {self._oom_max_batch}."
+                    "If this warning appears often, consider reducing max_batch to "
+                    "avoid deleting and rerunning evaluations."
                 )
                 max_batch = self._oom_max_batch
                 self.previous_max_batch = self._oom_max_batch

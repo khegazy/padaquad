@@ -44,6 +44,7 @@ import logging
 import math
 import time
 import warnings
+import gc
 from abc import abstractmethod
 from typing import TYPE_CHECKING
 
@@ -1160,6 +1161,7 @@ class AdaptiveQuadrature(SolverBase):
                     raise torch.OutOfMemoryError(
                         f"{e}\n\nSingle integrand (f) evaluation failed to fit in memory, batch size cannot be reduced."
                     )
+                free_mem, total_mem = self._get_memory()
                 gc.collect()
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
@@ -1172,6 +1174,12 @@ class AdaptiveQuadrature(SolverBase):
                     time.sleep(0.05)
                 self._oom_max_batch = torch.int(
                     torch.round(0.75*self._oom_max_batch)
+                )
+                logger.warning(
+                    f"Caught OOM with {free_mem} GB free of {total_mem} GB. "
+                    + f"Reducing max_batch from {max_batch} to {self._oom_max_batch}."
+                    + "If this warning appears often, consider reducing max_batch to "
+                    + "avoid deleting and rerunning evaluations."
                 )
                 max_batch = self._oom_max_batch
                 continue
@@ -2122,7 +2130,7 @@ class AdaptiveQuadrature(SolverBase):
         node_test = node_test.unsqueeze(0)
         self.f_unit_mem_size = None
 
-        N = 10
+        N = 1
         max_evals = 2 * N
         eval_time = 0
         mem_scale = 2.1 if take_gradient else 1.0
@@ -2135,7 +2143,23 @@ class AdaptiveQuadrature(SolverBase):
                 and self.f_unit_mem_size * N > mem_before[0]
             ):
                 return
-            result = f(t_input, *f_args)
+            
+            # Catch OOM errors
+            try:
+                result = f(t_input, *f_args)
+            except torch.OutOfMemoryError as e:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    # Small grace period for any async CUDA cleanup to land.
+                    # Avoiding `torch.cuda.synchronize()` here on purpose: post-
+                    # CUDA-OOM the default stream can be in an error state, and
+                    # synchronize on a faulted stream has been observed to
+                    # block indefinitely — matching the futex-wait-on-all-threads
+                    # signature of the prior deadlock.
+                    time.sleep(0.05)
+                return
+            
             mem_after = self._get_memory()
             del result
             self.f_unit_mem_size = mem_scale * max(

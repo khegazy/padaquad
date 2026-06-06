@@ -439,9 +439,7 @@ def test_check_f_output_finite_helper():
     # Non-finite tensor with the flag on: raises and localizes the offending t.
     with pytest.raises(ValueError, match=r"non-finite") as excinfo:
         solver._check_f_output_finite(bad, nodes)
-    assert "0.2" in str(excinfo.value), (
-        f"offending t not reported: {excinfo.value}"
-    )
+    assert "0.2" in str(excinfo.value), f"offending t not reported: {excinfo.value}"
 
     # Flag off: no raise (the guard keeps the run alive instead).
     solver.error_on_nonfinite = False

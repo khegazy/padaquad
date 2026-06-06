@@ -168,3 +168,33 @@ class TestAdaptivelyAddSteps:
         assert len(barriers_new) == 2
         assert trackers_new[0] == False  # noqa: E712
         assert len(er_kept) == 1
+
+    def test_explicit_masks_override_scalar_rule(self):
+        """When keep_mask/remove_mask are given they drive accept/reject,
+        independent of the scalar error_ratios values."""
+        barriers = torch.tensor([[0.0], [0.5], [1.0]], dtype=torch.float64)
+        trackers = torch.tensor([True, True, False])
+        idxs = torch.tensor([0, 1])
+        # Scalar rule would keep both (< 1), but the explicit masks reject step 0.
+        error_ratios = torch.tensor([0.5, 0.5])
+        keep_mask = torch.tensor([False, True])
+        remove_mask = torch.tensor([True, False])
+        mo = _make_method_output(2)
+
+        mo_out, _, _, _, barriers_new, _, er_kept, _ = (
+            self.solver._adaptively_increase_mesh(
+                mo,
+                error_ratios,
+                None,
+                None,
+                barriers,
+                idxs,
+                trackers,
+                keep_mask=keep_mask,
+                remove_mask=remove_mask,
+            )
+        )
+        # One step split -> one midpoint added (3 -> 4); one step kept.
+        assert len(barriers_new) == 4
+        assert len(er_kept) == 1
+        assert mo_out.mesh_quadratures.shape[0] == 1

@@ -180,8 +180,8 @@ class TestUnit:
         step_idxs = _make_step_idxs()
         f, _, _ = _resolve_integrand(integrand_name)
 
-        nodes, f_evals, _tracked, returned_idxs, state = solver._evaluate_f_on_full_nodes(
-            f, (), mesh, step_idxs, max_mesh_steps
+        nodes, f_evals, _tracked, returned_idxs, state = (
+            solver._evaluate_f_on_full_nodes(f, (), mesh, step_idxs, max_mesh_steps)
         )
 
         N_expected = min(max_mesh_steps, len(step_idxs))
@@ -254,14 +254,16 @@ class TestUnit:
         evaluate_all = (max_mesh_steps * C) % max_batch == 0
         num_mesh_steps_expected = max_mesh_steps if evaluate_all else max_mesh_steps + 1
 
-        nodes, _f_evals, _tracked, _returned_idxs, state = solver._evaluate_f_on_split_nodes(
-            _simple_integrand,
-            (),
-            mesh,
-            step_idxs,
-            max_batch=max_batch,
-            max_mesh_steps=max_mesh_steps,
-            split_node_state=(None, None, None, None),
+        nodes, _f_evals, _tracked, _returned_idxs, state = (
+            solver._evaluate_f_on_split_nodes(
+                _simple_integrand,
+                (),
+                mesh,
+                step_idxs,
+                max_batch=max_batch,
+                max_mesh_steps=max_mesh_steps,
+                split_node_state=(None, None, None, None),
+            )
         )
 
         if evaluate_all:
@@ -273,7 +275,9 @@ class TestUnit:
             # places the rest in split_node_state.
             num_residual = max_batch - (max_mesh_steps * C) % max_batch
             assert nodes.shape == (num_mesh_steps_expected - 1, C, 1)
-            residual_nodes, residual_f_evals, _residual_tracked, residual_mesh_idx = state
+            residual_nodes, residual_f_evals, _residual_tracked, residual_mesh_idx = (
+                state
+            )
             assert residual_nodes is not None
             assert residual_f_evals is not None
             assert residual_mesh_idx is not None
@@ -306,14 +310,16 @@ class TestUnit:
         step_idxs = torch.arange(mesh.shape[0] - 1)
 
         # First call: produces residual if evaluate_all=False
-        _nodes1, _f_evals1, _tracked, step_idxs1, state1 = solver._evaluate_f_on_split_nodes(
-            _simple_integrand,
-            (),
-            mesh,
-            step_idxs,
-            max_batch=max_batch,
-            max_mesh_steps=max_mesh_steps,
-            split_node_state=(None, None, None, None),
+        _nodes1, _f_evals1, _tracked, step_idxs1, state1 = (
+            solver._evaluate_f_on_split_nodes(
+                _simple_integrand,
+                (),
+                mesh,
+                step_idxs,
+                max_batch=max_batch,
+                max_mesh_steps=max_mesh_steps,
+                split_node_state=(None, None, None, None),
+            )
         )
 
         evaluate_all_iter1 = (max_mesh_steps * C) % max_batch == 0
@@ -325,14 +331,16 @@ class TestUnit:
         if len(remaining_idxs) == 0:
             pytest.skip("Iteration 1 consumed all panels; no Path B continuation")
 
-        nodes2, _f_evals2, _tracked, _step_idxs2, _state2 = solver._evaluate_f_on_split_nodes(
-            _simple_integrand,
-            (),
-            mesh,
-            remaining_idxs,
-            max_batch=max_batch,
-            max_mesh_steps=max_mesh_steps,
-            split_node_state=state1,
+        nodes2, _f_evals2, _tracked, _step_idxs2, _state2 = (
+            solver._evaluate_f_on_split_nodes(
+                _simple_integrand,
+                (),
+                mesh,
+                remaining_idxs,
+                max_batch=max_batch,
+                max_mesh_steps=max_mesh_steps,
+                split_node_state=state1,
+            )
         )
 
         # Path B output shape constraint: nodes2 has at least one panel
@@ -342,7 +350,9 @@ class TestUnit:
         # The first panel of iteration 2's output should be the one whose
         # residual was carried — its first num_residual nodes should match
         # the residual passed in.
-        residual_nodes, _residual_f_evals, _residual_tracked, _residual_mesh_idx = state1
+        residual_nodes, _residual_f_evals, _residual_tracked, _residual_mesh_idx = (
+            state1
+        )
         num_residual = residual_nodes.shape[0]
         assert torch.allclose(
             nodes2[0, :num_residual, :], residual_nodes, atol=1e-12
@@ -389,14 +399,16 @@ class TestUnit:
             batches_left = len(remaining_input) * C
             effective_max_batch = min(max_batch, batches_left)
             effective_max_mesh_steps = effective_max_batch // C
-            nodes_i, f_evals_i, _tracked, idxs_i, state = solver._evaluate_f_on_split_nodes(
-                f,
-                (),
-                mesh,
-                remaining_input,
-                max_batch=effective_max_batch,
-                max_mesh_steps=effective_max_mesh_steps,
-                split_node_state=state,
+            nodes_i, f_evals_i, _tracked, idxs_i, state = (
+                solver._evaluate_f_on_split_nodes(
+                    f,
+                    (),
+                    mesh,
+                    remaining_input,
+                    max_batch=effective_max_batch,
+                    max_mesh_steps=effective_max_mesh_steps,
+                    split_node_state=state,
+                )
             )
             nodes_acc.append(nodes_i)
             f_evals_acc.append(f_evals_i)
@@ -430,8 +442,10 @@ class TestUnit:
         f, _, _ = _resolve_integrand(integrand_name)
 
         # Reference: single full-nodes call
-        nodes_ref, f_evals_ref, _tracked, _step_idxs_ref, _ = solver._evaluate_f_on_full_nodes(
-            f, (), mesh, step_idxs, max_mesh_steps=n_panels
+        nodes_ref, f_evals_ref, _tracked, _step_idxs_ref, _ = (
+            solver._evaluate_f_on_full_nodes(
+                f, (), mesh, step_idxs, max_mesh_steps=n_panels
+            )
         )
 
         # Comparison: split-loop accumulation
@@ -669,7 +683,9 @@ class TestUnit:
         # Now call with step_idxs that does NOT contain residual_mesh_idx.
         # residual_mesh_idx came from step_idxs_long; pick step_idxs that
         # excludes it.
-        _residual_nodes, _residual_f_evals, _residual_tracked, residual_mesh_idx = state_real
+        _residual_nodes, _residual_f_evals, _residual_tracked, residual_mesh_idx = (
+            state_real
+        )
         new_step_idxs = torch.tensor(
             [i for i in range(6) if torch.tensor(i) != residual_mesh_idx][:3]
         )
@@ -885,7 +901,9 @@ class TestIntegration:
         assert completed_panels == set(range(n_panels)), (
             f"Missing panels: {set(range(n_panels)) - completed_panels}"
         )
-        assert state == (None, None, None, None), f"Final state should be empty, got {state}"
+        assert state == (None, None, None, None), (
+            f"Final state should be empty, got {state}"
+        )
         all_nodes = torch.cat(nodes_acc, dim=0)
         assert all_nodes.shape == (n_panels, C, 1)
 
@@ -1194,14 +1212,16 @@ class TestTier2:
         mesh = _make_mesh(n_panels=4)
         step_idxs = torch.tensor([1])  # only panel 1
         max_batch = C
-        nodes, f_evals, _tracked, returned_idxs, state = solver._evaluate_f_on_split_nodes(
-            _simple_integrand,
-            (),
-            mesh,
-            step_idxs,
-            max_batch=max_batch,
-            max_mesh_steps=1,
-            split_node_state=(None, None, None, None),
+        nodes, f_evals, _tracked, returned_idxs, state = (
+            solver._evaluate_f_on_split_nodes(
+                _simple_integrand,
+                (),
+                mesh,
+                step_idxs,
+                max_batch=max_batch,
+                max_mesh_steps=1,
+                split_node_state=(None, None, None, None),
+            )
         )
         assert nodes.shape == (1, C, 1)
         assert f_evals.shape == (1, C, 1)
@@ -1209,8 +1229,10 @@ class TestTier2:
         assert state == (None, None, None, None)
 
         # And for full_nodes
-        nodes_f, _f_evals_f, _tracked, idxs_f, _state_f = solver._evaluate_f_on_full_nodes(
-            _simple_integrand, (), mesh, step_idxs, max_mesh_steps=1
+        nodes_f, _f_evals_f, _tracked, idxs_f, _state_f = (
+            solver._evaluate_f_on_full_nodes(
+                _simple_integrand, (), mesh, step_idxs, max_mesh_steps=1
+            )
         )
         assert nodes_f.shape == (1, C, 1)
         assert idxs_f.tolist() == [1]

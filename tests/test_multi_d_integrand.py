@@ -27,7 +27,7 @@ import pytest
 import torch
 from tests._helpers import TAKE_GRADIENT_IDS, TAKE_GRADIENT_VALUES
 
-from padaquad import VARIABLE_METHODS, integrate
+from padaquad import VARIABLE_METHODS, adaptive_quadrature, integrate
 from padaquad.methods import UNIFORM_METHODS
 
 D = 3
@@ -40,6 +40,24 @@ def _vector_integrand(t: torch.Tensor) -> torch.Tensor:
     while t.dim() < 2:
         t = t.unsqueeze(0)
     return torch.cat([torch.sin(t), torch.cos(t), t], dim=-1)
+
+
+def _l2_norm(x: torch.Tensor) -> torch.Tensor:
+    """Callable error_norm reducing the last (D) axis (L2)."""
+    return torch.sqrt(torch.sum(x**2, dim=-1))
+
+
+def _heterogeneous_integrand(t: torch.Tensor) -> torch.Tensor:
+    """Two smooth components and one oscillatory (hard) component.
+
+    f(t) = [t, t, sin(2*pi*5*t)]. The third component needs much finer
+    resolution than the first two, so the choice of ``error_norm`` (which
+    decides whether that one hard component can force a split) visibly
+    changes the refinement.
+    """
+    while t.dim() < 2:
+        t = t.unsqueeze(0)
+    return torch.cat([t, t, torch.sin(2 * math.pi * 5 * t)], dim=-1)
 
 
 def _truth(a: float, b: float) -> torch.Tensor:
@@ -173,6 +191,131 @@ def test_per_method_independence_across_output_dimensions(take_gradient):
             f"dim {i}: vector got {vec_result.integral[i].item()}, "
             f"scalar got {scalar_val}"
         )
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64], ids=["f32", "f64"])
+@pytest.mark.parametrize(
+    "error_norm",
+    [
+        "2",
+        "max",
+        "rms",
+        "failure_fraction",
+        pytest.param(_l2_norm, id="callable_l2"),
+    ],
+)
+def test_error_norm_schemes_integrate_accurately(error_norm, dtype):
+    """Every error_norm scheme integrates the vector integrand accurately, at
+    both float32 and float64, and preserves the input dtype in the result."""
+    a, b = 0.0, math.pi / 2
+    # float32 cannot resolve 1e-8; use a dtype-appropriate tolerance/cutoff.
+    tol = 1e-8 if dtype == torch.float64 else 1e-6
+    cutoff = 1e-5 if dtype == torch.float64 else 1e-4
+    result = integrate(
+        f=_vector_integrand,
+        method="gk21",
+        atol=tol,
+        rtol=tol,
+        mesh_init=torch.tensor([a], dtype=dtype),
+        mesh_final=torch.tensor([b], dtype=dtype),
+        error_norm=error_norm,
+        take_gradient=False,
+    )
+    truth = _truth(a, b)
+    assert result.integral.shape == (D,)
+    assert result.integral.dtype == dtype, (
+        f"error_norm={error_norm}: result dtype {result.integral.dtype} != {dtype}"
+    )
+    got = result.integral.cpu().double()
+    assert torch.allclose(got, truth, atol=cutoff), (
+        f"error_norm={error_norm} ({dtype}): got {got.tolist()}, "
+        f"expected {truth.tolist()}"
+    )
+
+
+def test_failure_fraction_tol_zero_bounds_every_component():
+    """With mesh_failure_tolerance=0 every output element must meet tolerance,
+    including the hard oscillatory component."""
+    a, b = 0.0, 1.0
+    result = integrate(
+        f=_heterogeneous_integrand,
+        method="gk21",
+        atol=1e-7,
+        rtol=1e-7,
+        mesh_init=torch.tensor([a], dtype=torch.float64),
+        mesh_final=torch.tensor([b], dtype=torch.float64),
+        error_norm="failure_fraction",
+        mesh_failure_tolerance=0.0,
+        take_gradient=False,
+    )
+    # truth: [0.5, 0.5, (1 - cos(2*pi*5))/(2*pi*5)] = [0.5, 0.5, 0.0]
+    truth = torch.tensor([0.5, 0.5, 0.0], dtype=torch.float64)
+    assert torch.allclose(result.integral.cpu(), truth, atol=1e-5)
+
+
+def test_failure_fraction_permissive_uses_no_more_panels():
+    """A permissive mesh_failure_tolerance accepts panels the strict setting
+    would split, so (from the same initial mesh) it never produces a finer
+    optimal mesh."""
+    a, b = 0.0, 1.0
+    init_mesh = torch.linspace(a, b, 9, dtype=torch.float64).unsqueeze(-1)
+    common = {
+        "f": _heterogeneous_integrand,
+        "method": "gk21",
+        "atol": 1e-5,
+        "rtol": 1e-5,
+        "mesh": init_mesh,
+        "error_norm": "failure_fraction",
+        "take_gradient": False,
+    }
+    strict = integrate(mesh_failure_tolerance=0.0, **common)
+    # 0.67 allows up to 2 of 3 components to fail (only an all-fail panel splits).
+    permissive = integrate(mesh_failure_tolerance=0.67, **common)
+    assert len(permissive.mesh_optimal) <= len(strict.mesh_optimal)
+
+
+def test_error_norm_init_and_per_call_override():
+    """Constructor default is used when integrate() args are None; explicit
+    per-call args take priority."""
+    solver = adaptive_quadrature(
+        "uniform",
+        method="gk21",
+        atol=1e-5,
+        rtol=1e-5,
+        error_norm="max",
+        mesh_failure_tolerance=0.3,
+    )
+    kwargs = {
+        "f": _vector_integrand,
+        "mesh_init": torch.tensor([0.0], dtype=torch.float64),
+        "mesh_final": torch.tensor([1.0], dtype=torch.float64),
+        "take_gradient": False,
+    }
+
+    solver.integrate(**kwargs)
+    assert solver.error_norm == "max"
+    assert solver.mesh_failure_tolerance == 0.3
+
+    solver.integrate(error_norm="2", mesh_failure_tolerance=0.5, **kwargs)
+    assert solver.error_norm == "2"
+    assert solver.mesh_failure_tolerance == 0.5
+
+    # None falls back to the construction-time values.
+    solver.integrate(**kwargs)
+    assert solver.error_norm == "max"
+    assert solver.mesh_failure_tolerance == 0.3
+
+
+def test_invalid_error_norm_rejected():
+    """An unknown error_norm string is rejected at construction."""
+    with pytest.raises(ValueError, match="error_norm"):
+        adaptive_quadrature("uniform", method="gk21", error_norm="bogus")
+
+
+def test_invalid_mesh_failure_tolerance_rejected():
+    """mesh_failure_tolerance outside [0, 1] is rejected at construction."""
+    with pytest.raises(ValueError, match="mesh_failure_tolerance"):
+        adaptive_quadrature("uniform", method="gk21", mesh_failure_tolerance=1.5)
 
 
 def test_uniform_methods_registry_complete():

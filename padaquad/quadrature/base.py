@@ -86,9 +86,10 @@ class AdaptiveQuadrature(SolverBase):
             steps exceeds this value (used with pre-specified meshes).
         use_absolute_error_ratio: If True, uses the total integral for error
             normalization. If False, uses cumulative integral up to each step.
-        error_calc_idx: If set, only this output dimension is used for error
-            computation (useful for multi-dimensional integrands where only
-            one dimension should drive adaptivity).
+        error_norm: Vector-error reduction / acceptance scheme (one of "2",
+            "max", "rms", "failure_fraction", or a callable). See __init__.
+        mesh_failure_tolerance: Fraction of output elements allowed to fail when
+            error_norm == "failure_fraction".
         method: The RK method object (set by subclass).
         order: Convergence order of the RK method (set by subclass).
         C: Number of quadrature points per integration step (set by subclass).
@@ -103,7 +104,8 @@ class AdaptiveQuadrature(SolverBase):
         max_path_change: float | None = None,
         max_adaptive_splits: int | None = None,
         use_absolute_error_ratio: bool = True,
-        error_calc_idx: int | None = None,
+        error_norm: str | Callable = "2",
+        mesh_failure_tolerance: float = 0.0,
         error_on_nonfinite: bool = True,
         *args,
         **kwargs,
@@ -131,8 +133,28 @@ class AdaptiveQuadrature(SolverBase):
             use_absolute_error_ratio: If True, error ratios use the total
                 (converging) integral value. If False, uses cumulative sum up
                 to each step. Default: True.
-            error_calc_idx: If set, only this dimension index of the integrand
-                output is used for error-based step decisions.
+            error_norm: Selects how a vector-valued (D > 1) per-step error is
+                reduced to a single accept/reject decision. One of:
+
+                  - ``"2"`` (default, matches ``scipy.integrate.quad_vec``):
+                    L2 norm ``sqrt(sum(e**2))`` of the error vector, compared
+                    against ``atol + rtol * L2(integral)`` (reduce-then-compare).
+                  - ``"max"``: L-infinity norm ``max(|e|)`` (reduce-then-compare).
+                  - ``"rms"``: root-mean-square ``sqrt(mean(e**2))``
+                    (reduce-then-compare; padaquad's historical reduction).
+                  - a callable ``norm(x)`` that reduces the last (D) axis of a
+                    ``[..., D]`` tensor to ``[...]`` (reduce-then-compare).
+                  - ``"failure_fraction"``: per-component control. Each output
+                    element is compared against its own tolerance
+                    ``atol + rtol * |integral_d|``; a panel is accepted when the
+                    fraction of failing elements is ``<= mesh_failure_tolerance``.
+
+                For D == 1 every option reduces to ``|e| / (atol + rtol*|I|)``.
+            mesh_failure_tolerance: Used only when ``error_norm ==
+                "failure_fraction"``. Fraction in ``[0, 1]`` of output elements
+                that may exceed tolerance while a panel is still accepted.
+                Default 0.0 (every element must pass). Can be overridden per
+                call via ``integrate(mesh_failure_tolerance=...)``.
             error_on_nonfinite: If True (default), raise a ValueError naming the
                 offending ``t`` when the integrand returns NaN/Inf. If False,
                 such panels are accepted and the non-finite value propagates
@@ -157,12 +179,42 @@ class AdaptiveQuadrature(SolverBase):
         self.order = None
         self.C = None
         self.Cm1 = None
-        self.error_calc_idx = error_calc_idx
+        # Construction-time defaults; the active values live in self.error_norm
+        # and self.mesh_failure_tolerance and are (re)set each integrate() call.
+        self._check_error_norm(error_norm)
+        self._check_mesh_failure_tolerance(mesh_failure_tolerance)
+        self.init_error_norm = error_norm
+        self.error_norm = error_norm
+        self.init_mesh_failure_tolerance = mesh_failure_tolerance
+        self.mesh_failure_tolerance = mesh_failure_tolerance
         # Construction-time default; the active value lives in
         # self.error_on_nonfinite and is (re)set each integrate() call.
         self.init_error_on_nonfinite = error_on_nonfinite
         self.error_on_nonfinite = error_on_nonfinite
         self.init_total_mem_usage = total_mem_usage
+
+    #: String values accepted by ``error_norm`` (in addition to a callable).
+    _VALID_ERROR_NORMS = ("2", "max", "rms", "failure_fraction")
+
+    @classmethod
+    def _check_error_norm(cls, error_norm) -> None:
+        """Validate the ``error_norm`` selector (a known string or a callable)."""
+        if callable(error_norm):
+            return
+        if error_norm not in cls._VALID_ERROR_NORMS:
+            raise ValueError(
+                f"error_norm must be a callable or one of "
+                f"{cls._VALID_ERROR_NORMS}, got {error_norm!r}"
+            )
+
+    @staticmethod
+    def _check_mesh_failure_tolerance(mesh_failure_tolerance) -> None:
+        """Validate that ``mesh_failure_tolerance`` is a fraction in [0, 1]."""
+        if not (0.0 <= mesh_failure_tolerance <= 1.0):
+            raise ValueError(
+                "mesh_failure_tolerance must be in [0, 1], got "
+                f"{mesh_failure_tolerance!r}"
+            )
 
     # -------------------------------------------------------------------------------- #
     #                                 ABSTRACT METHODS                                 #
@@ -236,6 +288,8 @@ class AdaptiveQuadrature(SolverBase):
         loss_fxn: Callable | None = None,
         max_batch: int | None = None,
         max_adaptive_splits: int | None = None,
+        error_norm: str | Callable | None = None,
+        mesh_failure_tolerance: float | None = None,
         error_on_nonfinite: bool | None = None,
     ) -> IntegrationResult:
         """
@@ -283,6 +337,13 @@ class AdaptiveQuadrature(SolverBase):
                 (default), falls back to the value from construction (also
                 None ⇒ uncapped). When both are set, this per-call value takes
                 priority.
+            error_norm: Vector-error reduction / acceptance scheme (see
+                __init__). If None (default), falls back to the value from
+                construction. When set, this per-call value takes priority.
+            mesh_failure_tolerance: Fraction of output elements allowed to fail
+                when ``error_norm == "failure_fraction"`` (see __init__). If
+                None (default), falls back to the value from construction. When
+                set, this per-call value takes priority.
             error_on_nonfinite: If True, raise a ValueError naming the offending
                 ``t`` when the integrand returns NaN/Inf; if False, accept those
                 panels and let the non-finite value propagate into the result.
@@ -348,6 +409,18 @@ class AdaptiveQuadrature(SolverBase):
             if error_on_nonfinite is None
             else error_on_nonfinite
         )
+
+        # Per-call error_norm / mesh_failure_tolerance take priority over the
+        # constructor values. Stored on self so the error-ratio helpers read
+        # them without threading them through every signature.
+        self.error_norm = self.init_error_norm if error_norm is None else error_norm
+        self._check_error_norm(self.error_norm)
+        self.mesh_failure_tolerance = (
+            self.init_mesh_failure_tolerance
+            if mesh_failure_tolerance is None
+            else mesh_failure_tolerance
+        )
+        self._check_mesh_failure_tolerance(self.mesh_failure_tolerance)
 
         # Get variables or populate with default values, send to correct device
         f, mesh_init, mesh_final, y0 = self._check_variables(
@@ -472,10 +545,16 @@ class AdaptiveQuadrature(SolverBase):
 
             # --- Step 4: Compute error ratios for each step ---
             t0 = time.time()
-            error_ratios, error_ratios_2steps = self._compute_error_ratios(
-                mesh_quadrature_errors=method_output.mesh_quadrature_errors,
-                cum_mesh_quadratures=cum_mesh_quadratures,
-                integral=current_integral,
+            error_ratios, error_ratios_2steps, error_ratios_per_dim = (
+                self._compute_error_ratios(
+                    mesh_quadrature_errors=method_output.mesh_quadrature_errors,
+                    mesh_quadratures=method_output.mesh_quadratures,
+                    cum_mesh_quadratures=cum_mesh_quadratures,
+                    integral=current_integral,
+                )
+            )
+            keep_mask, remove_mask = self._accept_reject_masks(
+                error_ratios, error_ratios_per_dim
             )
             if self.speed_logger:
                 self.speed_logger.debug("calculate errors: %s", time.time() - t0)
@@ -494,7 +573,9 @@ class AdaptiveQuadrature(SolverBase):
             # inspect partial state instead of having to special-case
             # None.
             if mesh_is_given and self.max_path_change is not None:
-                fail_ratio = torch.sum(error_ratios > 1.0).to(float) / len(error_ratios)
+                # A "failed step" is one that would be split under the active
+                # error_norm scheme (consistent with the accept/reject masks).
+                fail_ratio = remove_mask.to(float).sum() / len(remove_mask)
                 if fail_ratio >= self.max_path_change:
                     logger.warning(
                         "%.1f%% of integration steps failed error requirements, "
@@ -546,6 +627,8 @@ class AdaptiveQuadrature(SolverBase):
                 tracked_step_eval=tracked_step_eval,
                 split_counts=split_counts,
                 max_adaptive_splits=max_adaptive_splits,
+                keep_mask=keep_mask,
+                remove_mask=remove_mask,
             )
             # Verify barrier ordering after adaptive refinement
             mesh_diff = mesh[1:, 0] - mesh[:-1, 0]
@@ -639,6 +722,8 @@ class AdaptiveQuadrature(SolverBase):
         tracked_step_eval: tuple[torch.Tensor, ...] | None = None,
         split_counts: torch.Tensor | None = None,
         max_adaptive_splits: int | None = None,
+        keep_mask: torch.Tensor | None = None,
+        remove_mask: torch.Tensor | None = None,
     ) -> tuple[
         MethodOutput | None,
         torch.Tensor | None,
@@ -694,6 +779,13 @@ class AdaptiveQuadrature(SolverBase):
             max_adaptive_splits: Optional cap on the per-panel split count.
                 Panels at or above this count are accepted instead of split.
                 None disables the cap.
+            keep_mask: Optional precomputed accept mask (True = accept), shape
+                [N_batch], from ``_accept_reject_masks``. When provided together
+                with ``remove_mask`` the scheme-aware decision is used as-is;
+                when omitted the legacy ``error_ratios < 1.0`` rule is applied
+                (kept for direct/unit callers).
+            remove_mask: Optional precomputed reject (split) mask, the
+                complement of ``keep_mask``.
 
         Returns:
             Tuple of (method_output, y_step_eval, tracked_step_eval, nodes,
@@ -708,18 +800,18 @@ class AdaptiveQuadrature(SolverBase):
                 - split_counts_new: Per-panel split counts for mesh_new, with
                   split children incremented (or None if split_counts is None).
         """
-        # Non-finite error ratios (NaN/Inf) cannot be reduced by splitting: the
-        # integrand returned NaN/Inf at a node, and a midpoint split reuses the
-        # same boundary node, so the value regenerates. Accept such panels
-        # unconditionally so the main loop always terminates -- with the default
-        # uncapped max_adaptive_splits, routing them to the split branch would
-        # refine forever (and a +Inf ratio is >= 1.0, so it would otherwise be
-        # split forever too).
-        nonfinite = ~torch.isfinite(error_ratios)
-        # Steps that pass the error tolerance are accepted (done)
-        keep_mask = (error_ratios < 1.0) | nonfinite
-        # Steps that fail the error tolerance need to be split
-        remove_mask = (error_ratios >= 1.0) & ~nonfinite
+        if keep_mask is None or remove_mask is None:
+            # Legacy/direct-call path: derive the masks from a scalar error
+            # ratio. Non-finite error ratios (NaN/Inf) cannot be reduced by
+            # splitting: the integrand returned NaN/Inf at a node, and a midpoint
+            # split reuses the same boundary node, so the value regenerates.
+            # Accept such panels unconditionally so the main loop always
+            # terminates -- with the default uncapped max_adaptive_splits,
+            # routing them to the split branch would refine forever (and a +Inf
+            # ratio is >= 1.0, so it would otherwise be split forever too).
+            nonfinite = ~torch.isfinite(error_ratios)
+            keep_mask = (error_ratios < 1.0) | nonfinite
+            remove_mask = (error_ratios >= 1.0) & ~nonfinite
         # Panels that have already been split the maximum number of times are
         # accepted as-is rather than split further.
         if max_adaptive_splits is not None and split_counts is not None:
@@ -1235,7 +1327,7 @@ class AdaptiveQuadrature(SolverBase):
             Optimized barrier positions. Shape: [M_opt, T].
         """
         # Prune steps with excess accuracy (over-resolved regions)
-        _, error_ratios_2steps = self._compute_error_ratios(
+        _, error_ratios_2steps, _ = self._compute_error_ratios(
             mesh_quadrature_errors=record["mesh_quadrature_errors"],
             mesh_quadratures=record["mesh_quadratures"],
             integral=record["integral"].detach(),
@@ -1253,10 +1345,15 @@ class AdaptiveQuadrature(SolverBase):
         )
 
         # Add new t steps using converged integral value
-        error_ratios, error_ratios_2steps = self._compute_error_ratios(
-            mesh_quadrature_errors=mesh_quadrature_errors_pruned,
-            mesh_quadratures=mesh_quadratures_pruned,
-            integral=record["integral"].detach(),
+        error_ratios, error_ratios_2steps, error_ratios_per_dim = (
+            self._compute_error_ratios(
+                mesh_quadrature_errors=mesh_quadrature_errors_pruned,
+                mesh_quadratures=mesh_quadratures_pruned,
+                integral=record["integral"].detach(),
+            )
+        )
+        keep_mask, remove_mask = self._accept_reject_masks(
+            error_ratios, error_ratios_per_dim
         )
         adaptive_step = self._adaptively_increase_mesh(
             method_output=None,
@@ -1266,6 +1363,8 @@ class AdaptiveQuadrature(SolverBase):
             mesh=mesh_pruned,
             mesh_idxs=torch.arange(len(mesh_pruned) - 1, device=self.device),
             mesh_trackers=torch.zeros(len(mesh_pruned), dtype=bool, device=self.device),
+            keep_mask=keep_mask,
+            remove_mask=remove_mask,
         )
         _, _, _, _, mesh_optimal, _, _, _ = adaptive_step
 
@@ -1468,21 +1567,57 @@ class AdaptiveQuadrature(SolverBase):
     #                           ADAPTIVE ERROR CALCULATIONS                            #
     # -------------------------------------------------------------------------------- #
 
-    def _error_norm(self, error: torch.Tensor) -> torch.Tensor:
+    def _reduce_norm(self, x: torch.Tensor, error_norm=None) -> torch.Tensor:
         """
-        Compute the RMS (root-mean-square) norm of per-dimension errors.
+        Reduce the last (output dimension D) axis of ``x`` to one scalar per
+        step using the configured ``error_norm``.
 
-        For multi-dimensional integrands (D > 1), reduces the error across
-        all output dimensions to a single scalar per step using the L2 norm.
-        For 1D integrands, this is equivalent to torch.abs().
+        Mirrors the ``norm`` argument of ``scipy.integrate.quad_vec``:
+
+          - ``"2"``   → L2 norm ``sqrt(sum(x**2))``     (scipy ``np.linalg.norm``)
+          - ``"max"`` → L-infinity norm ``max(|x|)``    (scipy ``_max_norm``)
+          - ``"rms"`` → root-mean-square ``sqrt(mean(x**2))`` (padaquad legacy)
+          - callable  → ``error_norm(x)`` reducing the last axis
+
+        For 1D integrands every option equals ``torch.abs(x)``.
 
         Args:
-            error: Per-dimension error values. Shape: [N, D] or [N].
+            x: Per-dimension values. Shape: [..., D].
+            error_norm: Override for the configured norm (defaults to
+                ``self.error_norm``). ``"failure_fraction"`` is not a norm and
+                must not be passed here.
 
         Returns:
-            RMS error per step. Shape: [N].
+            Reduced values, shape [...].
         """
-        return torch.sqrt(torch.mean(error**2, -1))
+        error_norm = self.error_norm if error_norm is None else error_norm
+        if callable(error_norm):
+            return error_norm(x)
+        if error_norm == "2":
+            return torch.sqrt(torch.sum(x**2, dim=-1))
+        if error_norm == "max":
+            return torch.amax(torch.abs(x), dim=-1)
+        if error_norm == "rms":
+            return torch.sqrt(torch.mean(x**2, dim=-1))
+        raise ValueError(f"_reduce_norm cannot reduce with error_norm={error_norm!r}")
+
+    def _round_floor(self, mesh_quadratures: torch.Tensor) -> torch.Tensor:
+        """
+        Machine-precision floor on the per-element error estimate.
+
+        Mirrors ``scipy.integrate.quad_vec``'s ``round_err = norm(50*eps*h*s_k)``
+        guard: it keeps the controller from splitting a panel forever chasing an
+        error that is already at/below floating-point round-off. ``s_k`` is the
+        panel's own integral contribution (``mesh_quadratures``).
+
+        Args:
+            mesh_quadratures: Per-step integral contributions. Shape: [N, D].
+
+        Returns:
+            Per-element rounding floor. Shape: [N, D].
+        """
+        eps = torch.finfo(self.dtype).eps
+        return 50.0 * eps * torch.abs(mesh_quadratures)
 
     def _compute_error_ratios(
         self,
@@ -1492,158 +1627,198 @@ class AdaptiveQuadrature(SolverBase):
         integral=None,
     ):
         """
-        Computes the ratio of the difference between chosen method of order p
-        and a method of order p-1, and the error tolerance determined by atol,
-        rtol, and the value of the integral. Integration steps of order p-1
-        use the same points.
+        Compute per-step error ratios, dispatching on ``self.error_norm``.
+
+        The error estimate is the difference between the order-p method and the
+        embedded order-(p-1) method. How the D output dimensions are turned into
+        a single accept/reject quantity depends on the scheme:
+
+          - Norm family (``"2"``/``"max"``/``"rms"``/callable): scipy-style
+            reduce-then-compare, in ``_error_ratios_norm``.
+          - ``"failure_fraction"``: per-component comparison, in
+            ``_error_ratios_failure_fraction``.
+
+        The absolute-vs-cumulative-mode axis (``use_absolute_error_ratio``) is
+        orthogonal and handled inside each family helper (it only changes the
+        tolerance denominator).
 
         Args:
-            mesh_quadrature_errors (Tensor): Similar to mesh_quadratures but evaluated with
-                and error tableau made of the differences between a method of
-                order p and one of order p-1
-            mesh_quadratures (Tensor): Sum over all t and y evaluations in a single
-                RK step multiplied by the total delta t for that step (h)
-            Integral (Tensor): The evaluated path integral
+            mesh_quadrature_errors (Tensor): Per-step error estimates. [N, D].
+            mesh_quadratures (Tensor): Per-step integral contributions (``s_k``),
+                used for the rounding floor and (in cumulative mode) the
+                cumulative sum. [N, D]. May be None.
+            cum_mesh_quadratures (Tensor): Pre-computed cumulative sum [N, D]
+                (cumulative mode only).
+            integral (Tensor): Current total integral estimate [D]
+                (absolute mode only).
 
-        Shapes:
-            mesh_quadrature_errors: [N, D]
-            mesh_quadratures: [N, D]
-            integral: [D]
+        Returns:
+            Tuple ``(error_ratios, error_ratios_2steps, error_ratios_per_dim)``:
+                - error_ratios: per-step accept/reject quantity [N] (reduced
+                  ratio for the norm family; failure fraction for
+                  ``"failure_fraction"``).
+                - error_ratios_2steps: per-pair merge/prune indicator [N-1].
+                - error_ratios_per_dim: per-element ratio [N, D] for
+                  ``"failure_fraction"`` (so non-finite panels can be detected),
+                  else None.
         """
-        if self.error_calc_idx is not None:
-            mesh_quadrature_errors = mesh_quadrature_errors[
-                :, self.error_calc_idx, None
-            ]
-            integral = integral[self.error_calc_idx, None]
-            # y = y[:,:,self.error_calc_idx, None]
-            if mesh_quadratures is not None:
-                mesh_quadratures = mesh_quadratures[:, self.error_calc_idx, None]
-            if cum_mesh_quadratures is not None:
-                cum_mesh_quadratures = cum_mesh_quadratures[
-                    :, self.error_calc_idx, None
-                ]
-                # DEBUG: add y0 to cum_steps to get get integral values at different times?
-
-        if self.use_absolute_error_ratio:
-            return self._compute_error_ratios_absolute(mesh_quadrature_errors, integral)
-        else:
-            return self._compute_error_ratios_cumulative(
-                mesh_quadrature_errors,
-                mesh_quadratures=mesh_quadratures,
-                cum_mesh_quadratures=cum_mesh_quadratures,
+        abs_err = torch.abs(mesh_quadrature_errors)
+        if (not callable(self.error_norm)) and self.error_norm == "failure_fraction":
+            return self._error_ratios_failure_fraction(
+                abs_err, mesh_quadratures, cum_mesh_quadratures, integral
             )
+        return self._error_ratios_norm(
+            abs_err, mesh_quadratures, cum_mesh_quadratures, integral
+        )
 
-    def _compute_error_ratios_absolute(self, mesh_quadrature_errors, integral):
-        """
-        Computes per-step error ratios against the *total* integral
-        magnitude (uniform-across-steps tolerance). This is the default
-        for path integrals because the total integral is meaningful in
-        its own right, so a single reference for the relative tolerance
-        is appropriate.
-
-        For each step k::
-
-            error_ratio[k] = |step_error[k]| / (atol + rtol * |integral|)
-
-        Every step uses the same denominator, so for an integrand whose
-        per-step error is constant the ratios across steps are
-        identical. Compare ``_compute_error_ratios_cumulative`` for the
-        ODE-style alternative where the denominator grows with the
-        running integral.
-
-        Args:
-            mesh_quadrature_errors (Tensor): Per-step error estimates (the
-                difference between the method of order p and embedded
-                order p-1).
-            integral (Tensor): The current total integral estimate.
-
-        Shapes:
-            mesh_quadrature_errors: [N, D]
-            integral: [D]
-        """
-        error_tol = self.atol + self.rtol * torch.abs(integral)
-        error_estimate = torch.abs(mesh_quadrature_errors)
-        error_ratio = self._error_norm(error_estimate / error_tol)
-
-        error_estimate_2steps = error_estimate[:-1] + error_estimate[1:]
-        error_ratio_2steps = self._error_norm(error_estimate_2steps / error_tol)
-
-        return error_ratio, error_ratio_2steps
-
-    def _compute_error_ratios_cumulative(
-        self, mesh_quadrature_errors, mesh_quadratures=None, cum_mesh_quadratures=None
+    def _error_ratios_norm(
+        self, abs_err, mesh_quadratures, cum_mesh_quadratures, integral
     ):
         """
-        Computes per-step error ratios using the *running* (cumulative)
-        integral as the magnitude reference, mimicking traditional ODE
-        error control where the state magnitude grows with the
-        integration variable.
+        Norm family (reduce-then-compare), matching ``scipy.integrate.quad_vec``.
 
-        For each step k::
+        The error vector is reduced to a scalar with ``self.error_norm`` and
+        compared to a single tolerance built from the *same* norm of the
+        integral::
 
-            error_ratio[k] = |step_error[k]| / (atol + rtol * |cumsum[k]|)
+            error_ratio[k] = R(|e[k]|) / (atol + rtol * R(I))      (absolute)
+            error_ratio[k] = R(|e[k]|) / (atol + rtol * R(cum[k])) (cumulative)
 
-        where ``cumsum[k]`` is the integral accumulated up to and
-        including step k. As cumsum grows monotonically through the
-        integration, the *denominator* grows, so the per-step
-        tolerance loosens for later steps. Equivalently, the controller
-        applies a *tighter* tolerance to early steps when the running
-        sum is still small.
+        where ``R`` is the configured norm. A panel is accepted when
+        ``error_ratio < 1`` (see ``_accept_reject_masks``).
 
-        Empirical behavior (see tests/test_error_indicator.py):
+        The rounding floor enters as a *lower bound on the tolerance*
+        (``effective_tol = max(tol, R(round_floor))``), not as an inflation of
+        the error. This realizes scipy's "stop once rounding-limited" behavior:
+        a panel whose error is already at/below round-off has ``error_ratio <=
+        ~1`` and is accepted instead of being split forever -- important when
+        the requested tolerance is below what the working dtype can resolve.
 
-          - For an integrand whose per-step error is constant and
-            whose step values are positive, the per-step ratios
-            decrease monotonically.
-          - At the last step ``cumsum == integral``, so the ratio
-            agrees with what the absolute mode produces for that step.
+        Shapes: abs_err [N, D]; integral [D]; cum [N, D]; returns [N], [N-1], None.
+        """
+        err = self._reduce_norm(abs_err)
+        floor = (
+            self._reduce_norm(self._round_floor(mesh_quadratures))
+            if mesh_quadratures is not None
+            else None
+        )
 
-        Use this mode when you want the integrator to accept progressively
-        larger absolute step errors as the integration progresses (i.e.,
-        a fixed *relative* error against the running state). Use the
-        absolute mode (``use_absolute_error_ratio=True``, the default)
-        when you want a uniform-across-steps tolerance keyed to the
-        total integral value — the better default for path integrals
-        where the total is meaningful in its own right.
+        if self.use_absolute_error_ratio:
+            error_tol = self.atol + self.rtol * self._reduce_norm(integral)
+            error_tol_2steps = error_tol
+        else:
+            if cum_mesh_quadratures is not None:
+                cum_steps = cum_mesh_quadratures
+            elif mesh_quadratures is not None:
+                cum_steps = torch.cumsum(mesh_quadratures, dim=0)
+            else:
+                raise ValueError("Must give mesh_quadratures or cum_mesh_quadratures")
+            error_tol = self.atol + self.rtol * self._reduce_norm(torch.abs(cum_steps))
+            error_tol_2steps = self.atol + self.rtol * torch.maximum(
+                self._reduce_norm(torch.abs(cum_steps[:-1])),
+                self._reduce_norm(torch.abs(cum_steps[1:])),
+            )
+
+        if floor is not None:
+            # Broadcasts a scalar (absolute mode) or per-step (cumulative) tol.
+            error_tol = torch.maximum(error_tol, floor)
+            error_tol_2steps = torch.maximum(error_tol_2steps, floor[:-1] + floor[1:])
+
+        error_ratio = err / error_tol
+        err_2steps = self._reduce_norm(abs_err[:-1] + abs_err[1:])
+        error_ratio_2steps = err_2steps / error_tol_2steps
+        return error_ratio, error_ratio_2steps, None
+
+    def _error_ratios_failure_fraction(
+        self, abs_err, mesh_quadratures, cum_mesh_quadratures, integral
+    ):
+        """
+        Per-component family: each output element keeps its own relative
+        tolerance, and a panel's accept/reject quantity is the *fraction* of
+        elements whose ratio exceeds 1::
+
+            r[k, d] = |e[k, d]| / (atol + rtol * |I[d]|)        (absolute)
+            r[k, d] = |e[k, d]| / (atol + rtol * |cum[k, d]|)   (cumulative)
+            failure_fraction[k] = mean_d( r[k, d] >= 1 )
+
+        A panel is accepted when ``failure_fraction <= mesh_failure_tolerance``
+        (applied in ``_accept_reject_masks``). The raw per-element ratio is also
+        returned so non-finite (NaN/Inf) panels can be detected downstream.
+
+        The rounding floor enters per element as a lower bound on the tolerance
+        (``effective_tol = max(tol, round_floor)``), so an element whose error is
+        already at/below round-off does not count as a failure and the panel is
+        not split chasing sub-precision accuracy.
+
+        Shapes: abs_err [N, D]; integral [D]; cum [N, D];
+        returns failure_fraction [N], error_ratio_2steps [N-1], ratio [N, D].
+        """
+        if self.use_absolute_error_ratio:
+            error_tol = self.atol + self.rtol * torch.abs(integral)  # [D]
+            error_tol_2steps = error_tol
+        else:
+            if cum_mesh_quadratures is not None:
+                cum_steps = cum_mesh_quadratures
+            elif mesh_quadratures is not None:
+                cum_steps = torch.cumsum(mesh_quadratures, dim=0)
+            else:
+                raise ValueError("Must give mesh_quadratures or cum_mesh_quadratures")
+            error_tol = self.atol + self.rtol * torch.abs(cum_steps)  # [N, D]
+            error_tol_2steps = self.atol + self.rtol * torch.maximum(
+                torch.abs(cum_steps[:-1]), torch.abs(cum_steps[1:])
+            )
+
+        if mesh_quadratures is not None:
+            floor = self._round_floor(mesh_quadratures)  # [N, D]
+            error_tol = torch.maximum(error_tol * torch.ones_like(floor), floor)
+            error_tol_2steps = torch.maximum(
+                error_tol_2steps * torch.ones_like(floor[:-1]),
+                floor[:-1] + floor[1:],
+            )
+
+        ratio = abs_err / error_tol  # [N, D]
+        finite = torch.isfinite(ratio)
+        failed = (ratio >= 1.0) & finite
+        failure_fraction = failed.to(self.dtype).mean(dim=-1)  # [N]
+
+        # Merge/prune indicator: conservative max-norm of the combined 2-step
+        # ratio (compared against remove_cut < 1, so a magnitude is needed here
+        # rather than a fraction).
+        ratio_2steps = (abs_err[:-1] + abs_err[1:]) / error_tol_2steps
+        error_ratio_2steps = torch.amax(ratio_2steps, dim=-1)  # [N-1]
+        return failure_fraction, error_ratio_2steps, ratio
+
+    def _accept_reject_masks(self, error_ratios, error_ratios_per_dim):
+        """
+        Turn per-step error quantities into accept (keep) / reject (split) masks.
+
+        Both families accept a panel whose error is non-finite (NaN/Inf): a
+        midpoint split reuses the boundary node, so it can never reduce a
+        non-finite value, and routing it to the split branch would loop forever.
+
+          - ``"failure_fraction"``: keep when the failure fraction is
+            ``<= mesh_failure_tolerance`` (plus a float-noise epsilon), or when
+            any element of the panel is non-finite.
+          - Norm family: keep when ``error_ratios < 1`` or ``error_ratios`` is
+            non-finite.
 
         Args:
-            mesh_quadrature_errors (Tensor): Per-step error estimates (the
-                difference between the method of order p and embedded
-                order p-1).
-            mesh_quadratures (Tensor): Per-step contributions to the integral,
-                shape ``[N, D]``. If provided, ``cum_mesh_quadratures`` is
-                computed as ``torch.cumsum(mesh_quadratures, dim=0)``.
-            cum_mesh_quadratures (Tensor): Pre-computed cumulative sum.
-                Provide directly when called inside the integration
-                loop where the running integral is already known.
+            error_ratios: Per-step accept/reject quantity. Shape: [N].
+            error_ratios_per_dim: Per-element ratio [N, D] for the failure
+                family (used for the non-finite check), else None.
 
-        Shapes:
-            mesh_quadratures: [N, D]
-            mesh_quadrature_errors: [N, D]
+        Returns:
+            Tuple ``(keep_mask, remove_mask)``, each boolean shape [N].
         """
-        if cum_mesh_quadratures is not None:
-            cum_steps = cum_mesh_quadratures
-        elif mesh_quadratures is not None:
-            cum_steps = torch.cumsum(mesh_quadratures, dim=0)
+        if (not callable(self.error_norm)) and self.error_norm == "failure_fraction":
+            panel_nonfinite = (~torch.isfinite(error_ratios_per_dim)).any(dim=-1)
+            eps_frac = 8.0 * torch.finfo(self.dtype).eps
+            keep_mask = (
+                error_ratios <= self.mesh_failure_tolerance + eps_frac
+            ) | panel_nonfinite
         else:
-            raise ValueError("Must give mesh_quadratures or cum_mesh_quadratures")
-        error_estimate = torch.abs(mesh_quadrature_errors)
-        error_tol = self.atol + self.rtol * torch.abs(cum_steps)
-        error_ratio = self._error_norm(error_estimate / error_tol).abs()
-
-        error_estimate_2steps = error_estimate[:-1] + error_estimate[1:]
-        error_tol_2steps = (
-            self.atol
-            + self.rtol
-            * torch.max(
-                torch.stack([cum_steps[:-1].abs(), cum_steps[1:].abs()]), dim=0
-            )[0]
-        )
-        error_ratio_2steps = self._error_norm(
-            error_estimate_2steps / error_tol_2steps
-        ).abs()
-
-        return error_ratio, error_ratio_2steps
+            keep_mask = (error_ratios < 1.0) | ~torch.isfinite(error_ratios)
+        return keep_mask, ~keep_mask
 
     # -------------------------------------------------------------------------------- #
     #                                    RECORDING                                     #

@@ -169,11 +169,11 @@ class AdaptiveQuadrature(SolverBase):
         assert remove_cut < 1.0
         assert max_adaptive_splits is None or max_adaptive_splits >= 0
         self.remove_cut = remove_cut
-        
+
         # Memory handling variables
         self._oom_max_batch = None
         self.previous_max_batch = None
-        
+
         # Construction-time defaults; each integrate() call falls back to these
         # when its corresponding argument is None.
         self.init_max_batch = max_batch
@@ -453,7 +453,7 @@ class AdaptiveQuadrature(SolverBase):
         # Use the previous max_batch, running memory check everytime is slow
         if force_max_batch is None:
             force_max_batch = self.previous_max_batch
-            
+
         # Benchmark memory footprint on first call with a new integrand
         if not same_integrand_fxn and force_max_batch is None:
             self._setup_memory_checks(
@@ -1107,7 +1107,7 @@ class AdaptiveQuadrature(SolverBase):
             # else:
             #     num_accumulation_iters = (max_mesh_steps * self.C) // max_batch + 1
             #     num_residual_nodes = max_batch - (max_mesh_steps * self.C % max_batch)
-            num_nodes_to_eval = max_mesh_steps * self.C 
+            num_nodes_to_eval = max_mesh_steps * self.C
         else:
             num_mesh_steps = max_mesh_steps + 1
             # Add another mesh step if number of saved split nodes is too small
@@ -1163,7 +1163,7 @@ class AdaptiveQuadrature(SolverBase):
             try:
                 f_output = f(
                     nodes_flat[num_nodes_evaluated : num_nodes_evaluated + max_batch],
-                    *f_args
+                    *f_args,
                 )
             except torch.OutOfMemoryError as e:  # Use RuntimeError for PyTorch < 2.0
                 if max_batch == 1:
@@ -1181,9 +1181,7 @@ class AdaptiveQuadrature(SolverBase):
                     # block indefinitely — matching the futex-wait-on-all-threads
                     # signature of the prior deadlock.
                     time.sleep(0.05)
-                self._oom_max_batch = torch.int(
-                    torch.round(0.75*self._oom_max_batch)
-                )
+                self._oom_max_batch = torch.int(torch.round(0.75 * self._oom_max_batch))
                 logger.warning(
                     f"Caught OOM with {free_mem} GB free of {total_mem} GB. "
                     + f"Reducing max_batch from {max_batch} to {self._oom_max_batch}."
@@ -1193,7 +1191,7 @@ class AdaptiveQuadrature(SolverBase):
                 max_batch = self._oom_max_batch
                 self.previous_max_batch = self._oom_max_batch
                 continue
-            
+
             integrand, tracked = self._split_f_output(f_output)
             self._check_f_output_finite(
                 integrand,
@@ -1205,7 +1203,7 @@ class AdaptiveQuadrature(SolverBase):
                     tracked_lists = [[] for _ in tracked]
                 for k, tv in enumerate(tracked):
                     tracked_lists[k].append(tv)
-            
+
             num_nodes_evaluated += len(integrand)
             del integrand
 
@@ -2153,7 +2151,7 @@ class AdaptiveQuadrature(SolverBase):
                 and self.f_unit_mem_size * N > mem_before[0]
             ):
                 return
-            
+
             # Catch OOM errors
             try:
                 result = f(t_input, *f_args)
@@ -2169,7 +2167,7 @@ class AdaptiveQuadrature(SolverBase):
                     # signature of the prior deadlock.
                     time.sleep(0.05)
                 return
-            
+
             mem_after = self._get_memory()
             del result
             self.f_unit_mem_size = mem_scale * max(

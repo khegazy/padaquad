@@ -396,6 +396,13 @@ class TestUnit:
                     f"(completed={completed}/{total_panels}, max_batch={max_batch})"
                 )
             remaining_input = original_step_idxs[completed:]
+            # _evaluate_f_on_split_nodes must not be called when all panels
+            # are already evaluated — batches_left would be 0, violating the
+            # precondition that the function is only called with pending work.
+            assert len(remaining_input) > 0, (
+                f"_evaluate_f_on_split_nodes called with no remaining panels "
+                f"(completed={completed}/{total_panels})"
+            )
             batches_left = len(remaining_input) * C
             effective_max_batch = min(max_batch, batches_left)
             effective_max_mesh_steps = effective_max_batch // C
@@ -409,6 +416,12 @@ class TestUnit:
                     max_mesh_steps=effective_max_mesh_steps,
                     split_node_state=state,
                 )
+            )
+            assert len(idxs_i) > 0, (
+                f"_evaluate_f_on_split_nodes made no forward progress "
+                f"(completed={completed}/{total_panels}, "
+                f"max_batch={effective_max_batch}, "
+                f"max_mesh_steps={effective_max_mesh_steps})"
             )
             nodes_acc.append(nodes_i)
             f_evals_acc.append(f_evals_i)
@@ -880,6 +893,7 @@ class TestIntegration:
         nodes_acc, f_evals_acc = [], []
         max_iters = n_panels + 5
         for _ in range(max_iters):
+            # Guard: only call when there are still pending panels.
             if not torch.any(mesh_trackers):
                 break
             nodes_i, f_evals_i, _tracked, idxs_i, state = solver._evaluate_f_on_mesh(
@@ -931,6 +945,7 @@ class TestIntegration:
             completed = set()
             nodes_acc, f_evals_acc = [], []
             for _ in range(n_panels + 5):
+                # Guard: only call when there are still pending panels.
                 if not torch.any(mesh_trackers):
                     break
                 ni, ei, _tracked, ii, state = solver._evaluate_f_on_mesh(
@@ -1300,6 +1315,10 @@ class TestTier2:
         f_evals_acc = []
         while completed < n_panels:
             remaining = step_idxs[completed:]
+            assert len(remaining) > 0, (
+                f"_evaluate_f_on_split_nodes called with no remaining panels "
+                f"(completed={completed}/{n_panels})"
+            )
             batches_left = len(remaining) * C
             effective_max_batch = min(max_batch, batches_left)
             _ni, fi, _tracked, ri, state = solver._evaluate_f_on_split_nodes(
@@ -1310,6 +1329,12 @@ class TestTier2:
                 max_batch=effective_max_batch,
                 max_mesh_steps=effective_max_batch // C,
                 split_node_state=state,
+            )
+            assert len(ri) > 0, (
+                f"_evaluate_f_on_split_nodes made no forward progress "
+                f"(completed={completed}/{n_panels}, "
+                f"max_batch={effective_max_batch}, "
+                f"max_mesh_steps={effective_max_batch // C})"
             )
             f_evals_acc.append(fi)
             completed += len(ri)

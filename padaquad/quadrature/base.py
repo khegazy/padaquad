@@ -413,9 +413,7 @@ class AdaptiveQuadrature(SolverBase):
         # Per-call error_norm / mesh_failure_tolerance take priority over the
         # constructor values. Stored on self so the error-ratio helpers read
         # them without threading them through every signature.
-        self.error_norm = (
-            self.init_error_norm if error_norm is None else error_norm
-        )
+        self.error_norm = self.init_error_norm if error_norm is None else error_norm
         self._check_error_norm(self.error_norm)
         self.mesh_failure_tolerance = (
             self.init_mesh_failure_tolerance
@@ -1601,9 +1599,7 @@ class AdaptiveQuadrature(SolverBase):
             return torch.amax(torch.abs(x), dim=-1)
         if error_norm == "rms":
             return torch.sqrt(torch.mean(x**2, dim=-1))
-        raise ValueError(
-            f"_reduce_norm cannot reduce with error_norm={error_norm!r}"
-        )
+        raise ValueError(f"_reduce_norm cannot reduce with error_norm={error_norm!r}")
 
     def _round_floor(self, mesh_quadratures: torch.Tensor) -> torch.Tensor:
         """

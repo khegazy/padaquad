@@ -55,9 +55,7 @@ class TestReduceNorm:
         """With no override, _reduce_norm uses self.error_norm."""
         self.solver.error_norm = "max"
         error = torch.tensor([[-3.0, 4.0]])
-        assert torch.allclose(
-            self.solver._reduce_norm(error), torch.tensor([4.0])
-        )
+        assert torch.allclose(self.solver._reduce_norm(error), torch.tensor([4.0]))
 
     def test_zero(self):
         """Zero errors give zero norms."""
@@ -343,9 +341,7 @@ class TestComputeErrorRatiosCumulative:
         mesh_quadrature_errors = torch.tensor([[0.001]])
 
         with pytest.raises(ValueError, match="Must give"):
-            solver._compute_error_ratios(
-                mesh_quadrature_errors=mesh_quadrature_errors
-            )
+            solver._compute_error_ratios(mesh_quadrature_errors=mesh_quadrature_errors)
 
 
 # ---------------------------------------------------------------------------

@@ -178,9 +178,7 @@ class TestErrorRatiosNormDtype:
         s = _solver(dtype)
         e = torch.tensor([[1e-3, 2e-3], [3e-3, 4e-3]], dtype=dtype)
         integral = torch.tensor([1.0, 1.0], dtype=dtype)
-        r, r2, _ = s._compute_error_ratios(
-            mesh_quadrature_errors=e, integral=integral
-        )
+        r, r2, _ = s._compute_error_ratios(mesh_quadrature_errors=e, integral=integral)
         assert r.dtype == dtype
         assert r2.dtype == dtype
 
@@ -210,9 +208,7 @@ class TestErrorRatiosNormDtype:
         s = _solver(dtype, error_norm="2", atol=1e-10, rtol=1e-10)
         e = torch.tensor([[1e-8]], dtype=dtype)
         integral = torch.tensor([1.0], dtype=dtype)
-        r, _, _ = s._compute_error_ratios(
-            mesh_quadrature_errors=e, integral=integral
-        )
+        r, _, _ = s._compute_error_ratios(mesh_quadrature_errors=e, integral=integral)
         assert math.isclose(r[0].item(), 1e-8 / (2e-10), rel_tol=1e-4)
 
 
@@ -267,9 +263,7 @@ class TestFailureFractionRatiosDtype:
     def test_rounding_limited_element_not_a_failure(self, dtype):
         """An element whose error is at/below its rounding floor must not count
         as a failure even when the requested tolerance is far below it."""
-        s = _solver(
-            dtype, error_norm="failure_fraction", atol=1e-30, rtol=1e-30
-        )
+        s = _solver(dtype, error_norm="failure_fraction", atol=1e-30, rtol=1e-30)
         # Element 0 error (1e-16) is below its floor 50*eps*|s_k| for both
         # dtypes (~1.1e-14 f64, ~6e-6 f32) -> rounding-limited -> not a failure.
         # Element 1 genuinely fails (large error vs tiny tol & tiny floor).
@@ -371,9 +365,7 @@ class TestAcceptRejectMasksFailure:
     def test_half_tolerance_D2(self, dtype):
         s = self._make(dtype, mft=0.5)
         # D=2: fractions 0, 0.5, 1.
-        e = torch.tensor(
-            [[0.5, 0.5], [2.0, 0.5], [2.0, 2.0]], dtype=dtype
-        )
+        e = torch.tensor([[0.5, 0.5], [2.0, 0.5], [2.0, 2.0]], dtype=dtype)
         integral = torch.tensor([1.0, 1.0], dtype=dtype)
         frac, _, per_dim = s._compute_error_ratios(
             mesh_quadrature_errors=e, integral=integral

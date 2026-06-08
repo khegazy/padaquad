@@ -1760,7 +1760,9 @@ class AdaptiveQuadrature(SolverBase):
         )
 
         if self.use_absolute_error_ratio:
-            error_tol = self.atol + self.rtol * self._reduce_norm(integral)
+            error_tol = torch.maximum(
+                self.atol, self.rtol * self._reduce_norm(integral)
+            )
             error_tol_2steps = error_tol
         else:
             if cum_mesh_quadratures is not None:
@@ -1769,8 +1771,12 @@ class AdaptiveQuadrature(SolverBase):
                 cum_steps = torch.cumsum(mesh_quadratures, dim=0)
             else:
                 raise ValueError("Must give mesh_quadratures or cum_mesh_quadratures")
-            error_tol = self.atol + self.rtol * self._reduce_norm(torch.abs(cum_steps))
-            error_tol_2steps = self.atol + self.rtol * torch.maximum(
+            error_tol = torch.maximum(
+                self.atol, self.rtol * self._reduce_norm(torch.abs(cum_steps))
+            )
+            error_tol_2steps = torch.maximum(
+                self.atol,
+                self.rtol * torch.maximum(
                 self._reduce_norm(torch.abs(cum_steps[:-1])),
                 self._reduce_norm(torch.abs(cum_steps[1:])),
             )

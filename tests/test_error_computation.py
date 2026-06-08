@@ -205,15 +205,15 @@ class TestComputeErrorRatiosAbsolute:
     def test_basic(self):
         """Error ratios correctly identify passing and failing steps."""
         solver = self._make_solver(atol=1e-3, rtol=1e-3)
-        # error_tol = atol + rtol * |integral| = 1e-3 + 1e-3 * 1.0 = 2e-3
-        mesh_quadrature_errors = torch.tensor([[0.01], [0.001]])  # [2, 1]
+        # error_tol = max(atol, rtol * |integral|) = max(1e-3, 1e-3 * 1.0) = 1e-3
+        mesh_quadrature_errors = torch.tensor([[0.01], [0.0005]])  # [2, 1]
         integral = torch.tensor([1.0])
 
         error_ratio, _error_ratio_2steps, _per_dim = solver._compute_error_ratios(
             mesh_quadrature_errors=mesh_quadrature_errors, integral=integral
         )
 
-        # 0.01 / 2e-3 = 5.0 (failing), 0.001 / 2e-3 = 0.5 (passing)
+        # 0.01 / 1e-3 = 10.0 (failing), 0.0005 / 1e-3 = 0.5 (passing)
         assert error_ratio[0] > 1.0
         assert error_ratio[1] < 1.0
 
@@ -267,8 +267,8 @@ class TestComputeErrorRatiosAbsolute:
             mesh_quadrature_errors=mesh_quadrature_errors, integral=integral
         )
 
-        # err = L2([0.003, 0.004]) = 0.005; tol = 1e-3 + 1e-3 * L2([1, 1])
-        tol = 1e-3 + 1e-3 * math.sqrt(2.0)
+        # err = L2([0.003, 0.004]) = 0.005; tol = max(1e-3, 1e-3 * L2([1, 1]))
+        tol = max(1e-3, 1e-3 * math.sqrt(2.0))
         assert error_ratio.shape == (1,)
         assert math.isclose(error_ratio[0].item(), 0.005 / tol, rel_tol=1e-6)
         # Norm family returns no per-dim ratio.
@@ -284,7 +284,7 @@ class TestComputeErrorRatiosAbsolute:
         error_ratio, _, _ = solver._compute_error_ratios(
             mesh_quadrature_errors=mesh_quadrature_errors, integral=integral
         )
-        tol = 1e-3 + 1e-3 * 1.0  # max(|[1, 1]|) = 1
+        tol = max(1e-3, 1e-3 * 1.0)  # max(|[1, 1]|) = 1
         assert math.isclose(error_ratio[0].item(), 0.004 / tol, rel_tol=1e-6)
 
 

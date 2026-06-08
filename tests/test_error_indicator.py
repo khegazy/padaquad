@@ -57,7 +57,7 @@ def test_absolute_mode_treats_steps_uniformly():
     produce constant per-step error ratios because the denominator is
     the same total-integral value for every step.
     """
-    solver = make_uniform_solver("dopri5", atol=1e-8, rtol=1e-8)
+    solver = make_uniform_solver("dopri5", atol=1e-8, rtol=1e-8, device="cpu")
     dtype = solver.dtype
     n = 10
     step_error = 1e-9
@@ -78,8 +78,8 @@ def test_absolute_mode_treats_steps_uniformly():
         f"spread = {spread}"
     )
 
-    # The numeric value: 1e-9 / (1e-8 + 1e-8 * 1.0) = 1e-9 / 2e-8 = 0.05
-    expected = step_error / (1e-8 + 1e-8 * abs(integral.item()))
+    # The numeric value: 1e-9 / max(1e-8, 1e-8 * 1.0) = 1e-9 / 1e-8 = 0.1
+    expected = step_error / max(1e-8, 1e-8 * abs(integral.item()))
     assert math.isclose(error_ratios[0].item(), expected, rel_tol=1e-6), (
         f"absolute-mode: got {error_ratios[0].item()}, expected {expected}"
     )
@@ -87,16 +87,16 @@ def test_absolute_mode_treats_steps_uniformly():
 
 def test_cumulative_mode_tightens_at_small_cumsum():
     """Pin the cumulative-mode behavior. The denominator
-    ``atol + rtol * |cumsum|`` is small at the start of the integration
-    (small cumsum) and grows monotonically. So per-step error ratios
-    DECREASE as the integration progresses — early steps face a
-    *tighter* tolerance.
+    ``max(atol, rtol * |cumsum|)`` grows once ``rtol*cumsum > atol``.
+    So per-step error ratios DECREASE as the integration progresses —
+    early steps (where atol dominates) share a flat tolerance, then
+    ratios drop once rtol*cumsum overtakes atol.
 
-    Whether this is intentional or a sign error is the open question
-    flagged by B8. The Phase 0 deliverable is documenting the actual
-    behavior; Phase 1 may revisit.
+    Use atol=5e-9, rtol=1e-8 so the crossover happens at cumsum=0.5
+    (step 5 of 10): steps 1-5 are atol-clamped (flat ratios), steps
+    6-10 are rtol-dominated (strictly decreasing ratios).
     """
-    solver = make_uniform_solver("dopri5", atol=1e-8, rtol=1e-8)
+    solver = make_uniform_solver("dopri5", atol=5e-9, rtol=1e-8, device="cpu")
     dtype = solver.dtype
     n = 10
     step_error = 1e-9
@@ -110,18 +110,64 @@ def test_cumulative_mode_tightens_at_small_cumsum():
         mesh_quadrature_errors=mesh_quadrature_errors, mesh_quadratures=mesh_quadratures
     )
 
-    # Cumsum grows: cumsum[0]=0.1, cumsum[1]=0.2, ..., cumsum[9]=1.0.
-    # Per-step denominator: atol + rtol*cumsum.
-    # Step 0: 1e-8 + 1e-8*0.1 = 1.1e-8 → ratio = 1e-9 / 1.1e-8 = 0.0909
-    # Step 9: 1e-8 + 1e-8*1.0 = 2e-8 → ratio = 1e-9 / 2e-8 = 0.05
-    # So ratios should DECREASE monotonically.
+    # Cumsum grows: cumsum[0]=0.1, ..., cumsum[9]=1.0.
+    # Per-step denominator: max(5e-9, 1e-8*cumsum).
+    # Crossover at cumsum=0.5: steps 0-4 clamped at atol=5e-9 (flat ratios),
+    # steps 5-9 rtol-dominated and strictly decreasing.
+    # Step 0: max(5e-9, 1e-8*0.1) = 5e-9 → ratio = 1e-9 / 5e-9 = 0.2
+    # Step 9: max(5e-9, 1e-8*1.0) = 1e-8 → ratio = 1e-9 / 1e-8 = 0.1
     diffs = error_ratios[1:] - error_ratios[:-1]
     assert torch.all(diffs <= 0), (
-        f"cumulative-mode error ratios should decrease as cumsum grows; "
+        f"cumulative-mode error ratios should be non-increasing as cumsum grows; "
         f"got error_ratios={error_ratios.flatten().tolist()}"
     )
     assert error_ratios[0].item() > error_ratios[-1].item(), (
         "cumulative-mode tightens tolerance at small cumsum (early steps)"
+    )
+
+
+def test_cumulative_mode_tolerance_is_per_step():
+    """The cumulative-mode tolerance ``max(atol, rtol*|cumsum|)`` must be
+    evaluated independently for each step, not as a single global max.
+
+    Use atol=5e-9, rtol=1e-8 with 10 steps of 0.1 so that steps 0-4
+    (cumsum 0.1-0.5) are atol-clamped and steps 5-9 (cumsum 0.6-1.0)
+    are rtol-dominated. If the tolerance were computed globally (e.g.
+    using the final cumsum for all steps), all ratios would equal
+    step_error / 1e-8 = 0.1. The per-step computation produces a
+    larger ratio (0.2) for the early atol-clamped steps.
+    """
+    atol = 5e-9
+    rtol = 1e-8
+    solver = make_uniform_solver("dopri5", atol=atol, rtol=rtol, device="cpu")
+    dtype = solver.dtype
+    n = 10
+    step_error = 1e-9
+    step_value = 0.1
+    mesh_quadratures, mesh_quadrature_errors, _integral = _make_synthetic_inputs(
+        n, step_error, step_value, dtype
+    )
+
+    solver.use_absolute_error_ratio = False
+    error_ratios, _, _ = solver._compute_error_ratios(
+        mesh_quadrature_errors=mesh_quadrature_errors, mesh_quadratures=mesh_quadratures
+    )
+
+    # Compute expected per-step tolerances manually.
+    cumsums = torch.arange(1, n + 1, dtype=dtype) * step_value  # [0.1, 0.2, ..., 1.0]
+    expected_tols = torch.maximum(
+        torch.tensor(atol, dtype=dtype), torch.tensor(rtol, dtype=dtype) * cumsums
+    )
+    expected_ratios = torch.tensor(step_error, dtype=dtype) / expected_tols
+
+    assert torch.allclose(error_ratios, expected_ratios, rtol=1e-6), (
+        f"per-step ratios mismatch:\n  got      {error_ratios.tolist()}\n"
+        f"  expected {expected_ratios.tolist()}"
+    )
+    # Sanity: early steps (atol-clamped) must differ from late steps (rtol-dominated).
+    assert not torch.allclose(error_ratios[:5], error_ratios[5:]), (
+        "early (atol-clamped) and late (rtol-dominated) ratios should differ; "
+        "tolerance may have been applied globally rather than per step"
     )
 
 
@@ -132,7 +178,7 @@ def test_modes_agree_when_cumsum_equals_total_at_last_step():
 
     Pinning this anchors the relationship between the two modes.
     """
-    solver = make_uniform_solver("dopri5", atol=1e-8, rtol=1e-8)
+    solver = make_uniform_solver("dopri5", atol=1e-8, rtol=1e-8, device="cpu")
     dtype = solver.dtype
     n = 5
     step_error = 1e-9

@@ -195,7 +195,7 @@ class TestErrorRatiosNormDtype:
         )
         eps = torch.finfo(dtype).eps
         floor = 50.0 * eps * 1.0
-        tol = 1e-10 + 1e-10 * 1.0
+        tol = max(1e-10, 1e-10 * 1.0)
         effective_tol = max(tol, floor)
         assert math.isclose(r[0].item(), 1e-8 / effective_tol, rel_tol=1e-4)
         if dtype == torch.float32:
@@ -209,7 +209,7 @@ class TestErrorRatiosNormDtype:
         e = torch.tensor([[1e-8]], dtype=dtype)
         integral = torch.tensor([1.0], dtype=dtype)
         r, _, _ = s._compute_error_ratios(mesh_quadrature_errors=e, integral=integral)
-        assert math.isclose(r[0].item(), 1e-8 / (2e-10), rel_tol=1e-4)
+        assert math.isclose(r[0].item(), 1e-8 / max(1e-10, 1e-10 * 1.0), rel_tol=1e-4)
 
 
 @pytest.mark.parametrize("dtype", DTYPES, ids=DTYPE_IDS)

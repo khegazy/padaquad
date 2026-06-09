@@ -331,7 +331,7 @@ class SolverBase(ABC, DistributedEnvironment):
         # Update integration control error tolerances
         self.atol = self.atol.to(self.dtype)
         self.rtol = self.rtol.to(self.dtype)
-        
+
         # Set assertion tolerances appropriate for this precision level.
         # These are used in internal sanity checks (e.g., time ordering),
         # NOT for integration error control (that uses self.atol/self.rtol).

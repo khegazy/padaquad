@@ -4,6 +4,41 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-06-09
+
+### Added
+
+- **`error_integral_reference`** argument on `integrate()`: in absolute-error mode the rtol denominator is the running (incomplete) integral, which over-refines early panels when the integrand's mass is concentrated at later times. This argument accepts a Python float or tensor close to the true total, using it as the denominator from the first batch onward. Has no effect in cumulative mode.
+- **`error_norm`** argument (constructor + per-call override): pluggable vector-error norm schemes replacing the fixed RMS reduction, modeled on `scipy.integrate.quad_vec`'s `norm`:
+  - Norm family (`"2"` default, `"max"`, `"rms"`, or a callable) — reduce-then-compare: collapse the error vector with the named norm, compare to the tolerance.
+  - `"failure_fraction"` — per-component control: each output element is compared against its own tolerance; a panel is accepted when the fraction of failing elements is ≤ `mesh_failure_tolerance` (default `0.0`, requiring every element to pass).
+- **Rounding floor** (`max(tol, 50 * eps * |step|)`): refinement halts at the working-dtype precision wall instead of refining indefinitely when the requested tolerance is below the dtype's resolution.
+- **`error_on_nonfinite`** flag (default `True`): raises a `ValueError` naming the offending `t` when `f` returns NaN/Inf, preventing silent wrong results.
+- **`max_adaptive_splits`**: configurable ceiling on adaptive refinement depth (added in v1.0.2; documented here for completeness).
+
+### Changed
+
+- **Error tolerance formula (breaking for fine tolerances):** the accept/reject threshold for the norm family has changed from `atol + rtol * |I|` (additive) to `max(atol, rtol * |I|)` (maximum), aligning with `scipy.integrate`. This tightens tolerance when both terms are comparable; snapshot values have been regenerated. The `failure_fraction` scheme retains the additive form.
+- `atol` and `rtol` are now stored as dtype-aware tensors in `SolverBase` and re-cast in `_set_dtype`.
+- `y0`, `mesh_init`, and `mesh_final` defaults now honor the solver's dtype rather than hard-coding float64.
+- `max_batch < C` (`take_gradient=False`): sub-panel batch budgets are now supported. The split path processes one panel per iteration, evaluating its `C` nodes across several `max_batch`-sized sub-batches and carrying remainders forward. The final integral is bit-identical to a `max_batch ≥ C` run with the same seeded mesh. `max_batch == 0` at the dispatcher is rescued to `1` (with a warning); a direct unit call to `_evaluate_f_on_split_nodes` raises `AssertionError`. `take_gradient=True` below `C` continues to raise an error.
+- Non-finite error ratios (from singular integrands) are routed into the accept mask rather than hanging the refinement loop indefinitely.
+- GPU device handling: user-provided meshes, `f_args` tensors, and internal assertions are now consistently placed on `self.device`, fixing 850 test failures on CUDA machines.
+- `max_batch` is cached between calls when `f` is the same function, avoiding a full re-benchmark on every `integrate()` call.
+- Out-of-memory errors during integration and memory benchmarking are caught; `max_batch` is lowered and the evaluation retried.
+
+### Fixed
+
+- **Bug:** the integral loss was computed as `sum(step²)` instead of `(integral)²`.
+- **Bug:** misplaced parenthesis in the tolerance expression.
+- **Bug:** `VariableAdaptiveQuadrature` did not call `method.to_device(self.device)` at construction, leaving method tensors on CPU when the solver was on CUDA.
+- **Bug:** `_merge_excess_nodes` used `np.allclose` for a device-agnostic sanity check, which fails on CUDA tensors; replaced with `torch.allclose`.
+- **Bug:** non-finite error ratios caused an infinite adaptive refinement loop.
+
+### Removed
+
+- `error_calc_idx` argument (superseded by the callable form of `error_norm`).
+
 ## [1.0.2] - 2026-05-30
 
 ### Added

@@ -102,6 +102,11 @@ plugins:
             merge_init_into_class: true
             docstring_options:
               ignore_init_summary: true
+            # Document only the public API: drop every underscore-prefixed
+            # member (private implementation details and dunders). __init__
+            # is merged into the class signature via merge_init_into_class.
+            filters:
+              - "!^_"
   - gen-files:
       scripts:
         - docs/gen_ref_pages.py

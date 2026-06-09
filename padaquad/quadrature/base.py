@@ -1038,6 +1038,23 @@ class AdaptiveQuadrature(SolverBase):
             max_batch = self._get_max_f_evals(total_mem_usage)
         self.previous_max_batch = max_batch
 
+        # Rescue a zero budget to the minimum workable value of 1 before
+        # dispatching to either evaluation path. Placed ahead of the
+        # take_gradient branch so neither _evaluate_f_on_full_nodes nor
+        # _evaluate_f_on_split_nodes is ever entered with max_batch=0. A 0 here
+        # comes from the dynamic memory estimate collapsing (or an explicit
+        # max_batch=0); it is always a misconfiguration, hence the warning.
+        if max_batch == 0:
+            logger.warning(
+                "max_batch is 0, increasing to 1. This is a significant issue and "
+                "should be addressed. Either your memory is too small and you will "
+                "get an OOM error, or your system's memory is being significantly "
+                "underutilized and removing the benefits of padaquad's "
+                "parallelization. For the latter case, increase max_batch or "
+                "total_mem_usage to be closer to 1.0"
+            )
+            max_batch = 1
+
         # max_batch should not exceed the remaining number of f evaluations
         batches_left = torch.sum(mesh_trackers) * self.C
         assert batches_left > 0
@@ -1105,6 +1122,17 @@ class AdaptiveQuadrature(SolverBase):
         max_mesh_steps,
         split_node_state,
     ):
+        # A zero budget is unsatisfiable here and would divide-by-zero below
+        # (the % max_batch layout math). Callers route through
+        # _evaluate_f_on_mesh, which rescues max_batch=0 -> 1 before dispatch;
+        # this assert guards direct/unit callers with an explicit message.
+        assert max_batch > 0
+        # When max_batch < C the budget cannot hold even one whole panel, so the
+        # dispatcher's max_batch // C floors to 0. Unlike the full-nodes path
+        # (which requires >= 1 whole panel per batch), the split path evaluates a
+        # single panel's C nodes across several max_batch-sized batches and
+        # carries the remainder forward in split_node_state. Force at least one
+        # panel of work so that sub-C budgets still make progress.
         max_mesh_steps = 1 if max_mesh_steps == 0 else max_mesh_steps
         # Gather nodes and evaluations from previous split. split_mesh_idx
         # stores the residual panel's left-barrier *coordinate* (not an

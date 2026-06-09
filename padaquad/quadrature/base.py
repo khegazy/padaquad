@@ -1843,10 +1843,11 @@ class AdaptiveQuadrature(SolverBase):
             )
             error_tol_2steps = torch.maximum(
                 self.atol,
-                self.rtol * torch.maximum(
+                self.rtol
+                * torch.maximum(
                     self._reduce_norm(torch.abs(cum_steps[:-1])),
                     self._reduce_norm(torch.abs(cum_steps[1:])),
-                )
+                ),
             )
 
         if floor is not None:

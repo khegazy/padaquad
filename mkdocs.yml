@@ -1,37 +1,22 @@
 site_name: padaquad
 site_author: Kareem Hegazy
+site_url: https://khegazy.github.io/padaquad/
 site_description: >-
   This is the padaquad package!
 nav:
   - Home: index.md
-  - Overview:
-      - example_docs/intro/why.md
-      - example_docs/intro/resources.md
-  - Setup:
-      - example_docs/setup/prep.md
-      - example_docs/setup/name.md
-      - example_docs/setup/basics.md
-  - Installation:
-      - example_docs/installation/pyproject.md
-      - example_docs/installation/install.md
-  - Code:
-      - example_docs/code/source.md
-      - example_docs/code/hints.md
-      - example_docs/code/tests.md
-  - Documentation:
-      - example_docs/mkdocs/docs.md
-      - example_docs/mkdocs/build.md
-  - GitHub and CI:
-      - example_docs/github/commits.md
-      - example_docs/github/workflows.md
-  - Miscellaneous:
-      - example_docs/other/linting.md
-      - example_docs/other/apps.md
-  - Code Documentation: reference/ # keep me!
+  - Quickstart: quickstart.md
+  - User Guide:
+      - user_guide/concepts.md
+      - user_guide/methods.md
+      - user_guide/error_control.md
+      - user_guide/autodiff.md
+      - user_guide/advanced.md
+  - API Reference: reference/ # keep me!
   - About:
-      - example_docs/about/changelog.md
-      - example_docs/about/conduct.md
-      - example_docs/about/license.md
+      - about/changelog.md
+      - about/conduct.md
+      - about/license.md
 
 repo_url: https://github.com/khegazy/padaquad/
 edit_uri: blob/main/docs/
@@ -82,7 +67,9 @@ markdown_extensions:
   - pymdownx.keys
   - pymdownx.magiclink
   - pymdownx.mark
-  - pymdownx.snippets
+  - pymdownx.snippets:
+      base_path:
+        - .
   - pymdownx.smartsymbols
   - pymdownx.superfences:
       custom_fences:

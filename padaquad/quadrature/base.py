@@ -1105,6 +1105,7 @@ class AdaptiveQuadrature(SolverBase):
         max_mesh_steps,
         split_node_state,
     ):
+        max_mesh_steps = 1 if max_mesh_steps == 0 else max_mesh_steps
         # Gather nodes and evaluations from previous split. split_mesh_idx
         # stores the residual panel's left-barrier *coordinate* (not an
         # integer index), so it survives mesh refinement: the calling
@@ -1121,8 +1122,9 @@ class AdaptiveQuadrature(SolverBase):
             split_mesh_idx = torch.where((mesh == split_mesh_idx).all(dim=-1))[0][0]
 
         if split_mesh_idx is None:
-            evaluate_all = (max_mesh_steps * self.C) % max_batch == 0
-            num_mesh_steps = max_mesh_steps if evaluate_all else max_mesh_steps + 1
+            num_mesh_steps = max_mesh_steps
+            if (max_mesh_steps * self.C) % max_batch != 0:
+                num_mesh_steps += 1
 
             step_idxs = step_idxs[:num_mesh_steps]
 

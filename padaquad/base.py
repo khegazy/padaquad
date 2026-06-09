@@ -159,8 +159,8 @@ class SolverBase(ABC, DistributedEnvironment):
             self.speed_logger = None
 
         self.method_name = method.lower()
-        self.atol = atol
-        self.rtol = rtol
+        self.atol = torch.tensor(atol, dtype=dtype, device=self.device)
+        self.rtol = torch.tensor(rtol, dtype=dtype, device=self.device)
         # Construction-time defaults; each integrate() call falls back to these
         # when its corresponding argument is None (the active value is the local
         # resolved in _check_variables).
@@ -168,17 +168,17 @@ class SolverBase(ABC, DistributedEnvironment):
         self.init_y0 = (
             y0.to(self.device)
             if y0 is not None
-            else torch.tensor([0], dtype=torch.float64, device=self.device)
+            else torch.tensor([0], dtype=dtype, device=self.device)
         )
         self.init_mesh_init = (
             mesh_init.to(self.device)
             if mesh_init is not None
-            else torch.tensor([0], dtype=torch.float64, device=self.device)
+            else torch.tensor([0], dtype=dtype, device=self.device)
         )
         self.init_mesh_final = (
             mesh_final.to(self.device)
             if mesh_final is not None
-            else torch.tensor([1], dtype=torch.float64, device=self.device)
+            else torch.tensor([1], dtype=dtype, device=self.device)
         )
         # Cached time barriers from last integration for warm-starting.
         # Used only when integrate(..., reuse_mesh=True) is passed; otherwise
@@ -327,6 +327,10 @@ class SolverBase(ABC, DistributedEnvironment):
         self.init_mesh_final = self.init_mesh_final.to(self.dtype)
         if self.mesh_previous is not None:
             self.mesh_previous = self.mesh_previous.to(self.dtype)
+
+        # Update integration control error tolerances
+        self.atol = self.atol.to(self.dtype)
+        self.rtol = self.rtol.to(self.dtype)
 
         # Set assertion tolerances appropriate for this precision level.
         # These are used in internal sanity checks (e.g., time ordering),

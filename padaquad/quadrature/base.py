@@ -295,6 +295,7 @@ class AdaptiveQuadrature(SolverBase):
         max_batch: int | None = None,
         max_adaptive_splits: int | None = None,
         error_norm: str | Callable | None = None,
+        error_integral_reference: float | torch.Tensor | None = None,
         mesh_failure_tolerance: float | None = None,
         error_on_nonfinite: bool | None = None,
     ) -> IntegrationResult:
@@ -346,6 +347,21 @@ class AdaptiveQuadrature(SolverBase):
             error_norm: Vector-error reduction / acceptance scheme (see
                 __init__). If None (default), falls back to the value from
                 construction. When set, this per-call value takes priority.
+            error_integral_reference: Reference value for the relative-tolerance
+                denominator in absolute error mode
+                (``use_absolute_error_ratio=True``), where a panel's tolerance is
+                ``atol + rtol * |reference|``. By default the reference is the
+                *running* integral, which is incomplete during the early batches
+                (it has not yet accumulated contributions from regions evaluated
+                later). When much of the integral's mass lies at later times,
+                that early denominator is too small and the controller
+                over-refines early panels. Passing a value close to the true
+                total integral here fixes the denominator from the first batch.
+                Accepts a Python float or a tensor (coerced to the solver
+                dtype/device). Has no effect in cumulative mode
+                (``use_absolute_error_ratio=False``), which normalizes by the
+                cumulative sum instead. If None (default), the running integral
+                is used.
             mesh_failure_tolerance: Fraction of output elements allowed to fail
                 when ``error_norm == "failure_fraction"`` (see __init__). If
                 None (default), falls back to the value from construction. When
@@ -427,6 +443,11 @@ class AdaptiveQuadrature(SolverBase):
             else mesh_failure_tolerance
         )
         self._check_mesh_failure_tolerance(self.mesh_failure_tolerance)
+        if error_integral_reference is not None:
+            if not isinstance(error_integral_reference, torch.Tensor):
+                error_integral_reference = torch.tensor(error_integral_reference)
+            error_integral_reference = error_integral_reference.to(self.device)
+            error_integral_reference = error_integral_reference.to(self.dtype)
 
         # Get variables or populate with default values, send to correct device
         f, mesh_init, mesh_final, y0 = self._check_variables(
@@ -555,12 +576,20 @@ class AdaptiveQuadrature(SolverBase):
 
             # --- Step 4: Compute error ratios for each step ---
             t0 = time.time()
+            # The rtol denominator (atol + rtol*|reference_integral|). By default
+            # this is the running integral, which is incomplete in the early
+            # batches; a user-supplied error_integral_reference (≈ the true total
+            # integral) replaces it so rtol is judged against the right scale
+            # from the first batch.
+            reference_integral = current_integral
+            if error_integral_reference is not None:
+                reference_integral = error_integral_reference
             error_ratios, error_ratios_2steps, error_ratios_per_dim = (
                 self._compute_error_ratios(
                     mesh_quadrature_errors=method_output.mesh_quadrature_errors,
                     mesh_quadratures=method_output.mesh_quadratures,
                     cum_mesh_quadratures=cum_mesh_quadratures,
-                    integral=current_integral,
+                    integral=reference_integral,
                 )
             )
             keep_mask, remove_mask = self._accept_reject_masks(
@@ -687,7 +716,9 @@ class AdaptiveQuadrature(SolverBase):
 
         # === Post-convergence: sort results and optimize the mesh ===
         record = self._sort_record(record)
-        # Prune over-resolved steps and refine under-resolved ones
+        # Prune over-resolved steps and refine under-resolved ones. Pass the
+        # same rtol reference used in the loop so the post-convergence
+        # prune/refine judges error against the same scale.
         mesh_optimal = self._get_optimal_mesh(record, mesh)
         # Cache results for warm-starting subsequent calls with the same integrand
         self.mesh_previous = mesh_optimal
@@ -1007,6 +1038,23 @@ class AdaptiveQuadrature(SolverBase):
             max_batch = self._get_max_f_evals(total_mem_usage)
         self.previous_max_batch = max_batch
 
+        # Rescue a zero budget to the minimum workable value of 1 before
+        # dispatching to either evaluation path. Placed ahead of the
+        # take_gradient branch so neither _evaluate_f_on_full_nodes nor
+        # _evaluate_f_on_split_nodes is ever entered with max_batch=0. A 0 here
+        # comes from the dynamic memory estimate collapsing (or an explicit
+        # max_batch=0); it is always a misconfiguration, hence the warning.
+        if max_batch == 0:
+            logger.warning(
+                "max_batch is 0, increasing to 1. This is a significant issue and "
+                "should be addressed. Either your memory is too small and you will "
+                "get an OOM error, or your system's memory is being significantly "
+                "underutilized and removing the benefits of padaquad's "
+                "parallelization. For the latter case, increase max_batch or "
+                "total_mem_usage to be closer to 1.0"
+            )
+            max_batch = 1
+
         # max_batch should not exceed the remaining number of f evaluations
         batches_left = torch.sum(mesh_trackers) * self.C
         assert batches_left > 0
@@ -1074,6 +1122,18 @@ class AdaptiveQuadrature(SolverBase):
         max_mesh_steps,
         split_node_state,
     ):
+        # A zero budget is unsatisfiable here and would divide-by-zero below
+        # (the % max_batch layout math). Callers route through
+        # _evaluate_f_on_mesh, which rescues max_batch=0 -> 1 before dispatch;
+        # this assert guards direct/unit callers with an explicit message.
+        assert max_batch > 0
+        # When max_batch < C the budget cannot hold even one whole panel, so the
+        # dispatcher's max_batch // C floors to 0. Unlike the full-nodes path
+        # (which requires >= 1 whole panel per batch), the split path evaluates a
+        # single panel's C nodes across several max_batch-sized batches and
+        # carries the remainder forward in split_node_state. Force at least one
+        # panel of work so that sub-C budgets still make progress.
+        max_mesh_steps = 1 if max_mesh_steps == 0 else max_mesh_steps
         # Gather nodes and evaluations from previous split. split_mesh_idx
         # stores the residual panel's left-barrier *coordinate* (not an
         # integer index), so it survives mesh refinement: the calling
@@ -1090,8 +1150,9 @@ class AdaptiveQuadrature(SolverBase):
             split_mesh_idx = torch.where((mesh == split_mesh_idx).all(dim=-1))[0][0]
 
         if split_mesh_idx is None:
-            evaluate_all = (max_mesh_steps * self.C) % max_batch == 0
-            num_mesh_steps = max_mesh_steps if evaluate_all else max_mesh_steps + 1
+            num_mesh_steps = max_mesh_steps
+            if (max_mesh_steps * self.C) % max_batch != 0:
+                num_mesh_steps += 1
 
             step_idxs = step_idxs[:num_mesh_steps]
 
@@ -1358,7 +1419,9 @@ class AdaptiveQuadrature(SolverBase):
         )
 
     def _get_optimal_mesh(
-        self, record: dict[str, torch.Tensor], mesh: torch.Tensor
+        self,
+        record: dict[str, torch.Tensor],
+        mesh: torch.Tensor,
     ) -> torch.Tensor:
         """
         Compute an optimized mesh from the converged integration results.
@@ -1378,6 +1441,10 @@ class AdaptiveQuadrature(SolverBase):
             record: Dictionary of converged results including 't', 'mesh_quadratures',
                 'mesh_quadrature_errors', and 'integral'.
             mesh: Current barrier positions. Shape: [M, T].
+            error_integral_reference: Optional rtol-denominator reference (see
+                ``integrate``). When given, it replaces the converged integral as
+                the error-ratio reference for the prune/refine decisions, matching
+                what the main loop used. None ⇒ use the converged integral.
 
         Returns:
             Optimized barrier positions. Shape: [M_opt, T].
@@ -1760,7 +1827,9 @@ class AdaptiveQuadrature(SolverBase):
         )
 
         if self.use_absolute_error_ratio:
-            error_tol = self.atol + self.rtol * self._reduce_norm(integral)
+            error_tol = torch.maximum(
+                self.atol, self.rtol * self._reduce_norm(integral)
+            )
             error_tol_2steps = error_tol
         else:
             if cum_mesh_quadratures is not None:
@@ -1769,10 +1838,16 @@ class AdaptiveQuadrature(SolverBase):
                 cum_steps = torch.cumsum(mesh_quadratures, dim=0)
             else:
                 raise ValueError("Must give mesh_quadratures or cum_mesh_quadratures")
-            error_tol = self.atol + self.rtol * self._reduce_norm(torch.abs(cum_steps))
-            error_tol_2steps = self.atol + self.rtol * torch.maximum(
-                self._reduce_norm(torch.abs(cum_steps[:-1])),
-                self._reduce_norm(torch.abs(cum_steps[1:])),
+            error_tol = torch.maximum(
+                self.atol, self.rtol * self._reduce_norm(torch.abs(cum_steps))
+            )
+            error_tol_2steps = torch.maximum(
+                self.atol,
+                self.rtol
+                * torch.maximum(
+                    self._reduce_norm(torch.abs(cum_steps[:-1])),
+                    self._reduce_norm(torch.abs(cum_steps[1:])),
+                ),
             )
 
         if floor is not None:

@@ -320,29 +320,25 @@ class TestTrainingLoopPattern:
         assert integrand.scale.grad.abs().item() > 0
 
     def test_optimizer_step_reduces_loss(self, method_name):
-        """3 Adam steps with ScaledIntegrand → loss decreases."""
+        """10 Adam steps with ScaledIntegrand → loss decreases."""
         torch.manual_seed(SEED)
         integrand = ScaledIntegrand(scale=2.0)
         integrand.eval()
-        optimizer = torch.optim.Adam(integrand.parameters(), lr=0.1)
-
-        # Custom loss: minimize |integral|^2 (drive integral toward 0)
-        def target_loss(output):
-            return (output.integral**2).sum()
+        optimizer = torch.optim.Adam(integrand.parameters(), lr=0.01)
 
         losses = []
-        for _ in range(3):
+        for _ in range(10):
             optimizer.zero_grad()
             solver = _make_solver(method_name, integrand)
             result = solver.integrate(
                 mesh_init=T_INIT,
                 mesh_final=T_FINAL,
                 take_gradient=False,
-                loss_fxn=target_loss,
             )
-            result.loss.backward()
+            # Minimize |integral|^2 (drive integral toward 0)
+            loss = (result.integral**2).sum()
+            loss.backward()
             optimizer.step()
-            losses.append(result.loss.item())
+            losses.append(loss.item())
 
-        # Loss should decrease over the 3 steps
         assert losses[-1] < losses[0], f"Loss did not decrease: {losses}"

@@ -25,6 +25,8 @@ Tier markers (T1, T2, T3) tag tests by priority. Run a subset with
 
 from __future__ import annotations
 
+import math
+
 import pytest
 import torch
 from _helpers import (
@@ -110,6 +112,16 @@ _ALL_SWEEP_IDS = _sweep_ids(_ALL_SWEEP)
 # Below-C sweep: (method, max_batch ∈ [0, C-1]) — these should error for full_nodes
 _BELOW_C_SWEEP = _sweep_params(batch_range_fn=lambda m: list(range(_method_C(m))))
 _BELOW_C_SWEEP_IDS = _sweep_ids(_BELOW_C_SWEEP)
+
+# Below-C but nonzero: (method, max_batch ∈ [1, C-1]). Now SUPPORTED for the
+# split-nodes (take_gradient=False) path: a budget too small to hold a whole
+# panel still runs by evaluating one panel's C nodes across several batches and
+# carrying remainders forward. Must run AND be correct. (adaptive_heun has C=2,
+# so this is just max_batch=1; gk15 has C=17, giving max_batch ∈ [1..16].)
+_BELOW_C_NONZERO_SWEEP = _sweep_params(
+    batch_range_fn=lambda m: list(range(1, _method_C(m)))
+)
+_BELOW_C_NONZERO_SWEEP_IDS = _sweep_ids(_BELOW_C_NONZERO_SWEEP)
 
 # Above-or-equal-C sweep: (method, max_batch ∈ [C, 2C+1])
 _AT_OR_ABOVE_C_SWEEP = _sweep_params(
@@ -206,11 +218,17 @@ class TestUnit:
     @pytest.mark.tier1
     @pytest.mark.parametrize("method", TEST_METHODS)
     def test_split_nodes_max_batch_zero_errors(self, method):
-        """max_batch=0 triggers division/modulo-by-zero in Path A."""
+        """max_batch=0 trips the explicit ``assert max_batch > 0`` guard.
+
+        A direct call bypasses the ``_evaluate_f_on_mesh`` dispatcher's
+        0 -> 1 rescue, so the function's own guard must reject it. (Sub-C
+        nonzero budgets are supported — see
+        ``test_split_nodes_below_C_matches_full_nodes``.)
+        """
         solver = make_solver_for_unit_test(method)
         mesh = _make_mesh()
         step_idxs = _make_step_idxs()
-        with pytest.raises((ZeroDivisionError, RuntimeError, ValueError)):
+        with pytest.raises(AssertionError):
             solver._evaluate_f_on_split_nodes(
                 _simple_integrand,
                 (),
@@ -520,6 +538,99 @@ class TestUnit:
         assert max_diff < 1e-14, (
             f"f_evals drift {max_diff:.3e} >= 1e-14 for {method} "
             f"max_batch={max_batch} integrand={integrand_name}"
+        )
+
+    # -----------------------------------------------------------------------
+    # 7b. Below-C (0 < max_batch < C): split-loop still reconstructs the panel
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier1
+    @pytest.mark.parametrize("integrand_name", TIER1_INTEGRANDS)
+    @pytest.mark.parametrize(
+        ("method", "max_batch"),
+        _BELOW_C_NONZERO_SWEEP,
+        ids=_BELOW_C_NONZERO_SWEEP_IDS,
+    )
+    def test_split_nodes_below_C_matches_full_nodes(
+        self, method, max_batch, integrand_name
+    ):
+        """A sub-C budget reconstructs panels exactly across many batches.
+
+        With ``0 < max_batch < C`` the dispatcher floors ``max_batch // C`` to 0
+        and the split path's guard bumps it back to one panel of work, so a
+        single panel's ``C`` nodes are accumulated over ``ceil(C / max_batch)``
+        batches via ``split_node_state``. The accumulated nodes/f_evals must
+        match the single full-nodes reference within 1e-12, with no orphaned
+        residual left in the final state.
+
+        ``_loop_split_until_done`` caps its iterations at ``n_panels + 5`` which
+        is too tight here (one panel can take ~C/max_batch calls), so this test
+        drives the loop with its own generous cap.
+        """
+        solver = make_solver_for_unit_test(method)
+        C = solver.C
+        n_panels = 3
+        mesh = _make_mesh(n_panels=n_panels)
+        step_idxs = torch.arange(n_panels)
+        f, _, _ = _resolve_integrand(integrand_name)
+
+        # Reference: single full-nodes call over the whole mesh.
+        nodes_ref, f_evals_ref, _tracked, _idxs_ref, _ = (
+            solver._evaluate_f_on_full_nodes(
+                f, (), mesh, step_idxs, max_mesh_steps=n_panels
+            )
+        )
+
+        # Drive the split path to completion. Each iteration recomputes the
+        # effective budget the way the integrate loop does (base.py); for sub-C
+        # budgets max_mesh_steps floors to 0 and the in-function guard handles
+        # it. One panel completes every ~ceil(C / max_batch) iterations.
+        state = (None, None, None, None)
+        nodes_acc, f_evals_acc, idxs_acc = [], [], []
+        completed = 0
+        iters = 0
+        max_iters = n_panels * math.ceil(C / max_batch) + n_panels + 5
+        while completed < n_panels:
+            iters += 1
+            assert iters <= max_iters, (
+                f"split loop did not converge for {method} "
+                f"max_batch={max_batch} (completed={completed}/{n_panels})"
+            )
+            remaining = step_idxs[completed:]
+            batches_left = len(remaining) * C
+            eff_max_batch = min(max_batch, batches_left)
+            eff_max_mesh_steps = eff_max_batch // C
+            nodes_i, f_evals_i, _tracked_i, idxs_i, state = (
+                solver._evaluate_f_on_split_nodes(
+                    f,
+                    (),
+                    mesh,
+                    remaining,
+                    max_batch=eff_max_batch,
+                    max_mesh_steps=eff_max_mesh_steps,
+                    split_node_state=state,
+                )
+            )
+            if len(idxs_i) > 0:
+                nodes_acc.append(nodes_i)
+                f_evals_acc.append(f_evals_i)
+                idxs_acc.append(idxs_i)
+                completed += len(idxs_i)
+
+        assert state == (None, None, None, None), (
+            f"orphaned residual left for {method} max_batch={max_batch}"
+        )
+        nodes_loop = torch.cat(nodes_acc, dim=0)
+        f_evals_loop = torch.cat(f_evals_acc, dim=0)
+        assert torch.cat(idxs_acc, dim=0).shape[0] == n_panels
+
+        assert torch.allclose(nodes_loop, nodes_ref, atol=1e-12, rtol=0), (
+            f"nodes mismatch: max abs diff = "
+            f"{(nodes_loop - nodes_ref).abs().max().item():.3e}"
+        )
+        assert torch.allclose(f_evals_loop, f_evals_ref, atol=1e-12, rtol=0), (
+            f"f_evals mismatch: max abs diff = "
+            f"{(f_evals_loop - f_evals_ref).abs().max().item():.3e}"
         )
 
     # -----------------------------------------------------------------------
@@ -1009,7 +1120,7 @@ class TestEndToEnd:
         )
 
     # -----------------------------------------------------------------------
-    # E1. max_batch=0 errors at the public API
+    # E1. max_batch=0 at the public API: dispatcher rescues 0 -> 1
     # -----------------------------------------------------------------------
 
     @pytest.mark.tier1
@@ -1018,15 +1129,53 @@ class TestEndToEnd:
     )
     @pytest.mark.parametrize("method", TEST_METHODS)
     def test_integrate_max_batch_zero_errors(self, method, take_gradient):
-        """``.integrate(max_batch=0)`` raises a clear error."""
-        f, _, _ = _resolve_integrand("damped_sine")
+        """``.integrate(max_batch=0)`` is rescued to ``max_batch=1`` by the
+        ``_evaluate_f_on_mesh`` dispatcher (with a warning).
+
+        - ``take_gradient=False``: the split path runs one panel at a time, so
+          the call **succeeds** with a correct integral.
+        - ``take_gradient=True``: the full-nodes path needs a whole panel per
+          batch, so ``max_batch=1 < C`` still trips its ``max_mesh_steps >= 1``
+          assertion for the C>1 methods under test.
+        """
+        f, _solution_fxn, _ = _resolve_integrand("damped_sine")
         solver = self._solver(method, max_batch=0)
-        with pytest.raises((AssertionError, ZeroDivisionError, RuntimeError)):
-            solver.integrate(
+        if take_gradient:
+            with pytest.raises(AssertionError):
+                solver.integrate(
+                    f=f,
+                    mesh_init=self.T_INIT,
+                    mesh_final=self.T_FINAL,
+                    take_gradient=True,
+                )
+        else:
+            # max_batch is an implementation detail; with the same initial mesh
+            # the rescued-to-1 run must produce the SAME integral as a normal
+            # max_batch=C run (the engine evaluates the same nodes, just in
+            # different-sized batches). Seed immediately before each call so both
+            # start from an identical random mesh, then require near-exact
+            # agreement.
+            torch.manual_seed(2025)
+            result = solver.integrate(
                 f=f,
                 mesh_init=self.T_INIT,
                 mesh_final=self.T_FINAL,
-                take_gradient=take_gradient,
+                take_gradient=False,
+            )
+            reference = self._solver(method, max_batch=_method_C(method))
+            torch.manual_seed(2025)
+            ref_result = reference.integrate(
+                f=f,
+                mesh_init=self.T_INIT,
+                mesh_final=self.T_FINAL,
+                take_gradient=False,
+            )
+            assert torch.allclose(
+                result.integral.cpu(), ref_result.integral.cpu(), atol=1e-12, rtol=0
+            ), (
+                f"{method} max_batch=0 (rescued to 1) altered the integral vs "
+                f"max_batch=C ({result.integral.item()} vs "
+                f"{ref_result.integral.item()})"
             )
 
     # -----------------------------------------------------------------------
@@ -1447,47 +1596,59 @@ class TestTier2:
             pass
 
     # -----------------------------------------------------------------------
-    # E2E 4. take_gradient=False with max_batch < C — pin the behavior
+    # E2E 4. take_gradient=False with 0 < max_batch < C — runs and is correct
     # -----------------------------------------------------------------------
 
-    @pytest.mark.tier2
+    @pytest.mark.tier1
+    @pytest.mark.parametrize("integrand_name", TIER1_INTEGRANDS)
     @pytest.mark.parametrize(
         ("method", "max_batch"),
-        _BELOW_C_SWEEP,
-        ids=_BELOW_C_SWEEP_IDS,
+        _BELOW_C_NONZERO_SWEEP,
+        ids=_BELOW_C_NONZERO_SWEEP_IDS,
     )
-    def test_integrate_take_grad_False_max_batch_below_C_behavior(
-        self, method, max_batch
+    def test_integrate_take_grad_False_max_batch_below_C_correct(
+        self, method, max_batch, integrand_name
     ):
-        """For take_gradient=False with max_batch < C, document the
-        actual behavior. The current implementation may produce empty
-        outputs, hang, or error - this test pins whatever it does.
+        """``take_gradient=False`` with ``0 < max_batch < C`` integrates correctly.
+
+        A sub-C budget no longer errors: the split path evaluates each panel's
+        ``C`` nodes across several batches (see the guards in
+        ``_evaluate_f_on_split_nodes``). ``max_batch`` is an implementation
+        detail and must not affect the integral. With the same initial mesh
+        (same seed), the below-C run evaluates the same nodes as a normal
+        ``max_batch == C`` run, just in different-sized batches, so the two
+        integrals must agree near-exactly (atol 1e-12) — not merely within a
+        loose batching-corruption bound. ``max_batch == 0`` is covered by
+        ``test_integrate_max_batch_zero_errors``.
         """
-        f, _, _ = _resolve_integrand("damped_sine")
-        solver = make_uniform_solver(method, atol=1e-4, rtol=1e-4, max_batch=max_batch)
-        # Accept any of: clean error, correct result, or specific error message.
-        # The point of this test is to PIN the behavior so changes are visible.
-        try:
-            result = solver.integrate(
-                f=f,
-                mesh_init=torch.tensor([0.0], dtype=torch.float64),
-                mesh_final=torch.tensor([1.0], dtype=torch.float64),
-                take_gradient=False,
+        f, _solution_fxn, _cutoff = _resolve_integrand(integrand_name)
+        t_init = TestEndToEnd.T_INIT
+        t_final = TestEndToEnd.T_FINAL
+
+        def _run(mb):
+            solver = make_uniform_solver(
+                method,
+                atol=TestEndToEnd.E2E_ATOL,
+                rtol=TestEndToEnd.E2E_RTOL,
+                max_batch=mb,
             )
-            # If it succeeded, the result should at least be a finite number.
-            assert torch.isfinite(result.integral).all()
-        except (
-            AssertionError,
-            ZeroDivisionError,
-            RuntimeError,
-            IndexError,
-            ValueError,
-        ):
-            # Acceptable: errors are the expected behavior for max_batch < C
-            # (the integrate code path can't accommodate fewer than C
-            # evaluations per batch). torch.cat raises ValueError on empty
-            # list, which fires when no batches are evaluable.
-            pass
+            # Seed immediately before integrate so both runs start from an
+            # identical random initial mesh.
+            torch.manual_seed(2025)
+            return solver.integrate(
+                f=f, mesh_init=t_init, mesh_final=t_final, take_gradient=False
+            )
+
+        result = _run(max_batch)
+        reference = _run(_method_C(method))  # valid max_batch == C baseline
+
+        assert torch.allclose(
+            result.integral.cpu(), reference.integral.cpu(), atol=1e-12, rtol=0
+        ), (
+            f"{method} {integrand_name}: max_batch={max_batch} altered the "
+            f"integral vs max_batch=C ({result.integral.item()} vs "
+            f"{reference.integral.item()})"
+        )
 
     # -----------------------------------------------------------------------
     # E2E 7. take_grad=True invariant subset

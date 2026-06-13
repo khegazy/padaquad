@@ -1112,7 +1112,7 @@ class AdaptiveQuadrature(SolverBase):
 
         return nodes, f_evals, tracked_out, step_idxs, (None, None, None, None)
 
-    def _evaluate_f_on_split_nodes(
+    def _evaluate_f_memory_conserve(
         self,
         f,
         f_args,

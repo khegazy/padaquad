@@ -20,7 +20,12 @@ def _make_method_output(N, D=1):
 
 
 class TestAdaptivelyAddSteps:
-    """Tests for AdaptiveQuadrature._adaptively_increase_mesh."""
+    """Tests for AdaptiveQuadrature._adaptively_increase_mesh.
+
+    The method returns a 9-tuple:
+    (method_output, y, tracked, nodes, mesh_new, trackers_new, mesh_indices,
+     error_ratios_kept, split_counts_new).
+    """
 
     def setup_method(self):
         self.solver = make_solver_for_unit_test()
@@ -33,7 +38,7 @@ class TestAdaptivelyAddSteps:
         error_ratios = torch.tensor([0.5, 0.3])
         mo = _make_method_output(2)
 
-        mo_out, _, _, _, barriers_new, trackers_new, er_kept, _ = (
+        mo_out, _, _, _, barriers_new, trackers_new, mesh_idx, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
                 mo, error_ratios, None, None, barriers, idxs, trackers
             )
@@ -42,6 +47,10 @@ class TestAdaptivelyAddSteps:
         assert not torch.any(trackers_new[:2])
         assert len(er_kept) == 2
         assert mo_out.mesh_quadratures.shape[0] == 2
+        # mesh_indices maps every barrier coordinate to its mesh position.
+        assert mesh_idx == {
+            tuple(b.tolist()): i for i, b in enumerate(barriers_new)
+        }
 
     def test_all_fail(self):
         """All error_ratios >= 1: midpoints inserted, error_ratios_kept empty."""
@@ -51,7 +60,7 @@ class TestAdaptivelyAddSteps:
         error_ratios = torch.tensor([2.0, 1.5])
         mo = _make_method_output(2)
 
-        mo_out, _, _, _, barriers_new, _trackers_new, er_kept, _ = (
+        mo_out, _, _, _, barriers_new, _trackers_new, mesh_idx, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
                 mo, error_ratios, None, None, barriers, idxs, trackers
             )
@@ -60,6 +69,10 @@ class TestAdaptivelyAddSteps:
         assert len(barriers_new) == 5
         assert len(er_kept) == 0
         assert mo_out.mesh_quadratures.shape[0] == 0
+        # mesh_indices reflects the inserted midpoints and the bumped positions.
+        assert mesh_idx == {
+            tuple(b.tolist()): i for i, b in enumerate(barriers_new)
+        }
 
     def test_mixed_pass_fail(self):
         """First passes, second fails: 1 midpoint added."""
@@ -69,7 +82,7 @@ class TestAdaptivelyAddSteps:
         error_ratios = torch.tensor([0.5, 2.0])
         mo = _make_method_output(2)
 
-        mo_out, _, _, _, barriers_new, _trackers_new, er_kept, _ = (
+        mo_out, _, _, _, barriers_new, _trackers_new, _, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
                 mo, error_ratios, None, None, barriers, idxs, trackers
             )
@@ -86,7 +99,7 @@ class TestAdaptivelyAddSteps:
         idxs = torch.tensor([0, 1])
         error_ratios = torch.tensor([2.0, 0.5])
 
-        mo_out, y_out, _tracked, t_out, barriers_new, _, _, _ = (
+        mo_out, y_out, _tracked, t_out, barriers_new, _, _, _, _ = (
             self.solver._adaptively_increase_mesh(
                 None, error_ratios, None, None, barriers, idxs, trackers
             )
@@ -104,7 +117,7 @@ class TestAdaptivelyAddSteps:
         idxs = torch.tensor([0])
         error_ratios = torch.tensor([3.0])
 
-        _, _, _, _, barriers_new, _, _, _ = self.solver._adaptively_increase_mesh(
+        _, _, _, _, barriers_new, _, _, _, _ = self.solver._adaptively_increase_mesh(
             None, error_ratios, None, None, barriers, idxs, trackers
         )
         assert torch.allclose(barriers_new[1], torch.tensor([0.5], dtype=torch.float64))
@@ -116,7 +129,7 @@ class TestAdaptivelyAddSteps:
         idxs = torch.tensor([0, 1, 2])
         error_ratios = torch.tensor([2.0, 2.0, 2.0])
 
-        _, _, _, _, barriers_new, _, _, _ = self.solver._adaptively_increase_mesh(
+        _, _, _, _, barriers_new, _, _, _, _ = self.solver._adaptively_increase_mesh(
             None, error_ratios, None, None, barriers, idxs, trackers
         )
         diffs = barriers_new[1:, 0] - barriers_new[:-1, 0]
@@ -129,7 +142,7 @@ class TestAdaptivelyAddSteps:
         idxs = torch.tensor([0])
         error_ratios = torch.tensor([2.0])
 
-        _, _, _, _, _barriers_new, trackers_new, _, _ = (
+        _, _, _, _, _barriers_new, trackers_new, _, _, _ = (
             self.solver._adaptively_increase_mesh(
                 None, error_ratios, None, None, barriers, idxs, trackers
             )
@@ -146,7 +159,7 @@ class TestAdaptivelyAddSteps:
         error_ratios = torch.tensor([0.5, 2.0, 0.3])
         mo = _make_method_output(3)
 
-        mo_out, _, _, _, _, _, er_kept, _ = self.solver._adaptively_increase_mesh(
+        mo_out, _, _, _, _, _, _, er_kept, _ = self.solver._adaptively_increase_mesh(
             mo, error_ratios, None, None, barriers, idxs, trackers
         )
         assert mo_out.mesh_quadratures.shape[0] == 2
@@ -160,7 +173,7 @@ class TestAdaptivelyAddSteps:
         idxs = torch.tensor([0])
         error_ratios = torch.tensor([0.5])
 
-        _, _, _, _, barriers_new, trackers_new, er_kept, _ = (
+        _, _, _, _, barriers_new, trackers_new, _, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
                 None, error_ratios, None, None, barriers, idxs, trackers
             )
@@ -181,7 +194,7 @@ class TestAdaptivelyAddSteps:
         remove_mask = torch.tensor([True, False])
         mo = _make_method_output(2)
 
-        mo_out, _, _, _, barriers_new, _, er_kept, _ = (
+        mo_out, _, _, _, barriers_new, _, _, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
                 mo,
                 error_ratios,

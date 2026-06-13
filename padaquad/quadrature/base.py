@@ -1709,7 +1709,7 @@ class AdaptiveQuadrature(SolverBase):
         mesh_trackers = torch.ones(len(mesh), device=self.device).to(bool)
         mesh_trackers[-1] = False  # mesh_final cannot be a step starting point
         mesh_indices = self._get_mesh_indices(mesh)
-        
+
         return mesh, mesh_trackers, mesh_indices, mesh_is_given
 
     def _get_mesh_indices(self, mesh):
@@ -1721,6 +1721,7 @@ class AdaptiveQuadrature(SolverBase):
         # Single device->host transfer of the whole [M, T] mesh, then build the
         # tuple keys in pure Python (one host sync instead of one per barrier).
         return {tuple(row): idx for idx, row in enumerate(mesh.tolist())}
+
     # -------------------------------------------------------------------------------- #
     #                           ADAPTIVE ERROR CALCULATIONS                            #
     # -------------------------------------------------------------------------------- #
@@ -1994,9 +1995,7 @@ class AdaptiveQuadrature(SolverBase):
     # not per-step arrays that need re-sorting.
     _RECORD_SCALAR_KEYS = ("integral", "integral_error", "loss")
 
-    def _mesh_order(
-        self, barriers: torch.Tensor, mesh_indices: dict
-    ) -> torch.Tensor:
+    def _mesh_order(self, barriers: torch.Tensor, mesh_indices: dict) -> torch.Tensor:
         """
         Look up the mesh-order index of each panel from its left barrier.
 
@@ -2048,9 +2047,7 @@ class AdaptiveQuadrature(SolverBase):
         """
         orders = torch.cat([rec_order, new_order])
         positions = torch.empty(len(orders), dtype=torch.long, device=self.device)
-        positions[torch.argsort(orders)] = torch.arange(
-            len(orders), device=self.device
-        )
+        positions[torch.argsort(orders)] = torch.arange(len(orders), device=self.device)
         n = len(rec_order)
         return positions[:n], positions[n:]
 
@@ -2167,9 +2164,7 @@ class AdaptiveQuadrature(SolverBase):
         assert torch.all(merged_order[1:] - merged_order[:-1] > 0)
         # For 1-D time the left-node coordinate must also be strictly ascending.
         if record["nodes"].shape[-1] == 1:
-            assert torch.all(
-                record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] > 0
-            )
+            assert torch.all(record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] > 0)
 
         return record
 

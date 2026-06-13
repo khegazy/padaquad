@@ -1163,11 +1163,6 @@ class AdaptiveQuadrature(SolverBase):
             nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
 
             # Determine the number of evaluation iterations based on split
-            # if evaluate_all:
-            #     num_accumulation_iters = (num_mesh_steps * self.C) // max_batch
-            # else:
-            #     num_accumulation_iters = (max_mesh_steps * self.C) // max_batch + 1
-            #     num_residual_nodes = max_batch - (max_mesh_steps * self.C % max_batch)
             num_nodes_to_eval = max_mesh_steps * self.C
         else:
             num_mesh_steps = max_mesh_steps + 1
@@ -1203,10 +1198,6 @@ class AdaptiveQuadrature(SolverBase):
             # evals), the rest splits into full new panels plus a partial
             # residual; if num_eval_nodes < max_batch the layout's tail
             # already ends cleanly, so the residual is zero.
-            # num_accumulation_iters = 1
-            # actual_evals = min(max_batch, num_eval_nodes)
-            # num_residual_nodes = (actual_evals - num_remaining_split_nodes) % self.C
-            # evaluate_all = num_residual_nodes == 0
 
             num_nodes_to_eval = min(
                 max_mesh_steps * self.C + num_remaining_split_nodes,
@@ -1347,20 +1338,6 @@ class AdaptiveQuadrature(SolverBase):
         )
 
         return nodes, f_evals, tracked_out, step_idxs, split_node_state
-
-        # node_split_state = (split_nodes)
-        # return torch.flatten(nodes, start_dim=0, end_dim=-2), step_idxs,
-        # # Find barrier indices where mesh_trackers is True, take up to max_steps
-        # step_idxs = torch.arange(len(mesh), device=self.device)
-        # step_idxs = step_idxs[mesh_trackers]
-        # step_idxs = step_idxs[:max_steps]
-        # # Place C quadrature points within each selected step
-        # nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
-
-        # # --- Step 2: Evaluate the integrand at all quadrature points ---
-        # # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
-        # # shape = nodes.shape
-        # return torch.flatten(nodes, start_dim=0, end_dim=-2), step_idxs, node_bucket
 
     def _sort_evals_into_mesh(
         self, take_gradient, nodes_flat, y_step_eval, y_step_bucket

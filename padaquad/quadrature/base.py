@@ -500,7 +500,7 @@ class AdaptiveQuadrature(SolverBase):
         #   - reuse_mesh=True with a populated cache: warm-start from the
         #     cached optimal mesh, snapping its endpoints to [mesh_init, mesh_final];
         #   - otherwise: generate a fresh random initial mesh.
-        mesh, mesh_trackers, mesh_is_given = self._setup_initial_mesh(
+        mesh, mesh_trackers, mesh_indices, mesh_is_given = self._setup_initial_mesh(
             mesh,
             mesh_init,
             mesh_final,
@@ -653,6 +653,7 @@ class AdaptiveQuadrature(SolverBase):
                 nodes,
                 mesh,
                 mesh_trackers,
+                mesh_indices,
                 error_ratios,
                 split_counts,
             ) = self._adaptively_increase_mesh(
@@ -930,6 +931,7 @@ class AdaptiveQuadrature(SolverBase):
             nodes,
             mesh_new,
             mesh_trackers_new,
+            self._get_mesh_indices(mesh_new),
             error_ratios[keep_mask],
             split_counts_new,
         )
@@ -1683,9 +1685,12 @@ class AdaptiveQuadrature(SolverBase):
             assert torch.all(mesh[1:] - mesh[:-1] > 0)
         mesh_trackers = torch.ones(len(mesh), device=self.device).to(bool)
         mesh_trackers[-1] = False  # mesh_final cannot be a step starting point
+        mesh_indices = self._get_mesh_indices(mesh)
+        
+        return mesh, mesh_trackers, mesh_indices, mesh_is_given
 
-        return mesh, mesh_trackers, mesh_is_given
-
+    def _get_mesh_indices(self, mesh):
+        return {init : idx for idx, init in enumerate(mesh)}
     # -------------------------------------------------------------------------------- #
     #                           ADAPTIVE ERROR CALCULATIONS                            #
     # -------------------------------------------------------------------------------- #

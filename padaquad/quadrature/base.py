@@ -560,9 +560,12 @@ class AdaptiveQuadrature(SolverBase):
             else:
                 # Subsequent batches: add to previously recorded integral
                 current_integral = record["integral"] + method_output.integral.detach()
-                # Merge new steps into the sorted record to compute cumulative sums
-                idxs_keep, idxs_input = self._get_sorted_indices(
-                    record["nodes"][:, 0, 0], nodes[:, 0, 0]
+                # Merge new steps into the sorted record to compute cumulative
+                # sums. Placement is by mesh order (each panel's left barrier
+                # looked up in mesh_indices), robust for any time dimension.
+                idxs_keep, idxs_input = self._merge_positions(
+                    self._mesh_order(record["nodes"][:, 0, :], mesh_indices),
+                    self._mesh_order(nodes[:, 0, :], mesh_indices),
                 )
                 all_mesh_quadratures = self._insert_sorted_results(
                     record["mesh_quadratures"],
@@ -670,11 +673,17 @@ class AdaptiveQuadrature(SolverBase):
                 keep_mask=keep_mask,
                 remove_mask=remove_mask,
             )
-            # Verify barrier ordering after adaptive refinement
-            mesh_diff = mesh[1:, 0] - mesh[:-1, 0]
-            assert torch.all(mesh_diff + self.atol_assert > 0) or torch.all(
-                mesh_diff - self.atol_assert < 0
-            )
+            # Verify barrier ordering after adaptive refinement.
+            # Any-T invariant: consecutive barriers are distinct (no
+            # zero-length panels), which is all that is meaningful for a
+            # multi-dimensional path.
+            assert torch.all(torch.any(mesh[1:] != mesh[:-1], dim=-1))
+            # For 1-D time the barriers must additionally be monotonic.
+            if mesh.shape[-1] == 1:
+                mesh_diff = mesh[1:, 0] - mesh[:-1, 0]
+                assert torch.all(mesh_diff + self.atol_assert > 0) or torch.all(
+                    mesh_diff - self.atol_assert < 0
+                )
 
             # --- Step 6: Record accepted results and handle gradients ---
             if nodes.shape[0] > 0:
@@ -708,6 +717,7 @@ class AdaptiveQuadrature(SolverBase):
                     record=record,
                     take_gradient=take_gradient,
                     results=intermediate_results,
+                    mesh_indices=mesh_indices,
                 )
 
                 # Backpropagate gradients through the integration if requested
@@ -716,7 +726,7 @@ class AdaptiveQuadrature(SolverBase):
             del y_step_eval
 
         # === Post-convergence: sort results and optimize the mesh ===
-        record = self._sort_record(record)
+        record = self._sort_record(record, mesh_indices)
         # Prune over-resolved steps and refine under-resolved ones. Pass the
         # same rtol reference used in the loop so the post-convergence
         # prune/refine judges error against the same scale.
@@ -1491,7 +1501,7 @@ class AdaptiveQuadrature(SolverBase):
             keep_mask=keep_mask,
             remove_mask=remove_mask,
         )
-        _, _, _, _, mesh_optimal, _, _, _ = adaptive_step
+        _, _, _, _, mesh_optimal, _, _, _, _ = adaptive_step
 
         return mesh_optimal
 
@@ -1605,10 +1615,14 @@ class AdaptiveQuadrature(SolverBase):
                     "this f.",
                     stacklevel=2,
                 )
-            # Filter cached barriers to within the new [mesh_init, mesh_final].
-            # TODO: CHECK THIS PART WITH MULTI DIM T
-            mask = (self.mesh_previous[:, 0] <= mesh_final[0]) & (
-                self.mesh_previous[:, 0] >= mesh_init[0]
+            # Filter cached barriers to within the new [mesh_init, mesh_final]
+            # box, comparing every time dimension (min/max handles either
+            # integration direction). For 1-D forward integration this is the
+            # same set as the previous coordinate-0 range test.
+            lo = torch.minimum(mesh_init, mesh_final)
+            hi = torch.maximum(mesh_init, mesh_final)
+            mask = torch.all(
+                (self.mesh_previous >= lo) & (self.mesh_previous <= hi), dim=-1
             )
             mesh = self.mesh_previous[mask]
             # Ensure the warm-started mesh starts at mesh_init.
@@ -1638,10 +1652,13 @@ class AdaptiveQuadrature(SolverBase):
                 torch.int
             )
             dt = (mesh_final - mesh_init) / N_even_t
+            # Top-level segment starts: mesh_init + k*dt, points along the
+            # mesh_init -> mesh_final line (dt is the [T] segment vector, so
+            # this is correct for any time dimensionality).
             mesh = (
                 mesh_init
                 + dt * torch.arange(N_even_t, device=self.device)[:, None, None]
-            )  # TODO: this assumes the mesh is 1d
+            )
 
             n_sub = N_even_t + 1  # sub-barriers per segment
             if random_initial_mesh:
@@ -1669,12 +1686,14 @@ class AdaptiveQuadrature(SolverBase):
                 # (segment k's last sub-barrier would otherwise
                 # coincide with segment k+1's first sub-barrier and
                 # the strict monotonicity assertion below would fail).
-                offsets = (
-                    dt
-                    * torch.arange(n_sub, dtype=self.dtype, device=self.device)
-                    / n_sub
+                # Fractions in [0, 1) along the segment vector dt (shape [T]),
+                # so sub-barriers stay on the line for any T. For T == 1 this is
+                # identical to the previous dt * arange(n_sub) / n_sub.
+                fractions = (
+                    torch.arange(n_sub, dtype=self.dtype, device=self.device) / n_sub
                 )
-                mesh = mesh + offsets[None, :, None]
+                offsets = fractions[:, None] * dt[None, :]  # [n_sub, T]
+                mesh = mesh + offsets[None]
             # Enforce exact start and end points
             mesh[0] += mesh_init - mesh[0, 0]
             mesh[-1] += mesh_final - mesh[-1, -1]
@@ -1682,7 +1701,11 @@ class AdaptiveQuadrature(SolverBase):
             mesh = torch.flatten(mesh, start_dim=0, end_dim=1)
             mesh[0] = mesh_init
             mesh[-1] = mesh_final
-            assert torch.all(mesh[1:] - mesh[:-1] > 0)
+            # Any-T: consecutive barriers are distinct (no zero-length panels).
+            assert torch.all(torch.any(mesh[1:] != mesh[:-1], dim=-1))
+            # 1-D: additionally strictly increasing.
+            if mesh.shape[-1] == 1:
+                assert torch.all(mesh[1:] - mesh[:-1] > 0)
         mesh_trackers = torch.ones(len(mesh), device=self.device).to(bool)
         mesh_trackers[-1] = False  # mesh_final cannot be a step starting point
         mesh_indices = self._get_mesh_indices(mesh)
@@ -1690,7 +1713,14 @@ class AdaptiveQuadrature(SolverBase):
         return mesh, mesh_trackers, mesh_indices, mesh_is_given
 
     def _get_mesh_indices(self, mesh):
-        return {init : idx for idx, init in enumerate(mesh)}
+        # Map each barrier to its position in the ordered mesh. Keyed on the
+        # full barrier coordinate as a hashable tuple (not the tensor object,
+        # which hashes by identity and so cannot be looked up by value) so the
+        # recording code can recover a panel's order from its left barrier for
+        # any time dimensionality T.
+        # Single device->host transfer of the whole [M, T] mesh, then build the
+        # tuple keys in pure Python (one host sync instead of one per barrier).
+        return {tuple(row): idx for idx, row in enumerate(mesh.tolist())}
     # -------------------------------------------------------------------------------- #
     #                           ADAPTIVE ERROR CALCULATIONS                            #
     # -------------------------------------------------------------------------------- #
@@ -1964,33 +1994,65 @@ class AdaptiveQuadrature(SolverBase):
     # not per-step arrays that need re-sorting.
     _RECORD_SCALAR_KEYS = ("integral", "integral_error", "loss")
 
-    def _get_sorted_indices(
-        self, record: torch.Tensor, result: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _mesh_order(
+        self, barriers: torch.Tensor, mesh_indices: dict
+    ) -> torch.Tensor:
         """
-        Compute indices for merging new results into an existing sorted record.
+        Look up the mesh-order index of each panel from its left barrier.
 
-        Uses binary search (searchsorted) to find where new results should be
-        inserted, then computes the indices for both the existing and new entries
-        in the merged array.
+        A panel's left barrier is ``nodes[:, 0, :]`` -- the first quadrature
+        node, which equals the left mesh barrier bit-for-bit because every
+        method's tableau has ``c[0] == 0`` (so ``mesh_left + 0*(...) ==
+        mesh_left`` exactly). ``mesh_indices`` maps each barrier (keyed on its
+        full coordinate tuple) to its position in the ordered mesh, so this
+        gives a robust total order for any time dimensionality T -- no single
+        coordinate is compared.
 
         Args:
-            record: Sorted 1D tensor of existing values (e.g. start node of
-                recorded steps). Shape: [N_record].
-            result: New values to insert. Shape: [N_result].
+            barriers: Per-panel left barriers. Shape: [N, T].
+            mesh_indices: ``{tuple(barrier): position}`` from
+                ``_get_mesh_indices`` for the current mesh.
 
         Returns:
-            Tuple of (idxs_keep, idxs_input):
-                - idxs_keep: Where existing record entries go in the merged array.
-                - idxs_input: Where new result entries go in the merged array.
+            Per-panel mesh positions. Shape: [N], dtype long.
         """
-        idxs_sorted = torch.searchsorted(record, result)
-        idxs_input = idxs_sorted + torch.arange(len(result), device=self.device)
-        idxs_keep = torch.arange(len(result) + len(record), device=self.device)
-        keep_mask = torch.ones(len(idxs_keep), device=self.device).to(bool)
-        keep_mask[idxs_input] = False
-        idxs_keep = idxs_keep[keep_mask]
-        return idxs_keep, idxs_input
+        # Build keys from a SINGLE device->host transfer of the whole [N, T]
+        # block (barriers.tolist()), then look each up in pure Python. Avoids
+        # one host sync per panel, which matters on GPU for fine meshes.
+        return torch.tensor(
+            [mesh_indices[tuple(row)] for row in barriers.tolist()],
+            dtype=torch.long,
+            device=self.device,
+        )
+
+    def _merge_positions(
+        self, rec_order: torch.Tensor, new_order: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Compute merged-array positions from two mesh-order arrays.
+
+        Given the mesh-order indices of the existing record entries and of the
+        new entries, return where each goes in the combined, mesh-ordered
+        array. The mesh indices are globally unique integers, so the merge is a
+        rank computation -- no coordinate comparison is involved. Replaces the
+        coordinate-based binary-search placement used previously.
+
+        Args:
+            rec_order: Mesh positions of existing record entries. Shape: [N_record].
+            new_order: Mesh positions of new entries. Shape: [N_result].
+
+        Returns:
+            Tuple of (idxs_keep, idxs_input): positions in the merged array for
+            the existing and the new entries respectively (consumed by
+            ``_insert_sorted_results``).
+        """
+        orders = torch.cat([rec_order, new_order])
+        positions = torch.empty(len(orders), dtype=torch.long, device=self.device)
+        positions[torch.argsort(orders)] = torch.arange(
+            len(orders), device=self.device
+        )
+        n = len(rec_order)
+        return positions[:n], positions[n:]
 
     def _insert_sorted_results(
         self,
@@ -2030,12 +2092,13 @@ class AdaptiveQuadrature(SolverBase):
         record: dict[str, torch.Tensor],
         take_gradient: bool,
         results: IntegrationResult,
+        mesh_indices: dict,
     ) -> dict[str, torch.Tensor]:
         """
         Add a batch of accepted step results to the running record.
 
         On the first batch, initializes the record dict. On subsequent batches,
-        inserts new results in sorted order and accumulates the integral
+        inserts new results in mesh order and accumulates the integral
         and loss. When take_gradient is True, detaches results to prevent
         the computation graph from growing across batches.
 
@@ -2044,6 +2107,8 @@ class AdaptiveQuadrature(SolverBase):
             take_gradient: Whether gradients are being computed. If True,
                 detaches tensors before storing to keep graph manageable.
             results: IntegrationResult from the current accepted batch.
+            mesh_indices: ``{tuple(barrier): position}`` for the current mesh,
+                used to place new steps in mesh order (robust for any T).
 
         Returns:
             Updated record dict with the new results merged in. Dict keys
@@ -2079,8 +2144,9 @@ class AdaptiveQuadrature(SolverBase):
                 record["tracked_variables"] = list(results.tracked_variables)
             return record
 
-        idxs_keep, idxs_input = self._get_sorted_indices(
-            record["nodes"][:, 0, 0].detach(), results.nodes[:, 0, 0].detach()
+        idxs_keep, idxs_input = self._merge_positions(
+            self._mesh_order(record["nodes"][:, 0, :].detach(), mesh_indices),
+            self._mesh_order(results.nodes[:, 0, :].detach(), mesh_indices),
         )
         for key, value in record.items():
             if key in self._RECORD_SCALAR_KEYS:
@@ -2095,25 +2161,40 @@ class AdaptiveQuadrature(SolverBase):
                 record[key] = self._insert_sorted_results(
                     value, idxs_keep, getattr(results, key), idxs_input
                 )
-        assert torch.all(record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] > 0)
+        # General (any-T) invariant: the record is in strictly increasing mesh
+        # order after the merge.
+        merged_order = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
+        assert torch.all(merged_order[1:] - merged_order[:-1] > 0)
+        # For 1-D time the left-node coordinate must also be strictly ascending.
+        if record["nodes"].shape[-1] == 1:
+            assert torch.all(
+                record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] > 0
+            )
 
         return record
 
-    def _sort_record(self, record: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+    def _sort_record(
+        self, record: dict[str, torch.Tensor], mesh_indices: dict
+    ) -> dict[str, torch.Tensor]:
         """
-        Sort all per-step entries in the record by ascending order.
+        Sort all per-step entries in the record by mesh order.
 
         The integration loop may process batches in any order, so the record
-        needs to be sorted before final output. Scalar values (integral, loss)
-        are not reordered since they are cumulative sums.
+        needs to be sorted before final output. Ordering is by each panel's
+        position in the mesh (its left barrier looked up in ``mesh_indices``),
+        which is robust for any time dimensionality T. Scalar values (integral,
+        loss) are not reordered since they are cumulative sums.
 
         Args:
             record: Record dict with per-step tensors.
+            mesh_indices: ``{tuple(barrier): position}`` for the final mesh.
 
         Returns:
-            Record with per-step tensors sorted by start node of each step.
+            Record with per-step tensors sorted by mesh position.
         """
-        sorted_idxs = torch.argsort(record["nodes"][:, 0, 0], dim=0)
+        sorted_idxs = torch.argsort(
+            self._mesh_order(record["nodes"][:, 0, :], mesh_indices), dim=0
+        )
         for key, value in record.items():
             if key in self._RECORD_SCALAR_KEYS:
                 continue
@@ -2121,15 +2202,20 @@ class AdaptiveQuadrature(SolverBase):
                 record[key] = [tv[sorted_idxs] for tv in value]
             else:
                 record[key] = value[sorted_idxs]
-        all_ascending = torch.all(
-            record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] > 0
-        )
-        all_descending = torch.all(
-            record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] < 0
-        )
-        assert all_ascending or all_descending, (
-            "Nodes are required to be either in ascending or descending order"
-        )
+        # General (any-T) invariant: strictly increasing mesh order.
+        sorted_order = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
+        assert torch.all(sorted_order[1:] - sorted_order[:-1] > 0)
+        # For 1-D time the left-node coordinate must be strictly monotonic.
+        if record["nodes"].shape[-1] == 1:
+            all_ascending = torch.all(
+                record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] > 0
+            )
+            all_descending = torch.all(
+                record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] < 0
+            )
+            assert all_ascending or all_descending, (
+                "Nodes are required to be either in ascending or descending order"
+            )
         return record
 
     # -------------------------------------------------------------------------------- #

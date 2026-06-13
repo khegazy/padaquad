@@ -258,3 +258,49 @@ class TestSortRecord:
             record["mesh_quadratures"][:, 0],
             torch.tensor([1.0, 2.0, 0.0], dtype=torch.float64),
         )
+
+    def test_sort_multidim_by_mesh_order(self):
+        """T>1: a scrambled record sorts to mesh order, not coordinate 0.
+
+        The mesh's coordinate 0 is non-monotonic ([0, 1, 0.5, 0.2]) so a
+        coordinate-0 sort could not recover the mesh order. The record rows are
+        supplied scrambled (mesh positions [2, 0, 3, 1]); after _sort_record the
+        rows must be in increasing mesh order, and mesh_quadratures (tagged with
+        each row's mesh position) must come out as [0, 1, 2, 3].
+        """
+        mesh = torch.tensor(
+            [[0.0, 0.0], [1.0, 1.0], [0.5, 2.0], [0.2, 3.0]], dtype=torch.float64
+        )
+        mi = self.solver._get_mesh_indices(mesh)
+        # Record rows in scrambled mesh-position order.
+        positions = [2, 0, 3, 1]
+        N, C, T, D = 4, 2, 2, 1
+        nodes = torch.zeros(N, C, T, dtype=torch.float64)
+        nodes[:, 0, :] = mesh[positions]
+        nodes[:, 1, :] = mesh[positions] + 0.01
+        record = {
+            "integral": torch.tensor([1.0], dtype=torch.float64),
+            "loss": torch.tensor([2.0], dtype=torch.float64),
+            "integral_error": torch.tensor([0.01], dtype=torch.float64),
+            "nodes": nodes,
+            "h": torch.ones(N, T, dtype=torch.float64) * 0.05,
+            "y": torch.ones(N, C, D, dtype=torch.float64),
+            # Tag each row with its mesh position so the reordering is visible.
+            "mesh_quadratures": torch.tensor(
+                positions, dtype=torch.float64
+            ).unsqueeze(-1),
+            "mesh_quadrature_errors": torch.ones(N, D, dtype=torch.float64) * 0.01,
+            "error_ratios": torch.ones(N, dtype=torch.float64) * 0.5,
+        }
+
+        record = self.solver._sort_record(record, mi)
+
+        order = self.solver._mesh_order(record["nodes"][:, 0, :], mi)
+        assert torch.all(order[1:] - order[:-1] > 0)
+        assert torch.allclose(
+            record["mesh_quadratures"][:, 0],
+            torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=torch.float64),
+        )
+        # Coordinate 0 alone is not monotonic -> sort followed mesh, not coord 0.
+        coord0 = record["nodes"][:, 0, 0]
+        assert not torch.all(coord0[1:] - coord0[:-1] > 0)

@@ -298,6 +298,8 @@ class AdaptiveQuadrature(SolverBase):
         error_integral_reference: float | torch.Tensor | None = None,
         mesh_failure_tolerance: float | None = None,
         error_on_nonfinite: bool | None = None,
+        conserve_memory: bool = False,
+        results_device: str = 'cpu'
     ) -> IntegrationResult:
         """
         Perform parallel adaptive numerical integration of f.
@@ -409,6 +411,9 @@ class AdaptiveQuadrature(SolverBase):
         """
         # Set dtype based on input
         self.set_dtype_by_input(mesh=mesh, mesh_init=mesh_init, mesh_final=mesh_init)
+
+        # Set resuts_device
+        results_device = torch.device(results_device)
 
         # If mesh is given set mesh_init and mesh_final, else use input, else use saved values
         mesh_init, mesh_final = self._setup_integral_bounds(mesh, mesh_init, mesh_final)
@@ -543,6 +548,7 @@ class AdaptiveQuadrature(SolverBase):
                 force_max_batch,
                 total_mem_usage,
                 split_node_state,
+                conserve_memory
             )
 
             # --- Step 3: Compute integral contributions via qudrature formula ---
@@ -558,14 +564,20 @@ class AdaptiveQuadrature(SolverBase):
                 all_mesh_quadratures = method_output.mesh_quadratures.detach()
                 cum_mesh_quadratures = torch.cumsum(all_mesh_quadratures, 0)
             else:
-                # Subsequent batches: add to previously recorded integral
-                current_integral = record["integral"] + method_output.integral.detach()
+                # Subsequent batches: add to previously recorded integral. The
+                # record is stored on results_device (e.g. cpu); pull the values
+                # this batch's error computation needs onto self.device to match
+                # the freshly-evaluated method_output / nodes tensors.
+                current_integral = (
+                    record["integral"].to(self.device)
+                    + method_output.integral.detach()
+                )
                 # Merge new steps into the sorted record to compute cumulative sums
                 idxs_keep, idxs_input = self._get_sorted_indices(
-                    record["nodes"][:, 0, 0], nodes[:, 0, 0]
+                    record["nodes"][:, 0, 0].to(self.device), nodes[:, 0, 0]
                 )
                 all_mesh_quadratures = self._insert_sorted_results(
-                    record["mesh_quadratures"],
+                    record["mesh_quadratures"].to(self.device),
                     idxs_keep,
                     method_output.mesh_quadratures,
                     idxs_input,
@@ -700,18 +712,22 @@ class AdaptiveQuadrature(SolverBase):
                 )
 
                 # TODO make sure growing string loss center is a time not the number of evals because eval number is meaningless here.
-                # Compute loss and accumulate into the record
+                # Compute loss
                 loss = loss_fxn(intermediate_results)
-                intermediate_results.loss = loss
-                record = self._record_results(
-                    record=record,
-                    take_gradient=take_gradient,
-                    results=intermediate_results,
-                )
-
+                
                 # Backpropagate gradients through the integration if requested
                 if take_gradient and loss.requires_grad:
                     loss.backward()
+                
+                # Record results
+                intermediate_results.loss = loss
+                record = self._record_results(
+                    record=record,
+                    results=intermediate_results,
+                    take_gradient=take_gradient,
+                    results_device=results_device
+                )
+
             del y_step_eval
 
         # === Post-convergence: sort results and optimize the mesh ===
@@ -729,8 +745,11 @@ class AdaptiveQuadrature(SolverBase):
         if "tracked_variables" in record:
             record_tracked = tuple(record["tracked_variables"])
 
+        # The record lives on results_device (e.g. cpu) while mesh/y0 tensors
+        # were built on self.device. Assemble the result on results_device so
+        # every field shares a device.
         return IntegrationResult(
-            integral=record["integral"] + y0,
+            integral=record["integral"].to(self.device) + y0,
             integral_error=record["integral_error"],
             mesh_optimal=mesh_optimal,
             mesh_init=mesh_init,
@@ -1030,6 +1049,7 @@ class AdaptiveQuadrature(SolverBase):
         force_max_batch,
         total_mem_usage,
         split_node_state,
+        conserve_memory
     ):
         # Determine how many f evaluations fit in one batch based on memory
         if force_max_batch is not None:
@@ -1426,17 +1446,26 @@ class AdaptiveQuadrature(SolverBase):
         Returns:
             Optimized barrier positions. Shape: [M_opt, T].
         """
+        # The record may live on a separate storage device (results_device,
+        # e.g. cpu) to conserve compute-device memory. The mesh optimization
+        # below runs on self.device (tolerances, mesh, mesh_idxs, trackers), so
+        # pull the record tensors it needs onto self.device first.
+        rec_nodes = record["nodes"].to(self.device)
+        rec_mesh_quadratures = record["mesh_quadratures"].to(self.device)
+        rec_mesh_quadrature_errors = record["mesh_quadrature_errors"].to(self.device)
+        rec_integral = record["integral"].detach().to(self.device)
+
         # Prune steps with excess accuracy (over-resolved regions)
         _, error_ratios_2steps, _ = self._compute_error_ratios(
-            mesh_quadrature_errors=record["mesh_quadrature_errors"],
-            mesh_quadratures=record["mesh_quadratures"],
-            integral=record["integral"].detach(),
+            mesh_quadrature_errors=rec_mesh_quadrature_errors,
+            mesh_quadratures=rec_mesh_quadratures,
+            integral=rec_integral,
         )
         nodes_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned = (
             self._prune_excess_mesh(
-                record["nodes"],
-                record["mesh_quadratures"],
-                record["mesh_quadrature_errors"],
+                rec_nodes,
+                rec_mesh_quadratures,
+                rec_mesh_quadrature_errors,
                 error_ratios_2steps,
             )
         )
@@ -1449,7 +1478,7 @@ class AdaptiveQuadrature(SolverBase):
             self._compute_error_ratios(
                 mesh_quadrature_errors=mesh_quadrature_errors_pruned,
                 mesh_quadratures=mesh_quadratures_pruned,
-                integral=record["integral"].detach(),
+                integral=rec_integral,
             )
         )
         keep_mask, remove_mask = self._accept_reject_masks(
@@ -1956,10 +1985,14 @@ class AdaptiveQuadrature(SolverBase):
                 - idxs_keep: Where existing record entries go in the merged array.
                 - idxs_input: Where new result entries go in the merged array.
         """
+        # Build index tensors on the same device as the inputs. The record may
+        # live on results_device (e.g. cpu) rather than self.device, so derive
+        # the device from the data rather than hardcoding self.device.
+        device = record.device
         idxs_sorted = torch.searchsorted(record, result)
-        idxs_input = idxs_sorted + torch.arange(len(result), device=self.device)
-        idxs_keep = torch.arange(len(result) + len(record), device=self.device)
-        keep_mask = torch.ones(len(idxs_keep), device=self.device).to(bool)
+        idxs_input = idxs_sorted + torch.arange(len(result), device=device)
+        idxs_keep = torch.arange(len(result) + len(record), device=device)
+        keep_mask = torch.ones(len(idxs_keep), device=device).to(bool)
         keep_mask[idxs_input] = False
         idxs_keep = idxs_keep[keep_mask]
         return idxs_keep, idxs_input
@@ -2000,72 +2033,80 @@ class AdaptiveQuadrature(SolverBase):
     def _record_results(
         self,
         record: dict[str, torch.Tensor],
-        take_gradient: bool,
         results: IntegrationResult,
+        take_gradient: bool,
+        results_device: torch.device
     ) -> dict[str, torch.Tensor]:
         """
         Add a batch of accepted step results to the running record.
 
         On the first batch, initializes the record dict. On subsequent batches,
         inserts new results in sorted order and accumulates the integral
-        and loss. When take_gradient is True, detaches results to prevent
-        the computation graph from growing across batches.
+        and loss. Every entry is detached before storing so the running
+        record never holds the computation graph (which would otherwise grow
+        unbounded across batches).
 
         Args:
             record: Running record dict. Empty dict {} on the first call.
-            take_gradient: Whether gradients are being computed. If True,
-                detaches tensors before storing to keep graph manageable.
             results: IntegrationResult from the current accepted batch.
+            take_gradient: Whether gradients are being computed. Retained so
+                callers can signal gradient mode; results are detached
+                unconditionally regardless.
+            results_device: Device the record is stored on. Every entry is
+                moved here before being merged in so the running record can
+                live off the (memory-constrained) compute device.
 
         Returns:
             Updated record dict with the new results merged in. Dict keys
             match IntegrationResult field names so getattr-based merge
             below can iterate without translation.
         """
-        if len(record) == 0 and not take_gradient:
-            record["integral"] = results.integral
-            record["nodes"] = results.nodes
-            record["h"] = results.h
-            record["y"] = results.y
-            record["mesh_quadratures"] = results.mesh_quadratures
-            record["mesh_quadrature_errors"] = results.mesh_quadrature_errors
-            record["integral_error"] = results.integral_error
-            record["error_ratios"] = results.error_ratios
-            record["loss"] = results.loss
+        if len(record) == 0:
+            # Detach every entry before storing so the running record never
+            # holds the autograd graph (it grows unbounded across batches).
+            record["integral"] = results.integral.detach().to(results_device)
+            record["nodes"] = results.nodes.detach().to(results_device)
+            record["h"] = results.h.detach().to(results_device)
+            record["y"] = results.y.detach().to(results_device)
+            record["mesh_quadratures"] = results.mesh_quadratures.detach().to(
+                results_device
+            )
+            record["mesh_quadrature_errors"] = (
+                results.mesh_quadrature_errors.detach().to(results_device)
+            )
+            record["integral_error"] = results.integral_error.detach().to(
+                results_device
+            )
+            record["error_ratios"] = results.error_ratios.detach().to(results_device)
+            record["loss"] = results.loss.detach().to(results_device)
             if results.tracked_variables is not None:
                 # Tracked variables are already detached at evaluation time.
-                record["tracked_variables"] = list(results.tracked_variables)
-            return record
-        elif len(record) == 0 and take_gradient:
-            record["integral"] = results.integral.detach()
-            record["nodes"] = results.nodes.detach()
-            record["h"] = results.h.detach()
-            record["y"] = results.y.detach()
-            record["mesh_quadratures"] = results.mesh_quadratures.detach()
-            record["mesh_quadrature_errors"] = results.mesh_quadrature_errors.detach()
-            record["integral_error"] = results.integral_error.detach()
-            record["error_ratios"] = results.error_ratios.detach()
-            record["loss"] = results.loss.detach()
-            if results.tracked_variables is not None:
-                # Tracked variables are already detached at evaluation time.
-                record["tracked_variables"] = list(results.tracked_variables)
+                record["tracked_variables"] = [
+                    v.detach().to(results_device) for v in results.tracked_variables
+                ]
             return record
 
         idxs_keep, idxs_input = self._get_sorted_indices(
-            record["nodes"][:, 0, 0].detach(), results.nodes[:, 0, 0].detach()
+            record["nodes"][:, 0, 0].detach(),
+            results.nodes[:, 0, 0].detach().to(results_device),
         )
         for key, value in record.items():
             if key in self._RECORD_SCALAR_KEYS:
-                record[key] = value + getattr(results, key).detach()
+                record[key] = value + getattr(results, key).detach().to(results_device)
             elif key == "tracked_variables":
                 # A list of per-variable tensors: insert each independently.
                 record[key] = [
-                    self._insert_sorted_results(v, idxs_keep, r, idxs_input)
+                    self._insert_sorted_results(
+                        v, idxs_keep, r.detach().to(results_device), idxs_input
+                    )
                     for v, r in zip(value, results.tracked_variables, strict=True)
                 ]
             else:
                 record[key] = self._insert_sorted_results(
-                    value, idxs_keep, getattr(results, key), idxs_input
+                    value,
+                    idxs_keep,
+                    getattr(results, key).detach().to(results_device),
+                    idxs_input,
                 )
         assert torch.all(record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] > 0)
 

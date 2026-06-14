@@ -298,7 +298,7 @@ class AdaptiveQuadrature(SolverBase):
         error_integral_reference: float | torch.Tensor | None = None,
         mesh_failure_tolerance: float | None = None,
         error_on_nonfinite: bool | None = None,
-        result_device: str | torch.device = 'cpu',
+        result_device: str | torch.device = "cpu",
     ) -> IntegrationResult:
         """
         Perform parallel adaptive numerical integration of f.
@@ -413,7 +413,7 @@ class AdaptiveQuadrature(SolverBase):
 
         # Setup results device
         result_device = torch.device(result_device)
-        
+
         # If mesh is given set mesh_init and mesh_final, else use input, else use saved values
         mesh_init, mesh_final = self._setup_integral_bounds(mesh, mesh_init, mesh_final)
 
@@ -629,24 +629,32 @@ class AdaptiveQuadrature(SolverBase):
                         fail_ratio * 100,
                         self.max_path_change,
                     )
+                    # Place the partial result on result_device for a
+                    # device-consistent return, matching the converged path.
                     return IntegrationResult(
-                        integral=method_output.integral,
-                        integral_error=method_output.integral_error,
-                        mesh_optimal=mesh,
-                        mesh_init=mesh_init,
-                        mesh_final=mesh_final,
-                        nodes=nodes,
-                        h=method_output.h,
-                        y=y_step_eval,
-                        tracked_variables=tracked_step_eval,
-                        mesh_quadratures=method_output.mesh_quadratures,
+                        integral=method_output.integral.to(result_device),
+                        integral_error=method_output.integral_error.to(result_device),
+                        mesh_optimal=mesh.to(result_device),
+                        mesh_init=mesh_init.to(result_device),
+                        mesh_final=mesh_final.to(result_device),
+                        nodes=nodes.to(result_device),
+                        h=method_output.h.to(result_device),
+                        y=y_step_eval.to(result_device),
+                        tracked_variables=tuple(
+                            tv.to(result_device) for tv in tracked_step_eval
+                        )
+                        if tracked_step_eval is not None
+                        else None,
+                        mesh_quadratures=method_output.mesh_quadratures.to(
+                            result_device
+                        ),
                         mesh_quadrature_errors=torch.abs(
                             method_output.mesh_quadrature_errors
-                        ),
-                        error_ratios=error_ratios,
+                        ).to(result_device),
+                        error_ratios=error_ratios.to(result_device),
                         loss=None,
                         gradient_taken=take_gradient,
-                        y0=y0,
+                        y0=y0.to(result_device),
                         converged=False,
                     )
 
@@ -714,13 +722,13 @@ class AdaptiveQuadrature(SolverBase):
                 )
 
                 # TODO make sure growing string loss center is a time not the number of evals because eval number is meaningless here.
-                # Compute loss 
+                # Compute loss
                 loss = loss_fxn(intermediate_results)
-                
+
                 # Backpropagate gradients through the integration if requested
                 if take_gradient and loss.requires_grad:
                     loss.backward()
-                
+
                 # Accumulate into the record
                 intermediate_results.loss = loss
                 record = self._record_results(
@@ -728,19 +736,38 @@ class AdaptiveQuadrature(SolverBase):
                     take_gradient=take_gradient,
                     results=intermediate_results,
                     mesh_indices=mesh_indices,
+                    result_device=result_device,
                 )
 
             del y_step_eval
 
         # === Post-convergence: sort results and optimize the mesh ===
         record = self._sort_record(record, mesh_indices)
-        # Prune over-resolved steps and refine under-resolved ones. Pass the
-        # same rtol reference used in the loop so the post-convergence
-        # prune/refine judges error against the same scale.
-        mesh_optimal = self._get_optimal_mesh(record, mesh)
-        # Cache results for warm-starting subsequent calls with the same integrand
-        self.mesh_previous = mesh_optimal
+        # Prune over-resolved steps and refine under-resolved ones. This runs on
+        # the integration device because it re-derives node positions through
+        # the method tableau (which lives there). mesh_quadratures and integral
+        # are already resident; give it integration-device copies of the two
+        # fields that were offloaded to result_device. This is a transient,
+        # bounded cost -- not the per-batch accumulation that result_device
+        # removes during the loop.
+        opt_record = {
+            "nodes": record["nodes"].to(self.device),
+            "mesh_quadratures": record["mesh_quadratures"].to(self.device),
+            "mesh_quadrature_errors": record["mesh_quadrature_errors"].to(self.device),
+            "integral": record["integral"].to(self.device),
+        }
+        mesh_optimal = self._get_optimal_mesh(opt_record, mesh.to(self.device))
+        del opt_record
+        # Cache the warm-start mesh on the integration device so the reuse_mesh
+        # path in _setup_initial_mesh gets a device-matched mesh next call.
+        self.mesh_previous = mesh_optimal.to(self.device)
         self.previous_f_id = id(f)
+
+        # Move the resident record fields to result_device so the returned
+        # IntegrationResult is entirely on result_device.
+        for key in self._DEVICE_RESIDENT_KEYS:
+            if key in record:
+                record[key] = record[key].to(result_device)
 
         # Tracked variables are stored in the record as a list; expose a tuple.
         record_tracked: tuple[torch.Tensor, ...] | None = None
@@ -748,11 +775,11 @@ class AdaptiveQuadrature(SolverBase):
             record_tracked = tuple(record["tracked_variables"])
 
         return IntegrationResult(
-            integral=record["integral"] + y0,
+            integral=record["integral"] + y0.to(result_device),
             integral_error=record["integral_error"],
-            mesh_optimal=mesh_optimal,
-            mesh_init=mesh_init,
-            mesh_final=mesh_final,
+            mesh_optimal=mesh_optimal.to(result_device),
+            mesh_init=mesh_init.to(result_device),
+            mesh_final=mesh_final.to(result_device),
             nodes=record["nodes"],
             h=record["h"],
             y=record["y"],
@@ -762,7 +789,7 @@ class AdaptiveQuadrature(SolverBase):
             error_ratios=record["error_ratios"],
             loss=record["loss"],
             gradient_taken=take_gradient,
-            y0=y0,
+            y0=y0.to(result_device),
         )
 
     # -------------------------------------------------------------------------------- #
@@ -880,30 +907,32 @@ class AdaptiveQuadrature(SolverBase):
         mesh_trackers[mesh_idxs[keep_mask]] = False
 
         N_t_add = torch.sum(remove_mask)
-        # Allocate new barriers array with room for inserted midpoints
+        # Allocate new barriers array with room for inserted midpoints. All
+        # allocations follow ``mesh.device`` so this runs on the integration
+        # device in the loop and on result_device in the post-convergence pass.
         mesh_new = torch.nan * torch.ones(
             (N_t_add + len(mesh), mesh.shape[-1]),
             dtype=self.dtype,
-            device=self.device,
+            device=mesh.device,
         )
         mesh_trackers_new = torch.ones(
-            N_t_add + len(mesh), dtype=bool, device=self.device
+            N_t_add + len(mesh), dtype=bool, device=mesh.device
         )
 
         # Transfer existing barriers to their new positions in the expanded array.
         # Each rejected step causes a +1 offset for all subsequent barriers
         # (because a midpoint is being inserted). idx_offset tracks this shift.
-        idx_offset = torch.zeros(len(mesh), dtype=torch.long, device=self.device)
+        idx_offset = torch.zeros(len(mesh), dtype=torch.long, device=mesh.device)
         idx_offset[mesh_idxs[remove_mask] + 1] = 1
         idx_offset = torch.cumsum(idx_offset, dim=0)
-        idxs_transfer = idx_offset + torch.arange(len(mesh), device=self.device)
+        idxs_transfer = idx_offset + torch.arange(len(mesh), device=mesh.device)
         mesh_new[idxs_transfer] = mesh.clone()
         mesh_trackers_new[idxs_transfer] = mesh_trackers.clone()
 
         # Insert new midpoint barriers between the start and end of rejected steps.
         # The midpoint is placed at (left_barrier + right_barrier) / 2.
         idxs_new = (
-            mesh_idxs[remove_mask] + torch.arange(N_t_add, device=self.device) + 1
+            mesh_idxs[remove_mask] + torch.arange(N_t_add, device=mesh.device) + 1
         )
         t_add_barriers = 0.5 * (mesh_new[idxs_new - 1] + mesh_new[idxs_new + 1])
         mesh_new[idxs_new] = t_add_barriers
@@ -915,7 +944,7 @@ class AdaptiveQuadrature(SolverBase):
         # each split panel to parent_count + 1.
         if split_counts is not None:
             split_counts_new = torch.zeros(
-                len(mesh_new), dtype=torch.long, device=self.device
+                len(mesh_new), dtype=torch.long, device=mesh_new.device
             )
             split_counts_new[idxs_transfer] = split_counts.clone()
             parent_counts = split_counts[mesh_idxs[remove_mask]]
@@ -1503,8 +1532,10 @@ class AdaptiveQuadrature(SolverBase):
             y_step_eval=None,
             nodes=None,
             mesh=mesh_pruned,
-            mesh_idxs=torch.arange(len(mesh_pruned) - 1, device=self.device),
-            mesh_trackers=torch.zeros(len(mesh_pruned), dtype=bool, device=self.device),
+            mesh_idxs=torch.arange(len(mesh_pruned) - 1, device=mesh_pruned.device),
+            mesh_trackers=torch.zeros(
+                len(mesh_pruned), dtype=bool, device=mesh_pruned.device
+            ),
             keep_mask=keep_mask,
             remove_mask=remove_mask,
         )
@@ -1863,6 +1894,10 @@ class AdaptiveQuadrature(SolverBase):
         Shapes: abs_err [N, D]; integral [D]; cum [N, D]; returns [N], [N-1], None.
         """
         err = self._reduce_norm(abs_err)
+        # Tolerances follow the inputs' device so this runs on the integration
+        # device in the loop and on result_device in the post-convergence pass.
+        atol = self.atol.to(abs_err.device)
+        rtol = self.rtol.to(abs_err.device)
         floor = (
             self._reduce_norm(self._round_floor(mesh_quadratures))
             if mesh_quadratures is not None
@@ -1870,9 +1905,7 @@ class AdaptiveQuadrature(SolverBase):
         )
 
         if self.use_absolute_error_ratio:
-            error_tol = torch.maximum(
-                self.atol, self.rtol * self._reduce_norm(integral)
-            )
+            error_tol = torch.maximum(atol, rtol * self._reduce_norm(integral))
             error_tol_2steps = error_tol
         else:
             if cum_mesh_quadratures is not None:
@@ -1882,11 +1915,11 @@ class AdaptiveQuadrature(SolverBase):
             else:
                 raise ValueError("Must give mesh_quadratures or cum_mesh_quadratures")
             error_tol = torch.maximum(
-                self.atol, self.rtol * self._reduce_norm(torch.abs(cum_steps))
+                atol, rtol * self._reduce_norm(torch.abs(cum_steps))
             )
             error_tol_2steps = torch.maximum(
-                self.atol,
-                self.rtol
+                atol,
+                rtol
                 * torch.maximum(
                     self._reduce_norm(torch.abs(cum_steps[:-1])),
                     self._reduce_norm(torch.abs(cum_steps[1:])),
@@ -1927,8 +1960,11 @@ class AdaptiveQuadrature(SolverBase):
         Shapes: abs_err [N, D]; integral [D]; cum [N, D];
         returns failure_fraction [N], error_ratio_2steps [N-1], ratio [N, D].
         """
+        # Tolerances follow the inputs' device (see _error_ratios_norm).
+        atol = self.atol.to(abs_err.device)
+        rtol = self.rtol.to(abs_err.device)
         if self.use_absolute_error_ratio:
-            error_tol = self.atol + self.rtol * torch.abs(integral)  # [D]
+            error_tol = atol + rtol * torch.abs(integral)  # [D]
             error_tol_2steps = error_tol
         else:
             if cum_mesh_quadratures is not None:
@@ -1937,8 +1973,8 @@ class AdaptiveQuadrature(SolverBase):
                 cum_steps = torch.cumsum(mesh_quadratures, dim=0)
             else:
                 raise ValueError("Must give mesh_quadratures or cum_mesh_quadratures")
-            error_tol = self.atol + self.rtol * torch.abs(cum_steps)  # [N, D]
-            error_tol_2steps = self.atol + self.rtol * torch.maximum(
+            error_tol = atol + rtol * torch.abs(cum_steps)  # [N, D]
+            error_tol_2steps = atol + rtol * torch.maximum(
                 torch.abs(cum_steps[:-1]), torch.abs(cum_steps[1:])
             )
 
@@ -2001,6 +2037,13 @@ class AdaptiveQuadrature(SolverBase):
     # Record dict keys that are cumulative scalars (sum across batches),
     # not per-step arrays that need re-sorting.
     _RECORD_SCALAR_KEYS = ("integral", "integral_error", "loss")
+
+    # Record dict keys that must stay on the integration device because they are
+    # read back during the loop (running integral and the per-step quadratures
+    # merged + cumsum'd for the error ratios). Everything else is detached and
+    # moved to ``result_device`` as it is recorded, to keep the large per-step
+    # tensors (nodes, y, tracked_variables, ...) off the GPU.
+    _DEVICE_RESIDENT_KEYS = ("integral", "mesh_quadratures")
 
     def _mesh_order(self, barriers: torch.Tensor, mesh_indices: dict) -> torch.Tensor:
         """
@@ -2083,6 +2126,12 @@ class AdaptiveQuadrature(SolverBase):
         """
         add_shape = (len(record) + len(result), *record.shape[1:])
         old_record = record.clone()
+        # Index tensors come from _merge_positions on the integration device;
+        # move them to the record's device so a record living on result_device
+        # (CPU) merges with CPU indices while a GPU-resident record uses GPU
+        # indices. ``result`` is already placed on record.device by the caller.
+        record_idxs = record_idxs.to(record.device)
+        result_idxs = result_idxs.to(record.device)
         # Allocate with the input tensor's own dtype/device so this works for
         # non-float records (e.g. integer/bool tracked variables), not just
         # self.dtype. Every position is overwritten below, so zeros is safe.
@@ -2097,73 +2146,98 @@ class AdaptiveQuadrature(SolverBase):
         take_gradient: bool,
         results: IntegrationResult,
         mesh_indices: dict,
+        result_device: torch.device | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Add a batch of accepted step results to the running record.
 
         On the first batch, initializes the record dict. On subsequent batches,
-        inserts new results in mesh order and accumulates the integral
-        and loss. When take_gradient is True, detaches results to prevent
-        the computation graph from growing across batches.
+        inserts new results in mesh order and accumulates the integral and loss.
+
+        Each recorded field is placed on its target device: the keys in
+        ``_DEVICE_RESIDENT_KEYS`` stay on the integration device (they are read
+        back during the loop), and all other fields -- including the large
+        ``nodes``/``y``/``tracked_variables`` -- are moved to ``result_device``
+        so they do not accumulate on the GPU. When ``take_gradient`` is True the
+        per-batch ``loss.backward()`` has already run, so tensors are detached
+        before placing; when False the autograd graph is retained so the
+        returned integral stays differentiable (the device move is itself a
+        differentiable op).
 
         Args:
             record: Running record dict. Empty dict {} on the first call.
-            take_gradient: Whether gradients are being computed. If True,
-                detaches tensors before storing to keep graph manageable.
+            take_gradient: If True, per-batch backward already ran and tensors
+                are detached before recording; if False the graph is retained.
             results: IntegrationResult from the current accepted batch.
             mesh_indices: ``{tuple(barrier): position}`` for the current mesh,
                 used to place new steps in mesh order (robust for any T).
+            result_device: Device for the large/output record tensors. ``None``
+                keeps everything on the integration device (no move).
 
         Returns:
             Updated record dict with the new results merged in. Dict keys
             match IntegrationResult field names so getattr-based merge
             below can iterate without translation.
         """
-        if len(record) == 0 and not take_gradient:
-            record["integral"] = results.integral
-            record["nodes"] = results.nodes
-            record["h"] = results.h
-            record["y"] = results.y
-            record["mesh_quadratures"] = results.mesh_quadratures
-            record["mesh_quadrature_errors"] = results.mesh_quadrature_errors
-            record["integral_error"] = results.integral_error
-            record["error_ratios"] = results.error_ratios
-            record["loss"] = results.loss
+        if result_device is None:
+            result_device = self.device
+
+        def target(key):
+            # Resident keys stay on the integration device; everything else goes
+            # to result_device.
+            return self.device if key in self._DEVICE_RESIDENT_KEYS else result_device
+
+        def place(value, key):
+            # take_gradient=True does per-batch backward *before* recording, so
+            # the graph is no longer needed and is detached. take_gradient=False
+            # retains the full graph for a single backward through the returned
+            # integral, so the grad-tracked tensor is kept (``.to`` is itself an
+            # autograd op, so the device move stays differentiable).
+            if take_gradient:
+                value = value.detach()
+            return value.to(target(key))
+
+        if len(record) == 0:
+            for key in (
+                "integral",
+                "nodes",
+                "h",
+                "y",
+                "mesh_quadratures",
+                "mesh_quadrature_errors",
+                "integral_error",
+                "error_ratios",
+                "loss",
+            ):
+                record[key] = place(getattr(results, key), key)
             if results.tracked_variables is not None:
                 # Tracked variables are already detached at evaluation time.
-                record["tracked_variables"] = list(results.tracked_variables)
-            return record
-        elif len(record) == 0 and take_gradient:
-            record["integral"] = results.integral.detach()
-            record["nodes"] = results.nodes.detach()
-            record["h"] = results.h.detach()
-            record["y"] = results.y.detach()
-            record["mesh_quadratures"] = results.mesh_quadratures.detach()
-            record["mesh_quadrature_errors"] = results.mesh_quadrature_errors.detach()
-            record["integral_error"] = results.integral_error.detach()
-            record["error_ratios"] = results.error_ratios.detach()
-            record["loss"] = results.loss.detach()
-            if results.tracked_variables is not None:
-                # Tracked variables are already detached at evaluation time.
-                record["tracked_variables"] = list(results.tracked_variables)
+                record["tracked_variables"] = [
+                    tv.to(result_device) for tv in results.tracked_variables
+                ]
             return record
 
         idxs_keep, idxs_input = self._merge_positions(
-            self._mesh_order(record["nodes"][:, 0, :].detach(), mesh_indices),
+            self._mesh_order(record["nodes"][:, 0, :], mesh_indices),
             self._mesh_order(results.nodes[:, 0, :].detach(), mesh_indices),
         )
         for key, value in record.items():
             if key in self._RECORD_SCALAR_KEYS:
-                record[key] = value + getattr(results, key).detach()
+                record[key] = value + place(getattr(results, key), key)
             elif key == "tracked_variables":
                 # A list of per-variable tensors: insert each independently.
                 record[key] = [
-                    self._insert_sorted_results(v, idxs_keep, r, idxs_input)
+                    self._insert_sorted_results(
+                        v, idxs_keep, r.to(result_device), idxs_input
+                    )
                     for v, r in zip(value, results.tracked_variables, strict=True)
                 ]
             else:
                 record[key] = self._insert_sorted_results(
-                    value, idxs_keep, getattr(results, key), idxs_input
+                    value,
+                    idxs_keep,
+                    place(getattr(results, key), key),
+                    idxs_input,
                 )
         # General (any-T) invariant: the record is in strictly increasing mesh
         # order after the merge.
@@ -2197,13 +2271,15 @@ class AdaptiveQuadrature(SolverBase):
         sorted_idxs = torch.argsort(
             self._mesh_order(record["nodes"][:, 0, :], mesh_indices), dim=0
         )
+        # Per-step fields may live on different devices (result_device vs the
+        # integration device), so move the index to each field's device.
         for key, value in record.items():
             if key in self._RECORD_SCALAR_KEYS:
                 continue
             if key == "tracked_variables":
-                record[key] = [tv[sorted_idxs] for tv in value]
+                record[key] = [tv[sorted_idxs.to(tv.device)] for tv in value]
             else:
-                record[key] = value[sorted_idxs]
+                record[key] = value[sorted_idxs.to(value.device)]
         # General (any-T) invariant: strictly increasing mesh order.
         sorted_order = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
         assert torch.all(sorted_order[1:] - sorted_order[:-1] > 0)

@@ -1126,15 +1126,24 @@ class AdaptiveQuadrature(SolverBase):
                 f, f_args, mesh, step_idxs, max_mesh_steps
             )
         else:
-            return self._evaluate_f_on_split_nodes(
-                f,
-                f_args,
-                mesh,
-                step_idxs,
-                max_batch,
-                max_mesh_steps,
-                split_node_state,
-            )
+            if True:
+                return self._evaluate_f_on_split_nodes(
+                    f,
+                    f_args,
+                    mesh,
+                    step_idxs,
+                    max_batch,
+                )
+            else:
+                return self._evaluate_f_on_split_nodes_prev(
+                    f,
+                    f_args,
+                    mesh,
+                    step_idxs,
+                    max_batch,
+                    max_mesh_steps,
+                    split_node_state,
+                ) 
 
     def _evaluate_f_on_full_nodes(self, f, f_args, mesh, step_idxs, max_mesh_steps):
         assert max_mesh_steps >= 1, (
@@ -1174,99 +1183,19 @@ class AdaptiveQuadrature(SolverBase):
         mesh,
         step_idxs,
         max_batch,
-        max_mesh_steps,
-        split_node_state,
     ):
         # A zero budget is unsatisfiable here and would divide-by-zero below
         # (the % max_batch layout math). Callers route through
         # _evaluate_f_on_mesh, which rescues max_batch=0 -> 1 before dispatch;
         # this assert guards direct/unit callers with an explicit message.
         assert max_batch > 0
-        # When max_batch < C the budget cannot hold even one whole panel, so the
-        # dispatcher's max_batch // C floors to 0. Unlike the full-nodes path
-        # (which requires >= 1 whole panel per batch), the split path evaluates a
-        # single panel's C nodes across several max_batch-sized batches and
-        # carries the remainder forward in split_node_state. Force at least one
-        # panel of work so that sub-C budgets still make progress.
-        max_mesh_steps = 1 if max_mesh_steps == 0 else max_mesh_steps
-        # Gather nodes and evaluations from previous split. split_mesh_idx
-        # stores the residual panel's left-barrier *coordinate* (not an
-        # integer index), so it survives mesh refinement: the calling
-        # integrate loop inserts midpoints between iterations, shifting
-        # any cached integer index. Barriers themselves are never removed
-        # mid-loop, so a stored coordinate stays resolvable.
-        split_nodes, split_f_evals, split_tracked, split_mesh_idx = split_node_state
-        num_split_nodes = 0 if split_mesh_idx is None else len(split_nodes)
-        num_remaining_split_nodes = self.C - num_split_nodes
 
-        if split_mesh_idx is not None:
-            # Translate the cached barrier coordinate back to an index in
-            # the current (possibly refined) mesh.
-            split_mesh_idx = torch.where((mesh == split_mesh_idx).all(dim=-1))[0][0]
+        # Place C quadrature points within each selected step
+        nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
 
-        if split_mesh_idx is None:
-            num_mesh_steps = max_mesh_steps
-            if (max_mesh_steps * self.C) % max_batch != 0:
-                num_mesh_steps += 1
-
-            step_idxs = step_idxs[:num_mesh_steps]
-
-            # Place C quadrature points within each selected step
-            nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
-
-            # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
-            nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
-
-            # Determine the number of evaluation iterations based on split
-            # if evaluate_all:
-            #     num_accumulation_iters = (num_mesh_steps * self.C) // max_batch
-            # else:
-            #     num_accumulation_iters = (max_mesh_steps * self.C) // max_batch + 1
-            #     num_residual_nodes = max_batch - (max_mesh_steps * self.C % max_batch)
-            num_nodes_to_eval = max_mesh_steps * self.C
-        else:
-            num_mesh_steps = max_mesh_steps + 1
-            # Add another mesh step if number of saved split nodes is too small
-            if (
-                num_remaining_split_nodes
-                < ((max_mesh_steps * self.C) % max_batch) - max_batch
-            ):
-                num_mesh_steps += 1
-
-            # Get mesh step indices
-            step_idxs = step_idxs[:num_mesh_steps]
-
-            # Move the previously split mesh index to the front
-            split_idx = torch.where(step_idxs == split_mesh_idx)[0]
-            if len(split_idx):
-                split_idx = split_idx[0]
-                step_idxs[1 : split_idx + 1] = step_idxs[:split_idx].clone()
-            else:
-                step_idxs[1:] = step_idxs[:-1].clone()
-            step_idxs[0] = split_mesh_idx
-
-            # Place C quadrature points within each selected step
-            nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
-
-            # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
-            nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
-            nodes_flat = nodes_flat[len(split_nodes) :]
-            num_eval_nodes = len(nodes_flat)
-
-            # One batch of up to max_batch new evals per call. After
-            # completing the carry-over panel (num_remaining_split_nodes
-            # evals), the rest splits into full new panels plus a partial
-            # residual; if num_eval_nodes < max_batch the layout's tail
-            # already ends cleanly, so the residual is zero.
-            # num_accumulation_iters = 1
-            # actual_evals = min(max_batch, num_eval_nodes)
-            # num_residual_nodes = (actual_evals - num_remaining_split_nodes) % self.C
-            # evaluate_all = num_residual_nodes == 0
-
-            num_nodes_to_eval = min(
-                max_mesh_steps * self.C + num_remaining_split_nodes,
-                num_eval_nodes,
-            )
+        # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
+        nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
+        num_nodes_to_eval = len(nodes_flat)
 
         # Evaluate the integrand over all batches, splitting each batch's
         # output into the integrand value and any tracked variables.
@@ -1324,48 +1253,15 @@ class AdaptiveQuadrature(SolverBase):
             del integrand
 
         assert num_nodes_evaluated >= num_nodes_to_eval
-        num_residual_nodes = num_nodes_evaluated - num_nodes_to_eval
-        # Get the residual evaluations of the last mesh step
-        if num_residual_nodes == 0:
-            residual_f_evals = None
-            residual_nodes = None
-            residual_tracked = None
-            residual_mesh_idx = None
-        else:
-            residual_nodes = nodes_flat[-self.C : -self.C + num_residual_nodes]
-            nodes_flat = nodes_flat[: -self.C]
-            residual_f_evals = f_evals[-1][-num_residual_nodes:]
-            f_evals[-1] = f_evals[-1][:-num_residual_nodes]
-            residual_tracked = None
-            if tracked_lists is not None:
-                residual_tracked = [
-                    tl[-1][-num_residual_nodes:].detach() for tl in tracked_lists
-                ]
-                for tl in tracked_lists:
-                    tl[-1] = tl[-1][:-num_residual_nodes]
-            # Store the residual panel's barrier coordinate, not its
-            # integer index — see the note at the top of this method.
-            residual_mesh_idx = mesh[step_idxs[-1]].clone()
-            step_idxs = step_idxs[:-1]
-
         # Combine split evaluations and nodes
-        if split_mesh_idx is not None:
-            nodes_flat = torch.concatenate([split_nodes, nodes_flat], dim=0)
-            f_evals = torch.concatenate([split_f_evals, *f_evals], dim=0)
-        else:
-            f_evals = torch.concatenate(f_evals, dim=0)
+        f_evals = torch.concatenate(f_evals, dim=0)
 
         # Combine tracked variables the same way (prepending the carried split).
         tracked_combined = None
         if tracked_lists is not None:
-            tracked_combined = []
-            for k, tl in enumerate(tracked_lists):
-                if split_mesh_idx is not None:
-                    tracked_combined.append(
-                        torch.concatenate([split_tracked[k], *tl], dim=0)
-                    )
-                else:
-                    tracked_combined.append(torch.concatenate(tl, dim=0))
+            tracked_combined = [
+                torch.concatenate(tl, dim=0) for tl in tracked_list
+            ]
 
         # Reshape and combine outputs
         nodes = torch.reshape(nodes_flat, (-1, self.C, nodes_flat.shape[-1]))
@@ -1375,33 +1271,13 @@ class AdaptiveQuadrature(SolverBase):
                 tv.reshape(-1, self.C, *tv.shape[1:]) for tv in tracked_combined
             ]
 
-        # Path B may have laid out panels with the residual panel first
-        # regardless of its position in time order — fine for the
-        # split-prefix bookkeeping above, but the caller's
-        # _adaptively_increase_mesh requires step_idxs sorted ascending
-        # (its barrier-insertion offset scan walks left-to-right). Sort
-        # step_idxs and permute the per-panel outputs to match.
-        if split_mesh_idx is not None and len(step_idxs) > 1:
-            sort_perm = torch.argsort(step_idxs)
-            step_idxs = step_idxs[sort_perm]
-            nodes = nodes[sort_perm]
-            f_evals = f_evals[sort_perm]
-            if tracked_combined is not None:
-                tracked_combined = [tv[sort_perm] for tv in tracked_combined]
-
         tracked_out = (
             tuple(tv.detach() for tv in tracked_combined)
             if tracked_combined is not None
             else None
         )
-        split_node_state = (
-            residual_nodes,
-            residual_f_evals,
-            residual_tracked,
-            residual_mesh_idx,
-        )
 
-        return nodes, f_evals, tracked_out, step_idxs, split_node_state
+        return nodes, f_evals, tracked_out, step_idxs, (None, None, None, None)
 
 
     def _evaluate_f_on_split_nodes_prev(

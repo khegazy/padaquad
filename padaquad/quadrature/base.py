@@ -298,6 +298,7 @@ class AdaptiveQuadrature(SolverBase):
         error_integral_reference: float | torch.Tensor | None = None,
         mesh_failure_tolerance: float | None = None,
         error_on_nonfinite: bool | None = None,
+        conserve_memory: bool = False,
         result_device: str | torch.device = "cpu",
     ) -> IntegrationResult:
         """
@@ -544,6 +545,7 @@ class AdaptiveQuadrature(SolverBase):
                 mesh,
                 mesh_trackers,
                 take_gradient,
+                conserve_memory,
                 force_max_batch,
                 total_mem_usage,
                 split_node_state,
@@ -1082,6 +1084,7 @@ class AdaptiveQuadrature(SolverBase):
         mesh,
         mesh_trackers,
         take_gradient,
+        conserve_memory,
         force_max_batch,
         total_mem_usage,
         split_node_state,
@@ -1126,16 +1129,8 @@ class AdaptiveQuadrature(SolverBase):
                 f, f_args, mesh, step_idxs, max_mesh_steps
             )
         else:
-            if True:
-                return self._evaluate_f_on_split_nodes(
-                    f,
-                    f_args,
-                    mesh,
-                    step_idxs,
-                    max_batch,
-                )
-            else:
-                return self._evaluate_f_on_split_nodes_prev(
+            if conserve_memory:
+                return self._evaluate_f_on_split_residual_nodes(
                     f,
                     f_args,
                     mesh,
@@ -1144,6 +1139,14 @@ class AdaptiveQuadrature(SolverBase):
                     max_mesh_steps,
                     split_node_state,
                 ) 
+            else:
+                return self._evaluate_f_on_split_nodes(
+                    f,
+                    f_args,
+                    mesh,
+                    step_idxs,
+                    max_batch,
+                )
 
     def _evaluate_f_on_full_nodes(self, f, f_args, mesh, step_idxs, max_mesh_steps):
         assert max_mesh_steps >= 1, (
@@ -1280,7 +1283,7 @@ class AdaptiveQuadrature(SolverBase):
         return nodes, f_evals, tracked_out, step_idxs, (None, None, None, None)
 
 
-    def _evaluate_f_on_split_nodes_prev(
+    def _evaluate_f_on_split_residual_nodes(
         self,
         f,
         f_args,

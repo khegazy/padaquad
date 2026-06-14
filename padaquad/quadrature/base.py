@@ -1262,9 +1262,7 @@ class AdaptiveQuadrature(SolverBase):
         # Combine tracked variables the same way (prepending the carried split).
         tracked_combined = None
         if tracked_lists is not None:
-            tracked_combined = [
-                torch.concatenate(tl, dim=0) for tl in tracked_lists
-            ]
+            tracked_combined = [torch.concatenate(tl, dim=0) for tl in tracked_lists]
 
         # Reshape and combine outputs
         nodes = torch.reshape(nodes_flat, (-1, self.C, nodes_flat.shape[-1]))
@@ -1281,7 +1279,6 @@ class AdaptiveQuadrature(SolverBase):
         )
 
         return nodes, f_evals, tracked_out, step_idxs, (None, None, None, None)
-
 
     def _evaluate_f_on_split_residual_nodes(
         self,

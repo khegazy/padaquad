@@ -1,4 +1,4 @@
-"""Unit tests for _get_sorted_indices and _insert_sorted_results."""
+"""Unit tests for _mesh_order, _merge_positions and _insert_sorted_results."""
 
 from __future__ import annotations
 
@@ -6,68 +6,69 @@ import torch
 from _helpers import make_solver_for_unit_test
 
 
-class TestGetSortedIndices:
-    """Tests for _get_sorted_indices: compute merge positions via binary search."""
+class TestMeshOrder:
+    """Tests for _mesh_order: map a panel's left barrier to its mesh position."""
 
     def setup_method(self):
         self.solver = make_solver_for_unit_test()
 
-    def test_basic(self):
-        """Interleaving [1,3,5] and [2,4] gives positions for [1,2,3,4,5]."""
-        record = torch.tensor([1.0, 3.0, 5.0], dtype=torch.float64)
-        result = torch.tensor([2.0, 4.0], dtype=torch.float64)
+    def test_1d(self):
+        """1-D barriers resolve to their mesh positions."""
+        mesh = torch.tensor([[0.0], [0.5], [1.0]], dtype=torch.float64)
+        mi = self.solver._get_mesh_indices(mesh)
+        barriers = torch.tensor([[0.5], [0.0], [1.0]], dtype=torch.float64)
+        order = self.solver._mesh_order(barriers, mi)
+        assert order.tolist() == [1, 0, 2]
 
-        idxs_keep, idxs_input = self.solver._get_sorted_indices(record, result)
+    def test_multi_dim_keys_on_full_vector(self):
+        """Multi-D barriers are matched on the whole vector, not coordinate 0.
 
-        # Merged: [1, 2, 3, 4, 5]
-        # record entries at positions 0, 2, 4
-        # result entries at positions 1, 3
-        assert torch.equal(idxs_keep, torch.tensor([0, 2, 4]))
-        assert torch.equal(idxs_input, torch.tensor([1, 3]))
+        Two barriers share coordinate 0 but differ in coordinate 1; the order
+        must come from the full-vector mesh position.
+        """
+        mesh = torch.tensor(
+            [[0.0, 0.0], [0.0, 1.0], [1.0, 2.0]], dtype=torch.float64
+        )
+        mi = self.solver._get_mesh_indices(mesh)
+        barriers = torch.tensor([[0.0, 1.0], [0.0, 0.0]], dtype=torch.float64)
+        order = self.solver._mesh_order(barriers, mi)
+        assert order.tolist() == [1, 0]
+
+
+class TestMergePositions:
+    """Tests for _merge_positions: combined-array placement from mesh orders."""
+
+    def setup_method(self):
+        self.solver = make_solver_for_unit_test()
+
+    def test_interleave(self):
+        """Interleaving record [0,2,4] and new [1,3] gives [0,1,2,3,4]."""
+        idxs_keep, idxs_input = self.solver._merge_positions(
+            torch.tensor([0, 2, 4]), torch.tensor([1, 3])
+        )
+        assert idxs_keep.tolist() == [0, 2, 4]
+        assert idxs_input.tolist() == [1, 3]
 
     def test_insert_at_start(self):
-        """Inserting before all existing entries."""
-        record = torch.tensor([5.0, 10.0], dtype=torch.float64)
-        result = torch.tensor([1.0], dtype=torch.float64)
-
-        idxs_keep, idxs_input = self.solver._get_sorted_indices(record, result)
-
-        # Merged: [1, 5, 10] -> result at 0, record at 1, 2
-        assert torch.equal(idxs_input, torch.tensor([0]))
-        assert torch.equal(idxs_keep, torch.tensor([1, 2]))
+        idxs_keep, idxs_input = self.solver._merge_positions(
+            torch.tensor([1, 2]), torch.tensor([0])
+        )
+        assert idxs_input.tolist() == [0]
+        assert idxs_keep.tolist() == [1, 2]
 
     def test_insert_at_end(self):
-        """Inserting after all existing entries."""
-        record = torch.tensor([1.0, 2.0], dtype=torch.float64)
-        result = torch.tensor([10.0], dtype=torch.float64)
-
-        idxs_keep, idxs_input = self.solver._get_sorted_indices(record, result)
-
-        # Merged: [1, 2, 10] -> record at 0, 1; result at 2
-        assert torch.equal(idxs_input, torch.tensor([2]))
-        assert torch.equal(idxs_keep, torch.tensor([0, 1]))
-
-    def test_single_into_many(self):
-        """Inserting one value into a larger record."""
-        record = torch.tensor([1.0, 3.0, 5.0, 7.0], dtype=torch.float64)
-        result = torch.tensor([4.0], dtype=torch.float64)
-
-        idxs_keep, idxs_input = self.solver._get_sorted_indices(record, result)
-
-        # Merged: [1, 3, 4, 5, 7] -> result at position 2
-        assert torch.equal(idxs_input, torch.tensor([2]))
-        assert len(idxs_keep) == 4
+        idxs_keep, idxs_input = self.solver._merge_positions(
+            torch.tensor([0, 1]), torch.tensor([2])
+        )
+        assert idxs_input.tolist() == [2]
+        assert idxs_keep.tolist() == [0, 1]
 
     def test_many_into_one(self):
-        """Inserting multiple values around a single record entry."""
-        record = torch.tensor([5.0], dtype=torch.float64)
-        result = torch.tensor([1.0, 3.0, 7.0], dtype=torch.float64)
-
-        idxs_keep, idxs_input = self.solver._get_sorted_indices(record, result)
-
-        # Merged: [1, 3, 5, 7] -> record at 2; result at 0, 1, 3
-        assert torch.equal(idxs_keep, torch.tensor([2]))
-        assert torch.equal(idxs_input, torch.tensor([0, 1, 3]))
+        idxs_keep, idxs_input = self.solver._merge_positions(
+            torch.tensor([2]), torch.tensor([0, 1, 3])
+        )
+        assert idxs_keep.tolist() == [2]
+        assert idxs_input.tolist() == [0, 1, 3]
 
 
 class TestInsertSortedResults:
@@ -80,7 +81,7 @@ class TestInsertSortedResults:
         """Merging 1D tensors produces correctly ordered output."""
         record = torch.tensor([1.0, 3.0, 5.0], dtype=torch.float64)
         result = torch.tensor([2.0, 4.0], dtype=torch.float64)
-        idxs_keep, idxs_input = self.solver._get_sorted_indices(record, result)
+        idxs_keep, idxs_input = self.solver._merge_positions(record, result)
 
         merged = self.solver._insert_sorted_results(
             record, idxs_keep, result, idxs_input
@@ -95,7 +96,7 @@ class TestInsertSortedResults:
             [[1.0, 10.0], [3.0, 30.0], [5.0, 50.0]], dtype=torch.float64
         )
         result = torch.tensor([[2.0, 20.0], [4.0, 40.0]], dtype=torch.float64)
-        idxs_keep, idxs_input = self.solver._get_sorted_indices(
+        idxs_keep, idxs_input = self.solver._merge_positions(
             record[:, 0], result[:, 0]
         )
 
@@ -115,7 +116,7 @@ class TestInsertSortedResults:
         result = torch.tensor(
             [[[2.0, 2.5]], [[4.0, 4.5]]], dtype=torch.float64
         )  # [2, 1, 2]
-        idxs_keep, idxs_input = self.solver._get_sorted_indices(
+        idxs_keep, idxs_input = self.solver._merge_positions(
             record[:, 0, 0], result[:, 0, 0]
         )
 
@@ -131,7 +132,7 @@ class TestInsertSortedResults:
         """All original values from both record and result appear in merged output."""
         record = torch.tensor([10.0, 30.0, 50.0], dtype=torch.float64)
         result = torch.tensor([20.0, 40.0], dtype=torch.float64)
-        idxs_keep, idxs_input = self.solver._get_sorted_indices(record, result)
+        idxs_keep, idxs_input = self.solver._merge_positions(record, result)
 
         merged = self.solver._insert_sorted_results(
             record, idxs_keep, result, idxs_input

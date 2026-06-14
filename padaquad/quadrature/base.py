@@ -710,8 +710,14 @@ class AdaptiveQuadrature(SolverBase):
                 )
 
                 # TODO make sure growing string loss center is a time not the number of evals because eval number is meaningless here.
-                # Compute loss and accumulate into the record
+                # Compute loss 
                 loss = loss_fxn(intermediate_results)
+                
+                # Backpropagate gradients through the integration if requested
+                if take_gradient and loss.requires_grad:
+                    loss.backward()
+                
+                # Accumulate into the record
                 intermediate_results.loss = loss
                 record = self._record_results(
                     record=record,
@@ -720,9 +726,6 @@ class AdaptiveQuadrature(SolverBase):
                     mesh_indices=mesh_indices,
                 )
 
-                # Backpropagate gradients through the integration if requested
-                if take_gradient and loss.requires_grad:
-                    loss.backward()
             del y_step_eval
 
         # === Post-convergence: sort results and optimize the mesh ===

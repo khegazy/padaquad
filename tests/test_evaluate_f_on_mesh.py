@@ -368,7 +368,6 @@ class TestSplitNodes:
         so compare within a tight numerical tolerance rather than bit-equality.
         """
         solver = make_solver_for_unit_test(method)
-        C = solver.C
         # n_panels * C >> max_batch (max_batch <= 2C+1) guarantees >1 chunk.
         n_panels = 6
         mesh = _make_mesh(n_panels=n_panels)
@@ -1189,7 +1188,7 @@ class TestSplitResidualNodes:
         mesh = _make_mesh(n_panels=n_panels)
         step_idxs = torch.arange(n_panels)
 
-        nodes_full, f_evals_full, _, _, _ = solver._evaluate_f_on_full_nodes(
+        _nodes_full, f_evals_full, _, _, _ = solver._evaluate_f_on_full_nodes(
             vec_integrand, (), mesh, step_idxs, max_mesh_steps=n_panels
         )
         assert f_evals_full.shape == (n_panels, C, 3)
@@ -1322,15 +1321,15 @@ class TestIntegration:
             solver, "_evaluate_f_on_split_residual_nodes", _fake("residual")
         )
 
-        common = dict(
-            f=_simple_integrand,
-            f_args=(),
-            mesh=mesh,
-            mesh_trackers=mesh_trackers,
-            force_max_batch=10 * C,
-            total_mem_usage=0.9,
-            split_node_state=(None, None, None, None),
-        )
+        common = {
+            "f": _simple_integrand,
+            "f_args": (),
+            "mesh": mesh,
+            "mesh_trackers": mesh_trackers,
+            "force_max_batch": 10 * C,
+            "total_mem_usage": 0.9,
+            "split_node_state": (None, None, None, None),
+        }
 
         # Route 1: take_gradient=True -> full
         solver._evaluate_f_on_mesh(take_gradient=True, conserve_memory=False, **common)
@@ -1674,7 +1673,7 @@ class TestEndToEnd:
     def test_integrate_conserve_memory_matches_default(self):
         """One minimal end-to-end check that the residual path
         (``conserve_memory=True``) integrates to the same value as the default
-        (``conserve_memory=False``). gk15 × damped_sine, same seed."""
+        (``conserve_memory=False``). gk15 and damped_sine, same seed."""
         f, _, _ = _resolve_integrand("damped_sine")
         method = "gk15"
 

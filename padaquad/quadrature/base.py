@@ -1138,7 +1138,7 @@ class AdaptiveQuadrature(SolverBase):
                     max_batch,
                     max_mesh_steps,
                     split_node_state,
-                ) 
+                )
             else:
                 return self._evaluate_f_on_split_nodes(
                     f,

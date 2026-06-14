@@ -298,6 +298,7 @@ class AdaptiveQuadrature(SolverBase):
         error_integral_reference: float | torch.Tensor | None = None,
         mesh_failure_tolerance: float | None = None,
         error_on_nonfinite: bool | None = None,
+        result_device: str | torch.device = 'cpu',
     ) -> IntegrationResult:
         """
         Perform parallel adaptive numerical integration of f.
@@ -410,6 +411,9 @@ class AdaptiveQuadrature(SolverBase):
         # Set dtype based on input
         self.set_dtype_by_input(mesh=mesh, mesh_init=mesh_init, mesh_final=mesh_init)
 
+        # Setup results device
+        result_device = torch.device(result_device)
+        
         # If mesh is given set mesh_init and mesh_final, else use input, else use saved values
         mesh_init, mesh_final = self._setup_integral_bounds(mesh, mesh_init, mesh_final)
 

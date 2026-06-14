@@ -634,7 +634,8 @@ class AdaptiveQuadrature(SolverBase):
                     return IntegrationResult(
                         integral=method_output.integral.to(result_device),
                         integral_error=method_output.integral_error.to(result_device),
-                        mesh_optimal=mesh.to(result_device),
+                        # mesh_optimal stays on the integration device (warm-start).
+                        mesh_optimal=mesh,
                         mesh_init=mesh_init.to(result_device),
                         mesh_final=mesh_final.to(result_device),
                         nodes=nodes.to(result_device),
@@ -756,15 +757,18 @@ class AdaptiveQuadrature(SolverBase):
             "mesh_quadrature_errors": record["mesh_quadrature_errors"].to(self.device),
             "integral": record["integral"].to(self.device),
         }
+        # mesh_optimal is generated on -- and kept on -- the integration device:
+        # it is fed back into the integrator as the warm-start mesh on the next
+        # call, so it must match self.device (the inputs that generate it are
+        # moved there above via opt_record / mesh.to(self.device)).
         mesh_optimal = self._get_optimal_mesh(opt_record, mesh.to(self.device))
         del opt_record
-        # Cache the warm-start mesh on the integration device so the reuse_mesh
-        # path in _setup_initial_mesh gets a device-matched mesh next call.
-        self.mesh_previous = mesh_optimal.to(self.device)
+        self.mesh_previous = mesh_optimal
         self.previous_f_id = id(f)
 
-        # Move the resident record fields to result_device so the returned
-        # IntegrationResult is entirely on result_device.
+        # Move the resident record fields to result_device so the rest of the
+        # returned IntegrationResult lives on result_device (mesh_optimal stays
+        # on the integration device for warm-start reuse).
         for key in self._DEVICE_RESIDENT_KEYS:
             if key in record:
                 record[key] = record[key].to(result_device)
@@ -777,7 +781,8 @@ class AdaptiveQuadrature(SolverBase):
         return IntegrationResult(
             integral=record["integral"] + y0.to(result_device),
             integral_error=record["integral_error"],
-            mesh_optimal=mesh_optimal.to(result_device),
+            # mesh_optimal stays on the integration device for warm-start reuse.
+            mesh_optimal=mesh_optimal,
             mesh_init=mesh_init.to(result_device),
             mesh_final=mesh_final.to(result_device),
             nodes=record["nodes"],

@@ -4,6 +4,27 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.1] - 2026-06-13
+
+### Added
+
+- **`result_device`** argument on `integrate()` (and the public `integrate()` wrapper), default `'cpu'`: the large per-step records (`nodes`, `y`, `h`, `mesh_quadrature_errors`, `error_ratios`, `integral_error`, `loss`, `tracked_variables`) are detached and moved to `result_device` as they are recorded, so they no longer accumulate on the integration device. This bounds GPU memory on fine meshes — previously the full record grew on the GPU for the entire run even though most fields are only needed in the returned result. The two fields read back inside the loop (`integral` and `mesh_quadratures`) stay on the integration device. When `take_gradient=False` the autograd graph is retained across the device move, so the returned integral remains differentiable (gradients flow back to parameters on the integration device).
+
+### Changed
+
+- **Record ordering is now by mesh position (robust to vector-valued time).** Recorded panels are merged/sorted by each panel's position in the mesh (its left barrier looked up in a `mesh_indices` map) instead of by the first node's first time-coordinate. The previous coordinate-0 key is not a valid total order when `t` is a vector (`T > 1`, e.g. path integrals) and could mis-order the record; the mesh order is correct for any `T`. For scalar time (`T == 1`) the order is unchanged and results are byte-identical (snapshots unaffected).
+- **Default result device (notable for CUDA users):** with `result_device` defaulting to `'cpu'`, `integrate()` now returns the large result tensors on CPU by default; pass `result_device='cuda'` (or your device) to keep them on the GPU. The "mesh family" (`mesh_optimal`, `mesh_init`, `mesh_final`) always stays on the integration device because `mesh_optimal` is the warm-start mesh fed back into the solver and its endpoints are `mesh_init`/`mesh_final`. On a CPU-only solver `result_device` is a no-op.
+- **Device-consistent internals:** the error-ratio helpers and adaptive-mesh refinement (`_adaptively_increase_mesh`, `_get_optimal_mesh`) are now device-following (tolerances and allocations follow their inputs), and the merge/sort paths place index tensors on each field's device, so a record split across devices stays consistent.
+- **Coordinate-0 assumptions removed for multi-dimensional `t`:** post-refinement/record monotonicity assertions are reframed (the 1-D strictly-ascending checks are retained, guarded to `T == 1`), initial sub-barriers are generated along the segment vector, and the `reuse_mesh` warm-start filter uses an all-coordinate bounding box instead of a coordinate-0 range.
+
+### Fixed
+
+- The `max_path_change` early-exit `IntegrationResult` is now device-consistent with the normal-completion path.
+
+### Removed
+
+- Internal `_get_sorted_indices` (coordinate-based binary-search merge), superseded by mesh-position placement (`_mesh_order` + `_merge_positions`).
+
 ## [1.1.0] - 2026-06-09
 
 ### Added

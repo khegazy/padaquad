@@ -41,6 +41,7 @@ def integrate(
     max_adaptive_splits: int | None = None,
     error_on_nonfinite: bool = True,
     device: str | None = None,
+    result_device: str | torch.device = "cpu",
     **kwargs,
 ) -> IntegrationResult:
     """
@@ -117,6 +118,10 @@ def integrate(
             result. The integration never hangs in either case.
         device: Device to run on (e.g. 'cuda', 'cpu'). If None,
             auto-detects.
+        result_device: Device the returned IntegrationResult tensors live on
+            (default 'cpu'). The large per-step records (nodes, y, ...) are
+            detached and moved here as they are recorded so they do not
+            accumulate on the integration device's memory.
         **kwargs: Additional keyword arguments forwarded to the solver
             constructor (e.g. max_batch, max_path_change).
 
@@ -170,4 +175,5 @@ def integrate(
         take_gradient=take_gradient,
         max_adaptive_splits=max_adaptive_splits,
         error_on_nonfinite=error_on_nonfinite,
+        result_device=result_device,
     )

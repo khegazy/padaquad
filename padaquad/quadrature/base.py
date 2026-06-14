@@ -298,6 +298,7 @@ class AdaptiveQuadrature(SolverBase):
         error_integral_reference: float | torch.Tensor | None = None,
         mesh_failure_tolerance: float | None = None,
         error_on_nonfinite: bool | None = None,
+        conserve_memory: bool = False,
         result_device: str | torch.device = "cpu",
     ) -> IntegrationResult:
         """
@@ -544,6 +545,7 @@ class AdaptiveQuadrature(SolverBase):
                 mesh,
                 mesh_trackers,
                 take_gradient,
+                conserve_memory,
                 force_max_batch,
                 total_mem_usage,
                 split_node_state,
@@ -1082,6 +1084,7 @@ class AdaptiveQuadrature(SolverBase):
         mesh,
         mesh_trackers,
         take_gradient,
+        conserve_memory,
         force_max_batch,
         total_mem_usage,
         split_node_state,
@@ -1126,15 +1129,24 @@ class AdaptiveQuadrature(SolverBase):
                 f, f_args, mesh, step_idxs, max_mesh_steps
             )
         else:
-            return self._evaluate_f_on_split_nodes(
-                f,
-                f_args,
-                mesh,
-                step_idxs,
-                max_batch,
-                max_mesh_steps,
-                split_node_state,
-            )
+            if conserve_memory:
+                return self._evaluate_f_on_split_residual_nodes(
+                    f,
+                    f_args,
+                    mesh,
+                    step_idxs,
+                    max_batch,
+                    max_mesh_steps,
+                    split_node_state,
+                )
+            else:
+                return self._evaluate_f_on_split_nodes(
+                    f,
+                    f_args,
+                    mesh,
+                    step_idxs,
+                    max_batch,
+                )
 
     def _evaluate_f_on_full_nodes(self, f, f_args, mesh, step_idxs, max_mesh_steps):
         assert max_mesh_steps >= 1, (
@@ -1168,6 +1180,107 @@ class AdaptiveQuadrature(SolverBase):
         return nodes, f_evals, tracked_out, step_idxs, (None, None, None, None)
 
     def _evaluate_f_on_split_nodes(
+        self,
+        f,
+        f_args,
+        mesh,
+        step_idxs,
+        max_batch,
+    ):
+        # A zero budget is unsatisfiable here and would divide-by-zero below
+        # (the % max_batch layout math). Callers route through
+        # _evaluate_f_on_mesh, which rescues max_batch=0 -> 1 before dispatch;
+        # this assert guards direct/unit callers with an explicit message.
+        assert max_batch > 0
+
+        # Place C quadrature points within each selected step
+        nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
+
+        # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
+        nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
+        num_nodes_to_eval = len(nodes_flat)
+
+        # Evaluate the integrand over all batches, splitting each batch's
+        # output into the integrand value and any tracked variables.
+        f_evals = []
+        # tracked_lists[k] is the list (one per accumulation batch) of the
+        # k-th tracked variable; stays None when f emits no tracked variables.
+        tracked_lists = None
+        num_nodes_evaluated = 0
+        while num_nodes_evaluated < num_nodes_to_eval:
+            try:
+                f_output = f(
+                    nodes_flat[num_nodes_evaluated : num_nodes_evaluated + max_batch],
+                    *f_args,
+                )
+            except torch.OutOfMemoryError as e:  # Use RuntimeError for PyTorch < 2.0
+                if max_batch == 1:
+                    raise torch.OutOfMemoryError(
+                        f"{e}\n\nSingle integrand (f) evaluation failed to fit in memory, batch size cannot be reduced."
+                    ) from e
+                free_mem, total_mem = self._get_memory()
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    # Small grace period for any async CUDA cleanup to land.
+                    # Avoiding `torch.cuda.synchronize()` here on purpose: post-
+                    # CUDA-OOM the default stream can be in an error state, and
+                    # synchronize on a faulted stream has been observed to
+                    # block indefinitely — matching the futex-wait-on-all-threads
+                    # signature of the prior deadlock.
+                    time.sleep(0.05)
+                self._oom_max_batch = torch.int(torch.round(0.75 * self._oom_max_batch))
+                logger.warning(
+                    f"Caught OOM with {free_mem} GB free of {total_mem} GB. "
+                    f"Reducing max_batch from {max_batch} to {self._oom_max_batch}."
+                    "If this warning appears often, consider reducing max_batch to "
+                    "avoid deleting and rerunning evaluations."
+                )
+                max_batch = self._oom_max_batch
+                self.previous_max_batch = self._oom_max_batch
+                continue
+
+            integrand, tracked = self._split_f_output(f_output)
+            self._check_f_output_finite(
+                integrand,
+                nodes_flat[num_nodes_evaluated : num_nodes_evaluated + max_batch],
+            )
+            f_evals.append(integrand)
+            if tracked is not None:
+                if tracked_lists is None:
+                    tracked_lists = [[] for _ in tracked]
+                for k, tv in enumerate(tracked):
+                    tracked_lists[k].append(tv)
+
+            num_nodes_evaluated += len(integrand)
+            del integrand
+
+        assert num_nodes_evaluated >= num_nodes_to_eval
+        # Combine split evaluations and nodes
+        f_evals = torch.concatenate(f_evals, dim=0)
+
+        # Combine tracked variables the same way (prepending the carried split).
+        tracked_combined = None
+        if tracked_lists is not None:
+            tracked_combined = [torch.concatenate(tl, dim=0) for tl in tracked_lists]
+
+        # Reshape and combine outputs
+        nodes = torch.reshape(nodes_flat, (-1, self.C, nodes_flat.shape[-1]))
+        f_evals = torch.reshape(f_evals, (-1, self.C, f_evals.shape[-1]))
+        if tracked_combined is not None:
+            tracked_combined = [
+                tv.reshape(-1, self.C, *tv.shape[1:]) for tv in tracked_combined
+            ]
+
+        tracked_out = (
+            tuple(tv.detach() for tv in tracked_combined)
+            if tracked_combined is not None
+            else None
+        )
+
+        return nodes, f_evals, tracked_out, step_idxs, (None, None, None, None)
+
+    def _evaluate_f_on_split_residual_nodes(
         self,
         f,
         f_args,

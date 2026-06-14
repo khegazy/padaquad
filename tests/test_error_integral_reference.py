@@ -24,6 +24,13 @@ accumulates over several batches (otherwise a single batch sees the whole
 integral at once and the "incomplete early reference" effect never appears).
 ``atol`` is kept far below ``rtol * |I|`` so the behavior is rtol-dominated; if
 ``atol`` floored the denominator the reference would have no effect.
+
+These tests run with ``conserve_memory=True``. The default
+(``conserve_memory=False``) path evaluates *every* pending panel in one pass
+before any accept/reject decision, so the running integral is already complete
+the first time a panel is judged and a reference has nothing to correct. The
+incremental, batch-by-batch accumulation that ``error_integral_reference``
+targets only happens on the memory-conserving (``conserve_memory=True``) path.
 """
 
 from __future__ import annotations
@@ -100,13 +107,20 @@ def _n_steps(result) -> int:
 
 
 def _run(solver, f, **kwargs):
-    """Integrate over [0, 1] with a forced small batch and no gradient."""
+    """Integrate over [0, 1] with a forced small batch and no gradient.
+
+    Uses ``conserve_memory=True`` so the running integral accumulates batch by
+    batch (the regime ``error_integral_reference`` targets). The default
+    evaluate-everything path computes the full integral before any panel is
+    judged, leaving a reference nothing to correct.
+    """
     return solver.integrate(
         f=f,
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
         take_gradient=False,
         max_batch=MAX_BATCH,
+        conserve_memory=True,
         **kwargs,
     )
 

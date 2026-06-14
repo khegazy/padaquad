@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-06-14
+
+### Changed
+
+- **Error tolerance is now computed against the complete integral (notable for memory-heavy integrands).** The default `take_gradient=False` evaluation path (`_evaluate_f_on_split_nodes`) now evaluates *every* pending panel in a single pass before any accept/reject decision, so the integral is complete the first time a panel is judged. The absolute-mode tolerance denominator (`max(atol, rtol * |I|)`) therefore uses the full integral from the start, instead of the running (incomplete) integral that accumulated batch by batch. This yields better mesh-split decisions, but **can change integration results for integrals large enough to span multiple batches** (`total_nodes > max_batch`): the early panels are now judged against the true total rather than a too-small partial sum, so the converged mesh and integral can differ from prior versions. Small integrals that fit in one batch are unaffected. `max_batch` continues to bound memory by chunking the `f` calls; it no longer fragments the error decision.
+
+### Added
+
+- **`conserve_memory`** argument on `integrate()` (and the public `integrate()` wrapper), default `False`. When `True`, the solver uses the previous memory-conserving path (`_evaluate_f_on_split_residual_nodes`): it evaluates a bounded number of panels per loop iteration and carries a partial-panel residual forward across iterations, so peak memory is bounded by `max_batch` rather than by the whole mesh. This restores the pre-1.2.0 incremental behavior (and the running-integral error denominator it implies). Use it when the full set of node evaluations does not fit in memory.
+
+### Fixed
+
+- **Bug:** `_evaluate_f_on_split_nodes` iterated an undefined `tracked_list` (instead of `tracked_lists`) when concatenating tracked variables across batches, raising `NameError` whenever an integrand emitted tracked variables on the default path.
+
 ## [1.1.1] - 2026-06-13
 
 ### Added

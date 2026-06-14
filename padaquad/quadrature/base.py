@@ -1263,7 +1263,7 @@ class AdaptiveQuadrature(SolverBase):
         tracked_combined = None
         if tracked_lists is not None:
             tracked_combined = [
-                torch.concatenate(tl, dim=0) for tl in tracked_list
+                torch.concatenate(tl, dim=0) for tl in tracked_lists
             ]
 
         # Reshape and combine outputs

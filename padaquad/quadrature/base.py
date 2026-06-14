@@ -634,10 +634,10 @@ class AdaptiveQuadrature(SolverBase):
                     return IntegrationResult(
                         integral=method_output.integral.to(result_device),
                         integral_error=method_output.integral_error.to(result_device),
-                        # mesh_optimal stays on the integration device (warm-start).
+                        # mesh family stays on the integration device (warm-start).
                         mesh_optimal=mesh,
-                        mesh_init=mesh_init.to(result_device),
-                        mesh_final=mesh_final.to(result_device),
+                        mesh_init=mesh_init,
+                        mesh_final=mesh_final,
                         nodes=nodes.to(result_device),
                         h=method_output.h.to(result_device),
                         y=y_step_eval.to(result_device),
@@ -781,10 +781,12 @@ class AdaptiveQuadrature(SolverBase):
         return IntegrationResult(
             integral=record["integral"] + y0.to(result_device),
             integral_error=record["integral_error"],
-            # mesh_optimal stays on the integration device for warm-start reuse.
+            # The mesh family (mesh_optimal/init/final) stays on the integration
+            # device: mesh_optimal is the warm-start mesh and its endpoints are
+            # mesh_init/mesh_final, so they must share a device.
             mesh_optimal=mesh_optimal,
-            mesh_init=mesh_init.to(result_device),
-            mesh_final=mesh_final.to(result_device),
+            mesh_init=mesh_init,
+            mesh_final=mesh_final,
             nodes=record["nodes"],
             h=record["h"],
             y=record["y"],

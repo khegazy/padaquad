@@ -40,6 +40,7 @@ Class hierarchy (defined here):
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import logging
 import math
@@ -642,11 +643,14 @@ class AdaptiveQuadrature(SolverBase):
                         mesh_optimal=mesh,
                         mesh_init=mesh_init,
                         mesh_final=mesh_final,
-                        nodes=nodes.to(result_device),
+                        # Flatten nodes/y/tracked_variables to match the
+                        # converged path's output format.
+                        nodes=self._flatten_output(nodes.to(result_device)),
                         h=method_output.h.to(result_device),
-                        y=y_step_eval.to(result_device),
+                        y=self._flatten_output(y_step_eval.to(result_device)),
                         tracked_variables=tuple(
-                            tv.to(result_device) for tv in tracked_step_eval
+                            self._flatten_output(tv.to(result_device))
+                            for tv in tracked_step_eval
                         )
                         if tracked_step_eval is not None
                         else None,
@@ -748,25 +752,27 @@ class AdaptiveQuadrature(SolverBase):
 
         # === Post-convergence: sort results and optimize the mesh ===
         record = self._sort_record(record, mesh_indices)
-        # Prune over-resolved steps and refine under-resolved ones. This runs on
-        # the integration device because it re-derives node positions through
-        # the method tableau (which lives there). mesh_quadratures and integral
-        # are already resident; give it integration-device copies of the two
-        # fields that were offloaded to result_device. This is a transient,
-        # bounded cost -- not the per-batch accumulation that result_device
-        # removes during the loop.
-        opt_record = {
-            "nodes": record["nodes"].to(self.device),
-            "mesh_quadratures": record["mesh_quadratures"].to(self.device),
-            "mesh_quadrature_errors": record["mesh_quadrature_errors"].to(self.device),
-            "integral": record["integral"].to(self.device),
-        }
-        # mesh_optimal is generated on -- and kept on -- the integration device:
-        # it is fed back into the integrator as the warm-start mesh on the next
-        # call, so it must match self.device (the inputs that generate it are
-        # moved there above via opt_record / mesh.to(self.device)).
-        mesh_optimal = self._get_optimal_mesh(opt_record, mesh.to(self.device))
-        del opt_record
+        # Prune over-resolved steps and refine under-resolved ones. This re-derives
+        # node positions through the method tableau, so it must run with the
+        # tableau and device-bound allocations co-located with its inputs. The
+        # bulky per-step fields (nodes, mesh_quadrature_errors) already live on
+        # result_device, so we evaluate the whole computation there -- moving the
+        # small tableau to result_device for the duration -- rather than copying
+        # those tensors back to the integration device. The two device-resident
+        # fields (mesh_quadratures, integral) are the only ones that must be moved
+        # to result_device to join them.
+        with self._integration_on_device(result_device):
+            mesh_optimal = self._get_optimal_mesh(
+                nodes=record["nodes"],
+                mesh_quadratures=record["mesh_quadratures"].to(result_device),
+                mesh_quadrature_errors=record["mesh_quadrature_errors"],
+                integral=record["integral"].to(result_device),
+                mesh=mesh.to(result_device),
+            )
+        # mesh_optimal is fed back into the integrator as the warm-start mesh on
+        # the next call, so it must match the integration device (its endpoints
+        # are mesh_init/mesh_final, which live on self.device).
+        mesh_optimal = mesh_optimal.to(self.device)
         self.mesh_previous = mesh_optimal
         self.previous_f_id = id(f)
 
@@ -797,7 +803,11 @@ class AdaptiveQuadrature(SolverBase):
             nodes=self._flatten_output(record["nodes"]),
             h=record["h"],
             y=self._flatten_output(record["y"]),
-            tracked_variables=record_tracked,
+            # Flatten tracked variables the same way so they stay aligned with
+            # the flattened nodes/y.
+            tracked_variables=tuple(self._flatten_output(tv) for tv in record_tracked)
+            if record_tracked is not None
+            else None,
             mesh_quadratures=record["mesh_quadratures"],
             mesh_quadrature_errors=torch.abs(record["mesh_quadrature_errors"]),
             error_ratios=record["error_ratios"],
@@ -1591,9 +1601,41 @@ class AdaptiveQuadrature(SolverBase):
             nodes, mesh_quadratures, mesh_quadrature_errors, ratio_idxs_cut
         )
 
+    @contextlib.contextmanager
+    def _integration_on_device(self, device: torch.device):
+        """
+        Temporarily run integration-device-bound operations on ``device``.
+
+        ``_get_optimal_mesh`` (and the subclass node helpers it calls) allocate
+        on ``self.device`` and read the method tableau, which lives on
+        ``self.device``. To evaluate the optimal-mesh computation on
+        ``result_device`` -- so the large per-step record tensors never have to
+        be copied back to the integration device -- this context manager swaps
+        ``self.device`` and moves the method tableau to ``device`` for the
+        duration of the block, restoring both on exit. A no-op when ``device``
+        already equals ``self.device``.
+
+        Args:
+            device: Device to run on for the duration of the block.
+        """
+        if device == self.device:
+            yield
+            return
+        original_device = self.device
+        self.device = device
+        self.method.to_device(device)
+        try:
+            yield
+        finally:
+            self.device = original_device
+            self.method.to_device(original_device)
+
     def _get_optimal_mesh(
         self,
-        record: dict[str, torch.Tensor],
+        nodes: torch.Tensor,
+        mesh_quadratures: torch.Tensor,
+        mesh_quadrature_errors: torch.Tensor,
+        integral: torch.Tensor,
         mesh: torch.Tensor,
     ) -> torch.Tensor:
         """
@@ -1610,29 +1652,32 @@ class AdaptiveQuadrature(SolverBase):
         This produces a mesh tailored to the difficulty of the integrand at
         different positions along the integration domain.
 
+        All inputs must share a device; the returned mesh lands on that same
+        device. (The caller runs this on ``result_device`` via
+        ``_integration_on_device`` and moves the result back to the integration
+        device afterward.)
+
         Args:
-            record: Dictionary of converged results including 't', 'mesh_quadratures',
-                'mesh_quadrature_errors', and 'integral'.
+            nodes: Per-step quadrature point positions. Shape: [N, C, T].
+            mesh_quadratures: Per-step integral contributions. Shape: [N, D].
+            mesh_quadrature_errors: Per-step error estimates. Shape: [N, D].
+            integral: Converged total integral estimate. Shape: [D].
             mesh: Current barrier positions. Shape: [M, T].
-            error_integral_reference: Optional rtol-denominator reference (see
-                ``integrate``). When given, it replaces the converged integral as
-                the error-ratio reference for the prune/refine decisions, matching
-                what the main loop used. None ⇒ use the converged integral.
 
         Returns:
             Optimized barrier positions. Shape: [M_opt, T].
         """
         # Prune steps with excess accuracy (over-resolved regions)
         _, error_ratios_2steps, _ = self._compute_error_ratios(
-            mesh_quadrature_errors=record["mesh_quadrature_errors"],
-            mesh_quadratures=record["mesh_quadratures"],
-            integral=record["integral"].detach(),
+            mesh_quadrature_errors=mesh_quadrature_errors,
+            mesh_quadratures=mesh_quadratures,
+            integral=integral.detach(),
         )
         nodes_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned = (
             self._prune_excess_mesh(
-                record["nodes"],
-                record["mesh_quadratures"],
-                record["mesh_quadrature_errors"],
+                nodes,
+                mesh_quadratures,
+                mesh_quadrature_errors,
                 error_ratios_2steps,
             )
         )
@@ -1645,7 +1690,7 @@ class AdaptiveQuadrature(SolverBase):
             self._compute_error_ratios(
                 mesh_quadrature_errors=mesh_quadrature_errors_pruned,
                 mesh_quadratures=mesh_quadratures_pruned,
-                integral=record["integral"].detach(),
+                integral=integral.detach(),
             )
         )
         keep_mask, remove_mask = self._accept_reject_masks(

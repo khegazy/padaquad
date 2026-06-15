@@ -633,9 +633,11 @@ class AdaptiveQuadrature(SolverBase):
                     )
                     # Place the partial result on result_device for a
                     # device-consistent return, matching the converged path.
+                    # integral, integral_error and y0 stay on the integration
+                    # device (the primary answer), as in the converged path.
                     return IntegrationResult(
-                        integral=method_output.integral.to(result_device),
-                        integral_error=method_output.integral_error.to(result_device),
+                        integral=method_output.integral,
+                        integral_error=method_output.integral_error,
                         # mesh family stays on the integration device (warm-start).
                         mesh_optimal=mesh,
                         mesh_init=mesh_init,
@@ -657,7 +659,7 @@ class AdaptiveQuadrature(SolverBase):
                         error_ratios=error_ratios.to(result_device),
                         loss=None,
                         gradient_taken=take_gradient,
-                        y0=y0.to(result_device),
+                        y0=y0,
                         converged=False,
                     )
 
@@ -769,10 +771,12 @@ class AdaptiveQuadrature(SolverBase):
         self.previous_f_id = id(f)
 
         # Move the resident record fields to result_device so the rest of the
-        # returned IntegrationResult lives on result_device (mesh_optimal stays
-        # on the integration device for warm-start reuse).
+        # returned IntegrationResult lives on result_device. The integration-
+        # output scalars (integral, integral_error) and mesh_optimal stay on the
+        # integration device -- the scalars are the primary answer and
+        # mesh_optimal is reused as the warm-start mesh.
         for key in self._DEVICE_RESIDENT_KEYS:
-            if key in record:
+            if key in record and key not in self._RESULT_INTEGRATION_KEYS:
                 record[key] = record[key].to(result_device)
 
         # Tracked variables are stored in the record as a list; expose a tuple.
@@ -781,7 +785,8 @@ class AdaptiveQuadrature(SolverBase):
             record_tracked = tuple(record["tracked_variables"])
 
         return IntegrationResult(
-            integral=record["integral"] + y0.to(result_device),
+            # integral, integral_error and y0 stay on the integration device.
+            integral=record["integral"] + y0,
             integral_error=record["integral_error"],
             # The mesh family (mesh_optimal/init/final) stays on the integration
             # device: mesh_optimal is the warm-start mesh and its endpoints are
@@ -798,7 +803,7 @@ class AdaptiveQuadrature(SolverBase):
             error_ratios=record["error_ratios"],
             loss=record["loss"],
             gradient_taken=take_gradient,
-            y0=y0.to(result_device),
+            y0=y0,
         )
 
     # -------------------------------------------------------------------------------- #
@@ -2165,6 +2170,13 @@ class AdaptiveQuadrature(SolverBase):
     # tensors (nodes, y, tracked_variables, ...) off the GPU.
     _DEVICE_RESIDENT_KEYS = ("integral", "mesh_quadratures")
 
+    # Cumulative scalar keys whose final output stays on the integration device.
+    # The integral and its error estimate are the primary answer, so they remain
+    # on the compute device even when the bulky per-step arrays are offloaded to
+    # ``result_device``. (``mesh_quadratures`` is resident only for loop reads
+    # and is moved to ``result_device`` after convergence.)
+    _RESULT_INTEGRATION_KEYS = ("integral", "integral_error")
+
     def _mesh_order(self, barriers: torch.Tensor, mesh_indices: dict) -> torch.Tensor:
         """
         Look up the mesh-order index of each panel from its left barrier.
@@ -2303,9 +2315,12 @@ class AdaptiveQuadrature(SolverBase):
             result_device = self.device
 
         def target(key):
-            # Resident keys stay on the integration device; everything else goes
-            # to result_device.
-            return self.device if key in self._DEVICE_RESIDENT_KEYS else result_device
+            # Resident keys (read back in the loop) and the integration-output
+            # scalars stay on the integration device; everything else goes to
+            # result_device.
+            if key in self._DEVICE_RESIDENT_KEYS or key in self._RESULT_INTEGRATION_KEYS:
+                return self.device
+            return result_device
 
         def place(value, key):
             # take_gradient=True does per-batch backward *before* recording, so
@@ -2416,7 +2431,7 @@ class AdaptiveQuadrature(SolverBase):
             )
         return record
 
-    def _flatten_output(panel_array):
+    def _flatten_output(self, panel_array):
         return torch.concatenate(
             [panel_array[0], torch.flatten(panel_array[1:,1:], start_dim=0, end_dim=1)],
             dim=0

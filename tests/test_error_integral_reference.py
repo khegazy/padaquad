@@ -14,10 +14,11 @@ The *direction* of the step-count change depends on where the integral's mass
 sits in time: late-mass integrands benefit (fewer steps), early-mass integrands
 barely change (the running integral is already near its final value early on).
 
-Step count is read from ``result.nodes.shape[0]`` — the number of panels the
+Step count is read from ``result.h.shape[0]`` — the number of panels the
 adaptive loop actually evaluated and accepted at convergence — not from
 ``mesh_optimal`` (the post-convergence prune-and-refine mesh, which is one step
-removed from what the loop did and can mask the signal).
+removed from what the loop did and can mask the signal). (``result.nodes`` is
+flattened across panels, so panel count comes from ``h``, which stays per-panel.)
 
 Small ``max_batch`` values are used so the running integral genuinely
 accumulates over several batches (otherwise a single batch sees the whole
@@ -102,8 +103,24 @@ def _decaying_integral() -> float:
 
 
 def _n_steps(result) -> int:
-    """Number of accepted panels at convergence (the controller's actual work)."""
-    return result.nodes.shape[0]
+    """Number of accepted panels at convergence (the controller's actual work).
+
+    ``nodes`` is flattened across panels, so the panel count is read from
+    ``h`` (one row per panel).
+    """
+    return result.h.shape[0]
+
+
+def _panel_left_edges(result):
+    """Left barrier of each accepted panel, reconstructed from panel widths.
+
+    The flattened ``nodes`` no longer expose per-panel boundaries directly, so
+    derive each panel's left edge from ``mesh_init`` and the cumulative panel
+    widths ``h`` (both in mesh order). Returns shape [N].
+    """
+    widths = result.h[:, 0]  # [N], mesh order
+    starts = torch.cat([widths.new_zeros(1), torch.cumsum(widths, dim=0)[:-1]])
+    return result.mesh_init[0] + starts
 
 
 def _run(solver, f, **kwargs):
@@ -211,9 +228,9 @@ def test_too_small_reference_inflates_early_steps():
         f"too_small={_n_steps(too_small)} good={_n_steps(good)}"
     )
 
-    # Left edge of each accepted panel: nodes[:, 0, 0].
-    good_left = good.nodes[:, 0, 0]
-    small_left = too_small.nodes[:, 0, 0]
+    # Left edge of each accepted panel (reconstructed from per-panel widths).
+    good_left = _panel_left_edges(good)
+    small_left = _panel_left_edges(too_small)
     good_early = int((good_left < midpoint).sum())
     small_early = int((small_left < midpoint).sum())
     assert small_early > good_early, (

@@ -74,9 +74,11 @@ def test_basic_tracked_variables(sampling, method, take_gradient):
     assert isinstance(tv, tuple)
     assert len(tv) == 2
 
-    N, C = result.nodes.shape[:2]
-    assert tv[0].shape[:2] == (N, C)
-    assert tv[1].shape[:2] == (N, C)
+    # tracked_variables are flattened to align with nodes/y on the leading
+    # (P = total node) axis.
+    P = result.nodes.shape[0]
+    assert tv[0].shape[0] == P
+    assert tv[1].shape[0] == P
 
     # Tracked values are evaluated at exactly the accepted nodes and never
     # recomputed/weighted, so they equal f's tracked outputs at result.nodes.
@@ -139,8 +141,8 @@ def test_multidim_trailing_shape_preserved():
         take_gradient=False,
     )
     tv = result.tracked_variables[0]
-    N, C = result.nodes.shape[:2]
-    assert tv.shape == (N, C, 3)
+    P = result.nodes.shape[0]
+    assert tv.shape == (P, 3)
     expected = torch.cat([result.nodes, result.nodes**2, result.nodes**3], dim=-1)
     assert torch.allclose(tv, expected)
 
@@ -168,7 +170,7 @@ def test_non_float_tracked_across_multiple_batches():
 
     tv = result.tracked_variables[0]
     assert tv.dtype == torch.int64
-    assert tv.shape[:2] == result.nodes.shape[:2]
+    assert tv.shape[0] == result.nodes.shape[0]
     expected = (result.nodes > 0.5).to(torch.int64)
     assert torch.equal(tv, expected)
 

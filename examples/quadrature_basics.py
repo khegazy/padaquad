@@ -100,7 +100,8 @@ def example_method_comparison() -> None:
             mesh_init=torch.tensor([0.0]),
             mesh_final=torch.tensor([4.0]),
         )
-        n_evals = result.nodes.shape[0] * result.nodes.shape[1]
+        # nodes is flattened across panels, so its length is the node count.
+        n_evals = result.nodes.shape[0]
         print(
             f"  {method:>14}: integral={result.integral.item():+.10f}  "
             f"err≈{result.integral_error.item():.2e}  evals={n_evals:>5}"

@@ -131,14 +131,11 @@ def constant_integrand(t, *args):
 def assert_time_ordering(integral_output):
     """Assert that all time points in the output are non-decreasing.
 
-    Allows ULP-level float rounding at panel boundaries: the last
-    node of panel i (at c=1.0, evaluating to barrier_i + h_i) and the
-    first node of panel i+1 (at c=0.0, evaluating to barrier_{i+1})
-    are mathematically equal but can differ by 1 ULP when the
-    subtraction h_i = barrier_{i+1} - barrier_i isn't exactly
-    representable. The tolerance scales with the integration domain.
+    ``nodes`` is the flattened ascending node sequence ([P, T]), so a small
+    tolerance still guards against ULP-level float rounding accumulated along
+    the sequence. The tolerance scales with the integration domain.
     """
-    t_flat = torch.flatten(integral_output.nodes, start_dim=0, end_dim=1)
+    t_flat = integral_output.nodes  # already flattened across panels: [P, T]
     eps = torch.finfo(t_flat.dtype).eps
     scale = t_flat.abs().max().clamp_min(1.0)
     tol = 8 * eps * scale  # generous bound for accumulated rounding
@@ -156,10 +153,19 @@ def assert_optimal_mesh_ordering(integral_output):
 
 
 def assert_step_continuity(integral_output):
-    """Assert that consecutive steps share boundary points (end of step i == start of step i+1)."""
-    assert torch.allclose(
-        integral_output.nodes[1:, 0, :], integral_output.nodes[:-1, -1, :]
-    ), "Consecutive steps do not share boundary points"
+    """Assert consecutive steps join continuously in the flattened output.
+
+    Panels share a single boundary point in the flattened ``nodes`` (the
+    duplicated end-of-step-i / start-of-step-(i+1) point is dropped), so the
+    continuity check becomes: no two adjacent nodes are equal (the boundary
+    was deduplicated, not repeated). Together with ``assert_time_ordering``
+    this gives a strictly monotonic, gap-free node sequence.
+    """
+    nodes = integral_output.nodes  # flattened across panels: [P, T]
+    adjacent_equal = torch.all(nodes[1:] == nodes[:-1], dim=-1)
+    assert not torch.any(adjacent_equal), (
+        "Adjacent nodes are duplicated; panel boundaries were not deduplicated"
+    )
 
 
 # ---------------------------------------------------------------------------

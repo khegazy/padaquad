@@ -789,9 +789,9 @@ class AdaptiveQuadrature(SolverBase):
             mesh_optimal=mesh_optimal,
             mesh_init=mesh_init,
             mesh_final=mesh_final,
-            nodes=record["nodes"],
+            nodes=self._flatten_output(record["nodes"]),
             h=record["h"],
-            y=record["y"],
+            y=self._flatten_output(record["y"]),
             tracked_variables=record_tracked,
             mesh_quadratures=record["mesh_quadratures"],
             mesh_quadrature_errors=torch.abs(record["mesh_quadrature_errors"]),
@@ -2416,6 +2416,11 @@ class AdaptiveQuadrature(SolverBase):
             )
         return record
 
+    def _flatten_output(panel_array):
+        return torch.concatenate(
+            [panel_array[0], torch.flatten(panel_array[1:,1:], start_dim=0, end_dim=1)],
+            dim=0
+        )
     # -------------------------------------------------------------------------------- #
     #                                MEMORY MANAGEMENT                                 #
     # -------------------------------------------------------------------------------- #

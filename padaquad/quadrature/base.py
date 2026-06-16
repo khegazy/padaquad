@@ -2363,7 +2363,10 @@ class AdaptiveQuadrature(SolverBase):
             # Resident keys (read back in the loop) and the integration-output
             # scalars stay on the integration device; everything else goes to
             # result_device.
-            if key in self._DEVICE_RESIDENT_KEYS or key in self._RESULT_INTEGRATION_KEYS:
+            if (
+                key in self._DEVICE_RESIDENT_KEYS
+                or key in self._RESULT_INTEGRATION_KEYS
+            ):
                 return self.device
             return result_device
 
@@ -2478,9 +2481,13 @@ class AdaptiveQuadrature(SolverBase):
 
     def _flatten_output(self, panel_array):
         return torch.concatenate(
-            [panel_array[0], torch.flatten(panel_array[1:,1:], start_dim=0, end_dim=1)],
-            dim=0
+            [
+                panel_array[0],
+                torch.flatten(panel_array[1:, 1:], start_dim=0, end_dim=1),
+            ],
+            dim=0,
         )
+
     # -------------------------------------------------------------------------------- #
     #                                MEMORY MANAGEMENT                                 #
     # -------------------------------------------------------------------------------- #

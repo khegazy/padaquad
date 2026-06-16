@@ -51,6 +51,9 @@ def _make(sampling, method, atol=ATOL_MED, rtol=RTOL_MED):
         atol=atol,
         rtol=rtol,
         remove_cut=REMOVE_CUT,
+        # Pin to CPU: the suite is CPU-designed and a busy/shared GPU can fail
+        # the per-eval memory pre-check (esp. with take_gradient=True).
+        device="cpu",
     )
 
 

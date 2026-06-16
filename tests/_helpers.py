@@ -66,14 +66,23 @@ TAKE_GRADIENT_IDS = ["take_grad_True", "take_grad_False"]
 # ---------------------------------------------------------------------------
 
 
-def make_uniform_solver(method_name, atol=ATOL_TIGHT, rtol=RTOL_TIGHT, **kwargs):
-    """Create a parallel uniform-sampling RK solver."""
+def make_uniform_solver(
+    method_name, atol=ATOL_TIGHT, rtol=RTOL_TIGHT, device="cpu", **kwargs
+):
+    """Create a parallel uniform-sampling RK solver.
+
+    Pinned to CPU by default: the suite is CPU-designed, and on a GPU machine
+    the solver otherwise auto-selects CUDA, where the per-eval memory budget can
+    fail the pre-check when the (often shared) GPU is short on free memory.
+    Pass ``device=`` to override.
+    """
     return adaptive_quadrature(
         sampling_type=steps.ADAPTIVE_UNIFORM,
         method=method_name,
         atol=atol,
         rtol=rtol,
         remove_cut=REMOVE_CUT,
+        device=device,
         **kwargs,
     )
 
@@ -153,18 +162,30 @@ def assert_optimal_mesh_ordering(integral_output):
 
 
 def assert_step_continuity(integral_output):
-    """Assert consecutive steps join continuously in the flattened output.
+    """Assert consecutive panels join continuously in the flattened output.
 
-    Panels share a single boundary point in the flattened ``nodes`` (the
-    duplicated end-of-step-i / start-of-step-(i+1) point is dropped), so the
-    continuity check becomes: no two adjacent nodes are equal (the boundary
-    was deduplicated, not repeated). Together with ``assert_time_ordering``
-    this gives a strictly monotonic, gap-free node sequence.
+    Flattening drops the duplicated end-of-panel-i / start-of-panel-(i+1)
+    boundary, so the panels form one continuous traversal. We verify the node
+    sequence runs in order (non-decreasing) and spans the full integration
+    domain end to end (mesh_init .. mesh_final), so no leading/trailing panel is
+    missing and panels join without a backward jump. Equal adjacent nodes are
+    allowed: methods like dopri5 repeat a node within a panel (c = 1 twice).
     """
     nodes = integral_output.nodes  # flattened across panels: [P, T]
-    adjacent_equal = torch.all(nodes[1:] == nodes[:-1], dim=-1)
-    assert not torch.any(adjacent_equal), (
-        "Adjacent nodes are duplicated; panel boundaries were not deduplicated"
+    eps = torch.finfo(nodes.dtype).eps
+    tol = 8 * eps * float(nodes.abs().max().clamp_min(1.0))
+    assert torch.all(nodes[1:] - nodes[:-1] >= -tol), (
+        "Flattened nodes are not ordered across panel boundaries"
+    )
+    # mesh_init/mesh_final stay on the integration device while nodes may be
+    # offloaded to result_device, so compare on the nodes' device.
+    mesh_init = integral_output.mesh_init.to(nodes.device)
+    mesh_final = integral_output.mesh_final.to(nodes.device)
+    assert torch.allclose(nodes[0], mesh_init, atol=tol, rtol=0), (
+        "Flattened nodes do not start at mesh_init"
+    )
+    assert torch.allclose(nodes[-1], mesh_final, atol=tol, rtol=0), (
+        "Flattened nodes do not end at mesh_final"
     )
 
 

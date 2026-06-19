@@ -1814,38 +1814,29 @@ class AdaptiveQuadrature(SolverBase):
             Modified mask with no adjacent True values. Shape: [N].
         """
 
-        mask2 = mask[:-1] * mask[1:]
-        if not torch.any(mask2):
-            return mask
+        # Iterative form of what was a tail recursion: each pass un-flags the
+        # second element of an adjacent True pair and rebuilds the mask, looping
+        # until no adjacent pair remains. The recursive version overflowed
+        # Python's stack on the large, finely-refined meshes the accepted-panel
+        # re-check can produce; this loop is behaviourally identical (the prior
+        # body's only recursive call was the final `return self._rec_remove(...)`)
+        # but has no depth limit.
+        while True:
+            mask2 = mask[:-1] * mask[1:]
+            if not torch.any(mask2):
+                return mask
 
-        # Must keep the first integration step
-        if mask2[0]:
-            mask[1] = False
+            # Must keep the first integration step
+            if mask2[0]:
+                mask[1] = False
 
-        # Mask is too small to remove points
-        if len(mask) <= 2:
-            return mask
+            # Mask is too small to remove points
+            if len(mask) <= 2:
+                return mask
 
-        return self._rec_remove(
-            torch.concatenate(
+            mask = torch.concatenate(
                 [mask[:2], mask2[1:] * mask[:-2] + (~mask2[1:]) * mask[2:]]
             )
-        )
-
-        # if torch.any(mask2):
-        #     if mask2[0]:
-        #         mask[1] = False
-        #     if len(mask) > 2:
-        #         return self._rec_remove(torch.concatenate(
-        #             [
-        #                 mask[:2],
-        #                 mask2[1:]*mask[:-2] + (~mask2[1:])*mask[2:]
-        #             ]
-        #         ))
-        #     else:
-        #         return mask
-        # else:
-        #     return mask
 
     def _setup_integral_bounds(self, mesh, mesh_init, mesh_final):
         if mesh is not None:
@@ -2618,8 +2609,16 @@ class AdaptiveQuadrature(SolverBase):
                 record[key] = [tv[record_keep_mask.to(tv.device)] for tv in value]
             else:
                 record[key] = value[record_keep_mask.to(value.device)]
-        # Default loss == integral, so keep it consistent with the rebuilt value.
-        if loss_fxn is self._integral_loss:
+        # Default loss == integral, so keep it consistent with the rebuilt
+        # value. Bound methods are not identity-stable (``obj.m is obj.m`` is
+        # False), so compare the underlying function rather than the bound
+        # method object. A custom loss_fxn is left as-is (its per-batch sum is
+        # already an approximation; the re-check only runs with
+        # take_gradient=False, so no per-batch backward depends on it).
+        is_default_loss = (
+            getattr(loss_fxn, "__func__", None) is self._integral_loss.__func__
+        )
+        if is_default_loss:
             record["loss"] = record["integral"]
         return record
 

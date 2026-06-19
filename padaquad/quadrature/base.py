@@ -2785,6 +2785,7 @@ class AdaptiveQuadrature(SolverBase):
             
             eval_time = time.time() - eval_t0
             del result
+            del t_input
             if overshot_memory:
                 self.f_unit_mem_size = mem_scale * mem_before / float(N)
                 break
@@ -2792,12 +2793,24 @@ class AdaptiveQuadrature(SolverBase):
                 self.f_unit_mem_size = mem_scale * mem_before / (100*float(N))
                 break
             elif N >= max_test:
-                self.f_unit_mem_size = mem_before / max_test
+                self.f_unit_mem_size = 0
                 break
             else:
                 N = 10 * N
         
         gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        # The benchmark never evaluated a tile larger than max_test, so the
+        # per-eval cost from the time-based / fallback branches can imply a
+        # max_batch far above what was actually validated (e.g. the eval_time
+        # branch at N=max_test implies ~100*max_test). Floor f_unit_mem_size at
+        # the size that yields max_batch == max_test so we never extrapolate
+        # past the tested tile size and risk an OOM.
+        min_unit_mem_size = self._get_usable_memory(total_mem_usage) / max_test
+        self.f_unit_mem_size = max(self.f_unit_mem_size, min_unit_mem_size)
+
         max_batch = self._get_max_f_evals(total_mem_usage)
         logger.warning(f"Memory test finished in {time.time() - t0:.3f}s with max_batch = {max_batch} of possible 1e9 search limit")
 

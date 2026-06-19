@@ -44,6 +44,7 @@ import torch
 from tests._helpers import (
     TAKE_GRADIENT_IDS,
     TAKE_GRADIENT_VALUES,
+    cached_max_batch,
     make_uniform_solver,
 )
 
@@ -68,6 +69,7 @@ def test_no_warm_start_path_correctness(take_gradient):
         mesh_init=torch.tensor([-2.0], dtype=torch.float64),
         mesh_final=torch.tensor([2.0], dtype=torch.float64),
         take_gradient=take_gradient,
+        max_batch=cached_max_batch(),
     )
     expected = math.sqrt(math.pi) * math.erf(2.0)
     actual = out.integral.item()
@@ -221,6 +223,7 @@ def test_normal_completion_has_converged_true(take_gradient):
         mesh_init=torch.tensor([0.0], dtype=torch.float64),
         mesh_final=torch.tensor([math.pi], dtype=torch.float64),
         take_gradient=take_gradient,
+        max_batch=cached_max_batch(),
     )
     assert out.converged is True
 
@@ -341,6 +344,7 @@ def test_nonfinite_integrand_does_not_hang(nan_f, sampling, method, take_gradien
             # Pin CPU so this NaN-logic regression is deterministic regardless
             # of whether a GPU is visible (NaN handling is device-agnostic).
             device="cpu",
+            max_batch=cached_max_batch(),
         )
     )
     assert isinstance(out, IntegrationResult)
@@ -369,6 +373,7 @@ def test_nonfinite_integrand_raises_by_default(nan_f, sampling, method, take_gra
             mesh_final=torch.tensor([1.0], dtype=torch.float64),
             take_gradient=take_gradient,
             device="cpu",
+            max_batch=cached_max_batch(),
         )
 
 
@@ -396,6 +401,7 @@ def test_nonfinite_cumulative_error_mode_terminates(nan_f):
             error_on_nonfinite=False,
             use_absolute_error_ratio=False,
             device="cpu",
+            max_batch=cached_max_batch(),
         )
     )
     assert isinstance(out, IntegrationResult)
@@ -417,6 +423,7 @@ def test_finite_integrand_unaffected_by_nonfinite_check(take_gradient):
         mesh_final=torch.tensor([math.pi], dtype=torch.float64),
         take_gradient=take_gradient,
         device="cpu",
+        max_batch=cached_max_batch(),
     )
     assert torch.isfinite(out.integral).all()
     assert abs(out.integral.item() - 2.0) < 1e-6

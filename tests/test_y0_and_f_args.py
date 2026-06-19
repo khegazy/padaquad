@@ -29,7 +29,11 @@ import math
 
 import pytest
 import torch
-from tests._helpers import TAKE_GRADIENT_IDS, TAKE_GRADIENT_VALUES
+from tests._helpers import (
+    TAKE_GRADIENT_IDS,
+    TAKE_GRADIENT_VALUES,
+    cached_max_batch,
+)
 
 from padaquad import adaptive_quadrature, integrate, steps
 
@@ -50,6 +54,7 @@ def test_f_forwards_to_integrand(take_gradient):
         method="gk21",
         atol=1e-9,
         rtol=1e-9,
+        max_batch=cached_max_batch(),
     )
     a, b = 0.0, math.pi
     result = solver.integrate(
@@ -84,6 +89,7 @@ def test_f_default_empty_tuple_works_with_zero_arg_integrand(take_gradient):
         mesh_init=torch.tensor([0.0], dtype=torch.float64),
         mesh_final=torch.tensor([math.pi], dtype=torch.float64),
         take_gradient=take_gradient,
+        max_batch=cached_max_batch(),
     )
     assert abs(result.integral.item() - 2.0) < 1e-7
 
@@ -103,6 +109,7 @@ def test_f_with_tensor_value(take_gradient):
         method="gk21",
         atol=1e-9,
         rtol=1e-9,
+        max_batch=cached_max_batch(),
     )
     result = solver.integrate(
         f=f,
@@ -133,6 +140,7 @@ def test_y0_default_zero_gives_pure_integral(take_gradient):
         mesh_init=torch.tensor([0.0], dtype=torch.float64),
         mesh_final=torch.tensor([1.0], dtype=torch.float64),
         take_gradient=take_gradient,
+        max_batch=cached_max_batch(),
     )
     assert abs(result.integral.item() - 1.0) < 1e-9
 
@@ -149,6 +157,7 @@ def test_y0_offsets_the_result_per_documentation(take_gradient):
         mesh_final=torch.tensor([1.0], dtype=torch.float64),
         y0=torch.tensor([5.0], dtype=torch.float64),
         take_gradient=take_gradient,
+        max_batch=cached_max_batch(),
     )
     # ∫_0^1 1 dt = 1. With y0=5, expected = 6.
     assert abs(result.integral.item() - 6.0) < 1e-9, (
@@ -174,6 +183,7 @@ def test_y0_difference_equals_y0_for_same_integral(take_gradient):
         "mesh_init": torch.tensor([0.0], dtype=torch.float64),
         "mesh_final": torch.tensor([math.pi], dtype=torch.float64),
         "take_gradient": take_gradient,
+        "max_batch": cached_max_batch(),
     }
     offset = torch.tensor([7.5], dtype=torch.float64)
 

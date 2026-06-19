@@ -30,6 +30,7 @@ from tests._helpers import (
     T_INIT,
     TAKE_GRADIENT_IDS,
     TAKE_GRADIENT_VALUES,
+    cached_max_batch,
     make_uniform_solver,
 )
 
@@ -54,6 +55,8 @@ def _make(sampling, method, atol=ATOL_MED, rtol=RTOL_MED):
         # Pin to CPU: the suite is CPU-designed and a busy/shared GPU can fail
         # the per-eval memory pre-check (esp. with take_gradient=True).
         device="cpu",
+        # Reuse the cached memory benchmark instead of re-running it here.
+        max_batch=cached_max_batch("cpu"),
     )
 
 

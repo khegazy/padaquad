@@ -40,7 +40,7 @@ import math
 
 import pytest
 import torch
-from tests._helpers import make_uniform_solver
+from tests._helpers import cached_max_batch, make_uniform_solver
 
 from padaquad import integrate
 
@@ -96,6 +96,7 @@ def test_grad_of_integral_matches_integral_of_grad(name, g, interval):
         rtol=RTOL,
         mesh_init=mesh_init,
         mesh_final=mesh_final,
+        max_batch=cached_max_batch(),
     )
     grad_b = out_b.integral.item()
 
@@ -122,6 +123,7 @@ def test_single_batch_autograd_grad_works():
         mesh_init=torch.tensor([0.0], dtype=torch.float64),
         mesh_final=torch.tensor([1.0], dtype=torch.float64),
         take_gradient=False,
+        max_batch=cached_max_batch(),
     )
     grad_a = torch.autograd.grad(out.integral.sum(), theta)[0].item()
     # int_0^1 t^2 dt = 1/3
@@ -145,6 +147,7 @@ def test_take_gradient_does_not_corrupt_integral_value():
         rtol=RTOL,
         mesh_init=mesh_init,
         mesh_final=mesh_final,
+        max_batch=cached_max_batch(),
     )
 
     theta = torch.tensor(1.7, dtype=torch.float64, requires_grad=True)

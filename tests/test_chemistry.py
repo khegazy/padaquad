@@ -25,6 +25,7 @@ from _helpers import (
     TAKE_GRADIENT_IDS,
     TAKE_GRADIENT_VALUES,
     UNIFORM_METHOD_NAMES,
+    cached_max_batch,
 )
 from scipy import integrate as scipy_integrate
 
@@ -53,6 +54,7 @@ def test_wolf_schlegel_parallel_vs_scipy(method_name, take_gradient):
         rtol=RTOL_LOOSE,
         remove_cut=REMOVE_CUT,
         f=wolf_schlegel,
+        max_batch=cached_max_batch(),
     )
 
     parallel_output = parallel_solver.integrate(

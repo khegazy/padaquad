@@ -700,9 +700,7 @@ class AdaptiveQuadrature(SolverBase):
                     integral=reference_integral,
                 )
                 _, rec_remove = self._accept_reject_masks(rec_ratios, rec_per_dim)
-                rec_positions = self._mesh_order(
-                    record["nodes"][:, 0, :], mesh_indices
-                )
+                rec_positions = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
                 # Respect the split cap so the record stays consistent with the
                 # mesh: a failing panel already at the cap is not split, so it
                 # must stay recorded.
@@ -825,7 +823,9 @@ class AdaptiveQuadrature(SolverBase):
             mesh_optimal = self._get_optimal_mesh(
                 nodes=record["nodes"],
                 mesh_quadratures=record["mesh_quadratures"].to(result_device),
-                mesh_quadrature_errors=record["mesh_quadrature_errors"].to(result_device),
+                mesh_quadrature_errors=record["mesh_quadrature_errors"].to(
+                    result_device
+                ),
                 integral=record["integral"].to(result_device),
                 mesh=mesh.to(result_device),
             )

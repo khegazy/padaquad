@@ -2711,6 +2711,11 @@ class AdaptiveQuadrature(SolverBase):
             node_test: A sample node point for benchmarking. Shape: [T] or [1, T].
             f_args: Extra arguments passed to f.
         """
+        logger.warning(
+            "Running memory test because max_batch was not provided, this is slow if called multiple times. Consider setting max_batch."
+        )
+        t0 = time.time()
+
         assert len(node_test.shape) <= 2
         if len(node_test.shape) == 2:
             node_test = node_test[0]
@@ -2718,19 +2723,12 @@ class AdaptiveQuadrature(SolverBase):
         self.f_unit_mem_size = None
 
         N = 1
-        max_evals = 2 * N
         eval_time = 0
         mem_scale = 2.1 if take_gradient else 1.0
         overshot_memory = False
         while self.f_unit_mem_size is None:
-            #eval_time < 0.1 and N < 1e9 and max_evals > N:
-            t0 = time.time()
+            assert N > 0
             mem_before = self._get_memory()
-            # if (
-            #     self.f_unit_mem_size is not None
-            #     and self.f_unit_mem_size * N > mem_before[0]
-            # ):
-            #     return
 
             # Catch OOM errors
             try:
@@ -2750,20 +2748,16 @@ class AdaptiveQuadrature(SolverBase):
                 overshot_memory = True
                 
             if overshot_memory:
-                #mem_after = self._get_memory()
                 del result
                 self.f_unit_mem_size = mem_scale * mem_before[0] / float(N)
-                #max(
-                #    0, (mem_before[0] - mem_after[0]) / float(N)
-                #)
                 break
             else:
                 eval_time = time.time() - t0
                 if overshot_memory:
-                    N = 0.9*N
+                    N = int(min(0.9*N, N-1))
                 else:
                     N = 10 * N
-        logger.debug("Ending unit memory search")
+        logger.warning(f"Memory test finished in {time.time() - t0}s")
 
     def _get_usable_memory(self, total_mem_usage: float) -> float:
         """

@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.1] - 2026-06-16
+
+### Changed
+
+- **Accepted integration panels are now re-validated against the drifting error tolerance.** In absolute-error mode the accept/reject denominator (`max(atol, rtol * |I|)`) depends on the running integral, which changes as more panels are evaluated — so a panel accepted early could later violate the *current* tolerance yet remain accepted, silently breaking the error guarantee. Each iteration the solver now re-checks every already-accepted (recorded) panel against the same `reference_integral` the current batch uses; any that now fail are removed from the record and bisected in the same mesh update (`_adaptively_increase_mesh` gained an internal `extra_split_idxs` argument), and their refined children are re-evaluated. At convergence **every** recorded panel satisfies the final tolerance. Runs only on the `take_gradient=False` path (where no per-batch backward can be double-counted and the full-integral denominator is available) and is skipped when a fixed `error_integral_reference` pins the denominator. The `take_gradient=True` path is unchanged. **This can change the converged mesh and integral** for multi-batch, drifting-denominator integrands (notably cancelling ones, where the denominator collapses toward `atol` as the integral cancels).
+- **Snapshot golden values are keyed per `take_gradient` mode and regenerated.** The two modes legitimately diverge once the re-check engages (they only ever coincided when every panel fit in a single batch); `take_gradient=True` values are unchanged.
+
+### Fixed
+
+- **Default-loss detection in the record bookkeeping** compared bound methods by identity (`loss_fxn is self._integral_loss`), but `obj.m is obj.m` is `False` for bound methods, so the recorded `loss` was never rebuilt after a panel removal. It now compares the underlying function; a custom `loss_fxn` is still left as-is.
+- **`_rec_remove` recursion overflow.** The post-convergence prune helper was tail-recursive and hit Python's recursion limit on the large, finely-refined meshes the re-check produces for cancelling integrands at tight `atol`. Converted to an equivalent `while` loop — identical output (snapshots unaffected), no depth limit.
+
 ## [1.2.0] - 2026-06-14
 
 ### Changed

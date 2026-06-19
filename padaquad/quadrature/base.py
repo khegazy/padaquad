@@ -172,7 +172,6 @@ class AdaptiveQuadrature(SolverBase):
         self.remove_cut = remove_cut
 
         # Memory handling variables
-        self._oom_max_batch = None
         self.previous_max_batch = None
 
         # Construction-time defaults; each integrate() call falls back to these
@@ -479,6 +478,7 @@ class AdaptiveQuadrature(SolverBase):
         )
 
         # Benchmark memory footprint on first call with a new integrand
+        self._oom_max_batch = None
         if same_integrand_fxn:
             # Use the previous max_batch, running memory check everytime is slow
             if force_max_batch is None:
@@ -881,6 +881,18 @@ class AdaptiveQuadrature(SolverBase):
     #                             ADAPTIVE MESH REFINEMENT                             #
     # -------------------------------------------------------------------------------- #
 
+    def get_max_batch(self, total_mem_usage=0.9, default_max_batch=None):
+        max_batch = None
+        if default_max_batch is not None:
+            max_batch = default_max_batch
+        elif self.max_batch is not None:
+            max_batch = self.max_batch
+        elif total_mem_usage is not None and self.f_unit_mem_size is not None:
+            return self._get_max_f_evals(total_mem_usage)
+        if self.oom_max_batch is not None and max_batch > self._oom_max_batch:
+            return self.oom_max_batch
+        return max_batch
+
     def _adaptively_increase_mesh(
         self,
         method_output: MethodOutput | None,
@@ -1189,12 +1201,7 @@ class AdaptiveQuadrature(SolverBase):
         split_node_state,
     ):
         # Determine how many f evaluations fit in one batch based on memory
-        if force_max_batch is not None:
-            max_batch = force_max_batch
-        else:
-            max_batch = self._get_max_f_evals(total_mem_usage)
-        if self._oom_max_batch is not None and max_batch > self._oom_max_batch:
-            max_batch = self._oom_max_batch
+        max_batch = self.get_max_batch(total_mem_usage, force_max_batch)
         self.previous_max_batch = max_batch
         
         # Rescue a zero budget to the minimum workable value of 1 before

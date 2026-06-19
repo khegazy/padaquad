@@ -2721,18 +2721,20 @@ class AdaptiveQuadrature(SolverBase):
         max_evals = 2 * N
         eval_time = 0
         mem_scale = 2.1 if take_gradient else 1.0
-        while eval_time < 0.1 and N < 1e9 and max_evals > N:
+        overshot_memory = False
+        while self.f_unit_mem_size is None:
+            #eval_time < 0.1 and N < 1e9 and max_evals > N:
             t0 = time.time()
-            t_input = torch.tile(node_test, (N, 1))
             mem_before = self._get_memory()
-            if (
-                self.f_unit_mem_size is not None
-                and self.f_unit_mem_size * N > mem_before[0]
-            ):
-                return
+            # if (
+            #     self.f_unit_mem_size is not None
+            #     and self.f_unit_mem_size * N > mem_before[0]
+            # ):
+            #     return
 
             # Catch OOM errors
             try:
+                t_input = torch.tile(node_test, (N, 1))
                 result = f(t_input, *f_args)
             except torch.OutOfMemoryError:
                 gc.collect()
@@ -2745,16 +2747,22 @@ class AdaptiveQuadrature(SolverBase):
                     # block indefinitely — matching the futex-wait-on-all-threads
                     # signature of the prior deadlock.
                     time.sleep(0.05)
-                return
-
-            mem_after = self._get_memory()
-            del result
-            self.f_unit_mem_size = mem_scale * max(
-                0, (mem_before[0] - mem_after[0]) / float(N)
-            )
-            eval_time = time.time() - t0
-            N = 10 * N
-            max_evals = self._get_max_f_evals(0.8)
+                overshot_memory = True
+                
+            if overshot_memory:
+                #mem_after = self._get_memory()
+                del result
+                self.f_unit_mem_size = mem_scale * mem_before[0] / float(N)
+                #max(
+                #    0, (mem_before[0] - mem_after[0]) / float(N)
+                #)
+                break
+            else:
+                eval_time = time.time() - t0
+                if overshot_memory:
+                    N = 0.9*N
+                else:
+                    N = 10 * N
         logger.debug("Ending unit memory search")
 
     def _get_usable_memory(self, total_mem_usage: float) -> float:

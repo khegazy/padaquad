@@ -477,12 +477,13 @@ class AdaptiveQuadrature(SolverBase):
         same_integrand_fxn = (
             self.previous_f_id is not None and id(f) == self.previous_f_id
         )
-        # Use the previous max_batch, running memory check everytime is slow
-        if force_max_batch is None:
-            force_max_batch = self.previous_max_batch
 
         # Benchmark memory footprint on first call with a new integrand
-        if not same_integrand_fxn and force_max_batch is None:
+        if same_integrand_fxn:
+            # Use the previous max_batch, running memory check everytime is slow
+            if force_max_batch is None:
+                force_max_batch = self.previous_max_batch
+        if force_max_batch is None:
             self._setup_memory_checks(
                 f, mesh_init, take_gradient=take_gradient, f_args=f_args
             )
@@ -1192,8 +1193,10 @@ class AdaptiveQuadrature(SolverBase):
             max_batch = force_max_batch
         else:
             max_batch = self._get_max_f_evals(total_mem_usage)
+        if self._oom_max_batch is not None and max_batch > self._oom_max_batch:
+            max_batch = self._oom_max_batch
         self.previous_max_batch = max_batch
-
+        
         # Rescue a zero budget to the minimum workable value of 1 before
         # dispatching to either evaluation path. Placed ahead of the
         # take_gradient branch so neither _evaluate_f_on_full_nodes nor
@@ -1215,8 +1218,6 @@ class AdaptiveQuadrature(SolverBase):
         batches_left = torch.sum(mesh_trackers) * self.C
         assert batches_left > 0
         max_batch = max_batch if max_batch < batches_left else batches_left
-        if self._oom_max_batch is not None and max_batch > self._oom_max_batch:
-            max_batch = self._oom_max_batch
         max_mesh_steps = max_batch // self.C
 
         step_idxs = torch.arange(len(mesh), device=self.device)

@@ -44,6 +44,62 @@ UNIFORM_METHOD_NAMES = list(UNIFORM_METHODS.keys())
 VARIABLE_METHOD_NAMES = list(VARIABLE_METHODS.keys())
 INTEGRAND_NAMES = list(integrand_dict.keys())
 
+
+# ---------------------------------------------------------------------------
+# Cached max_batch — run the slow memory benchmark at most once
+# ---------------------------------------------------------------------------
+#
+# Building a solver with ``max_batch=None`` makes the first ``.integrate()``
+# call benchmark the integrand's per-evaluation memory footprint
+# (``_setup_memory_checks``), which is slow. The solver only skips that
+# benchmark when the *same* integrand is reused (``id(f)`` match) or an explicit
+# ``max_batch`` is supplied. The test suite reuses neither — every
+# (method × integrand × ...) cell builds a fresh solver on a fresh integrand —
+# so the benchmark runs hundreds of times even though the answer is always the
+# same: all the analytic integrands share one per-evaluation footprint.
+#
+# We therefore benchmark a single representative integrand exactly once (per
+# device) and pass the resulting ``max_batch`` to every solver. This is
+# behavior-preserving:
+#   * ``take_gradient=False`` evaluates every pending panel in one logical pass,
+#     so ``max_batch`` only controls memory chunking and never the result (see
+#     test_evaluate_f_on_mesh::test_integrate_result_invariant_across_max_batch).
+#   * ``take_gradient=True`` reproduces the unbatched result as long as the
+#     budget stays above the (tiny) total node count of these integrals, which
+#     the benchmarked value does by a wide margin — exactly as the per-test
+#     benchmark already did.
+
+_MAX_BATCH_CACHE: dict = {}
+
+
+def cached_max_batch(device="cpu"):
+    """Return a ``max_batch`` for the analytic integrands, benchmarking once.
+
+    The memory footprint of every analytic integrand is the same, so the slow
+    ``_setup_memory_checks`` benchmark only needs to run for the first solver on
+    a given device; the resulting budget is cached and reused by every later
+    solver, skipping the benchmark entirely. Solvers that want their own value
+    can still pass an explicit ``max_batch`` (it takes precedence — see
+    ``make_uniform_solver``).
+    """
+    key = str(device)
+    if key not in _MAX_BATCH_CACHE:
+        f = integrand_dict["damped_sine"][0]
+        probe = adaptive_quadrature(
+            sampling_type=steps.ADAPTIVE_UNIFORM,
+            method="bosh3",
+            atol=ATOL_LOOSE,
+            rtol=RTOL_LOOSE,
+            remove_cut=REMOVE_CUT,
+            device=device,
+        )
+        # One real run benchmarks the footprint (take_gradient=False); the
+        # resulting budget is large enough to keep every test integral
+        # single-batch in both modes (see note above).
+        probe.integrate(f, mesh_init=T_INIT, mesh_final=T_FINAL)
+        _MAX_BATCH_CACHE[key] = probe.get_max_batch()
+    return _MAX_BATCH_CACHE[key]
+
 # ``take_gradient`` is a parameter of ``.integrate()`` (not the solver
 # constructor). The two modes share numerics in the current implementation
 # but diverge in memory/backward behavior. Tests that exercise the
@@ -75,9 +131,37 @@ def make_uniform_solver(
     the solver otherwise auto-selects CUDA, where the per-eval memory budget can
     fail the pre-check when the (often shared) GPU is short on free memory.
     Pass ``device=`` to override.
+
+    ``max_batch`` defaults to the cached benchmark value (``cached_max_batch``)
+    so the slow per-solver memory benchmark runs at most once; pass an explicit
+    ``max_batch`` to override.
     """
+    if "max_batch" not in kwargs:
+        kwargs["max_batch"] = cached_max_batch(device)
     return adaptive_quadrature(
         sampling_type=steps.ADAPTIVE_UNIFORM,
+        method=method_name,
+        atol=atol,
+        rtol=rtol,
+        remove_cut=REMOVE_CUT,
+        device=device,
+        **kwargs,
+    )
+
+
+def make_variable_solver(
+    method_name, atol=ATOL_TIGHT, rtol=RTOL_TIGHT, device="cpu", **kwargs
+):
+    """Create a parallel variable-sampling solver.
+
+    Pinned to CPU by default for the same reason as ``make_uniform_solver``, and
+    likewise defaults ``max_batch`` to the cached benchmark value so the slow
+    memory benchmark runs at most once.
+    """
+    if "max_batch" not in kwargs:
+        kwargs["max_batch"] = cached_max_batch(device)
+    return adaptive_quadrature(
+        sampling_type=steps.ADAPTIVE_VARIABLE,
         method=method_name,
         atol=atol,
         rtol=rtol,

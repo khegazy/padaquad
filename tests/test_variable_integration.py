@@ -24,20 +24,10 @@ from _helpers import (
     assert_optimal_mesh_ordering,
     assert_step_continuity,
     assert_time_ordering,
+    make_variable_solver as _make_variable_solver,
 )
 
-from padaquad import adaptive_quadrature, integrand_dict, steps
-
-
-def _make_variable_solver(method_name, atol=ATOL_TIGHT, rtol=RTOL_TIGHT):
-    """Construct a parallel variable-sampling solver."""
-    return adaptive_quadrature(
-        sampling_type=steps.ADAPTIVE_VARIABLE,
-        method=method_name,
-        atol=atol,
-        rtol=rtol,
-        remove_cut=0.1,
-    )
+from padaquad import integrand_dict
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)

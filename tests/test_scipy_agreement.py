@@ -30,6 +30,7 @@ from tests._helpers import (
     TAKE_GRADIENT_IDS,
     TAKE_GRADIENT_VALUES,
     UNIFORM_METHOD_NAMES,
+    cached_max_batch,
 )
 
 from padaquad import integrate
@@ -114,6 +115,7 @@ def test_method_agrees_with_scipy_quad(method, integrand_name, a, b, take_gradie
         mesh_init=torch.tensor([a], dtype=torch.float64),
         mesh_final=torch.tensor([b], dtype=torch.float64),
         take_gradient=take_gradient,
+        max_batch=cached_max_batch(),
     )
     library_value = library_result.integral.item()
 

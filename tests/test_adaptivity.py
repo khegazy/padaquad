@@ -15,6 +15,7 @@ from _helpers import (
     TAKE_GRADIENT_VALUES,
     assert_step_continuity,
     assert_time_ordering,
+    cached_max_batch,
 )
 
 from padaquad import UniformAdaptiveQuadrature
@@ -43,6 +44,7 @@ class TestStepAdding:
             f=_integrand,
             atol=ATOL_MED,
             rtol=RTOL_MED,
+            max_batch=cached_max_batch(),
         )
 
     def test_steps_added_on_coarse_mesh(self, method_name, take_gradient):
@@ -117,6 +119,7 @@ class TestStepRemoval:
             f=_integrand,
             atol=ATOL_LOOSE,
             rtol=RTOL_LOOSE,
+            max_batch=cached_max_batch(),
         )
 
     def test_steps_removed_on_dense_mesh(self, take_gradient):

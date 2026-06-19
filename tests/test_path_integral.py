@@ -13,6 +13,7 @@ from _helpers import (
     TAKE_GRADIENT_IDS,
     TAKE_GRADIENT_VALUES,
     UNIFORM_METHOD_NAMES,
+    cached_max_batch,
 )
 
 from padaquad import (
@@ -43,6 +44,7 @@ def test_wrapper_matches_direct_solver_uniform(method_name, take_gradient):
         y0=torch.tensor([0], dtype=torch.float64),
         mesh=None,
         take_gradient=take_gradient,
+        max_batch=cached_max_batch(),
     )
 
     torch.manual_seed(SEED)
@@ -52,6 +54,7 @@ def test_wrapper_matches_direct_solver_uniform(method_name, take_gradient):
         atol=ATOL_MED,
         rtol=RTOL_MED,
         f=_integrand,
+        max_batch=cached_max_batch(),
     )
     direct_output = direct_solver.integrate(
         mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=take_gradient

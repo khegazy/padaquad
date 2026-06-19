@@ -154,6 +154,7 @@ def test_uncapped_default_converges_correctly(take_gradient):
         atol=1e-9,
         rtol=1e-9,
         remove_cut=REMOVE_CUT,
+        max_batch=BIG_BATCH,
     )
     result = solver.integrate(
         f=torch.sin,
@@ -179,6 +180,7 @@ def test_high_cap_does_not_interfere_via_free_function(take_gradient):
         mesh_final=torch.tensor([math.pi], dtype=torch.float64),
         take_gradient=take_gradient,
         max_adaptive_splits=50,
+        max_batch=BIG_BATCH,
     )
     assert abs(result.integral.item() - 2.0) < 1e-6
 

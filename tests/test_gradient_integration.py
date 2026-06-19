@@ -10,6 +10,7 @@ from _helpers import (
     RTOL_LOOSE,
     SEED,
     ScaledIntegrand,
+    cached_max_batch,
 )
 from torch import nn
 
@@ -134,6 +135,7 @@ def _make_solver(method_name, f):
         remove_cut=REMOVE_CUT,
         f=f,
         device="cpu",
+        max_batch=cached_max_batch(),
     )
 
 

@@ -91,15 +91,27 @@ def example_method_comparison() -> None:
     """
     f = lambda t: torch.sin(10 * t) * torch.exp(-0.1 * t)  # noqa: E731
     print("damped sinusoid over [0, 4] — comparison across methods:")
+    mesh_init = torch.tensor([0.0])
+    mesh_final = torch.tensor([4.0])
+    # The per-evaluation memory footprint of ``f`` is the same for every method,
+    # so benchmark it once on the first method and reuse the resulting
+    # ``max_batch`` for the rest. Without this, each method's solver re-runs the
+    # (slow) memory benchmark even though the answer never changes. We use the
+    # class API rather than ``integrate(...)`` here so we can read ``max_batch``
+    # back off the solver after the first run via ``get_max_batch()``.
+    max_batch = None
     for method in ("adaptive_heun", "bosh3", "dopri5", "gk21", "cc33"):
-        result = integrate(
-            f=f,
+        solver = adaptive_quadrature(
+            sampling_type=steps.ADAPTIVE_UNIFORM,
             method=method,
             atol=1e-8,
             rtol=1e-8,
-            mesh_init=torch.tensor([0.0]),
-            mesh_final=torch.tensor([4.0]),
+            max_batch=max_batch,
         )
+        result = solver.integrate(f=f, mesh_init=mesh_init, mesh_final=mesh_final)
+        # Capture the benchmarked budget after the first run and reuse it.
+        if max_batch is None:
+            max_batch = solver.get_max_batch()
         # nodes is flattened across panels, so its length is the node count.
         n_evals = result.nodes.shape[0]
         print(

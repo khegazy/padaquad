@@ -25,7 +25,11 @@ import math
 
 import pytest
 import torch
-from tests._helpers import TAKE_GRADIENT_IDS, TAKE_GRADIENT_VALUES
+from tests._helpers import (
+    TAKE_GRADIENT_IDS,
+    TAKE_GRADIENT_VALUES,
+    cached_max_batch,
+)
 
 from padaquad import VARIABLE_METHODS, adaptive_quadrature, integrate
 from padaquad.methods import UNIFORM_METHODS
@@ -87,6 +91,7 @@ def test_uniform_methods_integrate_vector_valued_integrand(method, take_gradient
         mesh_init=torch.tensor([a], dtype=torch.float64),
         mesh_final=torch.tensor([b], dtype=torch.float64),
         take_gradient=take_gradient,
+        max_batch=cached_max_batch(),
     )
 
     truth = _truth(a, b)
@@ -114,6 +119,7 @@ def test_integration_result_shapes_for_multi_d(take_gradient):
         mesh_init=torch.tensor([a], dtype=torch.float64),
         mesh_final=torch.tensor([b], dtype=torch.float64),
         take_gradient=take_gradient,
+        max_batch=cached_max_batch(),
     )
 
     assert result.integral.shape == (D,)
@@ -140,6 +146,7 @@ def test_variable_methods_integrate_vector_valued_integrand(method, take_gradien
         mesh_init=torch.tensor([a], dtype=torch.float64),
         mesh_final=torch.tensor([b], dtype=torch.float64),
         take_gradient=take_gradient,
+        max_batch=cached_max_batch(),
     )
 
     truth = _truth(a, b)
@@ -168,6 +175,7 @@ def test_per_method_independence_across_output_dimensions(take_gradient):
         mesh_init=torch.tensor([a], dtype=torch.float64),
         mesh_final=torch.tensor([b], dtype=torch.float64),
         take_gradient=take_gradient,
+        max_batch=cached_max_batch(),
     )
 
     # Scalar integration of each component.
@@ -181,6 +189,7 @@ def test_per_method_independence_across_output_dimensions(take_gradient):
             mesh_init=torch.tensor([a], dtype=torch.float64),
             mesh_final=torch.tensor([b], dtype=torch.float64),
             take_gradient=take_gradient,
+            max_batch=cached_max_batch(),
         )
         scalar_results.append(scalar_result.integral.item())
 
@@ -220,6 +229,7 @@ def test_error_norm_schemes_integrate_accurately(error_norm, dtype):
         mesh_final=torch.tensor([b], dtype=dtype),
         error_norm=error_norm,
         take_gradient=False,
+        max_batch=cached_max_batch(),
     )
     truth = _truth(a, b)
     assert result.integral.shape == (D,)
@@ -247,6 +257,7 @@ def test_failure_fraction_tol_zero_bounds_every_component():
         error_norm="failure_fraction",
         mesh_failure_tolerance=0.0,
         take_gradient=False,
+        max_batch=cached_max_batch(),
     )
     # truth: [0.5, 0.5, (1 - cos(2*pi*5))/(2*pi*5)] = [0.5, 0.5, 0.0]
     truth = torch.tensor([0.5, 0.5, 0.0], dtype=torch.float64)
@@ -267,6 +278,7 @@ def test_failure_fraction_permissive_uses_no_more_panels():
         "mesh": init_mesh,
         "error_norm": "failure_fraction",
         "take_gradient": False,
+        "max_batch": cached_max_batch(),
     }
     strict = integrate(mesh_failure_tolerance=0.0, **common)
     # 0.67 allows up to 2 of 3 components to fail (only an all-fail panel splits).
@@ -284,6 +296,7 @@ def test_error_norm_init_and_per_call_override():
         rtol=1e-5,
         error_norm="max",
         mesh_failure_tolerance=0.3,
+        max_batch=cached_max_batch(),
     )
     kwargs = {
         "f": _vector_integrand,
@@ -309,13 +322,23 @@ def test_error_norm_init_and_per_call_override():
 def test_invalid_error_norm_rejected():
     """An unknown error_norm string is rejected at construction."""
     with pytest.raises(ValueError, match="error_norm"):
-        adaptive_quadrature("uniform", method="gk21", error_norm="bogus")
+        adaptive_quadrature(
+            "uniform",
+            method="gk21",
+            error_norm="bogus",
+            max_batch=cached_max_batch(),
+        )
 
 
 def test_invalid_mesh_failure_tolerance_rejected():
     """mesh_failure_tolerance outside [0, 1] is rejected at construction."""
     with pytest.raises(ValueError, match="mesh_failure_tolerance"):
-        adaptive_quadrature("uniform", method="gk21", mesh_failure_tolerance=1.5)
+        adaptive_quadrature(
+            "uniform",
+            method="gk21",
+            mesh_failure_tolerance=1.5,
+            max_batch=cached_max_batch(),
+        )
 
 
 def test_uniform_methods_registry_complete():

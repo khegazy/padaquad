@@ -484,13 +484,16 @@ class AdaptiveQuadrature(SolverBase):
 
         # Benchmark memory footprint on first call with a new integrand
         self._oom_max_batch = None
-        if same_integrand_fxn:
+        if same_integrand_fxn and force_max_batch is None:
             # Use the previous max_batch, running memory check everytime is slow
-            if force_max_batch is None:
-                force_max_batch = self.previous_max_batch
+            force_max_batch = self.previous_max_batch
         if force_max_batch is None:
             self._setup_memory_checks(
-                f, mesh_init, take_gradient=take_gradient, total_mem_usage=total_mem_usage, f_args=f_args
+                f,
+                mesh_init,
+                take_gradient=take_gradient,
+                total_mem_usage=total_mem_usage,
+                f_args=f_args,
             )
         # From previous version
         # assert self._get_max_f_evals(total_mem_usage) > (2 * self.Cm1 + 1), (
@@ -1226,7 +1229,7 @@ class AdaptiveQuadrature(SolverBase):
         # Determine how many f evaluations fit in one batch based on memory
         max_batch = self.get_max_batch(total_mem_usage, force_max_batch)
         self.previous_max_batch = max_batch
-        
+
         # Rescue a zero budget to the minimum workable value of 1 before
         # dispatching to either evaluation path. Placed ahead of the
         # take_gradient branch so neither _evaluate_f_on_full_nodes nor
@@ -2780,24 +2783,23 @@ class AdaptiveQuadrature(SolverBase):
                     # signature of the prior deadlock.
                     time.sleep(0.02)
                 overshot_memory = True
-                N = int(min(0.75*N, N-1))
+                N = int(min(0.75 * N, N - 1))
                 continue
-            
+
             eval_time = time.time() - eval_t0
             del result
             del t_input
             if overshot_memory:
                 self.f_unit_mem_size = mem_scale * mem_before / float(N)
                 break
-            elif eval_time > 0.1:
-                self.f_unit_mem_size = mem_scale * mem_before / (100*float(N))
+            if eval_time > 0.1:
+                self.f_unit_mem_size = mem_scale * mem_before / (100 * float(N))
                 break
-            elif N >= max_test:
+            if max_test <= N:
                 self.f_unit_mem_size = 0
                 break
-            else:
-                N = 10 * N
-        
+            N = 10 * N
+
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -2812,7 +2814,9 @@ class AdaptiveQuadrature(SolverBase):
         self.f_unit_mem_size = max(self.f_unit_mem_size, min_unit_mem_size)
 
         max_batch = self._get_max_f_evals(total_mem_usage)
-        logger.warning(f"Memory test finished in {time.time() - t0:.3f}s with max_batch = {max_batch} of possible 1e9 search limit")
+        logger.warning(
+            f"Memory test finished in {time.time() - t0:.3f}s with max_batch = {max_batch} of possible 1e9 search limit"
+        )
 
     def _get_usable_memory(self, total_mem_usage: float) -> float:
         """

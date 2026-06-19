@@ -2729,7 +2729,7 @@ class AdaptiveQuadrature(SolverBase):
         """
         Benchmark the integrand's memory footprint to determine batch sizes.
 
-        Runs the integrand with increasing batch sizes (10, 100, 1000, ...)
+        Runs the integrand with increasing batch sizes (10, 100, ..., 1e9)
         and measures the memory consumed per evaluation. This per-evaluation
         memory cost (f_unit_mem_size) is then used throughout integration
         to dynamically compute how many steps can fit in one batch.
@@ -2758,9 +2758,10 @@ class AdaptiveQuadrature(SolverBase):
         eval_time = 0
         mem_scale = 2.1 if take_gradient else 1.0
         overshot_memory = False
+        max_test = 1000000000
         while self.f_unit_mem_size is None:
             assert N > 0
-            mem_before = self._get_memory()
+            mem_before = self._get_usable_memory(total_mem_usage)
             eval_t0 = time.time()
 
             # Catch OOM errors
@@ -2785,16 +2786,20 @@ class AdaptiveQuadrature(SolverBase):
             eval_time = time.time() - eval_t0
             del result
             if overshot_memory:
-                self.f_unit_mem_size = mem_scale * mem_before[0] / float(N)
+                self.f_unit_mem_size = mem_scale * mem_before / float(N)
                 break
             elif eval_time > 0.1:
-                self.f_unit_mem_size = mem_scale * mem_before[0] / (100*float(N))
-                break 
+                self.f_unit_mem_size = mem_scale * mem_before / (100*float(N))
+                break
+            elif N >= max_test:
+                self.f_unit_mem_size = mem_before / max_test
+                break
             else:
                 N = 10 * N
-
+        
+        gc.collect()
         max_batch = self._get_max_f_evals(total_mem_usage)
-        logger.warning(f"Memory test finished in {time.time() - t0:.3f}s with max_batch = {max_batch}")
+        logger.warning(f"Memory test finished in {time.time() - t0:.3f}s with max_batch = {max_batch} of possible 1e9 search limit")
 
     def _get_usable_memory(self, total_mem_usage: float) -> float:
         """

@@ -490,7 +490,7 @@ class AdaptiveQuadrature(SolverBase):
                 force_max_batch = self.previous_max_batch
         if force_max_batch is None:
             self._setup_memory_checks(
-                f, mesh_init, take_gradient=take_gradient, f_args=f_args
+                f, mesh_init, take_gradient=take_gradient, total_mem_usage=total_mem_usage, f_args=f_args
             )
         # From previous version
         # assert self._get_max_f_evals(total_mem_usage) > (2 * self.Cm1 + 1), (
@@ -2723,6 +2723,7 @@ class AdaptiveQuadrature(SolverBase):
         f: Callable,
         node_test: torch.Tensor,
         take_gradient: bool,
+        total_mem_usage: float,
         f_args: tuple = (),
     ) -> None:
         """
@@ -2792,7 +2793,8 @@ class AdaptiveQuadrature(SolverBase):
             else:
                 N = 10 * N
 
-        logger.warning(f"Memory test finished in {time.time() - t0}s")
+        max_batch = self._get_max_f_evals(total_mem_usage)
+        logger.warning(f"Memory test finished in {time.time() - t0:.3f}s with max_batch = {max_batch}")
 
     def _get_usable_memory(self, total_mem_usage: float) -> float:
         """

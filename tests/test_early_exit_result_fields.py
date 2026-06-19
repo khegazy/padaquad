@@ -125,11 +125,13 @@ def test_early_exit_per_step_diagnostics_populated():
     )
     assert out.error_ratios is not None, "error_ratios lost on early-exit"
 
-    # Shape coherence: nodes [N, C, T], y [N, C, D], h [N, T],
-    # mesh_quadratures [N, D], mesh_quadrature_errors [N, D], error_ratios [N].
-    N, C, T = out.nodes.shape
-    assert out.y.shape[:2] == (N, C)
-    assert out.h.shape == (N, T)
+    # Shape coherence: nodes [P, T], y [P, D] (flattened across panels);
+    # h [N, T], mesh_quadratures [N, D], mesh_quadrature_errors [N, D],
+    # error_ratios [N]. Panel count N comes from h (per-panel); P = total nodes.
+    N, T = out.h.shape
+    P = out.nodes.shape[0]
+    assert out.nodes.shape[-1] == T
+    assert out.y.shape[0] == P
     assert out.mesh_quadratures.shape[0] == N
     assert out.mesh_quadrature_errors.shape[0] == N
     assert out.error_ratios.shape[0] == N

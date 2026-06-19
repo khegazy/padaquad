@@ -78,7 +78,7 @@ def test_panel_count_equals_K_times_2_pow_n(sampling, method, n, take_gradient):
         take_gradient=take_gradient,
         max_batch=BIG_BATCH,
     )
-    assert result.nodes.shape[0] == K * 2**n
+    assert result.h.shape[0] == K * 2**n
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
@@ -100,7 +100,7 @@ def test_integrate_arg_takes_priority_over_construction(take_gradient):
         max_batch=BIG_BATCH,
         max_adaptive_splits=1,
     )
-    assert result.nodes.shape[0] == K * 2**1
+    assert result.h.shape[0] == K * 2**1
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
@@ -121,7 +121,7 @@ def test_construction_value_used_when_no_call_arg(take_gradient):
         take_gradient=take_gradient,
         max_batch=BIG_BATCH,
     )
-    assert result.nodes.shape[0] == K * 2**1
+    assert result.h.shape[0] == K * 2**1
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
@@ -142,7 +142,7 @@ def test_call_arg_used_when_no_construction_value(take_gradient):
         max_batch=BIG_BATCH,
         max_adaptive_splits=2,
     )
-    assert result.nodes.shape[0] == K * 2**2
+    assert result.h.shape[0] == K * 2**2
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
@@ -198,4 +198,4 @@ def test_free_function_cap_panel_count(take_gradient):
         max_batch=BIG_BATCH,
         max_adaptive_splits=1,
     )
-    assert result.nodes.shape[0] == K * 2**1
+    assert result.h.shape[0] == K * 2**1

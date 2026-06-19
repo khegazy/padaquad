@@ -57,9 +57,17 @@ TOLERANCES = {
 }
 
 
-def _case_key(method: str, integrand: str, tol_label: str) -> str:
-    """Stable key for a snapshot case in the JSON data file."""
-    return f"{method}|{integrand}|{tol_label}"
+def _case_key(
+    method: str, integrand: str, tol_label: str, take_gradient: bool
+) -> str:
+    """Stable key for a snapshot case in the JSON data file.
+
+    ``take_gradient`` is part of the key: the accepted-panel re-check runs only
+    on the ``take_gradient=False`` path, so the two modes can legitimately
+    produce different meshes/integrals (they coincide only when every panel fits
+    in a single batch).
+    """
+    return f"{method}|{integrand}|{tol_label}|grad={int(take_gradient)}"
 
 
 def _run_case(
@@ -112,13 +120,16 @@ def _run_case(
 
 
 def _generate_all() -> dict[str, dict]:
-    """Compute snapshots for every (method, integrand, tolerance) case."""
+    """Compute snapshots for every (method, integrand, tolerance, take_gradient) case."""
     snaps: dict[str, dict] = {}
     for method in UNIFORM_METHOD_NAMES:
         for integrand in INTEGRAND_NAMES:
             for tol_label, (atol, rtol) in TOLERANCES.items():
-                key = _case_key(method, integrand, tol_label)
-                snaps[key] = _run_case(method, integrand, atol, rtol)
+                for take_gradient in TAKE_GRADIENT_VALUES:
+                    key = _case_key(method, integrand, tol_label, take_gradient)
+                    snaps[key] = _run_case(
+                        method, integrand, atol, rtol, take_gradient=take_gradient
+                    )
     return snaps
 
 
@@ -167,14 +178,12 @@ def _ids() -> list[tuple[str, str, str]]:
 def test_snapshot(snapshots, method, integrand, tol_label, take_gradient):
     """Current solver output matches the committed snapshot to 1e-12.
 
-    Both ``take_gradient=True`` and ``take_gradient=False`` must hit
-    the same stored value — the snapshot key intentionally omits
-    ``take_gradient`` because the two modes are expected to produce
-    identical numerics. After the upcoming code-path split, any
-    divergence between modes will fail this test against the single
-    stored value, surfacing the bug.
+    The snapshot is keyed per ``take_gradient`` mode: the accepted-panel
+    re-check runs only on the ``take_gradient=False`` path, so the two modes can
+    diverge (they coincide only when every panel fits in one batch). Each mode is
+    pinned against its own stored value.
     """
-    key = _case_key(method, integrand, tol_label)
+    key = _case_key(method, integrand, tol_label, take_gradient)
     expected = snapshots.get(key)
     if expected is None:
         pytest.fail(

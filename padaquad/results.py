@@ -39,17 +39,20 @@ class IntegrationResult:
             Shape: [M, T].
         mesh_init: Lower integration bound used. Shape: [T].
         mesh_final: Upper integration bound used. Shape: [T].
-        nodes: Per-step quadrature node positions, organized by
-            integration step. Shape: [N, C, T].
+        nodes: Quadrature node positions flattened across panels into a
+            single ascending sequence. Consecutive panels share one boundary
+            point, which is deduplicated, so for N panels of C nodes each the
+            length is ``C + (N - 1) * (C - 1)``. Shape: [P, T].
         h: Step sizes (right - left) for each integration step.
             Shape: [N, T].
-        y: Integrand evaluations at each node. Shape: [N, C, D].
+        y: Integrand evaluations at each node, flattened to match ``nodes``.
+            Shape: [P, D].
         tracked_variables: Optional extra quantities emitted by the
             integrand alongside the integrand value. These are evaluated at
             every node but NOT integrated; they are returned at the accepted
-            nodes. A tuple of detached tensors, each shaped [N, C, *var_dims]
-            and aligned with ``nodes``/``y``. ``None`` when the integrand
-            returns only the integrand value (no tracked variables).
+            nodes. A tuple of detached tensors, each shaped [P, *var_dims]
+            and flattened to align with ``nodes``/``y``. ``None`` when the
+            integrand returns only the integrand value (no tracked variables).
         mesh_quadratures: Weighted contribution of each step to the total
             integral (h * sum(b_i * y_i) per step). Shape: [N, D].
         mesh_quadrature_errors: Per-step error estimates from the difference

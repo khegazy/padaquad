@@ -66,14 +66,23 @@ TAKE_GRADIENT_IDS = ["take_grad_True", "take_grad_False"]
 # ---------------------------------------------------------------------------
 
 
-def make_uniform_solver(method_name, atol=ATOL_TIGHT, rtol=RTOL_TIGHT, **kwargs):
-    """Create a parallel uniform-sampling RK solver."""
+def make_uniform_solver(
+    method_name, atol=ATOL_TIGHT, rtol=RTOL_TIGHT, device="cpu", **kwargs
+):
+    """Create a parallel uniform-sampling RK solver.
+
+    Pinned to CPU by default: the suite is CPU-designed, and on a GPU machine
+    the solver otherwise auto-selects CUDA, where the per-eval memory budget can
+    fail the pre-check when the (often shared) GPU is short on free memory.
+    Pass ``device=`` to override.
+    """
     return adaptive_quadrature(
         sampling_type=steps.ADAPTIVE_UNIFORM,
         method=method_name,
         atol=atol,
         rtol=rtol,
         remove_cut=REMOVE_CUT,
+        device=device,
         **kwargs,
     )
 
@@ -131,14 +140,11 @@ def constant_integrand(t, *args):
 def assert_time_ordering(integral_output):
     """Assert that all time points in the output are non-decreasing.
 
-    Allows ULP-level float rounding at panel boundaries: the last
-    node of panel i (at c=1.0, evaluating to barrier_i + h_i) and the
-    first node of panel i+1 (at c=0.0, evaluating to barrier_{i+1})
-    are mathematically equal but can differ by 1 ULP when the
-    subtraction h_i = barrier_{i+1} - barrier_i isn't exactly
-    representable. The tolerance scales with the integration domain.
+    ``nodes`` is the flattened ascending node sequence ([P, T]), so a small
+    tolerance still guards against ULP-level float rounding accumulated along
+    the sequence. The tolerance scales with the integration domain.
     """
-    t_flat = torch.flatten(integral_output.nodes, start_dim=0, end_dim=1)
+    t_flat = integral_output.nodes  # already flattened across panels: [P, T]
     eps = torch.finfo(t_flat.dtype).eps
     scale = t_flat.abs().max().clamp_min(1.0)
     tol = 8 * eps * scale  # generous bound for accumulated rounding
@@ -156,10 +162,31 @@ def assert_optimal_mesh_ordering(integral_output):
 
 
 def assert_step_continuity(integral_output):
-    """Assert that consecutive steps share boundary points (end of step i == start of step i+1)."""
-    assert torch.allclose(
-        integral_output.nodes[1:, 0, :], integral_output.nodes[:-1, -1, :]
-    ), "Consecutive steps do not share boundary points"
+    """Assert consecutive panels join continuously in the flattened output.
+
+    Flattening drops the duplicated end-of-panel-i / start-of-panel-(i+1)
+    boundary, so the panels form one continuous traversal. We verify the node
+    sequence runs in order (non-decreasing) and spans the full integration
+    domain end to end (mesh_init .. mesh_final), so no leading/trailing panel is
+    missing and panels join without a backward jump. Equal adjacent nodes are
+    allowed: methods like dopri5 repeat a node within a panel (c = 1 twice).
+    """
+    nodes = integral_output.nodes  # flattened across panels: [P, T]
+    eps = torch.finfo(nodes.dtype).eps
+    tol = 8 * eps * float(nodes.abs().max().clamp_min(1.0))
+    assert torch.all(nodes[1:] - nodes[:-1] >= -tol), (
+        "Flattened nodes are not ordered across panel boundaries"
+    )
+    # mesh_init/mesh_final stay on the integration device while nodes may be
+    # offloaded to result_device, so compare on the nodes' device.
+    mesh_init = integral_output.mesh_init.to(nodes.device)
+    mesh_final = integral_output.mesh_final.to(nodes.device)
+    assert torch.allclose(nodes[0], mesh_init, atol=tol, rtol=0), (
+        "Flattened nodes do not start at mesh_init"
+    )
+    assert torch.allclose(nodes[-1], mesh_final, atol=tol, rtol=0), (
+        "Flattened nodes do not end at mesh_final"
+    )
 
 
 # ---------------------------------------------------------------------------

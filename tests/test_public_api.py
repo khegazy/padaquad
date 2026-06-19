@@ -159,7 +159,8 @@ class TestIntegrationResultFields:
         )
         assert isinstance(r.tracked_variables, tuple)
         assert len(r.tracked_variables) == 1
-        assert r.tracked_variables[0].shape[:2] == r.nodes.shape[:2]
+        # tracked_variables are flattened to align with nodes on the leading axis.
+        assert r.tracked_variables[0].shape[0] == r.nodes.shape[0]
 
 
 class TestSolverFactory:

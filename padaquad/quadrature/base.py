@@ -40,6 +40,7 @@ Class hierarchy (defined here):
 
 from __future__ import annotations
 
+import contextlib
 import gc
 import logging
 import math
@@ -633,18 +634,23 @@ class AdaptiveQuadrature(SolverBase):
                     )
                     # Place the partial result on result_device for a
                     # device-consistent return, matching the converged path.
+                    # integral, integral_error and y0 stay on the integration
+                    # device (the primary answer), as in the converged path.
                     return IntegrationResult(
-                        integral=method_output.integral.to(result_device),
-                        integral_error=method_output.integral_error.to(result_device),
+                        integral=method_output.integral,
+                        integral_error=method_output.integral_error,
                         # mesh family stays on the integration device (warm-start).
                         mesh_optimal=mesh,
                         mesh_init=mesh_init,
                         mesh_final=mesh_final,
-                        nodes=nodes.to(result_device),
+                        # Flatten nodes/y/tracked_variables to match the
+                        # converged path's output format.
+                        nodes=self._flatten_output(nodes.to(result_device)),
                         h=method_output.h.to(result_device),
-                        y=y_step_eval.to(result_device),
+                        y=self._flatten_output(y_step_eval.to(result_device)),
                         tracked_variables=tuple(
-                            tv.to(result_device) for tv in tracked_step_eval
+                            self._flatten_output(tv.to(result_device))
+                            for tv in tracked_step_eval
                         )
                         if tracked_step_eval is not None
                         else None,
@@ -657,13 +663,60 @@ class AdaptiveQuadrature(SolverBase):
                         error_ratios=error_ratios.to(result_device),
                         loss=None,
                         gradient_taken=take_gradient,
-                        y0=y0.to(result_device),
+                        y0=y0,
                         converged=False,
                     )
 
+            # --- Step 4b: Re-check already-accepted (recorded) panels ---
+            # The accept/reject denominator (atol + rtol*|reference_integral|)
+            # drifts as the running integral changes, so a panel accepted early
+            # can violate the *current* tolerance. Re-check the recorded panels
+            # against the SAME reference_integral the batch just used (so a panel
+            # accepted this iteration -- not yet in the record -- cannot
+            # immediately re-fail) and split any that now fail in the same mesh
+            # update below (extra_split_idxs). Only when not taking gradients:
+            # per-batch backward has not run, so removing/re-splitting a recorded
+            # panel cannot double-count gradients. Skipped when a fixed
+            # error_integral_reference pins the denominator (no drift).
+            recheck_active = (
+                not take_gradient
+                and len(record) > 0
+                and not (
+                    self.use_absolute_error_ratio
+                    and error_integral_reference is not None
+                )
+            )
+            extra_split_idxs = None
+            record_keep_mask = None
+            if recheck_active:
+                # All inputs are integration-device-resident (mesh_quadratures
+                # and mesh_quadrature_errors are in _DEVICE_RESIDENT_KEYS;
+                # reference_integral is on self.device) -- no host<->device copy.
+                rec_quad = record["mesh_quadratures"]
+                rec_ratios, _, rec_per_dim = self._compute_error_ratios(
+                    mesh_quadrature_errors=record["mesh_quadrature_errors"],
+                    mesh_quadratures=rec_quad,
+                    cum_mesh_quadratures=torch.cumsum(rec_quad, 0),
+                    integral=reference_integral,
+                )
+                _, rec_remove = self._accept_reject_masks(rec_ratios, rec_per_dim)
+                rec_positions = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
+                # Respect the split cap so the record stays consistent with the
+                # mesh: a failing panel already at the cap is not split, so it
+                # must stay recorded.
+                splittable = rec_remove
+                if max_adaptive_splits is not None and split_counts is not None:
+                    splittable = rec_remove & (
+                        split_counts[rec_positions] < max_adaptive_splits
+                    )
+                extra_split_idxs = rec_positions[splittable]
+                record_keep_mask = ~splittable
+
             # --- Step 5: Adaptive refinement ---
             # Split steps with error_ratio >= 1, keep steps with error_ratio < 1,
-            # and update barriers/trackers accordingly
+            # and update barriers/trackers accordingly. extra_split_idxs adds the
+            # re-checked recorded panels that failed, so both the new batch and
+            # the stale recorded panels are bisected in this single mesh update.
             (
                 method_output,
                 y_step_eval,
@@ -687,6 +740,7 @@ class AdaptiveQuadrature(SolverBase):
                 max_adaptive_splits=max_adaptive_splits,
                 keep_mask=keep_mask,
                 remove_mask=remove_mask,
+                extra_split_idxs=extra_split_idxs,
             )
             # Verify barrier ordering after adaptive refinement.
             # Any-T invariant: consecutive barriers are distinct (no
@@ -698,6 +752,16 @@ class AdaptiveQuadrature(SolverBase):
                 mesh_diff = mesh[1:, 0] - mesh[:-1, 0]
                 assert torch.all(mesh_diff + self.atol_assert > 0) or torch.all(
                     mesh_diff - self.atol_assert < 0
+                )
+
+            # --- Step 5b: Drop re-split recorded panels from the record ---
+            # The recorded panels flagged above were just bisected in the mesh
+            # update; remove their now-stale entries (their children will be
+            # re-evaluated as fresh panels). Done before _record_results so the
+            # remaining record stays strictly mesh-ordered for the merge.
+            if recheck_active and not bool(torch.all(record_keep_mask)):
+                record = self._remove_failed_record_panels(
+                    record, record_keep_mask, loss_fxn
                 )
 
             # --- Step 6: Record accepted results and handle gradients ---
@@ -746,33 +810,39 @@ class AdaptiveQuadrature(SolverBase):
 
         # === Post-convergence: sort results and optimize the mesh ===
         record = self._sort_record(record, mesh_indices)
-        # Prune over-resolved steps and refine under-resolved ones. This runs on
-        # the integration device because it re-derives node positions through
-        # the method tableau (which lives there). mesh_quadratures and integral
-        # are already resident; give it integration-device copies of the two
-        # fields that were offloaded to result_device. This is a transient,
-        # bounded cost -- not the per-batch accumulation that result_device
-        # removes during the loop.
-        opt_record = {
-            "nodes": record["nodes"].to(self.device),
-            "mesh_quadratures": record["mesh_quadratures"].to(self.device),
-            "mesh_quadrature_errors": record["mesh_quadrature_errors"].to(self.device),
-            "integral": record["integral"].to(self.device),
-        }
-        # mesh_optimal is generated on -- and kept on -- the integration device:
-        # it is fed back into the integrator as the warm-start mesh on the next
-        # call, so it must match self.device (the inputs that generate it are
-        # moved there above via opt_record / mesh.to(self.device)).
-        mesh_optimal = self._get_optimal_mesh(opt_record, mesh.to(self.device))
-        del opt_record
+        # Prune over-resolved steps and refine under-resolved ones. This re-derives
+        # node positions through the method tableau, so it must run with the
+        # tableau and device-bound allocations co-located with its inputs. The
+        # bulky per-step fields (nodes, mesh_quadrature_errors) already live on
+        # result_device, so we evaluate the whole computation there -- moving the
+        # small tableau to result_device for the duration -- rather than copying
+        # those tensors back to the integration device. The two device-resident
+        # fields (mesh_quadratures, integral) are the only ones that must be moved
+        # to result_device to join them.
+        with self._integration_on_device(result_device):
+            mesh_optimal = self._get_optimal_mesh(
+                nodes=record["nodes"],
+                mesh_quadratures=record["mesh_quadratures"].to(result_device),
+                mesh_quadrature_errors=record["mesh_quadrature_errors"].to(
+                    result_device
+                ),
+                integral=record["integral"].to(result_device),
+                mesh=mesh.to(result_device),
+            )
+        # mesh_optimal is fed back into the integrator as the warm-start mesh on
+        # the next call, so it must match the integration device (its endpoints
+        # are mesh_init/mesh_final, which live on self.device).
+        mesh_optimal = mesh_optimal.to(self.device)
         self.mesh_previous = mesh_optimal
         self.previous_f_id = id(f)
 
         # Move the resident record fields to result_device so the rest of the
-        # returned IntegrationResult lives on result_device (mesh_optimal stays
-        # on the integration device for warm-start reuse).
+        # returned IntegrationResult lives on result_device. The integration-
+        # output scalars (integral, integral_error) and mesh_optimal stay on the
+        # integration device -- the scalars are the primary answer and
+        # mesh_optimal is reused as the warm-start mesh.
         for key in self._DEVICE_RESIDENT_KEYS:
-            if key in record:
+            if key in record and key not in self._RESULT_INTEGRATION_KEYS:
                 record[key] = record[key].to(result_device)
 
         # Tracked variables are stored in the record as a list; expose a tuple.
@@ -781,7 +851,8 @@ class AdaptiveQuadrature(SolverBase):
             record_tracked = tuple(record["tracked_variables"])
 
         return IntegrationResult(
-            integral=record["integral"] + y0.to(result_device),
+            # integral, integral_error and y0 stay on the integration device.
+            integral=record["integral"] + y0,
             integral_error=record["integral_error"],
             # The mesh family (mesh_optimal/init/final) stays on the integration
             # device: mesh_optimal is the warm-start mesh and its endpoints are
@@ -789,16 +860,20 @@ class AdaptiveQuadrature(SolverBase):
             mesh_optimal=mesh_optimal,
             mesh_init=mesh_init,
             mesh_final=mesh_final,
-            nodes=record["nodes"],
+            nodes=self._flatten_output(record["nodes"]),
             h=record["h"],
-            y=record["y"],
-            tracked_variables=record_tracked,
+            y=self._flatten_output(record["y"]),
+            # Flatten tracked variables the same way so they stay aligned with
+            # the flattened nodes/y.
+            tracked_variables=tuple(self._flatten_output(tv) for tv in record_tracked)
+            if record_tracked is not None
+            else None,
             mesh_quadratures=record["mesh_quadratures"],
             mesh_quadrature_errors=torch.abs(record["mesh_quadrature_errors"]),
             error_ratios=record["error_ratios"],
             loss=record["loss"],
             gradient_taken=take_gradient,
-            y0=y0.to(result_device),
+            y0=y0,
         )
 
     # -------------------------------------------------------------------------------- #
@@ -819,6 +894,7 @@ class AdaptiveQuadrature(SolverBase):
         max_adaptive_splits: int | None = None,
         keep_mask: torch.Tensor | None = None,
         remove_mask: torch.Tensor | None = None,
+        extra_split_idxs: torch.Tensor | None = None,
     ) -> tuple[
         MethodOutput | None,
         torch.Tensor | None,
@@ -881,6 +957,14 @@ class AdaptiveQuadrature(SolverBase):
                 (kept for direct/unit callers).
             remove_mask: Optional precomputed reject (split) mask, the
                 complement of ``keep_mask``.
+            extra_split_idxs: Optional extra mesh positions to bisect in the
+                same update, in addition to the batch's rejected steps. Used by
+                the accepted-panel re-check to split already-recorded panels
+                that failed the tolerance after the running integral drifted.
+                Must be ascending and disjoint from ``mesh_idxs[remove_mask]``.
+                Their barriers are re-activated (tracker set True) so both
+                children are re-evaluated. ``None`` ⇒ behaviour identical to
+                before (batch-only split).
 
         Returns:
             Tuple of (method_output, y_step_eval, tracked_step_eval, nodes,
@@ -915,7 +999,23 @@ class AdaptiveQuadrature(SolverBase):
             remove_mask = remove_mask & ~at_max
         mesh_trackers[mesh_idxs[keep_mask]] = False
 
-        N_t_add = torch.sum(remove_mask)
+        # Mesh positions to bisect this update: the batch's rejected steps plus
+        # any extra positions (already-accepted panels that failed the re-check
+        # against the drifted tolerance). The recorded panels were accepted
+        # (tracker False), so re-activate the whole split set to ensure both
+        # children of every bisected panel are re-evaluated. With no extras this
+        # is exactly the previous batch-only behaviour (and trackers untouched
+        # here, matching the original).
+        split_idxs = mesh_idxs[remove_mask]
+        if extra_split_idxs is not None and extra_split_idxs.numel() > 0:
+            split_idxs = torch.sort(torch.cat([split_idxs, extra_split_idxs])).values
+            # Batch (tracker True) and recorded (tracker False) positions are
+            # disjoint, so the combined set must be strictly ascending; a
+            # duplicate would corrupt the midpoint-offset math below.
+            assert torch.all(split_idxs[1:] > split_idxs[:-1])
+            mesh_trackers[split_idxs] = True
+
+        N_t_add = len(split_idxs)
         # Allocate new barriers array with room for inserted midpoints. All
         # allocations follow ``mesh.device`` so this runs on the integration
         # device in the loop and on result_device in the post-convergence pass.
@@ -932,7 +1032,7 @@ class AdaptiveQuadrature(SolverBase):
         # Each rejected step causes a +1 offset for all subsequent barriers
         # (because a midpoint is being inserted). idx_offset tracks this shift.
         idx_offset = torch.zeros(len(mesh), dtype=torch.long, device=mesh.device)
-        idx_offset[mesh_idxs[remove_mask] + 1] = 1
+        idx_offset[split_idxs + 1] = 1
         idx_offset = torch.cumsum(idx_offset, dim=0)
         idxs_transfer = idx_offset + torch.arange(len(mesh), device=mesh.device)
         mesh_new[idxs_transfer] = mesh.clone()
@@ -940,9 +1040,7 @@ class AdaptiveQuadrature(SolverBase):
 
         # Insert new midpoint barriers between the start and end of rejected steps.
         # The midpoint is placed at (left_barrier + right_barrier) / 2.
-        idxs_new = (
-            mesh_idxs[remove_mask] + torch.arange(N_t_add, device=mesh.device) + 1
-        )
+        idxs_new = split_idxs + torch.arange(N_t_add, device=mesh.device) + 1
         t_add_barriers = 0.5 * (mesh_new[idxs_new - 1] + mesh_new[idxs_new + 1])
         mesh_new[idxs_new] = t_add_barriers
         assert torch.sum(torch.isnan(mesh_new)) == 0
@@ -956,9 +1054,9 @@ class AdaptiveQuadrature(SolverBase):
                 len(mesh_new), dtype=torch.long, device=mesh_new.device
             )
             split_counts_new[idxs_transfer] = split_counts.clone()
-            parent_counts = split_counts[mesh_idxs[remove_mask]]
+            parent_counts = split_counts[split_idxs]
             # left child = transferred parent barrier; right child = new midpoint
-            split_counts_new[idxs_transfer[mesh_idxs[remove_mask]]] = parent_counts + 1
+            split_counts_new[idxs_transfer[split_idxs]] = parent_counts + 1
             split_counts_new[idxs_new] = parent_counts + 1
         else:
             split_counts_new = None
@@ -1586,9 +1684,41 @@ class AdaptiveQuadrature(SolverBase):
             nodes, mesh_quadratures, mesh_quadrature_errors, ratio_idxs_cut
         )
 
+    @contextlib.contextmanager
+    def _integration_on_device(self, device: torch.device):
+        """
+        Temporarily run integration-device-bound operations on ``device``.
+
+        ``_get_optimal_mesh`` (and the subclass node helpers it calls) allocate
+        on ``self.device`` and read the method tableau, which lives on
+        ``self.device``. To evaluate the optimal-mesh computation on
+        ``result_device`` -- so the large per-step record tensors never have to
+        be copied back to the integration device -- this context manager swaps
+        ``self.device`` and moves the method tableau to ``device`` for the
+        duration of the block, restoring both on exit. A no-op when ``device``
+        already equals ``self.device``.
+
+        Args:
+            device: Device to run on for the duration of the block.
+        """
+        if device == self.device:
+            yield
+            return
+        original_device = self.device
+        self.device = device
+        self.method.to_device(device)
+        try:
+            yield
+        finally:
+            self.device = original_device
+            self.method.to_device(original_device)
+
     def _get_optimal_mesh(
         self,
-        record: dict[str, torch.Tensor],
+        nodes: torch.Tensor,
+        mesh_quadratures: torch.Tensor,
+        mesh_quadrature_errors: torch.Tensor,
+        integral: torch.Tensor,
         mesh: torch.Tensor,
     ) -> torch.Tensor:
         """
@@ -1605,29 +1735,32 @@ class AdaptiveQuadrature(SolverBase):
         This produces a mesh tailored to the difficulty of the integrand at
         different positions along the integration domain.
 
+        All inputs must share a device; the returned mesh lands on that same
+        device. (The caller runs this on ``result_device`` via
+        ``_integration_on_device`` and moves the result back to the integration
+        device afterward.)
+
         Args:
-            record: Dictionary of converged results including 't', 'mesh_quadratures',
-                'mesh_quadrature_errors', and 'integral'.
+            nodes: Per-step quadrature point positions. Shape: [N, C, T].
+            mesh_quadratures: Per-step integral contributions. Shape: [N, D].
+            mesh_quadrature_errors: Per-step error estimates. Shape: [N, D].
+            integral: Converged total integral estimate. Shape: [D].
             mesh: Current barrier positions. Shape: [M, T].
-            error_integral_reference: Optional rtol-denominator reference (see
-                ``integrate``). When given, it replaces the converged integral as
-                the error-ratio reference for the prune/refine decisions, matching
-                what the main loop used. None ⇒ use the converged integral.
 
         Returns:
             Optimized barrier positions. Shape: [M_opt, T].
         """
         # Prune steps with excess accuracy (over-resolved regions)
         _, error_ratios_2steps, _ = self._compute_error_ratios(
-            mesh_quadrature_errors=record["mesh_quadrature_errors"],
-            mesh_quadratures=record["mesh_quadratures"],
-            integral=record["integral"].detach(),
+            mesh_quadrature_errors=mesh_quadrature_errors,
+            mesh_quadratures=mesh_quadratures,
+            integral=integral.detach(),
         )
         nodes_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned = (
             self._prune_excess_mesh(
-                record["nodes"],
-                record["mesh_quadratures"],
-                record["mesh_quadrature_errors"],
+                nodes,
+                mesh_quadratures,
+                mesh_quadrature_errors,
                 error_ratios_2steps,
             )
         )
@@ -1640,7 +1773,7 @@ class AdaptiveQuadrature(SolverBase):
             self._compute_error_ratios(
                 mesh_quadrature_errors=mesh_quadrature_errors_pruned,
                 mesh_quadratures=mesh_quadratures_pruned,
-                integral=record["integral"].detach(),
+                integral=integral.detach(),
             )
         )
         keep_mask, remove_mask = self._accept_reject_masks(
@@ -1681,38 +1814,29 @@ class AdaptiveQuadrature(SolverBase):
             Modified mask with no adjacent True values. Shape: [N].
         """
 
-        mask2 = mask[:-1] * mask[1:]
-        if not torch.any(mask2):
-            return mask
+        # Iterative form of what was a tail recursion: each pass un-flags the
+        # second element of an adjacent True pair and rebuilds the mask, looping
+        # until no adjacent pair remains. The recursive version overflowed
+        # Python's stack on the large, finely-refined meshes the accepted-panel
+        # re-check can produce; this loop is behaviourally identical (the prior
+        # body's only recursive call was the final `return self._rec_remove(...)`)
+        # but has no depth limit.
+        while True:
+            mask2 = mask[:-1] * mask[1:]
+            if not torch.any(mask2):
+                return mask
 
-        # Must keep the first integration step
-        if mask2[0]:
-            mask[1] = False
+            # Must keep the first integration step
+            if mask2[0]:
+                mask[1] = False
 
-        # Mask is too small to remove points
-        if len(mask) <= 2:
-            return mask
+            # Mask is too small to remove points
+            if len(mask) <= 2:
+                return mask
 
-        return self._rec_remove(
-            torch.concatenate(
+            mask = torch.concatenate(
                 [mask[:2], mask2[1:] * mask[:-2] + (~mask2[1:]) * mask[2:]]
             )
-        )
-
-        # if torch.any(mask2):
-        #     if mask2[0]:
-        #         mask[1] = False
-        #     if len(mask) > 2:
-        #         return self._rec_remove(torch.concatenate(
-        #             [
-        #                 mask[:2],
-        #                 mask2[1:]*mask[:-2] + (~mask2[1:])*mask[2:]
-        #             ]
-        #         ))
-        #     else:
-        #         return mask
-        # else:
-        #     return mask
 
     def _setup_integral_bounds(self, mesh, mesh_init, mesh_final):
         if mesh is not None:
@@ -2160,10 +2284,19 @@ class AdaptiveQuadrature(SolverBase):
 
     # Record dict keys that must stay on the integration device because they are
     # read back during the loop (running integral and the per-step quadratures
-    # merged + cumsum'd for the error ratios). Everything else is detached and
-    # moved to ``result_device`` as it is recorded, to keep the large per-step
-    # tensors (nodes, y, tracked_variables, ...) off the GPU.
-    _DEVICE_RESIDENT_KEYS = ("integral", "mesh_quadratures")
+    # merged + cumsum'd for the error ratios; the per-step errors are re-checked
+    # against the drifting tolerance every iteration -- see the accepted-panel
+    # re-check in ``integrate``). Everything else is detached and moved to
+    # ``result_device`` as it is recorded, to keep the large per-step tensors
+    # (nodes, y, tracked_variables, ...) off the GPU.
+    _DEVICE_RESIDENT_KEYS = ("integral", "mesh_quadratures", "mesh_quadrature_errors")
+
+    # Cumulative scalar keys whose final output stays on the integration device.
+    # The integral and its error estimate are the primary answer, so they remain
+    # on the compute device even when the bulky per-step arrays are offloaded to
+    # ``result_device``. (``mesh_quadratures`` is resident only for loop reads
+    # and is moved to ``result_device`` after convergence.)
+    _RESULT_INTEGRATION_KEYS = ("integral", "integral_error")
 
     def _mesh_order(self, barriers: torch.Tensor, mesh_indices: dict) -> torch.Tensor:
         """
@@ -2303,9 +2436,15 @@ class AdaptiveQuadrature(SolverBase):
             result_device = self.device
 
         def target(key):
-            # Resident keys stay on the integration device; everything else goes
-            # to result_device.
-            return self.device if key in self._DEVICE_RESIDENT_KEYS else result_device
+            # Resident keys (read back in the loop) and the integration-output
+            # scalars stay on the integration device; everything else goes to
+            # result_device.
+            if (
+                key in self._DEVICE_RESIDENT_KEYS
+                or key in self._RESULT_INTEGRATION_KEYS
+            ):
+                return self.device
+            return result_device
 
         def place(value, key):
             # take_gradient=True does per-batch backward *before* recording, so
@@ -2415,6 +2554,82 @@ class AdaptiveQuadrature(SolverBase):
                 "Nodes are required to be either in ascending or descending order"
             )
         return record
+
+    def _remove_failed_record_panels(
+        self,
+        record: dict[str, torch.Tensor],
+        record_keep_mask: torch.Tensor,
+        loss_fxn,
+    ) -> dict[str, torch.Tensor]:
+        """
+        Drop recorded panels that failed the accepted-panel re-check.
+
+        Their barriers were just bisected in the mesh (their children will be
+        re-evaluated as fresh panels), so the stale entries must leave the
+        record. Per-step fields are filtered by ``record_keep_mask`` and the
+        cumulative scalar accumulators are rebuilt:
+
+        - ``integral`` is rebuilt exactly: it equals the sum of the per-step
+          ``mesh_quadratures``, so subtracting the removed panels' contribution
+          is exact.
+        - ``integral_error`` is a signed accumulated sum but the stored per-step
+          errors are abs (kept abs so the optimal-mesh/merge path is unchanged),
+          so the removed panels' *abs* errors are subtracted -- a bounded
+          approximation of a diagnostic field.
+        - ``loss`` for the default loss equals the integral, so it tracks the
+          rebuilt integral; a custom ``loss_fxn`` is left as-is (its per-batch
+          sum is already an approximation, and the re-check only runs with
+          ``take_gradient=False`` so no per-batch backward depends on it).
+
+        Args:
+            record: Running record dict (per-step fields in mesh order).
+            record_keep_mask: Boolean mask over recorded panels; True = keep.
+            loss_fxn: The active loss function (to detect the default loss).
+
+        Returns:
+            The record with the failed panels removed.
+        """
+        removed = ~record_keep_mask
+        # mesh_quadratures / mesh_quadrature_errors are device-resident, as are
+        # integral / integral_error; move the mask to each tensor's device.
+        quad = record["mesh_quadratures"]
+        err = record["mesh_quadrature_errors"]
+        removed_quad_sum = quad[removed.to(quad.device)].sum(0)
+        removed_err_sum = err[removed.to(err.device)].sum(0)
+        record["integral"] = record["integral"] - removed_quad_sum.to(
+            record["integral"].device
+        )
+        record["integral_error"] = record["integral_error"] - removed_err_sum.to(
+            record["integral_error"].device
+        )
+        for key, value in record.items():
+            if key in self._RECORD_SCALAR_KEYS:
+                continue
+            if key == "tracked_variables":
+                record[key] = [tv[record_keep_mask.to(tv.device)] for tv in value]
+            else:
+                record[key] = value[record_keep_mask.to(value.device)]
+        # Default loss == integral, so keep it consistent with the rebuilt
+        # value. Bound methods are not identity-stable (``obj.m is obj.m`` is
+        # False), so compare the underlying function rather than the bound
+        # method object. A custom loss_fxn is left as-is (its per-batch sum is
+        # already an approximation; the re-check only runs with
+        # take_gradient=False, so no per-batch backward depends on it).
+        is_default_loss = (
+            getattr(loss_fxn, "__func__", None) is self._integral_loss.__func__
+        )
+        if is_default_loss:
+            record["loss"] = record["integral"]
+        return record
+
+    def _flatten_output(self, panel_array):
+        return torch.concatenate(
+            [
+                panel_array[0],
+                torch.flatten(panel_array[1:, 1:], start_dim=0, end_dim=1),
+            ],
+            dim=0,
+        )
 
     # -------------------------------------------------------------------------------- #
     #                                MEMORY MANAGEMENT                                 #

@@ -117,7 +117,7 @@ class TestGetOptimalTStepBarriers:
         record = self._make_record(solver, N, error_scale=1e-10)
         barriers = torch.linspace(0, 1, N + 1, dtype=torch.float64).unsqueeze(-1)
 
-        barriers_opt = solver._get_optimal_mesh(record, barriers)
+        barriers_opt = solver._get_optimal_mesh(**record, mesh=barriers)
 
         assert len(barriers_opt) < len(barriers)
 
@@ -128,7 +128,7 @@ class TestGetOptimalTStepBarriers:
         record = self._make_record(solver, N, error_scale=10.0)
         barriers = torch.linspace(0, 1, N + 1, dtype=torch.float64).unsqueeze(-1)
 
-        barriers_opt = solver._get_optimal_mesh(record, barriers)
+        barriers_opt = solver._get_optimal_mesh(**record, mesh=barriers)
 
         assert len(barriers_opt) > len(barriers)
 
@@ -139,7 +139,7 @@ class TestGetOptimalTStepBarriers:
         record = self._make_record(solver, N, error_scale=0.001)
         barriers = torch.linspace(0, 1, N + 1, dtype=torch.float64).unsqueeze(-1)
 
-        barriers_opt = solver._get_optimal_mesh(record, barriers)
+        barriers_opt = solver._get_optimal_mesh(**record, mesh=barriers)
 
         diffs = barriers_opt[1:, 0] - barriers_opt[:-1, 0]
         assert torch.all(diffs > 0), f"Barriers not sorted: {barriers_opt[:, 0]}"
@@ -151,7 +151,7 @@ class TestGetOptimalTStepBarriers:
         record = self._make_record(solver, N, error_scale=0.001)
         barriers = torch.linspace(0, 1, N + 1, dtype=torch.float64).unsqueeze(-1)
 
-        barriers_opt = solver._get_optimal_mesh(record, barriers)
+        barriers_opt = solver._get_optimal_mesh(**record, mesh=barriers)
 
         assert torch.allclose(barriers_opt[0], torch.tensor([0.0], dtype=torch.float64))
         assert torch.allclose(

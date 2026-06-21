@@ -96,7 +96,20 @@ def cached_max_batch(device="cpu"):
         # One real run benchmarks the footprint (take_gradient=False); the
         # resulting budget is large enough to keep every test integral
         # single-batch in both modes (see note above).
-        probe.integrate(f, mesh_init=T_INIT, mesh_final=T_FINAL)
+        #
+        # The probe's ``integrate`` draws a random initial mesh via
+        # ``torch.rand``, advancing the global RNG. Because this runs only on the
+        # first call (it is cached afterward), it would perturb the RNG for
+        # whichever test happens to prime the cache, breaking the reproducibility
+        # that callers establish with ``torch.manual_seed`` before constructing a
+        # solver (e.g. the snapshot tests). Fork the RNG so the benchmark leaves
+        # the global generator state untouched.
+        torch_device = torch.device(device)
+        fork_devices = (
+            [torch_device.index or 0] if torch_device.type == "cuda" else []
+        )
+        with torch.random.fork_rng(devices=fork_devices):
+            probe.integrate(f, mesh_init=T_INIT, mesh_final=T_FINAL)
         _MAX_BATCH_CACHE[key] = probe.get_max_batch()
     return _MAX_BATCH_CACHE[key]
 

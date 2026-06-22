@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import torch
 from torch import nn
 
@@ -12,6 +14,32 @@ from padaquad import (
     integrand_dict,
     steps,
 )
+
+# ---------------------------------------------------------------------------
+# Default test device
+# ---------------------------------------------------------------------------
+#
+# padaquad is normally run on GPU, so the suite runs on CUDA when one is present
+# and falls back to CPU otherwise (e.g. GitHub CI, where ``torch.cuda`` is
+# unavailable). Set ``PADAQUAD_TEST_DEVICE`` to force a specific device -- e.g.
+# ``PADAQUAD_TEST_DEVICE=cpu`` to reproduce the CI / CPU path on a GPU box, or
+# ``cuda:1`` to pin a particular GPU.
+#
+# A few tests are pinned to CPU regardless of this default: the snapshot golden
+# values (float64 determinism) and the internal-method unit tests (which feed
+# hand-built CPU tensors straight into solver methods). Those keep their explicit
+# ``device="cpu"``.
+
+
+def _resolve_test_device() -> str:
+    """Return the default device for the suite (env override, else auto-detect)."""
+    env = os.environ.get("PADAQUAD_TEST_DEVICE")
+    if env:
+        return env
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+DEVICE = _resolve_test_device()
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -54,7 +82,7 @@ INTEGRAND_NAMES = list(integrand_dict.keys())
 # (``_setup_memory_checks``), which is slow. The solver only skips that
 # benchmark when the *same* integrand is reused (``id(f)`` match) or an explicit
 # ``max_batch`` is supplied. The test suite reuses neither — every
-# (method × integrand × ...) cell builds a fresh solver on a fresh integrand —
+# (method x integrand x ...) cell builds a fresh solver on a fresh integrand —
 # so the benchmark runs hundreds of times even though the answer is always the
 # same: all the analytic integrands share one per-evaluation footprint.
 #
@@ -72,7 +100,7 @@ INTEGRAND_NAMES = list(integrand_dict.keys())
 _MAX_BATCH_CACHE: dict = {}
 
 
-def cached_max_batch(device="cpu"):
+def cached_max_batch(device=None):
     """Return a ``max_batch`` for the analytic integrands, benchmarking once.
 
     The memory footprint of every analytic integrand is the same, so the slow
@@ -82,6 +110,8 @@ def cached_max_batch(device="cpu"):
     can still pass an explicit ``max_batch`` (it takes precedence — see
     ``make_uniform_solver``).
     """
+    if device is None:
+        device = DEVICE
     key = str(device)
     if key not in _MAX_BATCH_CACHE:
         f = integrand_dict["damped_sine"][0]
@@ -136,14 +166,15 @@ TAKE_GRADIENT_IDS = ["take_grad_True", "take_grad_False"]
 
 
 def make_uniform_solver(
-    method_name, atol=ATOL_TIGHT, rtol=RTOL_TIGHT, device="cpu", **kwargs
+    method_name, atol=ATOL_TIGHT, rtol=RTOL_TIGHT, device=DEVICE, **kwargs
 ):
     """Create a parallel uniform-sampling RK solver.
 
-    Pinned to CPU by default: the suite is CPU-designed, and on a GPU machine
-    the solver otherwise auto-selects CUDA, where the per-eval memory budget can
-    fail the pre-check when the (often shared) GPU is short on free memory.
-    Pass ``device=`` to override.
+    Runs on the auto-detected default device (CUDA when present, else CPU; see
+    ``DEVICE`` / ``PADAQUAD_TEST_DEVICE``). Results are offloaded to CPU by the
+    solver (``result_device="cpu"``), so accuracy comparisons stay device-safe.
+    Pass ``device=`` to override (e.g. ``device="cpu"`` to pin a test that is not
+    GPU-deterministic).
 
     ``max_batch`` defaults to the cached benchmark value (``cached_max_batch``)
     so the slow per-solver memory benchmark runs at most once; pass an explicit
@@ -163,11 +194,11 @@ def make_uniform_solver(
 
 
 def make_variable_solver(
-    method_name, atol=ATOL_TIGHT, rtol=RTOL_TIGHT, device="cpu", **kwargs
+    method_name, atol=ATOL_TIGHT, rtol=RTOL_TIGHT, device=DEVICE, **kwargs
 ):
     """Create a parallel variable-sampling solver.
 
-    Pinned to CPU by default for the same reason as ``make_uniform_solver``, and
+    Runs on the auto-detected default device (see ``make_uniform_solver``), and
     likewise defaults ``max_batch`` to the cached benchmark value so the slow
     memory benchmark runs at most once.
     """

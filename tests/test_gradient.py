@@ -5,6 +5,7 @@ from __future__ import annotations
 import torch
 from _helpers import (
     ATOL_LOOSE,
+    DEVICE,
     RTOL_LOOSE,
     SEED,
     ScaledIntegrand,
@@ -92,9 +93,9 @@ class TestGradientFlowThroughIntegrate:
     def test_gradient_flows_to_params(self):
         """take_gradient=False, manual backward() → param grad nonzero."""
         torch.manual_seed(SEED)
-        integrand = ScaledIntegrand(scale=2.0)
+        integrand = ScaledIntegrand(scale=2.0).to(DEVICE)
         solver = make_uniform_solver(
-            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device="cpu"
+            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device=DEVICE
         )
         result = solver.integrate(
             mesh_init=torch.tensor([0], dtype=torch.float64),
@@ -109,9 +110,9 @@ class TestGradientFlowThroughIntegrate:
     def test_take_gradient_flag(self):
         """take_gradient=True → gradient_taken is True and params have grads."""
         torch.manual_seed(SEED)
-        integrand = ScaledIntegrand(scale=2.0)
+        integrand = ScaledIntegrand(scale=2.0).to(DEVICE)
         solver = make_uniform_solver(
-            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device="cpu"
+            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device=DEVICE
         )
         result = solver.integrate(
             mesh_init=torch.tensor([0], dtype=torch.float64),
@@ -126,9 +127,9 @@ class TestGradientFlowThroughIntegrate:
     def test_gradient_taken_false(self):
         """take_gradient=False → gradient_taken is False."""
         torch.manual_seed(SEED)
-        integrand = ScaledIntegrand(scale=2.0)
+        integrand = ScaledIntegrand(scale=2.0).to(DEVICE)
         solver = make_uniform_solver(
-            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device="cpu"
+            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device=DEVICE
         )
         result = solver.integrate(
             mesh_init=torch.tensor([0], dtype=torch.float64),
@@ -198,25 +199,25 @@ class TestCustomLoss:
     def test_default_loss_equals_integral(self):
         """No loss_fxn → result.loss equals the integral."""
         torch.manual_seed(SEED)
-        integrand = ScaledIntegrand(scale=2.0)
+        integrand = ScaledIntegrand(scale=2.0).to(DEVICE)
         integrand.eval()
         solver = make_uniform_solver(
-            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device="cpu"
+            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device=DEVICE
         )
         result = solver.integrate(
             mesh_init=torch.tensor([0], dtype=torch.float64),
             mesh_final=torch.tensor([1], dtype=torch.float64),
         )
 
-        assert torch.allclose(result.loss, result.integral)
+        assert torch.allclose(result.loss.cpu(), result.integral.cpu())
 
     def test_custom_loss_applied(self):
         """Custom loss_fxn is used instead of the default."""
         torch.manual_seed(SEED)
-        integrand = ScaledIntegrand(scale=2.0)
+        integrand = ScaledIntegrand(scale=2.0).to(DEVICE)
         integrand.eval()
         solver = make_uniform_solver(
-            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device="cpu"
+            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device=DEVICE
         )
 
         def double_loss(output):
@@ -229,15 +230,15 @@ class TestCustomLoss:
         )
 
         # loss should be approximately 2 * integral
-        expected = result.integral * 2
-        assert torch.allclose(result.loss, expected, rtol=1e-4)
+        expected = result.integral.cpu() * 2
+        assert torch.allclose(result.loss.cpu(), expected, rtol=1e-4)
 
     def test_custom_loss_gradient(self):
         """take_gradient=True with custom loss → params have grads."""
         torch.manual_seed(SEED)
-        integrand = ScaledIntegrand(scale=2.0)
+        integrand = ScaledIntegrand(scale=2.0).to(DEVICE)
         solver = make_uniform_solver(
-            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device="cpu"
+            "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device=DEVICE
         )
 
         def square_loss(output):

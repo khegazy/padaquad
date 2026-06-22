@@ -40,7 +40,7 @@ import math
 
 import pytest
 import torch
-from tests._helpers import cached_max_batch, make_uniform_solver
+from tests._helpers import DEVICE, cached_max_batch, make_uniform_solver
 
 from padaquad import integrate
 
@@ -73,7 +73,7 @@ def test_grad_of_integral_matches_integral_of_grad(name, g, interval):
     method = "dopri5"
 
     # --- Path A: solver class directly so we can pass take_gradient=True. ---
-    theta = torch.tensor(1.7, dtype=torch.float64, requires_grad=True)
+    theta = torch.tensor(1.7, dtype=torch.float64, device=DEVICE, requires_grad=True)
 
     def f_theta(t):
         return theta * g(t)
@@ -97,6 +97,7 @@ def test_grad_of_integral_matches_integral_of_grad(name, g, interval):
         mesh_init=mesh_init,
         mesh_final=mesh_final,
         max_batch=cached_max_batch(),
+        device=DEVICE,
     )
     grad_b = out_b.integral.item()
 
@@ -114,7 +115,7 @@ def test_single_batch_autograd_grad_works():
     Use ``take_gradient=True`` instead when GPU memory prevents holding the
     full graph (see ``test_grad_of_integral_matches_integral_of_grad``).
     """
-    theta = torch.tensor(1.7, dtype=torch.float64, requires_grad=True)
+    theta = torch.tensor(1.7, dtype=torch.float64, device=DEVICE, requires_grad=True)
     out = integrate(
         f=lambda t: theta * (t**2),  # very simple, fits in one batch
         method="dopri5",
@@ -124,6 +125,7 @@ def test_single_batch_autograd_grad_works():
         mesh_final=torch.tensor([1.0], dtype=torch.float64),
         take_gradient=False,
         max_batch=cached_max_batch(),
+        device=DEVICE,
     )
     grad_a = torch.autograd.grad(out.integral.sum(), theta)[0].item()
     # int_0^1 t^2 dt = 1/3
@@ -148,9 +150,10 @@ def test_take_gradient_does_not_corrupt_integral_value():
         mesh_init=mesh_init,
         mesh_final=mesh_final,
         max_batch=cached_max_batch(),
+        device=DEVICE,
     )
 
-    theta = torch.tensor(1.7, dtype=torch.float64, requires_grad=True)
+    theta = torch.tensor(1.7, dtype=torch.float64, device=DEVICE, requires_grad=True)
     solver = make_uniform_solver(method, atol=ATOL, rtol=RTOL)
     out_with_grad = solver.integrate(
         f=lambda t: theta * torch.sin(t),

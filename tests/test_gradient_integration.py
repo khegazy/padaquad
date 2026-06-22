@@ -6,6 +6,7 @@ import pytest
 import torch
 from _helpers import (
     ATOL_LOOSE,
+    DEVICE,
     REMOVE_CUT,
     RTOL_LOOSE,
     SEED,
@@ -122,10 +123,10 @@ class _DerivativeNet(nn.Module):
 def _make_solver(method_name, f):
     """Create a solver with loose tolerances for gradient tests.
 
-    Pinned to CPU: these gradient-correctness tests use nn.Module integrands
-    whose parameters live on CPU, so the solver must be on CPU too (otherwise it
-    auto-selects CUDA on a GPU machine and f(cuda_nodes) clashes with the CPU
-    parameters). Gradient flow is device-agnostic, so CPU is appropriate.
+    Runs on the default device (CUDA when present, else CPU; see ``DEVICE`` /
+    ``PADAQUAD_TEST_DEVICE``). The nn.Module integrands are moved onto ``DEVICE``
+    by each test so ``f(nodes)`` and the module parameters share a device; this
+    exercises GPU autograd on a GPU box. Gradient flow is device-agnostic.
     """
     return adaptive_quadrature(
         sampling_type=steps.ADAPTIVE_UNIFORM,
@@ -134,7 +135,7 @@ def _make_solver(method_name, f):
         rtol=RTOL_LOOSE,
         remove_cut=REMOVE_CUT,
         f=f,
-        device="cpu",
+        device=DEVICE,
         max_batch=cached_max_batch(),
     )
 
@@ -151,21 +152,21 @@ class TestQuadratureWithGradients:
     def test_exp_integral_accuracy(self, method_name):
         """Numerical quadrature of exp(-2t) + 3*exp(-3t) matches analytical."""
         torch.manual_seed(SEED)
-        integrand = _ExpIntegrand(scale=1.0)
+        integrand = _ExpIntegrand(scale=1.0).to(DEVICE)
         integrand.eval()
         solver = _make_solver(method_name, integrand)
 
         result = solver.integrate(mesh_init=T_INIT, mesh_final=T_FINAL)
         analytical = _exp_analytical_integral(0.0, 1.0)
 
-        assert torch.allclose(result.integral, analytical, atol=1e-3), (
+        assert torch.allclose(result.integral.cpu(), analytical, atol=1e-3), (
             f"Expected {analytical.item():.6f}, got {result.integral.item():.6f}"
         )
 
     def test_exp_integral_gradient_to_params(self, method_name):
         """Gradient of integral w.r.t. scale is nonzero and positive."""
         torch.manual_seed(SEED)
-        integrand = _ExpIntegrand(scale=1.0)
+        integrand = _ExpIntegrand(scale=1.0).to(DEVICE)
         integrand.eval()  # Prevent auto-backward; we do manual backward
         solver = _make_solver(method_name, integrand)
 
@@ -191,7 +192,7 @@ class TestPathOptimization:
     def test_gradients_nonzero(self):
         """After first integration, offsets.grad is nonzero."""
         torch.manual_seed(SEED)
-        path_integrand = _PathIntegrand(n_control=5)
+        path_integrand = _PathIntegrand(n_control=5).to(DEVICE)
         path_integrand.eval()
         solver = _make_solver("bosh3", path_integrand)
 
@@ -206,7 +207,7 @@ class TestPathOptimization:
     def test_loss_decreases(self):
         """10 Adam steps decrease the path integral loss."""
         torch.manual_seed(SEED)
-        path_integrand = _PathIntegrand(n_control=5)
+        path_integrand = _PathIntegrand(n_control=5).to(DEVICE)
         path_integrand.eval()
         optimizer = torch.optim.Adam(path_integrand.parameters(), lr=1e-2)
 
@@ -246,15 +247,17 @@ class TestQuadratureWithInitialValue:
     def test_integral_with_y0_accuracy(self, method_name):
         """y0 + integral matches the analytical value for the given integrand."""
         torch.manual_seed(SEED)
-        integrand = _ExpIntegrand(scale=1.0)
+        integrand = _ExpIntegrand(scale=1.0).to(DEVICE)
         integrand.eval()
         solver = _make_solver(method_name, integrand)
 
         result = solver.integrate(mesh_init=T_INIT, mesh_final=T_FINAL)
 
-        # The solver computes ∫f(t)dt; add y0 externally
+        # The solver computes ∫f(t)dt; add y0 externally. result.integral can
+        # live on the compute device (the default take_gradient path), so move it
+        # to CPU to match the CPU-side y0 / analytical tensors.
         y0 = torch.tensor([4.0], dtype=torch.float64)
-        y_T = y0 + result.integral
+        y_T = y0 + result.integral.cpu()
         analytical = y0 + _exp_analytical_integral(0.0, 1.0)
         assert torch.allclose(y_T, analytical, atol=1e-3), (
             f"Expected {analytical.item():.6f}, got {y_T.item():.6f}"
@@ -265,10 +268,12 @@ class TestQuadratureWithInitialValue:
         torch.manual_seed(SEED)
 
         # Pre-train the MLP to approximate exp(-2t) + 3*exp(-3t)
-        net = _DerivativeNet(hidden=64)
+        net = _DerivativeNet(hidden=64).to(DEVICE)
         optimizer = torch.optim.Adam(net.parameters(), lr=1e-2)
 
-        t_train = torch.linspace(0, 1, 100, dtype=torch.float64).unsqueeze(-1)
+        t_train = (
+            torch.linspace(0, 1, 100, dtype=torch.float64).unsqueeze(-1).to(DEVICE)
+        )
         y_target = torch.exp(-2 * t_train) + 3 * torch.exp(-3 * t_train)
 
         for _ in range(1000):
@@ -293,7 +298,7 @@ class TestQuadratureWithInitialValue:
 
         analytical = _exp_analytical_integral(0.0, 1.0)
         # Looser tolerance since the MLP is an approximation
-        assert torch.allclose(result.integral, analytical, atol=0.1), (
+        assert torch.allclose(result.integral.cpu(), analytical, atol=0.1), (
             f"Expected ~ {analytical.item():.4f}, got {result.integral.item():.4f}"
         )
 
@@ -310,7 +315,7 @@ class TestTrainingLoopPattern:
     def test_manual_backward(self, method_name):
         """take_gradient=False: manual backward() on result.integral → param grads exist."""
         torch.manual_seed(SEED)
-        integrand = ScaledIntegrand(scale=2.0)
+        integrand = ScaledIntegrand(scale=2.0).to(DEVICE)
         solver = _make_solver(method_name, integrand)
 
         result = solver.integrate(
@@ -324,7 +329,7 @@ class TestTrainingLoopPattern:
     def test_optimizer_step_reduces_loss(self, method_name):
         """10 Adam steps with ScaledIntegrand → loss decreases."""
         torch.manual_seed(SEED)
-        integrand = ScaledIntegrand(scale=2.0)
+        integrand = ScaledIntegrand(scale=2.0).to(DEVICE)
         integrand.eval()
         optimizer = torch.optim.Adam(integrand.parameters(), lr=0.01)
 

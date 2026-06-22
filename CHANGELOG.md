@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.2] - 2026-06-22
+
+### Changed
+
+- **The per-evaluation memory benchmark (`_setup_memory_checks`) was rewritten to be stable and self-limiting.** It now grows the probe batch by powers of ten until the integrand either takes measurably long (`eval_time > 0.1s`), overshoots available memory, or reaches the `1e9` search ceiling, and derives `f_unit_mem_size` from the usable-memory budget at that point. The result is floored so the implied `max_batch` never extrapolates past the largest tile actually validated — previously the time-based branch could imply a `max_batch` ~100× the tested size and risk an out-of-memory error on the first real batch. On an out-of-memory event during the probe the batch is backed off (`0.75 * N`) and retried instead of aborting, and the benchmark now honors the caller's `total_mem_usage` fraction. It logs a warning when it runs (it is slow if repeated) and reports the resolved `max_batch` on completion.
+
+### Added
+
+- **`get_max_batch(total_mem_usage=0.9, default_max_batch=None)`** on the solver: resolves the per-batch evaluation cap *without* re-benchmarking memory. Precedence is an explicit `default_max_batch` (e.g. a per-call `max_batch`), then the construction-time `init_max_batch`, then the budget implied by a prior memory benchmark (`f_unit_mem_size`), all clamped by any `_oom_max_batch` discovered after an out-of-memory event. This lets calling code capture `max_batch` after a first run and feed it back into later solvers/calls to skip the slow benchmark.
+
 ## [1.2.1] - 2026-06-16
 
 ### Changed

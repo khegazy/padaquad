@@ -1367,7 +1367,11 @@ class AdaptiveQuadrature(SolverBase):
                 # retry forever -- mirroring the _setup_memory_checks search.
                 # int(...) coerces a torch scalar (max_batch is a tensor in the
                 # integrate loop) to a Python int so round()/min() work.
-                prev = int(self._oom_max_batch if self._oom_max_batch is not None else max_batch)
+                prev = int(
+                    self._oom_max_batch
+                    if self._oom_max_batch is not None
+                    else max_batch
+                )
                 self._oom_max_batch = max(1, int(min(round(0.75 * prev), prev - 1)))
                 logger.warning(
                     f"Caught OOM with {free_mem} GB free of {total_mem} GB. "
@@ -1555,7 +1559,11 @@ class AdaptiveQuadrature(SolverBase):
                 # retry forever -- mirroring the _setup_memory_checks search.
                 # int(...) coerces a torch scalar (max_batch is a tensor in the
                 # integrate loop) to a Python int so round()/min() work.
-                prev = int(self._oom_max_batch if self._oom_max_batch is not None else max_batch)
+                prev = int(
+                    self._oom_max_batch
+                    if self._oom_max_batch is not None
+                    else max_batch
+                )
                 self._oom_max_batch = max(1, int(min(round(0.75 * prev), prev - 1)))
                 logger.warning(
                     f"Caught OOM with {free_mem} GB free of {total_mem} GB. "

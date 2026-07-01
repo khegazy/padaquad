@@ -1361,7 +1361,18 @@ class AdaptiveQuadrature(SolverBase):
                     # block indefinitely — matching the futex-wait-on-all-threads
                     # signature of the prior deadlock.
                     time.sleep(0.05)
-                self._oom_max_batch = torch.int(torch.round(0.75 * self._oom_max_batch))
+                # Seed from the live max_batch on the first OOM (_oom_max_batch
+                # starts as None), then shrink. min(..., prev - 1) guarantees a
+                # strict decrease -- plain round(0.75 * 2) == 2 would stick and
+                # retry forever -- mirroring the _setup_memory_checks search.
+                # int(...) coerces a torch scalar (max_batch is a tensor in the
+                # integrate loop) to a Python int so round()/min() work.
+                prev = int(
+                    self._oom_max_batch
+                    if self._oom_max_batch is not None
+                    else max_batch
+                )
+                self._oom_max_batch = max(1, int(min(round(0.75 * prev), prev - 1)))
                 logger.warning(
                     f"Caught OOM with {free_mem} GB free of {total_mem} GB. "
                     f"Reducing max_batch from {max_batch} to {self._oom_max_batch}."
@@ -1542,7 +1553,18 @@ class AdaptiveQuadrature(SolverBase):
                     # block indefinitely — matching the futex-wait-on-all-threads
                     # signature of the prior deadlock.
                     time.sleep(0.05)
-                self._oom_max_batch = torch.int(torch.round(0.75 * self._oom_max_batch))
+                # Seed from the live max_batch on the first OOM (_oom_max_batch
+                # starts as None), then shrink. min(..., prev - 1) guarantees a
+                # strict decrease -- plain round(0.75 * 2) == 2 would stick and
+                # retry forever -- mirroring the _setup_memory_checks search.
+                # int(...) coerces a torch scalar (max_batch is a tensor in the
+                # integrate loop) to a Python int so round()/min() work.
+                prev = int(
+                    self._oom_max_batch
+                    if self._oom_max_batch is not None
+                    else max_batch
+                )
+                self._oom_max_batch = max(1, int(min(round(0.75 * prev), prev - 1)))
                 logger.warning(
                     f"Caught OOM with {free_mem} GB free of {total_mem} GB. "
                     f"Reducing max_batch from {max_batch} to {self._oom_max_batch}."

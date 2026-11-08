@@ -24,7 +24,7 @@ import math
 
 import pytest
 import torch
-from _helpers import REMOVE_CUT, make_solver_for_unit_test
+from _helpers import REMOVE_CUT, make_solver_for_unit_test, needs_cuda
 from scipy.integrate import quad
 
 from padaquad import adaptive_quadrature, steps
@@ -402,7 +402,7 @@ def test_recheck_determinism():
 # ---------------------------------------------------------------------------
 
 
-def _make_record(solver, n_panels=4):
+def _make_record(solver, n_panels=4, result_device=None):
     """Build an initialized record (via _record_results) with known per-step
     quadratures/errors and integral == sum(quadratures)."""
     boundaries = torch.linspace(0.0, 1.0, n_panels + 1, dtype=torch.float64)
@@ -428,7 +428,7 @@ def _make_record(solver, n_panels=4):
         [nodes[:, 0, :], torch.tensor([[1.0]], dtype=torch.float64)], dim=0
     )
     mi = solver._get_mesh_indices(mesh)
-    record = solver._record_results({}, False, results, mi)
+    record = solver._record_results({}, False, results, mi, result_device)
     return record, quad_vals, err_vals
 
 
@@ -454,12 +454,16 @@ def test_remove_failed_record_panels_subset():
     assert record["error_ratios"].shape[0] == 2
 
 
-def test_remove_all_then_record_does_not_crash():
+@pytest.mark.parametrize(
+    "result_device", [None, pytest.param(torch.device("cuda"), marks=needs_cuda)]
+)
+def test_remove_all_then_record_does_not_crash(result_device):
     """Removing every recorded panel empties the per-step fields; the next
     _record_results must still merge a fresh batch without crashing (the
-    record-emptying regression)."""
+    record-emptying regression), including when the record's loss lives on a
+    result_device other than the solver's (the cross-device loss regression)."""
     solver = make_solver_for_unit_test()
-    record, _, _ = _make_record(solver)
+    record, _, _ = _make_record(solver, result_device=result_device)
     keep = torch.zeros(4, dtype=torch.bool)
 
     record = solver._remove_failed_record_panels(record, keep, solver._integral_loss)
@@ -485,6 +489,6 @@ def test_remove_all_then_record_does_not_crash():
     mi_fresh = solver._get_mesh_indices(
         torch.tensor([[0.0], [1.0]], dtype=torch.float64)
     )
-    record = solver._record_results(record, False, fresh, mi_fresh)
+    record = solver._record_results(record, False, fresh, mi_fresh, result_device)
     assert record["nodes"].shape[0] == 1
     assert torch.allclose(record["mesh_quadratures"], fresh.mesh_quadratures)

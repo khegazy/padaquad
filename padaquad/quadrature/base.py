@@ -2681,7 +2681,9 @@ class AdaptiveQuadrature(SolverBase):
             getattr(loss_fxn, "__func__", None) is self._integral_loss.__func__
         )
         if is_default_loss:
-            record["loss"] = record["integral"]
+            # loss lives on result_device (see _record_results), integral on the
+            # integration device; keep loss where the next batch's loss is added.
+            record["loss"] = record["integral"].to(record["loss"].device)
         return record
 
     def _flatten_output(self, panel_array):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+import pytest
 import torch
 from torch import nn
 
@@ -40,6 +41,7 @@ def _resolve_test_device() -> str:
 
 
 DEVICE = _resolve_test_device()
+needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 
 # ---------------------------------------------------------------------------
 # Constants

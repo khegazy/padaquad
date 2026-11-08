@@ -144,16 +144,8 @@ class DistributedEnvironment:
         else:
             self.init_single_process()
 
-        # Assign the device. Only distributed runs set the process-wide CUDA
-        # device, because NCCL collectives use the current device.
-        self.device = _resolve_device(
-            device,
-            self.local_rank if torch.cuda.device_count() > 1 else 0,
-            self.is_distributed,
-        )
-        if self.is_distributed and self.device.type == "cuda":
-            torch.cuda.set_device(self.device)
-        logger.info("Process %s: running on %s", self.rank, self.device)
+        # Assign a specific device (e.g. cuda:1) from the request and local rank
+        self.set_device(device)
 
     def check_distributed(self) -> bool:
         """
@@ -278,6 +270,30 @@ class DistributedEnvironment:
             init_method="env://",
         )
 
+    def set_device(self, device: str | torch.device | None = None) -> None:
+        """
+        Resolve and assign this process's compute device to ``self.device``.
+
+        An index-less request uses the GPU matching local_rank when several GPUs
+        are visible, else GPU 0. Only distributed runs set the process-wide CUDA
+        device, because NCCL collectives use the current device; single-process
+        runs leave global torch state unchanged.
+
+        Args:
+            device: Requested device, as accepted by ``_resolve_device``.
+
+        Raises:
+            ValueError: If the device is invalid (see ``_resolve_device``).
+        """
+        self.device = _resolve_device(
+            device,
+            self.local_rank if torch.cuda.device_count() > 1 else 0,
+            self.is_distributed,
+        )
+        if self.is_distributed and self.device.type == "cuda":
+            torch.cuda.set_device(self.device)
+        logger.info("Process %s: running on %s", self.rank, self.device)
+
     def end_process(self) -> None:
         """
         Clean up the distributed process group.
@@ -287,3 +303,15 @@ class DistributedEnvironment:
         """
         if self.is_distributed:
             dist.destroy_process_group()
+
+    def get_cuda_memory_usage(self) -> tuple[int, int] | int:
+        """
+        Query CUDA memory info for this process's device.
+
+        Returns:
+            Tuple of (free_memory_bytes, total_memory_bytes) from
+            torch.cuda.mem_get_info, or -1 if not running on CUDA.
+        """
+        if self.device.type != "cuda":
+            return -1
+        return torch.cuda.mem_get_info(self.device)

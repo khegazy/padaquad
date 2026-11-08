@@ -9,6 +9,7 @@ from _helpers import (
     T_INIT,
     make_solver_for_unit_test,
     make_uniform_solver,
+    needs_cuda,
 )
 
 from padaquad import UNIFORM_METHODS, integrand_dict
@@ -257,7 +258,6 @@ class TestIntegralLoss:
 # ---------------------------------------------------------------------------
 
 CPU, CUDA0, CUDA1 = map(torch.device, ("cpu", "cuda:0", "cuda:1"))
-needs_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
 needs_2_gpus = pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs 2 GPUs")
 
 
@@ -331,6 +331,7 @@ class TestDeviceSelection:
         )
 
         assert solver.device == expected
+        assert (solver.get_cuda_memory_usage() == -1) == (expected.type == "cpu")
         assert result.nodes.device == expected_result
         assert torch.allclose(result.integral.cpu(), solution(T_INIT, T_FINAL))
         assert torch.get_default_device() == default

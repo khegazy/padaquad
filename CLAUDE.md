@@ -81,7 +81,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_error_computation.py` | `_error_norm`, `_rec_remove`, `_compute_error_ratios_absolute`/`_cumulative` |
 | `test_interpolation.py` | `_compute_nodes`: endpoints, shapes, monotonicity, tableau-c matching |
 | `test_sorted_insert.py` | `_get_sorted_indices` and `_insert_sorted_results` |
-| `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables`, `_integral_loss` |
+| `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables`, `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects) |
 | `test_methods_extra.py` | Variable subclass `tableau_b`, `to_device`, dtype conversion |
 | `test_rk_solver_methods.py` | `adaptive_quadrature` factory, `_get_tableau_b`, `_get_num_tableau_c` |
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed error ratios, midpoint placement |

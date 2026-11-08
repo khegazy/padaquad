@@ -40,8 +40,8 @@ def integrate(
     take_gradient: bool = True,
     max_adaptive_splits: int | None = None,
     error_on_nonfinite: bool = True,
-    device: str | None = None,
-    result_device: str | torch.device = "cpu",
+    device: str | torch.device | None = None,
+    result_device: str | torch.device | None = "cpu",
     **kwargs,
 ) -> IntegrationResult:
     """
@@ -116,12 +116,13 @@ def integrate(
             offending ``t`` when the integrand returns NaN/Inf. If False, those
             panels are accepted and the non-finite value propagates into the
             result. The integration never hangs in either case.
-        device: Device to run on (e.g. 'cuda', 'cpu'). If None,
-            auto-detects.
+        device: Device to run on: 'cpu', 'cuda', an indexed 'cuda:N', or a
+            torch.device. If None, auto-detects.
         result_device: Device the returned IntegrationResult tensors live on
             (default 'cpu'). The large per-step records (nodes, y, ...) are
             detached and moved here as they are recorded so they do not
-            accumulate on the integration device's memory.
+            accumulate on the integration device's memory. An index-less
+            'cuda' means the solver's GPU; None keeps them on the solver's device.
         **kwargs: Additional keyword arguments forwarded to the solver
             constructor (e.g. max_batch, max_path_change).
 

@@ -21,6 +21,54 @@ import torch.distributed as dist
 logger = logging.getLogger(__name__)
 
 
+def _resolve_device(
+    device: str | torch.device | None, index_default: int, distributed: bool = False
+) -> torch.device:
+    """
+    Normalize a requested device to one ``torch.device``.
+
+    CPU resolves to the bare ``torch.device("cpu")``; CUDA always resolves to an
+    explicit index, so devices compare equal regardless of how they were spelled
+    (``torch.device("cuda") != torch.device("cuda", 0)``). Only ``cpu`` and
+    ``cuda`` are supported because the memory queries handle only those two.
+
+    Args:
+        device: Requested device, e.g. ``"cpu"``, ``"cuda"``, ``"cuda:1"``, or
+            ``torch.device("cuda", 1)``. None auto-detects (CUDA if available).
+        index_default: GPU index used when ``device`` carries no index.
+        distributed: If True, an explicit index must equal ``index_default``
+            (the GPU assigned to this rank).
+
+    Returns:
+        The resolved device.
+
+    Raises:
+        ValueError: If the device type is unsupported, CUDA is unavailable, the
+            index conflicts with this rank's GPU, or the index is not visible.
+        RuntimeError, TypeError: Raised by ``torch.device`` for an unparsable
+            string or an unsupported argument type.
+    """
+    device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    if device.type == "cpu":
+        return torch.device("cpu")
+    if device.type != "cuda" or not torch.cuda.is_available():
+        raise ValueError(
+            f"device must be 'cpu' or an available 'cuda' device, got {device}"
+        )
+    if distributed and device.index not in (None, index_default):
+        raise ValueError(
+            f"{device} conflicts with this rank's GPU cuda:{index_default}; "
+            "pass 'cuda' or None in distributed runs"
+        )
+    index = index_default if device.index is None else device.index
+    if index >= torch.cuda.device_count():
+        raise ValueError(
+            f"cuda:{index} requested but only {torch.cuda.device_count()} GPU(s) "
+            "are visible"
+        )
+    return torch.device("cuda", index)
+
+
 class DistributedEnvironment:
     """
     Manages the distributed computing environment for integration solvers.
@@ -42,8 +90,9 @@ class DistributedEnvironment:
         world_size: Total number of processes across all nodes.
         seed_offset: Offset for random seeds to ensure different processes
             use different random sequences (equals rank).
-        device_type: Type of compute device ('cuda' or 'cpu').
-        device: Full device string (e.g. 'cuda:0', 'cpu:0').
+        device: Resolved compute device, ``torch.device("cpu")`` or
+            ``torch.device("cuda", index)``; the single source of truth for
+            where the solver runs.
     """
 
     is_distributed: bool
@@ -53,13 +102,12 @@ class DistributedEnvironment:
     local_rank: int
     world_size: int
     seed_offset: int
-    device_type: str
-    device: str
+    device: torch.device
 
     def __init__(
         self,
         backend: str = "nccl",
-        device_type: str | None = "cuda",
+        device: str | torch.device | None = None,
         master_addr: str | None = None,
         master_port: str | None = None,
         is_slurm: bool = False,
@@ -73,8 +121,11 @@ class DistributedEnvironment:
         Args:
             backend: Communication backend for distributed training.
                 Options: 'nccl' (GPU), 'gloo' (CPU/GPU), 'mpi'.
-            device_type: Type of device to use. If None, auto-detects
-                CUDA availability. Options: 'cuda', 'cpu', or None.
+            device: Device to run on: 'cpu', 'cuda', an indexed 'cuda:N', a
+                torch.device, or None to auto-detect (CUDA if available). An
+                index-less 'cuda' uses this rank's GPU (local_rank when
+                distributed with several GPUs visible, else 0). In distributed
+                runs an explicit index must match that GPU.
             master_addr: IP address of the master node. Required (along with
                 master_port) for distributed mode if not set via environment.
             master_port: Port on the master node. Required (along with
@@ -84,11 +135,6 @@ class DistributedEnvironment:
         """
         self.is_slurm = is_slurm
         self.backend = backend.lower()
-        if device_type is None:
-            self.device_type = "cuda" if torch.cuda.is_available() else "cpu"
-        else:
-            self.device_type = device_type
-
         # Determine if this process is part of a distributed job
         self.check_distributed()
 
@@ -98,8 +144,16 @@ class DistributedEnvironment:
         else:
             self.init_single_process()
 
-        # Assign a specific device (e.g. cuda:0) based on local rank
-        self.set_device()
+        # Assign the device. Only distributed runs set the process-wide CUDA
+        # device, because NCCL collectives use the current device.
+        self.device = _resolve_device(
+            device,
+            self.local_rank if torch.cuda.device_count() > 1 else 0,
+            self.is_distributed,
+        )
+        if self.is_distributed and self.device.type == "cuda":
+            torch.cuda.set_device(self.device)
+        logger.info("Process %s: running on %s", self.rank, self.device)
 
     def check_distributed(self) -> bool:
         """
@@ -224,56 +278,6 @@ class DistributedEnvironment:
             init_method="env://",
         )
 
-    def set_device(self) -> None:
-        """
-        Assign a compute device to this process based on its local rank.
-
-        When multiple GPUs (or CPUs) are visible, assigns the device
-        corresponding to local_rank (e.g., local_rank=1 -> 'cuda:1').
-        When only one device is visible, defaults to device index 0.
-        Also initializes CUDA and sets the active device.
-
-        Raises:
-            ValueError: If device_type is not 'cuda' or 'cpu'.
-        """
-        logger.info("Process %s: Number of visible CPUs: %s", self.rank, os.cpu_count())
-        if self.device_type == "cuda":
-            logger.info(
-                "Process %s: Number of visible GPUs: %s",
-                self.rank,
-                torch.cuda.device_count(),
-            )
-
-        # Assign device index by local rank when multiple devices are available
-        is_cuda_with_GPUs = self.device_type.lower() == "cuda"
-        is_cuda_with_GPUs = is_cuda_with_GPUs and torch.cuda.device_count() > 1
-        is_cpu_with_CPUs = self.device_type.lower() == "cpu"
-        is_cpu_with_CPUs = is_cpu_with_CPUs and os.cpu_count() > 1
-        if is_cuda_with_GPUs or is_cpu_with_CPUs:
-            self.device = f"{self.device_type}:{self.local_rank}"
-            self.device_ids = [self.local_rank]
-        else:
-            self.device = f"{self.device_type}:0"
-            self.device_ids = [0]
-        logger.info("Process %s: Running process on %s", self.rank, self.device)
-
-        # Initialize and select the CUDA device
-        if self.device_type == "cuda":
-            torch.cuda.init()
-
-        if self.device_type == "cuda":
-            torch.cuda.set_device(self.device)
-            logger.info(
-                "Process %s is on cuda device %s",
-                self.rank,
-                torch.cuda.current_device(),
-            )
-        elif self.device_type == "cpu":
-            torch.set_default_device(self.device)
-            logger.info("Process %s is on cpu device %s", self.rank, self.device)
-        else:
-            raise ValueError(f"Cannot handle device type {self.device_type}")
-
     def end_process(self) -> None:
         """
         Clean up the distributed process group.
@@ -283,15 +287,3 @@ class DistributedEnvironment:
         """
         if self.is_distributed:
             dist.destroy_process_group()
-
-    def get_cuda_memory_usage(self) -> tuple:
-        """
-        Query CUDA memory info for the current device.
-
-        Returns:
-            Tuple of (free_memory_bytes, total_memory_bytes) from
-            torch.cuda.mem_get_info, or -1 if not running on CUDA.
-        """
-        if self.device_type != "cuda":
-            return -1
-        return torch.cuda.mem_get_info()

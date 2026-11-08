@@ -53,6 +53,7 @@ import psutil
 import torch
 
 from padaquad.base import SolverBase
+from padaquad.distributed import _resolve_device
 from padaquad.results import IntegrationResult, MethodOutput
 
 logger = logging.getLogger(__name__)
@@ -304,7 +305,7 @@ class AdaptiveQuadrature(SolverBase):
         mesh_failure_tolerance: float | None = None,
         error_on_nonfinite: bool | None = None,
         conserve_memory: bool = False,
-        result_device: str | torch.device = "cpu",
+        result_device: str | torch.device | None = "cpu",
     ) -> IntegrationResult:
         """
         Perform parallel adaptive numerical integration of f.
@@ -403,6 +404,9 @@ class AdaptiveQuadrature(SolverBase):
                 was produced for a different integrand (id mismatch), emits
                 a warning but proceeds. Ignored when ``mesh`` is provided
                 explicitly (the explicit ``mesh`` always takes precedence).
+            result_device: Device the per-step output records (nodes, y, ...)
+                are moved to (default 'cpu'). An index-less 'cuda' means the
+                solver's GPU; None keeps them on the solver's device.
 
         Returns:
             IntegrationResult with the computed integral, error estimates, the
@@ -418,7 +422,9 @@ class AdaptiveQuadrature(SolverBase):
         self.set_dtype_by_input(mesh=mesh, mesh_init=mesh_init, mesh_final=mesh_init)
 
         # Setup results device
-        result_device = torch.device(result_device)
+        result_device = _resolve_device(
+            result_device or self.device, self.device.index or 0
+        )
 
         # If mesh is given set mesh_init and mesh_final, else use input, else use saved values
         mesh_init, mesh_final = self._setup_integral_bounds(mesh, mesh_init, mesh_final)
@@ -2733,12 +2739,12 @@ class AdaptiveQuadrature(SolverBase):
         Query available and total memory in GB for the active device type.
 
         Dispatches to _get_cuda_memory() or _get_cpu_memory() based on
-        self.device_type.
+        self.device.type.
 
         Returns:
             Tuple of (free_gb, total_gb).
         """
-        if self.device_type == "cuda":
+        if self.device.type == "cuda":
             return self._get_cuda_memory()
         else:
             return self._get_cpu_memory()

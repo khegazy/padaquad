@@ -239,7 +239,9 @@ padaquad.integrate(
 One-shot integration. Constructs an `AdaptiveQuadrature` and calls
 `integrate()` on it. For repeated calls (e.g. training loops),
 instantiate the class directly via `adaptive_quadrature(...)` so
-warm-start cache state persists across iterations.
+warm-start cache state persists across iterations. `device` accepts
+`"cpu"`, `"cuda"`, an indexed `"cuda:N"`, or a `torch.device`; `None`
+auto-detects.
 
 ### Class API
 

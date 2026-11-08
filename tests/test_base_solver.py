@@ -1,12 +1,19 @@
-"""Unit tests for SolverBase methods: _set_dtype, set_dtype_by_input, _check_variables, _integral_loss."""
+"""Unit tests for SolverBase methods: _set_dtype, set_dtype_by_input, _check_variables, _integral_loss, device selection."""
 
 from __future__ import annotations
 
 import pytest
 import torch
-from _helpers import make_solver_for_unit_test
+from _helpers import (
+    T_FINAL,
+    T_INIT,
+    make_solver_for_unit_test,
+    make_uniform_solver,
+    needs_cuda,
+)
 
-from padaquad import UNIFORM_METHODS
+from padaquad import UNIFORM_METHODS, integrand_dict
+from padaquad.distributed import _resolve_device
 from padaquad.results import IntegrationResult
 
 
@@ -244,3 +251,91 @@ class TestIntegralLoss:
         output = IntegrationResult(integral=torch.tensor([1.0, 2.0]))
         result = solver._integral_loss(output)
         assert torch.equal(result, torch.tensor([1.0, 2.0]))
+
+
+# ---------------------------------------------------------------------------
+# Device selection
+# ---------------------------------------------------------------------------
+
+CPU, CUDA0, CUDA1 = map(torch.device, ("cpu", "cuda:0", "cuda:1"))
+needs_2_gpus = pytest.mark.skipif(torch.cuda.device_count() < 2, reason="needs 2 GPUs")
+
+
+class TestDeviceSelection:
+    """Tests for _resolve_device and the solver's resolved ``device``."""
+
+    @pytest.mark.parametrize(
+        ("device", "index_default", "distributed", "available", "expected"),
+        [
+            (None, 0, False, True, CUDA0),
+            (None, 0, False, False, CPU),
+            ("cuda", 1, False, True, CUDA1),
+            ("cuda:1", 0, False, True, CUDA1),
+            (CUDA1, 0, False, True, CUDA1),
+            ("cuda:1", 1, True, True, CUDA1),
+            ("cpu", 0, False, True, CPU),
+            ("cpu:0", 0, False, True, CPU),
+            ("cuda:2", 0, False, True, ValueError),  # index not visible
+            ("meta", 0, False, True, ValueError),  # unsupported type
+            ("cuda:1", 0, True, True, ValueError),  # conflicts with rank's cuda:0
+            ("cuda", 0, False, False, ValueError),  # CUDA unavailable
+        ],
+    )
+    def test_resolve_device(
+        self, monkeypatch, device, index_default, distributed, available, expected
+    ):
+        """Every spelling resolves to bare cpu or an explicitly indexed cuda, and
+        invalid requests raise ValueError instead of failing later."""
+        monkeypatch.setattr(torch.cuda, "is_available", lambda: available)
+        monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+        if expected is ValueError:
+            with pytest.raises(ValueError):
+                _resolve_device(device, index_default, distributed)
+        else:
+            assert _resolve_device(device, index_default, distributed) == expected
+
+    @pytest.mark.parametrize(
+        ("device", "result_device", "expected", "expected_result"),
+        [
+            ("cpu", "cpu", CPU, CPU),
+            (CPU, None, CPU, CPU),  # None keeps results on the solver's device
+            (None, "cpu", CUDA0 if torch.cuda.is_available() else CPU, CPU),
+            pytest.param("cpu", "cuda", CPU, CUDA0, marks=needs_cuda),
+            # Index-less "cuda" resolves to the solver's GPU, not cuda:0.
+            pytest.param("cuda:1", "cuda", CUDA1, CUDA1, marks=needs_2_gpus),
+            pytest.param(CUDA1, "cuda:0", CUDA1, CUDA0, marks=needs_2_gpus),
+        ],
+    )
+    def test_solver_device(self, device, result_device, expected, expected_result):
+        """The solver and its results land on exactly the requested devices,
+        nothing is allocated on an unrequested GPU 0, and the global default /
+        current CUDA device are unchanged."""
+        default = torch.get_default_device()
+        # current_device() also initializes CUDA, which the stats reset requires.
+        current = torch.cuda.current_device() if torch.cuda.is_available() else None
+        check_gpu0 = current is not None and CUDA0 not in (expected, expected_result)
+        if check_gpu0:
+            torch.cuda.reset_accumulated_memory_stats(0)
+        f, solution, _ = integrand_dict["t_squared"]
+
+        def f_on_device(t):
+            assert t.device == expected
+            return f(t)
+
+        solver = make_uniform_solver("gk21", device=device)
+        result = solver.integrate(
+            f_on_device,
+            mesh_init=T_INIT,
+            mesh_final=T_FINAL,
+            result_device=result_device,
+        )
+
+        assert solver.device == expected
+        assert (solver.get_cuda_memory_usage() == -1) == (expected.type == "cpu")
+        assert result.nodes.device == expected_result
+        assert torch.allclose(result.integral.cpu(), solution(T_INIT, T_FINAL))
+        assert torch.get_default_device() == default
+        if current is not None:
+            assert torch.cuda.current_device() == current
+        if check_gpu0:
+            assert torch.cuda.memory_stats(0)["allocated_bytes.all.allocated"] == 0

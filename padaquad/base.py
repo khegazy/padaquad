@@ -111,7 +111,7 @@ class SolverBase(ABC, DistributedEnvironment):
         mesh_final: torch.Tensor | None = None,
         output_speed_info: bool = False,
         dtype: torch.dtype = torch.float64,
-        device: str | None = None,
+        device: str | torch.device | None = None,
         *args,
         **kwargs,
     ) -> None:
@@ -139,13 +139,13 @@ class SolverBase(ABC, DistributedEnvironment):
                 on GPU). torch.float16 is refused: its ~1e-3 precision floor
                 sits above typical adaptive tolerances and cannot support
                 meaningful error control.
-            device: Device string (e.g. 'cuda', 'cpu'). Passed to
-                DistributedEnvironment for device assignment.
+            device: 'cpu', 'cuda', an indexed 'cuda:N', or a torch.device;
+                None auto-detects. Resolved by DistributedEnvironment.
             *args: Additional arguments forwarded to DistributedEnvironment.
             **kwargs: Additional keyword arguments forwarded to
                 DistributedEnvironment.
         """
-        super().__init__(*args, **kwargs, device_type=device)
+        super().__init__(*args, **kwargs, device=device)
 
         # Speed timing logger — writes to a dedicated file, no other output
         if output_speed_info:

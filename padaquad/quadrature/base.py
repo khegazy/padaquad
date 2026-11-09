@@ -2795,7 +2795,7 @@ class AdaptiveQuadrature(SolverBase):
         for every point, so an f whose memory depends on t can be mismeasured.
 
         The search stops when c changes by less than 1 % from N/10 to N, a call
-        takes longer than 1 s (CUDA) or 0.1 s (CPU), N reaches 1e9, or the next
+        takes longer than 0.5 s (CUDA) or 0.1 s (CPU), N reaches 1e9, or the next
         call is predicted not to fit (10 * M > usable memory). After an
         out-of-memory error at N, c from the previous N is kept if that N was
         >= 100; otherwise c = max(previous c, s * F / (0.75 * N)) with F the free
@@ -2836,7 +2836,7 @@ class AdaptiveQuadrature(SolverBase):
         GB = 1024**3
         on_cuda = self.device.type == "cuda"
         s = _GRADIENT_MEMORY_SAFETY_FACTOR if take_gradient else 1.0
-        time_limit = 1.0 if on_cuda else 0.1
+        time_limit = 0.5 if on_cuda else 0.1
         max_test = 1000000000
         # On Linux the process's peak resident memory can be reset; elsewhere
         # (macOS, Windows, a locked /proc) M is a before/after difference.

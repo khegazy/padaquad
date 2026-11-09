@@ -281,7 +281,7 @@ merged. `_rec_remove` ensures no two adjacent pairs are both flagged.
   `take_gradient`, else 1). M: CUDA peak counters; on Linux CPUs the
   resettable process peak (`/proc/self/clear_refs` + `VmHWM`) plus the
   kernel's counter error E; elsewhere an RSS before/after difference.
-  Stops: c changes < 1 %, call slower than 1 s (CUDA) / 0.1 s (CPU),
+  Stops: c changes < 1 %, call slower than 0.5 s (CUDA) / 0.1 s (CPU),
   N = 1e9, or 10·M > usable memory.
 - The batch size is computed at every evaluation from live memory:
   `get_max_batch` → `_get_max_f_evals = usable_memory / c` (capped at 1e9).

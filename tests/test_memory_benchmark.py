@@ -25,7 +25,6 @@ import logging
 import os
 import subprocess
 import sys
-import time
 import types
 
 import pytest
@@ -157,7 +156,7 @@ def test_cost_converges(fake, take_gradient):
 
 
 def test_slow_call_stops_search(fake):
-    """A call slower than the CPU limit (0.1 s) ends the search at that N. The
+    """A call slower than the 1 s limit ends the search at that N. The
     fixed cost keeps c changing by > 1 %, so only the time stop can fire."""
     a, b = 2**20, 4096
     f = CostIntegrand(fake.memory, fake.clock, fixed=a, per_point=b, slow_from=100)
@@ -284,11 +283,13 @@ def test_real_linux_reader_smoke(monkeypatch):
     counted on one or a few CPUs, so the per-CPU counter error is a few MiB;
     a multithreaded fill such as torch.ones can read low by most of it."""
     monkeypatch.setattr(qbase.os, "cpu_count", lambda: 1)
+    clock = FakeClock()
+    monkeypatch.setattr(qbase, "time", clock)
     solver = make_solver_for_unit_test()
 
     def heavy(t, *args):
         bytearray(200 * 2**20)  # 200 MiB, touched, freed before returning
-        time.sleep(0.2)  # slower than the CPU limit: one call only
+        clock.now += 2.0  # slower than the 1 s limit: one call only
         return torch.ones((t.shape[0], 1), dtype=t.dtype)
 
     solver._setup_memory_checks(heavy, NODE, take_gradient=False, total_mem_usage=0.9)
@@ -328,7 +329,7 @@ def test_messages_when_measuring(caplog, monkeypatch):
     monkeypatch.setattr(qbase, "time", clock)
 
     def slow_sin(t, *args):
-        clock.now += 0.5  # stops the search after one call; no real waiting
+        clock.now += 2.0  # stops the search after one call; no real waiting
         return torch.sin(t)
 
     solver = make_solver_for_unit_test(method_name="gk21")
@@ -358,7 +359,7 @@ def test_slow_integrand_gradient_path_completes(monkeypatch):
     monkeypatch.setattr(qbase, "time", clock)
 
     def slow(t, *args):
-        clock.now += 0.5  # every call is "slow" on the CPU limit
+        clock.now += 2.0  # every call is slower than the 1 s limit
         return torch.cos(t)
 
     solver = make_solver_for_unit_test(method_name="gk21")

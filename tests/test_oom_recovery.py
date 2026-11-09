@@ -4,9 +4,13 @@ When an integrand ``f`` raises ``torch.OutOfMemoryError`` mid-evaluation, the
 split evaluation handlers
 (``_evaluate_f_on_split_nodes`` / ``_evaluate_f_on_split_residual_nodes``) are
 supposed to shrink ``max_batch`` and retry the failed batch, caching the new cap
-in ``self._oom_max_batch`` so every later batch in the same ``integrate()`` call
-stays clamped. The reduction repeats until the batch fits or a single evaluation
-(``max_batch == 1``) still fails, at which point an informative error is raised.
+in ``self._oom_max_batch`` so every later batch stays clamped. The cap persists
+across ``integrate()`` calls while ``f`` is the same object and
+``take_gradient=False``; it is cleared when ``f`` changes or on a
+``take_gradient=True`` call (that path has no OOM recovery and cannot honor a
+cap below ``C``). The reduction repeats until the batch fits or a single
+evaluation (``max_batch == 1``) still fails, at which point an informative error
+is raised.
 
 Every analytic integrand in the suite has a tiny memory footprint, so this path
 was never exercised by the existing tests. These tests **simulate** OOM with a
@@ -57,11 +61,15 @@ class OOMIntegrand:
     this it means the reduction is not strictly decreasing (e.g. a naive
     ``round`` that sticks at 2 forever). We raise ``AssertionError`` to turn what
     would otherwise be an infinite loop / hang into a clean test failure.
+
+    ``fail`` replaces the simulated ``torch.OutOfMemoryError`` with another way
+    of running out of memory: a callable that raises (see ``FAILURE_MODES``).
     """
 
-    def __init__(self, limit: int, max_calls: int = 2000):
+    def __init__(self, limit: int, max_calls: int = 2000, fail=None):
         self.limit = limit
         self.max_calls = max_calls
+        self.fail = fail
         self.batch_sizes: list[int] = []
         self.n_oom = 0
 
@@ -75,8 +83,33 @@ class OOMIntegrand:
             )
         if n > self.limit:
             self.n_oom += 1
+            if self.fail is not None:
+                self.fail()
             raise torch.OutOfMemoryError(f"simulated OOM at batch {n}")
         return torch.ones((n, 1), dtype=t.dtype, device=t.device)
+
+
+def _raise_memory_error():
+    raise MemoryError("simulated numpy-style MemoryError")
+
+
+def _raise_cublas_alloc_failed():
+    # torch 2.8's message when cuBLAS cannot allocate its handle (TORCH_CUDABLAS_CHECK).
+    raise RuntimeError(
+        "CUDA error: CUBLAS_STATUS_ALLOC_FAILED when calling `cublasCreate(handle)`"
+    )
+
+
+# Every out-of-memory form the batch loop must recover from: the GPU error, a
+# real refused CPU allocation (a plain RuntimeError naming DefaultCPUAllocator;
+# 8 PB is refused instantly and allocates nothing), Python's MemoryError, and a
+# CUDA library's allocation status (a plain RuntimeError without "out of memory").
+FAILURE_MODES = {
+    "torch_oom": None,
+    "cpu_refusal": lambda: torch.empty(10**15, dtype=torch.float64),
+    "memory_error": _raise_memory_error,
+    "cublas_alloc_failed": _raise_cublas_alloc_failed,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -138,7 +171,7 @@ HANDLERS = ["split", "residual"]
 class TestSplitHandlersOOM:
     def _solver(self):
         solver = make_solver_for_unit_test(UNIT_METHOD)
-        # Mimic integrate()'s per-call reset (base.py:486): no cap carried in.
+        # Mimic a fresh solver / new integrand: no cap carried in.
         solver._oom_max_batch = None
         return solver
 
@@ -227,17 +260,19 @@ class TestIntegrateOOMRecovery:
     LIMIT = 10
     BIG_BATCH = 100_000  # >> any panel count, so the first batch OOMs
 
+    @pytest.mark.parametrize("fail", list(FAILURE_MODES))
     @pytest.mark.parametrize("conserve_memory", [False, True])
-    def test_integrate_recovers_from_oom(self, conserve_memory):
+    def test_integrate_recovers_from_oom(self, conserve_memory, fail):
         """A full ``integrate()`` of ``f=1`` completes despite repeated OOMs,
         returns the correct integral (∫₀¹ 1 dt = 1), and leaves a cap
         ``<= limit``. ``conserve_memory`` selects the split vs. split-residual
         handler; ``take_gradient=False`` keeps us off the (unhandled)
-        full-nodes path."""
+        full-nodes path. ``fail`` covers every recognized out-of-memory form;
+        before 1.2.3 the CPU refusal and ``MemoryError`` crashed ``integrate``."""
         solver = make_uniform_solver(
             "gk21", atol=1e-6, rtol=1e-6, device="cpu", max_batch=self.BIG_BATCH
         )
-        oom = OOMIntegrand(limit=self.LIMIT)
+        oom = OOMIntegrand(limit=self.LIMIT, fail=FAILURE_MODES[fail])
         result = solver.integrate(
             oom,
             mesh_init=T_INIT,
@@ -251,18 +286,34 @@ class TestIntegrateOOMRecovery:
         assert solver._oom_max_batch is not None
         assert solver._oom_max_batch <= oom.limit
 
+    def test_unrelated_runtime_error_propagates(self):
+        """A ``RuntimeError`` that is not an out-of-memory error is a real bug in
+        ``f``: the batch loop must re-raise it unchanged, not shrink the batch."""
+        solver = make_uniform_solver(
+            "gk21", atol=1e-6, rtol=1e-6, device="cpu", max_batch=self.BIG_BATCH
+        )
+
+        def broken(t, *args):
+            # Only multi-point batches fail, so the one-point warm-up call in
+            # integrate() passes and the error comes from the batch loop.
+            if t.shape[0] > 1:
+                raise RuntimeError("shape mismatch in f")
+            return torch.ones((1, 1), dtype=t.dtype, device=t.device)
+
+        with pytest.raises(RuntimeError, match="shape mismatch in f"):
+            solver.integrate(broken, mesh_init=T_INIT, mesh_final=T_FINAL)
+        assert solver._oom_max_batch is None
+
     def test_oom_max_batch_reset_between_calls(self):
-        """``_oom_max_batch`` is reset to ``None`` at the start of each
-        ``integrate()`` (base.py:486): a clean follow-up run that never OOMs
-        must not inherit the previous run's cap."""
+        """``_oom_max_batch`` is cleared at the start of an ``integrate()``
+        whose ``f`` is a different object: the memory footprint depends on
+        ``f``, so a cap learned for one integrand must not throttle another."""
         solver = make_uniform_solver(
             "gk21", atol=1e-6, rtol=1e-6, device="cpu", max_batch=self.BIG_BATCH
         )
 
         oom = OOMIntegrand(limit=self.LIMIT)
-        solver.integrate(
-            oom, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
-        )
+        solver.integrate(oom, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False)
         assert solver._oom_max_batch is not None  # cap set by the OOM run
 
         # A run with a tiny-footprint integrand never OOMs -> cap stays None.
@@ -273,3 +324,62 @@ class TestIntegrateOOMRecovery:
             take_gradient=False,
         )
         assert solver._oom_max_batch is None
+
+    @pytest.mark.parametrize(
+        ("solver_kwargs", "call_kwargs"),
+        [
+            ({"max_batch": BIG_BATCH}, {}),
+            # Explicit None: make_uniform_solver injects the cached benchmark
+            # value whenever the key is absent, which would set init_max_batch.
+            ({"max_batch": None}, {"max_batch": BIG_BATCH}),
+        ],
+        ids=["constructor", "per_call"],
+    )
+    def test_oom_max_batch_kept_for_same_integrand(self, solver_kwargs, call_kwargs):
+        """The cap learned on one call clamps the next call with the *same*
+        ``f`` even when an explicit ``max_batch`` (constructor or per call)
+        asks for more: no OOM is re-triggered and no batch exceeds the cap."""
+        solver = make_uniform_solver(
+            "gk21", atol=1e-6, rtol=1e-6, device="cpu", **solver_kwargs
+        )
+        oom = OOMIntegrand(limit=self.LIMIT)
+        call = dict(
+            mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False, **call_kwargs
+        )
+
+        solver.integrate(oom, **call)
+        cap = solver._oom_max_batch
+        n_oom, n_before = oom.n_oom, len(oom.batch_sizes)
+        assert cap is not None
+        assert n_oom >= 1
+
+        result = solver.integrate(oom, **call)
+
+        assert math.isclose(float(result.integral.sum()), 1.0, abs_tol=1e-5)
+        assert oom.n_oom == n_oom, "cap was forgotten: the second call OOM'd again"
+        # Only the second call's batches: the first call's record also holds
+        # the OOM attempts above the cap.
+        assert all(b <= cap for b in oom.batch_sizes[n_before:])
+        assert solver._oom_max_batch == cap
+        assert solver.get_max_batch(default_max_batch=self.BIG_BATCH) == cap
+
+    def test_oom_max_batch_cleared_for_take_gradient(self):
+        """A ``take_gradient=True`` call clears the cap. That path has no OOM
+        recovery and uses ``max_mesh_steps = max_batch // C``, so a persisted
+        cap below ``C`` would trip its ``max_mesh_steps >= 1`` assert."""
+        solver = make_uniform_solver(
+            "gk21", atol=1e-6, rtol=1e-6, device="cpu", max_batch=self.BIG_BATCH
+        )
+        oom = OOMIntegrand(limit=self.LIMIT)
+        solver.integrate(oom, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False)
+        assert solver._oom_max_batch is not None
+        assert solver._oom_max_batch < solver.C, "test needs a cap below C"
+
+        # Same object (same id) so the solver still sees the same integrand;
+        # it just stops raising.
+        oom.limit = self.BIG_BATCH
+        result = solver.integrate(
+            oom, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=True
+        )
+        assert solver._oom_max_batch is None
+        assert math.isclose(float(result.integral.sum()), 1.0, abs_tol=1e-5)

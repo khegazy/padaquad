@@ -113,6 +113,8 @@ padaquad/
 │   └── interpolatory.py     # variable adaptive_heun, interpolatory3_variable
 ├── quadrature/            # adaptive integration engine
 │   ├── base.py              # AdaptiveQuadrature ABC + main integrate loop
+│   ├── memory.py            # _MemoryManagement mixin: memory benchmark,
+│   │                        #   batch-size budget, OOM recognition
 │   ├── uniform.py           # _UniformAdaptiveQuadratureBase
 │   └── variable.py          # _VariableAdaptiveQuadratureBase
 ├── runge_kutta.py         # _RK_integral, UniformAdaptiveQuadrature,
@@ -127,7 +129,8 @@ padaquad/
 ```
 DistributedEnvironment (distributed.py)
   └── SolverBase (base.py)
-        └── AdaptiveQuadrature (quadrature/base.py)
+        └── AdaptiveQuadrature (quadrature/base.py; also inherits the
+            _MemoryManagement mixin from quadrature/memory.py)
               ├── _UniformAdaptiveQuadratureBase (quadrature/uniform.py)
               │     └── UniformAdaptiveQuadrature (runge_kutta.py)
               └── _VariableAdaptiveQuadratureBase (quadrature/variable.py)
@@ -274,9 +277,25 @@ merged. `_rec_remove` ensures no two adjacent pairs are both flagged.
 
 ### Memory management
 
-- `_setup_memory_checks` benchmarks `f` with increasing `N`, measures
-  per-evaluation memory cost (with a 2.1× safety factor).
-- `_get_max_f_evals = usable_memory / per_eval_size`.
+- All of this lives in `quadrature/memory.py` (`_MemoryManagement` mixin,
+  `_is_out_of_memory`); the batch loop `_evaluate_f_in_batches` stays in
+  `quadrature/base.py`.
+- `_setup_memory_checks` measures only c = `f_unit_mem_size`, the memory
+  cost of ONE evaluation of `f`. It does not choose a batch size. It calls
+  `f` on N = 1, 10, 100, … points, measures M (memory that call used) and
+  sets c = s·(M + E)/N (s = `_GRADIENT_MEMORY_SAFETY_FACTOR` = 2.1 when
+  `take_gradient`, else 1). M: CUDA peak counters; on Linux CPUs the
+  resettable process peak (`/proc/self/clear_refs` + `VmHWM`) plus the
+  kernel's counter error E; elsewhere an RSS before/after difference.
+  Stops: c changes < 1 %, call slower than 1 s,
+  N = 1e9, or 10·M > usable memory.
+- The batch size is computed at every evaluation from live memory:
+  `get_max_batch` → `_get_max_f_evals = usable_memory / c` (capped at 1e9).
+- Out-of-memory errors are recognized by `_is_out_of_memory` (GPU OOM, CPU
+  `DefaultCPUAllocator` refusal, CUDA "out of memory" and CUDA-library
+  `*ALLOC*_FAILED` statuses, `MemoryError`);
+  the shared batch loop `_evaluate_f_in_batches` shrinks the batch, and
+  `_release_memory` cleans up (CUDA cache only on a CUDA solver).
 - `_get_usable_memory = free - buffer`, where
   `buffer = (1 - total_mem_usage) * total_memory`.
 - Supports both CUDA (`torch.cuda.mem_get_info`) and CPU

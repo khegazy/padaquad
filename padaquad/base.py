@@ -61,7 +61,7 @@ def get_sampling_type(sampling_type: str) -> steps:
         The corresponding ``steps`` enum value.
 
     Raises:
-        KeyError: If sampling_type is not a recognized name.
+        ValueError: If sampling_type is not a recognized name.
     """
     types = {
         "fixed": steps.FIXED,
@@ -70,6 +70,10 @@ def get_sampling_type(sampling_type: str) -> steps:
         "adaptive_variable": steps.ADAPTIVE_VARIABLE,
         "variable": steps.ADAPTIVE_VARIABLE,
     }
+    if sampling_type not in types:
+        raise ValueError(
+            f"Unknown sampling_type {sampling_type!r}; valid names are {sorted(types)}."
+        )
     return types[sampling_type]
 
 

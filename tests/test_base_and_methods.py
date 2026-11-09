@@ -56,7 +56,8 @@ class TestGetSamplingType:
         assert get_sampling_type("fixed") == steps.FIXED
 
     def test_invalid_raises(self):
-        with pytest.raises(KeyError):
+        """An unknown name raises ValueError naming it and the valid names."""
+        with pytest.raises(ValueError, match=r"'nonexistent'.*'uniform'"):
             get_sampling_type("nonexistent")
 
 

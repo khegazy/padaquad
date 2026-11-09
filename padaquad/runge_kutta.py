@@ -283,4 +283,7 @@ def adaptive_quadrature(
     elif sampling_type == steps.ADAPTIVE_VARIABLE:
         return VariableAdaptiveQuadrature(*args, **kwargs)
     else:
-        raise ValueError
+        raise ValueError(
+            f"adaptive_quadrature supports sampling_type {steps.ADAPTIVE_UNIFORM} "
+            f"or {steps.ADAPTIVE_VARIABLE}, got {sampling_type}."
+        )

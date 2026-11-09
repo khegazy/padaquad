@@ -70,8 +70,8 @@ class TestGetParallelRKSolver:
         assert isinstance(solver, VariableAdaptiveQuadrature)
 
     def test_fixed_raises(self):
-        """steps.FIXED raises ValueError (not supported for parallel RK)."""
-        with pytest.raises(ValueError):
+        """steps.FIXED raises ValueError naming it and the supported types."""
+        with pytest.raises(ValueError, match=r"ADAPTIVE_UNIFORM.*got steps\.FIXED"):
             adaptive_quadrature(
                 sampling_type=steps.FIXED,
                 method="bosh3",
@@ -79,6 +79,11 @@ class TestGetParallelRKSolver:
                 rtol=1e-6,
                 remove_cut=REMOVE_CUT,
             )
+
+    def test_unknown_string_raises(self):
+        """An unknown string raises ValueError (not KeyError) naming it."""
+        with pytest.raises(ValueError, match=r"'bogus'.*'uniform'"):
+            adaptive_quadrature(sampling_type="bogus", method="bosh3")
 
 
 # ---------------------------------------------------------------------------

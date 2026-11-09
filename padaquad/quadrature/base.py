@@ -494,7 +494,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # Using id() avoids the lambda-collision bug present in earlier
         # versions which compared f.__name__ (every lambda has
         # __name__ == "<lambda>").
-        same_integrand_fxn = (
+        same_integrand_f = (
             self.previous_f_id is not None and id(f) == self.previous_f_id
         )
 
@@ -504,7 +504,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # that path has no OOM recovery, keeps the autograd graph (a larger
         # footprint than the one the cap was learned on), and fails its
         # max_mesh_steps >= 1 assert if the cap is below C.
-        if not same_integrand_fxn or take_gradient:
+        if not same_integrand_f or take_gradient:
             self._oom_max_batch = None
 
         # Make sure f exists and provides the correct output. Running this
@@ -520,7 +520,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         del test_output, test_integrand
 
         # Benchmark memory footprint on first call with a new integrand
-        if same_integrand_fxn and force_max_batch is None:
+        if same_integrand_f and force_max_batch is None:
             # Use the previous max_batch, running memory check everytime is slow
             force_max_batch = self.previous_max_batch
         if force_max_batch is None:
@@ -543,7 +543,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh_init,
             mesh_final,
             reuse_mesh,
-            same_integrand_fxn,
+            same_integrand_f,
             random_initial_mesh,
             N_init_steps,
         )
@@ -1851,7 +1851,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_init,
         mesh_final,
         reuse_mesh,
-        same_integrand_fxn,
+        same_integrand_f,
         random_initial_mesh,
         N_init_steps,
     ):
@@ -1867,7 +1867,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh_is_given = False
             # Warn if the cached mesh was produced for a different integrand;
             # the user has opted into reuse but we should flag the mismatch.
-            if not same_integrand_fxn:
+            if not same_integrand_f:
                 warnings.warn(
                     "reuse_mesh=True but f id differs from the cached "
                     "integrand; warm-started mesh may be poorly tuned for "

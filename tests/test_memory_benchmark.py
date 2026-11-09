@@ -31,7 +31,7 @@ import pytest
 import torch
 from _helpers import T_FINAL, T_INIT, make_solver_for_unit_test, needs_cuda
 
-import padaquad.quadrature.base as qbase
+import padaquad.quadrature.memory as qmem
 from padaquad import adaptive_quadrature, steps
 
 GB = 1024**3
@@ -47,7 +47,7 @@ class FakeMemory:
 
 
 class FakeClock:
-    """Replaces ``qbase.time``: ``time()`` advances only when an integrand says."""
+    """Replaces ``qmem.time``: ``time()`` advances only when an integrand says."""
 
     def __init__(self):
         self.now = 0.0
@@ -112,10 +112,10 @@ def fake(monkeypatch):
             raise OSError("no /proc here")
 
     memory, clock = FakeMemory(), FakeClock()
-    monkeypatch.setattr(qbase, "Path", NoClearRefs)
-    monkeypatch.setattr(qbase, "time", clock)
+    monkeypatch.setattr(qmem, "Path", NoClearRefs)
+    monkeypatch.setattr(qmem, "time", clock)
     monkeypatch.setattr(
-        qbase.psutil,
+        qmem.psutil,
         "Process",
         lambda: types.SimpleNamespace(
             memory_info=lambda: types.SimpleNamespace(rss=memory.rss)
@@ -135,7 +135,7 @@ def benchmark(solver, f, take_gradient=False):
 
 
 def safety(take_gradient):
-    return qbase._GRADIENT_MEMORY_SAFETY_FACTOR if take_gradient else 1.0
+    return qmem._GRADIENT_MEMORY_SAFETY_FACTOR if take_gradient else 1.0
 
 
 # ---------------------------------------------------------------------------
@@ -264,8 +264,8 @@ def test_linux_reader_adds_error_allowance(fake, monkeypatch, cores):
     monkeypatch.setattr(
         resource, "getrusage", lambda who: types.SimpleNamespace(ru_maxrss=50 * 2**20)
     )
-    monkeypatch.setattr(qbase, "Path", FakeProc)
-    monkeypatch.setattr(qbase.os, "cpu_count", lambda: cores)
+    monkeypatch.setattr(qmem, "Path", FakeProc)
+    monkeypatch.setattr(qmem.os, "cpu_count", lambda: cores)
     f = CostIntegrand(fake.memory, fake.clock, per_point=4096, slow_from=1)
     c = benchmark(fake.solver, f)
     E = cores * max(32, 2 * cores) * os.sysconf("SC_PAGE_SIZE")
@@ -282,9 +282,9 @@ def test_real_linux_reader_smoke(monkeypatch):
     The allocation is a single-threaded memset (bytearray): its pages are
     counted on one or a few CPUs, so the per-CPU counter error is a few MiB;
     a multithreaded fill such as torch.ones can read low by most of it."""
-    monkeypatch.setattr(qbase.os, "cpu_count", lambda: 1)
+    monkeypatch.setattr(qmem.os, "cpu_count", lambda: 1)
     clock = FakeClock()
-    monkeypatch.setattr(qbase, "time", clock)
+    monkeypatch.setattr(qmem, "time", clock)
     solver = make_solver_for_unit_test()
 
     def heavy(t, *args):
@@ -326,14 +326,14 @@ def test_messages_when_measuring(caplog, monkeypatch):
     the user to pass max_batch; the end warning reports time, c, max_batch and
     the reason. With max_batch, neither appears."""
     clock = FakeClock()
-    monkeypatch.setattr(qbase, "time", clock)
+    monkeypatch.setattr(qmem, "time", clock)
 
     def slow_sin(t, *args):
         clock.now += 2.0  # stops the search after one call; no real waiting
         return torch.sin(t)
 
     solver = make_solver_for_unit_test(method_name="gk21")
-    with caplog.at_level(logging.WARNING, logger=qbase.__name__):
+    with caplog.at_level(logging.WARNING, logger=qmem.__name__):
         solver.integrate(slow_sin, mesh_init=T_INIT, mesh_final=T_FINAL)
     text = caplog.text
     assert "PadaQuad is measuring how much memory" in text
@@ -344,7 +344,7 @@ def test_messages_when_measuring(caplog, monkeypatch):
 
     caplog.clear()
     solver = make_solver_for_unit_test(method_name="gk21", max_batch=1000)
-    with caplog.at_level(logging.WARNING, logger=qbase.__name__):
+    with caplog.at_level(logging.WARNING, logger=qmem.__name__):
         solver.integrate(slow_sin, mesh_init=T_INIT, mesh_final=T_FINAL)
     assert "PadaQuad is measuring" not in caplog.text
     assert "Memory measurement finished" not in caplog.text
@@ -356,7 +356,7 @@ def test_slow_integrand_gradient_path_completes(monkeypatch):
     on the take_gradient=True path, which then failed its assertion. c is now
     measured, so the batch is usable / c and integrate() completes."""
     clock = FakeClock()
-    monkeypatch.setattr(qbase, "time", clock)
+    monkeypatch.setattr(qmem, "time", clock)
 
     def slow(t, *args):
         clock.now += 2.0  # every call is slower than the 1 s limit
@@ -378,7 +378,7 @@ def test_release_memory_never_touches_gpu_on_cpu_solver(monkeypatch):
     def forbidden():
         raise AssertionError("CPU solver emptied the CUDA cache")
 
-    monkeypatch.setattr(qbase.torch.cuda, "empty_cache", forbidden)
+    monkeypatch.setattr(qmem.torch.cuda, "empty_cache", forbidden)
     make_solver_for_unit_test()._release_memory()
 
 
@@ -489,7 +489,7 @@ def test_gpu_next_call_predicted_not_to_fit(monkeypatch, caplog):
         return torch.ones((t.shape[0], 1), dtype=t.dtype, device=t.device)
 
     node = torch.zeros(1, dtype=torch.float64, device="cuda:0")
-    with caplog.at_level(logging.WARNING, logger=qbase.__name__):
+    with caplog.at_level(logging.WARNING, logger=qmem.__name__):
         solver._setup_memory_checks(f, node, take_gradient=False, total_mem_usage=0.9)
     assert calls == [1, 10]
     assert "stopped because the next test would not fit in memory" in caplog.text

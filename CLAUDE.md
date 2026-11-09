@@ -113,6 +113,8 @@ padaquad/
 │   └── interpolatory.py     # variable adaptive_heun, interpolatory3_variable
 ├── quadrature/            # adaptive integration engine
 │   ├── base.py              # AdaptiveQuadrature ABC + main integrate loop
+│   ├── memory.py            # _MemoryManagement mixin: memory benchmark,
+│   │                        #   batch-size budget, OOM recognition
 │   ├── uniform.py           # _UniformAdaptiveQuadratureBase
 │   └── variable.py          # _VariableAdaptiveQuadratureBase
 ├── runge_kutta.py         # _RK_integral, UniformAdaptiveQuadrature,
@@ -127,7 +129,8 @@ padaquad/
 ```
 DistributedEnvironment (distributed.py)
   └── SolverBase (base.py)
-        └── AdaptiveQuadrature (quadrature/base.py)
+        └── AdaptiveQuadrature (quadrature/base.py; also inherits the
+            _MemoryManagement mixin from quadrature/memory.py)
               ├── _UniformAdaptiveQuadratureBase (quadrature/uniform.py)
               │     └── UniformAdaptiveQuadrature (runge_kutta.py)
               └── _VariableAdaptiveQuadratureBase (quadrature/variable.py)
@@ -274,6 +277,9 @@ merged. `_rec_remove` ensures no two adjacent pairs are both flagged.
 
 ### Memory management
 
+- All of this lives in `quadrature/memory.py` (`_MemoryManagement` mixin,
+  `_is_out_of_memory`); the batch loop `_evaluate_f_in_batches` stays in
+  `quadrature/base.py`.
 - `_setup_memory_checks` measures only c = `f_unit_mem_size`, the memory
   cost of ONE evaluation of `f`. It does not choose a batch size. It calls
   `f` on N = 1, 10, 100, … points, measures M (memory that call used) and

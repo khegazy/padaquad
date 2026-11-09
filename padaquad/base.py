@@ -46,6 +46,10 @@ class steps(Enum):
     ADAPTIVE_VARIABLE = 2
 
 
+# Sampling type used when the caller gives none (adaptive_quadrature, integrate).
+DEFAULT_SAMPLING_TYPE = "uniform"
+
+
 def get_sampling_type(sampling_type: str) -> steps:
     """
     Convert a string sampling type name into the corresponding ``steps`` enum.

@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [1.3.0] - Unreleased
 
+### Added
+
+- **`adaptive_quadrature` defaults to uniform sampling.** `sampling_type` was a required argument, so `adaptive_quadrature(method="gk21", ...)`, as written in the README's warm-start example, raised `TypeError: missing 1 required positional argument: 'sampling_type'`. It now defaults to `DEFAULT_SAMPLING_TYPE` (`"uniform"`, defined in `padaquad/base.py`), the same constant that now sets the default of the `padaquad.integrate()` wrapper's `sampling` argument, so both defaults change together.
+
 ### Changed
 
 - **The memory benchmark now measures the memory cost of one integrand evaluation.** `_setup_memory_checks` measures one number, c (`f_unit_mem_size`), the memory one evaluation of `f` uses; the batch size is still computed at every evaluation from live free memory (usable memory ÷ c). Before, nothing was measured: when a test call took longer than 0.1 s the code assumed 100·N points would fill memory, so c was about 100 times too small and batches about 100 times too large. The 1.2.2 entry below claimed the result "never extrapolates past the largest tile actually validated"; that was wrong. Now, for N = 1, 10, 100, … points, M (the memory one call used) is measured and c = s·(M + E)/N, with s = 2.1 for `take_gradient=True` (a heuristic for backpropagation) and 1 otherwise:

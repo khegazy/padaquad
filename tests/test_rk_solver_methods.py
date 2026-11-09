@@ -36,6 +36,11 @@ class TestGetParallelRKSolver:
         )
         assert isinstance(solver, UniformAdaptiveQuadrature)
 
+    def test_default_is_uniform(self):
+        """No sampling_type gives a uniform solver (the README's warm-start example)."""
+        solver = adaptive_quadrature(method="gk21", atol=1e-8, rtol=1e-8)
+        assert isinstance(solver, UniformAdaptiveQuadrature)
+
     def test_variable_string(self):
         """String 'variable' returns a variable solver."""
         solver = adaptive_quadrature(

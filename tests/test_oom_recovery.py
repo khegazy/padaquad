@@ -61,11 +61,15 @@ class OOMIntegrand:
     this it means the reduction is not strictly decreasing (e.g. a naive
     ``round`` that sticks at 2 forever). We raise ``AssertionError`` to turn what
     would otherwise be an infinite loop / hang into a clean test failure.
+
+    ``fail`` replaces the simulated ``torch.OutOfMemoryError`` with another way
+    of running out of memory: a callable that raises (see ``FAILURE_MODES``).
     """
 
-    def __init__(self, limit: int, max_calls: int = 2000):
+    def __init__(self, limit: int, max_calls: int = 2000, fail=None):
         self.limit = limit
         self.max_calls = max_calls
+        self.fail = fail
         self.batch_sizes: list[int] = []
         self.n_oom = 0
 
@@ -79,8 +83,24 @@ class OOMIntegrand:
             )
         if n > self.limit:
             self.n_oom += 1
+            if self.fail is not None:
+                self.fail()
             raise torch.OutOfMemoryError(f"simulated OOM at batch {n}")
         return torch.ones((n, 1), dtype=t.dtype, device=t.device)
+
+
+def _raise_memory_error():
+    raise MemoryError("simulated numpy-style MemoryError")
+
+
+# Every out-of-memory form the batch loop must recover from: the GPU error, a
+# real refused CPU allocation (a plain RuntimeError naming DefaultCPUAllocator;
+# 8 PB is refused instantly and allocates nothing), and Python's MemoryError.
+FAILURE_MODES = {
+    "torch_oom": None,
+    "cpu_refusal": lambda: torch.empty(10**15, dtype=torch.float64),
+    "memory_error": _raise_memory_error,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -231,17 +251,19 @@ class TestIntegrateOOMRecovery:
     LIMIT = 10
     BIG_BATCH = 100_000  # >> any panel count, so the first batch OOMs
 
+    @pytest.mark.parametrize("fail", list(FAILURE_MODES))
     @pytest.mark.parametrize("conserve_memory", [False, True])
-    def test_integrate_recovers_from_oom(self, conserve_memory):
+    def test_integrate_recovers_from_oom(self, conserve_memory, fail):
         """A full ``integrate()`` of ``f=1`` completes despite repeated OOMs,
         returns the correct integral (∫₀¹ 1 dt = 1), and leaves a cap
         ``<= limit``. ``conserve_memory`` selects the split vs. split-residual
         handler; ``take_gradient=False`` keeps us off the (unhandled)
-        full-nodes path."""
+        full-nodes path. ``fail`` covers every recognized out-of-memory form;
+        before 1.2.3 the CPU refusal and ``MemoryError`` crashed ``integrate``."""
         solver = make_uniform_solver(
             "gk21", atol=1e-6, rtol=1e-6, device="cpu", max_batch=self.BIG_BATCH
         )
-        oom = OOMIntegrand(limit=self.LIMIT)
+        oom = OOMIntegrand(limit=self.LIMIT, fail=FAILURE_MODES[fail])
         result = solver.integrate(
             oom,
             mesh_init=T_INIT,
@@ -254,6 +276,24 @@ class TestIntegrateOOMRecovery:
         assert math.isclose(float(result.integral.sum()), 1.0, abs_tol=1e-5)
         assert solver._oom_max_batch is not None
         assert solver._oom_max_batch <= oom.limit
+
+    def test_unrelated_runtime_error_propagates(self):
+        """A ``RuntimeError`` that is not an out-of-memory error is a real bug in
+        ``f``: the batch loop must re-raise it unchanged, not shrink the batch."""
+        solver = make_uniform_solver(
+            "gk21", atol=1e-6, rtol=1e-6, device="cpu", max_batch=self.BIG_BATCH
+        )
+
+        def broken(t, *args):
+            # Only multi-point batches fail, so the one-point warm-up call in
+            # integrate() passes and the error comes from the batch loop.
+            if t.shape[0] > 1:
+                raise RuntimeError("shape mismatch in f")
+            return torch.ones((1, 1), dtype=t.dtype, device=t.device)
+
+        with pytest.raises(RuntimeError, match="shape mismatch in f"):
+            solver.integrate(broken, mesh_init=T_INIT, mesh_final=T_FINAL)
+        assert solver._oom_max_batch is None
 
     def test_oom_max_batch_reset_between_calls(self):
         """``_oom_max_batch`` is cleared at the start of an ``integrate()``

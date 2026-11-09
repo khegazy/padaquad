@@ -44,13 +44,20 @@ import contextlib
 import gc
 import logging
 import math
+import os
 import time
 import warnings
 from abc import abstractmethod
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import psutil
 import torch
+
+try:
+    import resource  # Unix only; used to read peak memory on Linux CPUs
+except ImportError:  # Windows
+    resource = None  # type: ignore[assignment]
 
 from padaquad.base import SolverBase
 from padaquad.distributed import _resolve_device
@@ -60,6 +67,25 @@ logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+# Multiplies the measured memory cost of one f evaluation when
+# take_gradient=True: backpropagation uses roughly twice the forward memory.
+# A heuristic, not a measurement.
+_GRADIENT_MEMORY_SAFETY_FACTOR = 2.1
+
+
+def _is_out_of_memory(e: BaseException) -> bool:
+    """
+    True if e signals that an allocation did not fit in memory.
+
+    Covers a GPU out-of-memory error, a refused PyTorch CPU allocation (a plain
+    RuntimeError naming DefaultCPUAllocator, checked on torch 2.8), a CUDA
+    library allocation failure such as cuBLAS ("out of memory" in a plain
+    RuntimeError), and Python's MemoryError (raised by numpy).
+    """
+    return isinstance(e, (torch.OutOfMemoryError, MemoryError)) or any(
+        s in str(e) for s in ("DefaultCPUAllocator", "out of memory")
+    )
 
 
 class AdaptiveQuadrature(SolverBase):
@@ -506,6 +532,17 @@ class AdaptiveQuadrature(SolverBase):
         if not same_integrand_fxn or take_gradient:
             self._oom_max_batch = None
 
+        # Make sure f exists and provides the correct output. Running this
+        # before the memory benchmark also warms f up, so one-time costs (CUDA
+        # start-up, lazy model loading, cuBLAS workspace) stay out of it.
+        assert f is not None, "Must specify f or pass it during class initialization."
+        test_output = f(
+            torch.tensor([[mesh_init]], dtype=self.dtype, device=self.device), *f_args
+        )
+        test_integrand, _ = self._split_f_output(test_output)
+        assert len(test_integrand.shape) >= 2
+        del test_output, test_integrand
+
         # Benchmark memory footprint on first call with a new integrand
         if same_integrand_fxn and force_max_batch is None:
             # Use the previous max_batch, running memory check everytime is slow
@@ -519,15 +556,6 @@ class AdaptiveQuadrature(SolverBase):
                 f_args=f_args,
             )
         loss_fxn = loss_fxn if loss_fxn is not None else self._integral_loss
-
-        # Make sure f exists and provides the correct output
-        assert f is not None, "Must specify f or pass it during class initialization."
-        test_output = f(
-            torch.tensor([[mesh_init]], dtype=self.dtype, device=self.device), *f_args
-        )
-        test_integrand, _ = self._split_f_output(test_output)
-        assert len(test_integrand.shape) >= 2
-        del test_output, test_integrand
 
         # Decide initial mesh:
         #   - explicit mesh passed in: use it (always takes precedence);
@@ -1359,16 +1387,23 @@ class AdaptiveQuadrature(SolverBase):
         tracked_lists: list[list] | None = None
         num_nodes_evaluated = 0
         while num_nodes_evaluated < num_nodes_to_eval:
+            out_of_memory = False
             try:
                 f_output = f(
                     nodes_flat[num_nodes_evaluated : num_nodes_evaluated + max_batch],
                     *f_args,
                 )
-            except torch.OutOfMemoryError as e:  # Use RuntimeError for PyTorch < 2.0
+            except (RuntimeError, MemoryError) as e:
+                if not _is_out_of_memory(e):
+                    raise
                 if max_batch == 1:
                     raise torch.OutOfMemoryError(
                         f"{e}\n\nSingle integrand (f) evaluation failed to fit in memory, batch size cannot be reduced."
                     ) from e
+                out_of_memory = True
+            if out_of_memory:
+                # Cleaned up here, after the except block: inside it the error's
+                # traceback still holds f's tensors, so they cannot be freed.
                 free_mem, total_mem = self._get_memory()
                 self._release_memory()
                 # Seed from the live max_batch on the first OOM (_oom_max_batch
@@ -2720,81 +2755,178 @@ class AdaptiveQuadrature(SolverBase):
         f_args: tuple = (),
     ) -> None:
         """
-        Benchmark the integrand's memory footprint to determine batch sizes.
+        Measure c, the memory cost of one evaluation of f (``f_unit_mem_size``, GB).
 
-        Runs the integrand with increasing batch sizes (10, 100, ..., 1e9)
-        and measures the memory consumed per evaluation. This per-evaluation
-        memory cost (f_unit_mem_size) is then used throughout integration
-        to dynamically compute how many steps can fit in one batch.
+        This only measures c; it does not choose a batch size. The batch size
+        is computed at every evaluation from the memory free at that moment:
+        ``get_max_batch`` -> ``_get_max_f_evals`` = usable memory / c.
 
-        When take_gradient=True, a 2.1x safety factor is applied to the measured
-        memory to account for intermediate allocations during integration (RK
-        computation, error estimation, etc.).
+        f is called on N = 1, 10, 100, ... copies of ``node_test``. For each
+        call, M is the memory the call used and c = s * (M + E) / N, where s is
+        ``_GRADIENT_MEMORY_SAFETY_FACTOR`` (a heuristic for backpropagation)
+        when ``take_gradient`` and 1 otherwise. M is measured as:
+
+        - CUDA: peak allocated memory during the call minus allocated memory
+          before it. The peak counters of ``self.device`` are reset first, which
+          also resets ``max_memory_reserved``.
+        - CPU on Linux: the process's peak resident memory (``ru_maxrss``) minus
+          its value before the call, after resetting the peak by writing 5 to
+          ``/proc/self/clear_refs`` (Linux >= 4.0). This also resets the peak
+          that the caller's own ``getrusage`` or ``/usr/bin/time`` report from
+          then on. The kernel's per-CPU memory counters can read low by up to
+          E = cores * max(32, 2 * cores) pages (``lib/percpu_counter.c``,
+          ``compute_batch_value``), so E is added to M; E = 0 elsewhere.
+        - Other CPUs (macOS, Windows): resident memory after the call, with its
+          result alive, minus before. Memory that f frees before returning (for
+          example Jacobian intermediates) is missed, so c can be too low.
+
+        The "before" reading precedes building the input tile, so the tile is
+        counted. Memory allocated outside PyTorch's CUDA allocator (custom
+        ``cudaMalloc``, CuPy, NCCL) is not counted, and one input value is used
+        for every point, so an f whose memory depends on t can be mismeasured.
+
+        The search stops when c changes by less than 1 % from N/10 to N, a call
+        takes longer than 1 s (CUDA) or 0.1 s (CPU), N reaches 1e9, or the next
+        call is predicted not to fit (10 * M > usable memory). After an
+        out-of-memory error at N, c from the previous N is kept if that N was
+        >= 100; otherwise c = max(previous c, s * F / (0.75 * N)) with F the free
+        memory before the call, because the peak counters undercount a failed
+        call. The start and end messages are logged at WARNING level, so they
+        are silent if the application configures logging above WARNING.
 
         Args:
             f: The integrand function to benchmark.
             node_test: A sample node point for benchmarking. Shape: [T] or [1, T].
+            take_gradient: Whether the integration will backpropagate per batch.
+            total_mem_usage: Fraction of total memory allowed (0 < value <= 1).
             f_args: Extra arguments passed to f.
+
+        Raises:
+            torch.OutOfMemoryError: A single evaluation of f does not fit.
+            RuntimeError: The measurement failed for another reason; pass
+                ``max_batch`` to skip it.
         """
         logger.warning(
-            "Running memory test because max_batch was not provided, this is slow if called multiple times. Consider setting max_batch."
+            "PadaQuad is measuring how much memory one integrand (f) evaluation "
+            "uses, to determine max_batch (the maximum number of evaluations per "
+            "batch). This is needed because adaptive refinement changes the "
+            "evaluation batch at each step during the integral. This measurement "
+            "is slow and runs again for every new integrand. Pass max_batch to "
+            "skip this: determine it on your own or from an earlier run "
+            "(solver.get_max_batch()), or if evaluating multiple integrals over f "
+            "pass solver.get_max_batch() into max_batch."
         )
         t0 = time.time()
 
         assert len(node_test.shape) <= 2
         if len(node_test.shape) == 2:
             node_test = node_test[0]
-        node_test = node_test.unsqueeze(0)
+        node_test = node_test.unsqueeze(0).to(self.device)
         self.f_unit_mem_size = None
 
-        N = 1
-        eval_time = 0
-        mem_scale = 2.1 if take_gradient else 1.0
-        overshot_memory = False
+        GB = 1024**3
+        on_cuda = self.device.type == "cuda"
+        s = _GRADIENT_MEMORY_SAFETY_FACTOR if take_gradient else 1.0
+        time_limit = 1.0 if on_cuda else 0.1
         max_test = 1000000000
-        while self.f_unit_mem_size is None:
-            assert N > 0
-            mem_before = self._get_usable_memory(total_mem_usage)
-            eval_t0 = time.time()
-
-            # Catch OOM errors
+        # On Linux the process's peak resident memory can be reset; elsewhere
+        # (macOS, Windows, a locked /proc) M is a before/after difference.
+        clear_refs = Path("/proc/self/clear_refs")
+        linux_peak = False
+        if not on_cuda:
             try:
-                t_input = torch.tile(node_test, (N, 1))
-                result = f(t_input, *f_args)
-            except torch.OutOfMemoryError:
-                self._release_memory()
-                overshot_memory = True
-                N = int(min(0.75 * N, N - 1))
-                continue
+                clear_refs.write_text("5")
+                linux_peak = True
+            except OSError:
+                pass
+        if linux_peak:
+            cores = os.cpu_count() or 1
+            E = cores * max(32, 2 * cores) * resource.getpagesize() / GB
+        else:
+            E = 0.0
 
-            eval_time = time.time() - eval_t0
-            del result
-            del t_input
-            if overshot_memory:
-                self.f_unit_mem_size = mem_scale * mem_before / float(N)
-                break
-            if eval_time > 0.1:
-                self.f_unit_mem_size = mem_scale * mem_before / (100 * float(N))
-                break
-            if max_test <= N:
-                self.f_unit_mem_size = 0
-                break
-            N = 10 * N
+        def memory_in_use() -> int:
+            """Bytes in use (CUDA allocated, or process RSS / its reset peak)."""
+            if on_cuda:
+                return torch.cuda.max_memory_allocated(self.device)
+            if linux_peak:
+                return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+            return psutil.Process().memory_info().rss
+
+        N, c, c_prev, N_prev, reason = 1, 0.0, 0.0, 0, None
+        try:
+            while reason is None:
+                usable = self._get_usable_memory(total_mem_usage)
+                free = self._get_memory()[0]
+                if on_cuda:
+                    torch.cuda.reset_peak_memory_stats(self.device)
+                elif linux_peak:
+                    clear_refs.write_text("5")
+                before = memory_in_use()
+                eval_t0 = time.time()
+                out_of_memory = False
+                t_input: torch.Tensor | None = None
+                result = None
+                try:
+                    t_input = torch.tile(node_test, (N, 1))
+                    result = f(t_input, *f_args)
+                except (RuntimeError, MemoryError) as e:
+                    if not _is_out_of_memory(e):
+                        raise
+                    if N == 1:
+                        raise torch.OutOfMemoryError(
+                            f"{e}\n\nA single evaluation of f does not fit in "
+                            f"memory on {self.device} with "
+                            f"total_mem_usage={total_mem_usage}."
+                        ) from e
+                    out_of_memory = True
+                if out_of_memory:
+                    # After the except block, so f's tensors can be freed. The
+                    # peak counters undercount a failed call, so use free memory.
+                    t_input = result = None
+                    self._release_memory()
+                    if N_prev < 100:
+                        c = max(c_prev, s * free / (0.75 * N))
+                    reason = "an evaluation ran out of memory"
+                    continue
+
+                if on_cuda:
+                    torch.cuda.synchronize(self.device)
+                eval_time = time.time() - eval_t0
+                M = max(memory_in_use() - before, 0) / GB
+                del result, t_input
+                c = s * (M + E) / N
+                if N_prev and abs(c - c_prev) < 0.01 * c_prev:
+                    reason = "the cost per evaluation stopped changing"
+                elif eval_time > time_limit:
+                    reason = f"an evaluation took longer than {time_limit} s"
+                elif max_test <= N:
+                    reason = "the 1e9 search limit was reached"
+                elif usable < 10 * M:
+                    reason = "the next test would not fit in memory"
+                else:
+                    c_prev, N_prev, N = c, N, 10 * N
+        except torch.OutOfMemoryError:
+            raise
+        except Exception as e:
+            raise RuntimeError(
+                f"padaquad could not measure the memory cost of f after "
+                f"{time.time() - t0:.2f} s ({type(e).__name__}: {e}). Specify "
+                "max_batch to skip the measurement."
+            ) from e
 
         self._release_memory()
 
-        # The benchmark never evaluated a tile larger than max_test, so the
-        # per-eval cost from the time-based / fallback branches can imply a
-        # max_batch far above what was actually validated (e.g. the eval_time
-        # branch at N=max_test implies ~100*max_test). Floor f_unit_mem_size at
-        # the size that yields max_batch == max_test so we never extrapolate
-        # past the tested tile size and risk an OOM.
-        min_unit_mem_size = self._get_usable_memory(total_mem_usage) / max_test
-        self.f_unit_mem_size = max(self.f_unit_mem_size, min_unit_mem_size)
+        # Cap the batch size at the 1e9 search limit: for tiny integrands (a few
+        # bytes per point) usable / c would otherwise exceed what was ever tried.
+        c = max(c, self._get_usable_memory(total_mem_usage) / max_test)
+        self.f_unit_mem_size = c
 
         max_batch = self._get_max_f_evals(total_mem_usage)
         logger.warning(
-            f"Memory test finished in {time.time() - t0:.3f}s with max_batch = {max_batch} of possible 1e9 search limit"
+            f"Memory measurement finished in {time.time() - t0:.2f} s: "
+            f"{c * GB:.0f} bytes per evaluation, max_batch = "
+            f"{max_batch} now (stopped because {reason})."
         )
 
     def _get_usable_memory(self, total_mem_usage: float) -> float:

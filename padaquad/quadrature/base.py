@@ -54,11 +54,6 @@ from typing import TYPE_CHECKING
 import psutil
 import torch
 
-try:
-    import resource  # Unix only; used to read peak memory on Linux CPUs
-except ImportError:  # Windows
-    resource = None  # type: ignore[assignment]
-
 from padaquad.base import SolverBase
 from padaquad.distributed import _resolve_device
 from padaquad.results import IntegrationResult, MethodOutput
@@ -79,12 +74,21 @@ def _is_out_of_memory(e: BaseException) -> bool:
     True if e signals that an allocation did not fit in memory.
 
     Covers a GPU out-of-memory error, a refused PyTorch CPU allocation (a plain
-    RuntimeError naming DefaultCPUAllocator, checked on torch 2.8), a CUDA
-    library allocation failure such as cuBLAS ("out of memory" in a plain
-    RuntimeError), and Python's MemoryError (raised by numpy).
+    RuntimeError naming DefaultCPUAllocator), a failed cudaMalloc or
+    cudaHostAlloc outside PyTorch's allocator ("CUDA error: out of memory"), a
+    CUDA library's allocation status (CUBLAS_STATUS_ALLOC_FAILED and the
+    cuSOLVER, cuSPARSE and cuFFT equivalents; cuDNN 9's
+    CUDNN_STATUS_INTERNAL_ERROR_*_ALLOCATION_FAILED), and Python's MemoryError
+    (raised by numpy). The strings were checked in torch 2.8's libraries.
     """
     return isinstance(e, (torch.OutOfMemoryError, MemoryError)) or any(
-        s in str(e) for s in ("DefaultCPUAllocator", "out of memory")
+        s in str(e)
+        for s in (
+            "DefaultCPUAllocator",
+            "out of memory",
+            "ALLOC_FAILED",
+            "ALLOCATION_FAILED",
+        )
     )
 
 
@@ -2769,11 +2773,16 @@ class AdaptiveQuadrature(SolverBase):
         - CUDA: peak allocated memory during the call minus allocated memory
           before it. The peak counters of ``self.device`` are reset first, which
           also resets ``max_memory_reserved``.
-        - CPU on Linux: the process's peak resident memory (``ru_maxrss``) minus
-          its value before the call, after resetting the peak by writing 5 to
-          ``/proc/self/clear_refs`` (Linux >= 4.0). This also resets the peak
-          that the caller's own ``getrusage`` or ``/usr/bin/time`` report from
-          then on. The kernel's per-CPU memory counters can read low by up to
+        - CPU on Linux: the process's peak resident memory (``VmHWM`` in
+          ``/proc/self/status``) minus its value before the call, after resetting
+          the peak by writing 5 to ``/proc/self/clear_refs`` (Linux >= 4.0). This
+          also resets the peak that the caller's own ``getrusage`` or
+          ``/usr/bin/time`` report from then on. ``ru_maxrss`` is not used: it is
+          the larger of VmHWM and the peak of the process this one was started
+          from (``signal->maxrss``, set at exec), so in a worker started by a
+          larger process (``subprocess``, multiprocessing ``spawn``) it would stay
+          at the parent's peak, and M would read 0 until this process exceeds
+          it. The kernel's per-CPU memory counters can read low by up to
           E = cores * max(32, 2 * cores) pages (``lib/percpu_counter.c``,
           ``compute_batch_value``), so E is added to M; E = 0 elsewhere.
         - Other CPUs (macOS, Windows): resident memory after the call, with its
@@ -2841,7 +2850,7 @@ class AdaptiveQuadrature(SolverBase):
                 pass
         if linux_peak:
             cores = os.cpu_count() or 1
-            E = cores * max(32, 2 * cores) * resource.getpagesize() / GB
+            E = cores * max(32, 2 * cores) * os.sysconf("SC_PAGE_SIZE") / GB
         else:
             E = 0.0
 
@@ -2849,8 +2858,9 @@ class AdaptiveQuadrature(SolverBase):
             """Bytes in use (CUDA allocated, or process RSS / its reset peak)."""
             if on_cuda:
                 return torch.cuda.max_memory_allocated(self.device)
-            if linux_peak:
-                return resource.getrusage(resource.RUSAGE_SELF).ru_maxrss * 1024
+            if linux_peak:  # "VmHWM:   14336 kB" (KiB), the peak clear_refs resets
+                status = Path("/proc/self/status").read_text()
+                return int(status.split("VmHWM:")[1].split()[0]) * 1024
             return psutil.Process().memory_info().rss
 
         N, c, c_prev, N_prev, reason = 1, 0.0, 0.0, 0, None

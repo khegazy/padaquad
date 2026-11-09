@@ -23,6 +23,8 @@ from __future__ import annotations
 import gc
 import logging
 import os
+import subprocess
+import sys
 import time
 import types
 
@@ -234,31 +236,40 @@ def test_other_failure_stops_with_clear_message(fake):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.skipif(qbase.resource is None, reason="needs the Unix resource module")
+@pytest.mark.skipif(sys.platform != "linux", reason="Linux reader only")
 @pytest.mark.parametrize("cores", [12, 256])
 def test_linux_reader_adds_error_allowance(fake, monkeypatch, cores):
-    """With the Linux reader, M comes from the (reset) peak record and
-    E = cores * max(32, 2 * cores) pages is added: 1.5 MiB on 12 cores and
-    512 MiB on 256 cores with 4 KiB pages. The call at N = 1 is slow, so
-    c = M(1) + E exactly."""
+    """With the Linux reader, M comes from the (reset) peak VmHWM in
+    /proc/self/status and E = cores * max(32, 2 * cores) pages is added:
+    1.5 MiB on 12 cores and 512 MiB on 256 cores with 4 KiB pages. The call at
+    N = 1 is slow, so c = M(1) + E exactly.
 
-    class WritableClearRefs:
-        def __init__(self, *args):
-            pass
+    Regression: ``getrusage`` reports a stuck 50 GB peak here, as it does in a
+    worker started by a larger process (its ``ru_maxrss`` keeps the parent's
+    peak). The old reader used ``ru_maxrss`` and measured M = 0."""
+
+    class FakeProc:
+        """/proc/self: clear_refs accepts writes; status reports the fake peak."""
+
+        def __init__(self, path):
+            self.path = path
 
         def write_text(self, text):
             pass
 
-    monkeypatch.setattr(qbase, "Path", WritableClearRefs)
-    monkeypatch.setattr(qbase.os, "cpu_count", lambda: cores)
+        def read_text(self):
+            assert self.path == "/proc/self/status"
+            return f"VmRSS:\t1 kB\nVmHWM:\t{fake.memory.rss // 1024} kB\n"
+
+    resource = pytest.importorskip("resource")
     monkeypatch.setattr(
-        qbase.resource,
-        "getrusage",
-        lambda who: types.SimpleNamespace(ru_maxrss=fake.memory.rss // 1024),
+        resource, "getrusage", lambda who: types.SimpleNamespace(ru_maxrss=50 * 2**20)
     )
+    monkeypatch.setattr(qbase, "Path", FakeProc)
+    monkeypatch.setattr(qbase.os, "cpu_count", lambda: cores)
     f = CostIntegrand(fake.memory, fake.clock, per_point=4096, slow_from=1)
     c = benchmark(fake.solver, f)
-    E = cores * max(32, 2 * cores) * qbase.resource.getpagesize()
+    E = cores * max(32, 2 * cores) * os.sysconf("SC_PAGE_SIZE")
     assert f.calls == [1]
     assert c * GB == pytest.approx(4096 + E)
 
@@ -266,18 +277,42 @@ def test_linux_reader_adds_error_allowance(fake, monkeypatch, cores):
 @pytest.mark.skipif(
     not os.access("/proc/self/clear_refs", os.W_OK), reason="needs Linux clear_refs"
 )
-def test_real_linux_reader_smoke():
-    """With the real reader, a 200 MB allocation inside f gives a positive c.
-    The reading's accuracy is not asserted (it can read low; E covers that)."""
+def test_real_linux_reader_smoke(monkeypatch):
+    """With the real reader, a 200 MiB allocation that f frees before returning
+    is measured. E is made negligible (one core), so c is the reading itself.
+    The allocation is a single-threaded memset (bytearray): its pages are
+    counted on one or a few CPUs, so the per-CPU counter error is a few MiB;
+    a multithreaded fill such as torch.ones can read low by most of it."""
+    monkeypatch.setattr(qbase.os, "cpu_count", lambda: 1)
     solver = make_solver_for_unit_test()
 
     def heavy(t, *args):
-        torch.ones(25 * 2**20, dtype=torch.float64)  # 200 MiB, touched
+        bytearray(200 * 2**20)  # 200 MiB, touched, freed before returning
         time.sleep(0.2)  # slower than the CPU limit: one call only
         return torch.ones((t.shape[0], 1), dtype=t.dtype)
 
     solver._setup_memory_checks(heavy, NODE, take_gradient=False, total_mem_usage=0.9)
-    assert solver.f_unit_mem_size > 0
+    assert solver.f_unit_mem_size * GB >= 150 * 2**20
+
+
+@pytest.mark.skipif(
+    not os.access("/proc/self/clear_refs", os.W_OK), reason="needs Linux clear_refs"
+)
+def test_real_linux_reader_in_child_of_larger_process():
+    """Regression: the reader works in a process started by a larger one.
+    ``ru_maxrss`` of such a child starts at the parent's peak, so the old
+    reader saw no memory use. This process raises its peak by 768 MiB, then
+    runs ``test_real_linux_reader_smoke`` in a child process."""
+    bytearray(768 * 2**20)  # raises this process's peak; freed at once
+    test = f"{__file__}::test_real_linux_reader_smoke"
+    child = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", test],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=300,
+    )
+    assert child.returncode == 0, child.stdout + child.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -435,22 +470,28 @@ def test_gpu_oom_after_n_100_keeps_measured_cost(monkeypatch):
 
 
 @needs_cuda
-def test_gpu_next_call_predicted_not_to_fit(monkeypatch):
-    """With 1 MiB usable, a 100 KiB-per-point f stops at N = 10."""
-    solver = gpu_solver(monkeypatch, usable_gb=2**20 / GB)
+def test_gpu_next_call_predicted_not_to_fit(monkeypatch, caplog):
+    """With 2 MiB usable, an f using a fixed 64 KiB plus 100 KiB per point
+    stops after N = 10 because 10 * M(10) (about 10 MiB) > 2 MiB. The fixed
+    cost keeps c changing by > 1 %, so the convergence stop (checked first)
+    cannot be the one that fires."""
+    solver = gpu_solver(monkeypatch, usable_gb=2 * 2**20 / GB)
     calls = []
 
     def f(t, *args):
         calls.append(t.shape[0])
+        fixed = torch.empty(64 * 1024, dtype=torch.uint8, device=t.device)
         scratch = torch.empty(
             100 * 1024 * t.shape[0], dtype=torch.uint8, device=t.device
         )
-        del scratch
+        del fixed, scratch
         return torch.ones((t.shape[0], 1), dtype=t.dtype, device=t.device)
 
     node = torch.zeros(1, dtype=torch.float64, device="cuda:0")
-    solver._setup_memory_checks(f, node, take_gradient=False, total_mem_usage=0.9)
-    assert max(calls) <= 10
+    with caplog.at_level(logging.WARNING, logger=qbase.__name__):
+        solver._setup_memory_checks(f, node, take_gradient=False, total_mem_usage=0.9)
+    assert calls == [1, 10]
+    assert "stopped because the next test would not fit in memory" in caplog.text
 
 
 @needs_cuda

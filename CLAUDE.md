@@ -279,14 +279,15 @@ merged. `_rec_remove` ensures no two adjacent pairs are both flagged.
   `f` on N = 1, 10, 100, … points, measures M (memory that call used) and
   sets c = s·(M + E)/N (s = `_GRADIENT_MEMORY_SAFETY_FACTOR` = 2.1 when
   `take_gradient`, else 1). M: CUDA peak counters; on Linux CPUs the
-  resettable process peak (`/proc/self/clear_refs` + `ru_maxrss`) plus the
+  resettable process peak (`/proc/self/clear_refs` + `VmHWM`) plus the
   kernel's counter error E; elsewhere an RSS before/after difference.
   Stops: c changes < 1 %, call slower than 1 s (CUDA) / 0.1 s (CPU),
   N = 1e9, or 10·M > usable memory.
 - The batch size is computed at every evaluation from live memory:
   `get_max_batch` → `_get_max_f_evals = usable_memory / c` (capped at 1e9).
 - Out-of-memory errors are recognized by `_is_out_of_memory` (GPU OOM, CPU
-  `DefaultCPUAllocator` refusal, CUDA-library "out of memory", `MemoryError`);
+  `DefaultCPUAllocator` refusal, CUDA "out of memory" and CUDA-library
+  `*ALLOC*_FAILED` statuses, `MemoryError`);
   the shared batch loop `_evaluate_f_in_batches` shrinks the batch, and
   `_release_memory` cleans up (CUDA cache only on a CUDA solver).
 - `_get_usable_memory = free - buffer`, where

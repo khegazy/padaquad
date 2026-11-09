@@ -93,13 +93,22 @@ def _raise_memory_error():
     raise MemoryError("simulated numpy-style MemoryError")
 
 
+def _raise_cublas_alloc_failed():
+    # torch 2.8's message when cuBLAS cannot allocate its handle (TORCH_CUDABLAS_CHECK).
+    raise RuntimeError(
+        "CUDA error: CUBLAS_STATUS_ALLOC_FAILED when calling `cublasCreate(handle)`"
+    )
+
+
 # Every out-of-memory form the batch loop must recover from: the GPU error, a
 # real refused CPU allocation (a plain RuntimeError naming DefaultCPUAllocator;
-# 8 PB is refused instantly and allocates nothing), and Python's MemoryError.
+# 8 PB is refused instantly and allocates nothing), Python's MemoryError, and a
+# CUDA library's allocation status (a plain RuntimeError without "out of memory").
 FAILURE_MODES = {
     "torch_oom": None,
     "cpu_refusal": lambda: torch.empty(10**15, dtype=torch.float64),
     "memory_error": _raise_memory_error,
+    "cublas_alloc_failed": _raise_cublas_alloc_failed,
 }
 
 

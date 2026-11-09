@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.3] - Unreleased
+
+### Changed
+
+- **The out-of-memory (OOM) batch cap now persists across `integrate()` calls with the same integrand.** Previously `_oom_max_batch` was cleared at the start of every call, so a caller passing an explicit `max_batch` (constructor or per call) re-triggered the same OOMs and re-shrank the batch on every call. The cap is now kept while `f` is the same object and `take_gradient=False`, and it clamps an explicit `max_batch` too. It is cleared when `f` changes (a different integrand has a different memory footprint), on a `take_gradient=True` call (that path has no OOM recovery and cannot run with a cap below the rule's node count `C`), or by constructing a new solver. Callers that rebuild their integrand closure every call should pass `get_max_batch(default_max_batch=max_batch)` back as the next call's `max_batch`.
+
 ## [1.2.2] - 2026-06-22
 
 ### Changed

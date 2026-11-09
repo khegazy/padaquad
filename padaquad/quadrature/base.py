@@ -177,7 +177,13 @@ class AdaptiveQuadrature(SolverBase):
         # Per-evaluation memory cost; populated by _setup_memory_checks on the
         # first benchmarked run and reused thereafter.
         self.f_unit_mem_size = None
-        # Cap discovered after an OOM during evaluation; None until one occurs.
+        # Cap discovered after an OOM during a take_gradient=False evaluation;
+        # None until one occurs. It persists across integrate() calls while f
+        # is the same object and clamps an explicit max_batch too; a new f, a
+        # take_gradient=True call, or a new solver clears it. Like
+        # previous_max_batch it may survive a run that raised after the OOM
+        # (previous_f_id updates only on convergence): a smaller batch on the
+        # next call with the same f, never a wrong result.
         self._oom_max_batch = None
 
         # Construction-time defaults; each integrate() call falls back to these
@@ -345,7 +351,10 @@ class AdaptiveQuadrature(SolverBase):
             loss_fxn: Custom loss function. Takes an IntegrationResult, returns a
                 scalar tensor. If None, uses the integral value itself.
             max_batch: Maximum evaluations per batch. Overrides dynamic memory
-                calculation if provided.
+                calculation if provided. Silently clamped by the OOM cap learned
+                on an earlier ``take_gradient=False`` call with the same ``f``
+                object; a new ``f``, a ``take_gradient=True`` call, or a new
+                solver clears that cap.
             max_adaptive_splits: Maximum number of times a panel may be split
                 during adaptive refinement; a panel split this many times is
                 accepted even if it still fails the tolerance. If None
@@ -488,8 +497,16 @@ class AdaptiveQuadrature(SolverBase):
             self.previous_f_id is not None and id(f) == self.previous_f_id
         )
 
+        # Keep the OOM cap while f is unchanged (its memory footprint is what
+        # the cap measured), so an explicit max_batch does not re-trigger the
+        # same OOMs every call. Clear it for a new f, and for take_gradient=True:
+        # that path has no OOM recovery, keeps the autograd graph (a larger
+        # footprint than the one the cap was learned on), and fails its
+        # max_mesh_steps >= 1 assert if the cap is below C.
+        if not same_integrand_fxn or take_gradient:
+            self._oom_max_batch = None
+
         # Benchmark memory footprint on first call with a new integrand
-        self._oom_max_batch = None
         if same_integrand_fxn and force_max_batch is None:
             # Use the previous max_batch, running memory check everytime is slow
             force_max_batch = self.previous_max_batch
@@ -908,6 +925,13 @@ class AdaptiveQuadrature(SolverBase):
         run (where the memory benchmark ran once) and pass it back to later
         solvers/calls so the slow benchmark is skipped. See also
         ``previous_max_batch``.
+
+        The OOM cap only survives into the next ``integrate()`` call when ``f``
+        is the same object. Callers that rebuild their integrand closure every
+        call (a new ``id`` each time) should carry the cap themselves: after
+        each call, pass ``get_max_batch(default_max_batch=max_batch)`` back as
+        the next call's ``max_batch``. The cap is cleared only at the start of
+        the next call, so it is still applied here when the call returns.
         """
         if default_max_batch is not None:
             max_batch = default_max_batch

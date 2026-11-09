@@ -7,6 +7,7 @@ import torch
 from _helpers import (
     T_FINAL,
     T_INIT,
+    constant_integrand,
     make_solver_for_unit_test,
     make_uniform_solver,
     needs_cuda,
@@ -187,6 +188,23 @@ class TestSetDtypeByInput:
             assert solver.dtype == torch.float32
         finally:
             _restore_tableau("bosh3", saved)
+
+    def test_integrate_infers_dtype_from_mesh_final_only(self):
+        """integrate() given only mesh_final adopts mesh_final's dtype.
+
+        Goes through integrate(), not set_dtype_by_input directly: integrate()
+        used to pass mesh_final=mesh_init, so a float32 mesh_final on a float64
+        solver was ignored and the integral ran in float64.
+        """
+        solver = make_solver_for_unit_test()  # float64
+        result = solver.integrate(
+            constant_integrand,
+            mesh_final=torch.tensor([2.0], dtype=torch.float32),
+            max_batch=10000,
+        )
+        assert solver.dtype == torch.float32
+        assert result.integral.dtype == torch.float32
+        assert torch.allclose(result.integral, torch.tensor([2.0]))
 
 
 # ---------------------------------------------------------------------------

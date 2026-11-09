@@ -429,7 +429,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             a random initial mesh is generated in [mesh_init, mesh_final].
         """
         # Set dtype based on input
-        self.set_dtype_by_input(mesh=mesh, mesh_init=mesh_init, mesh_final=mesh_init)
+        self.set_dtype_by_input(mesh=mesh, mesh_init=mesh_init, mesh_final=mesh_final)
 
         # Setup results device
         result_device = _resolve_device(

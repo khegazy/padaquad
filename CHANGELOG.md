@@ -9,6 +9,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 ### Changed
 
 - **The out-of-memory (OOM) batch cap now persists across `integrate()` calls with the same integrand.** Previously `_oom_max_batch` was cleared at the start of every call, so a caller passing an explicit `max_batch` (constructor or per call) re-triggered the same OOMs and re-shrank the batch on every call. The cap is now kept while `f` is the same object and `take_gradient=False`, and it clamps an explicit `max_batch` too. It is cleared when `f` changes (a different integrand has a different memory footprint), on a `take_gradient=True` call (that path has no OOM recovery and cannot run with a cap below the rule's node count `C`), or by constructing a new solver. Callers that rebuild their integrand closure every call should pass `get_max_batch(default_max_batch=max_batch)` back as the next call's `max_batch`.
+- **The two split evaluation handlers share one batch loop.** `_evaluate_f_on_split_nodes` and `_evaluate_f_on_split_residual_nodes` carried byte-identical copies of the batched `f` evaluation loop with its out-of-memory retry; both now call `_evaluate_f_in_batches`. The memory cleanup after an out-of-memory error or a memory benchmark is one method, `_release_memory`, which empties the CUDA cache only on a CUDA solver (previously it did so whenever any GPU was visible, even for a CPU solver). Dead commented-out code in the residual handler and in `integrate()` was removed. No change in results.
 
 ## [1.2.2] - 2026-06-22
 

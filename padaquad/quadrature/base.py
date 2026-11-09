@@ -173,7 +173,7 @@ class AdaptiveQuadrature(SolverBase):
         self.remove_cut = remove_cut
 
         # Memory handling variables
-        self.previous_max_batch = None
+        self.previous_max_batch: int | None = None
         # Per-evaluation memory cost; populated by _setup_memory_checks on the
         # first benchmarked run and reused thereafter.
         self.f_unit_mem_size = None
@@ -184,7 +184,7 @@ class AdaptiveQuadrature(SolverBase):
         # previous_max_batch it may survive a run that raised after the OOM
         # (previous_f_id updates only on convergence): a smaller batch on the
         # next call with the same f, never a wrong result.
-        self._oom_max_batch = None
+        self._oom_max_batch: int | None = None
 
         # Construction-time defaults; each integrate() call falls back to these
         # when its corresponding argument is None.
@@ -518,10 +518,6 @@ class AdaptiveQuadrature(SolverBase):
                 total_mem_usage=total_mem_usage,
                 f_args=f_args,
             )
-        # From previous version
-        # assert self._get_max_f_evals(total_mem_usage) > (2 * self.Cm1 + 1), (
-        #    "Not enough free memory to run 2 integration steps, consider increasing total_mem_usage"
-        # )
         loss_fxn = loss_fxn if loss_fxn is not None else self._integral_loss
 
         # Make sure f exists and provides the correct output
@@ -1341,33 +1337,26 @@ class AdaptiveQuadrature(SolverBase):
 
         return nodes, f_evals, tracked_out, step_idxs, (None, None, None, None)
 
-    def _evaluate_f_on_split_nodes(
-        self,
-        f,
-        f_args,
-        mesh,
-        step_idxs,
-        max_batch,
-    ):
-        # A zero budget is unsatisfiable here and would divide-by-zero below
-        # (the % max_batch layout math). Callers route through
-        # _evaluate_f_on_mesh, which rescues max_batch=0 -> 1 before dispatch;
-        # this assert guards direct/unit callers with an explicit message.
-        assert max_batch > 0
+    def _evaluate_f_in_batches(
+        self, f, f_args, nodes_flat, num_nodes_to_eval, max_batch
+    ) -> tuple[list, list | None, int]:
+        """
+        Evaluate f on nodes_flat in batches of at most max_batch nodes.
 
-        # Place C quadrature points within each selected step
-        nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
+        Shared by both split handlers. Batches run until at least
+        num_nodes_to_eval nodes are evaluated; the last batch may run past it,
+        and _evaluate_f_on_split_residual_nodes keeps that overshoot as the
+        residual. On an out-of-memory error the failed batch is retried with a
+        smaller max_batch, cached in _oom_max_batch.
 
-        # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
-        nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
-        num_nodes_to_eval = len(nodes_flat)
-
-        # Evaluate the integrand over all batches, splitting each batch's
-        # output into the integrand value and any tracked variables.
+        Returns:
+            f_evals: per-batch integrand outputs, each [batch, D].
+            tracked_lists: tracked_lists[k] is the per-batch list of the k-th
+                tracked variable, or None when f emits no tracked variables.
+            num_nodes_evaluated: nodes evaluated (>= num_nodes_to_eval).
+        """
         f_evals = []
-        # tracked_lists[k] is the list (one per accumulation batch) of the
-        # k-th tracked variable; stays None when f emits no tracked variables.
-        tracked_lists = None
+        tracked_lists: list[list] | None = None
         num_nodes_evaluated = 0
         while num_nodes_evaluated < num_nodes_to_eval:
             try:
@@ -1381,22 +1370,13 @@ class AdaptiveQuadrature(SolverBase):
                         f"{e}\n\nSingle integrand (f) evaluation failed to fit in memory, batch size cannot be reduced."
                     ) from e
                 free_mem, total_mem = self._get_memory()
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    # Small grace period for any async CUDA cleanup to land.
-                    # Avoiding `torch.cuda.synchronize()` here on purpose: post-
-                    # CUDA-OOM the default stream can be in an error state, and
-                    # synchronize on a faulted stream has been observed to
-                    # block indefinitely — matching the futex-wait-on-all-threads
-                    # signature of the prior deadlock.
-                    time.sleep(0.05)
+                self._release_memory()
                 # Seed from the live max_batch on the first OOM (_oom_max_batch
                 # starts as None), then shrink. min(..., prev - 1) guarantees a
                 # strict decrease -- plain round(0.75 * 2) == 2 would stick and
-                # retry forever -- mirroring the _setup_memory_checks search.
-                # int(...) coerces a torch scalar (max_batch is a tensor in the
-                # integrate loop) to a Python int so round()/min() work.
+                # retry forever. int(...) coerces a torch scalar (max_batch is a
+                # tensor in the integrate loop) to a Python int so round()/min()
+                # work.
                 prev = int(
                     self._oom_max_batch
                     if self._oom_max_batch is not None
@@ -1429,6 +1409,31 @@ class AdaptiveQuadrature(SolverBase):
             del integrand
 
         assert num_nodes_evaluated >= num_nodes_to_eval
+        return f_evals, tracked_lists, num_nodes_evaluated
+
+    def _evaluate_f_on_split_nodes(
+        self,
+        f,
+        f_args,
+        mesh,
+        step_idxs,
+        max_batch,
+    ):
+        # A zero budget is unsatisfiable here and would divide-by-zero below
+        # (the % max_batch layout math). Callers route through
+        # _evaluate_f_on_mesh, which rescues max_batch=0 -> 1 before dispatch;
+        # this assert guards direct/unit callers with an explicit message.
+        assert max_batch > 0
+
+        # Place C quadrature points within each selected step
+        nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
+
+        # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
+        nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
+        f_evals, tracked_lists, _ = self._evaluate_f_in_batches(
+            f, f_args, nodes_flat, len(nodes_flat), max_batch
+        )
+
         # Combine split evaluations and nodes
         f_evals = torch.concatenate(f_evals, dim=0)
 
@@ -1502,13 +1507,6 @@ class AdaptiveQuadrature(SolverBase):
 
             # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
             nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
-
-            # Determine the number of evaluation iterations based on split
-            # if evaluate_all:
-            #     num_accumulation_iters = (num_mesh_steps * self.C) // max_batch
-            # else:
-            #     num_accumulation_iters = (max_mesh_steps * self.C) // max_batch + 1
-            #     num_residual_nodes = max_batch - (max_mesh_steps * self.C % max_batch)
             num_nodes_to_eval = max_mesh_steps * self.C
         else:
             num_mesh_steps = max_mesh_steps + 1
@@ -1544,83 +1542,16 @@ class AdaptiveQuadrature(SolverBase):
             # evals), the rest splits into full new panels plus a partial
             # residual; if num_eval_nodes < max_batch the layout's tail
             # already ends cleanly, so the residual is zero.
-            # num_accumulation_iters = 1
-            # actual_evals = min(max_batch, num_eval_nodes)
-            # num_residual_nodes = (actual_evals - num_remaining_split_nodes) % self.C
-            # evaluate_all = num_residual_nodes == 0
-
             num_nodes_to_eval = min(
                 max_mesh_steps * self.C + num_remaining_split_nodes,
                 num_eval_nodes,
             )
 
-        # Evaluate the integrand over all batches, splitting each batch's
-        # output into the integrand value and any tracked variables.
-        f_evals = []
-        # tracked_lists[k] is the list (one per accumulation batch) of the
-        # k-th tracked variable; stays None when f emits no tracked variables.
-        tracked_lists = None
-        num_nodes_evaluated = 0
-        while num_nodes_evaluated < num_nodes_to_eval:
-            try:
-                f_output = f(
-                    nodes_flat[num_nodes_evaluated : num_nodes_evaluated + max_batch],
-                    *f_args,
-                )
-            except torch.OutOfMemoryError as e:  # Use RuntimeError for PyTorch < 2.0
-                if max_batch == 1:
-                    raise torch.OutOfMemoryError(
-                        f"{e}\n\nSingle integrand (f) evaluation failed to fit in memory, batch size cannot be reduced."
-                    ) from e
-                free_mem, total_mem = self._get_memory()
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    # Small grace period for any async CUDA cleanup to land.
-                    # Avoiding `torch.cuda.synchronize()` here on purpose: post-
-                    # CUDA-OOM the default stream can be in an error state, and
-                    # synchronize on a faulted stream has been observed to
-                    # block indefinitely — matching the futex-wait-on-all-threads
-                    # signature of the prior deadlock.
-                    time.sleep(0.05)
-                # Seed from the live max_batch on the first OOM (_oom_max_batch
-                # starts as None), then shrink. min(..., prev - 1) guarantees a
-                # strict decrease -- plain round(0.75 * 2) == 2 would stick and
-                # retry forever -- mirroring the _setup_memory_checks search.
-                # int(...) coerces a torch scalar (max_batch is a tensor in the
-                # integrate loop) to a Python int so round()/min() work.
-                prev = int(
-                    self._oom_max_batch
-                    if self._oom_max_batch is not None
-                    else max_batch
-                )
-                self._oom_max_batch = max(1, int(min(round(0.75 * prev), prev - 1)))
-                logger.warning(
-                    f"Caught OOM with {free_mem} GB free of {total_mem} GB. "
-                    f"Reducing max_batch from {max_batch} to {self._oom_max_batch}."
-                    "If this warning appears often, consider reducing max_batch to "
-                    "avoid deleting and rerunning evaluations."
-                )
-                max_batch = self._oom_max_batch
-                self.previous_max_batch = self._oom_max_batch
-                continue
-
-            integrand, tracked = self._split_f_output(f_output)
-            self._check_f_output_finite(
-                integrand,
-                nodes_flat[num_nodes_evaluated : num_nodes_evaluated + max_batch],
-            )
-            f_evals.append(integrand)
-            if tracked is not None:
-                if tracked_lists is None:
-                    tracked_lists = [[] for _ in tracked]
-                for k, tv in enumerate(tracked):
-                    tracked_lists[k].append(tv)
-
-            num_nodes_evaluated += len(integrand)
-            del integrand
-
-        assert num_nodes_evaluated >= num_nodes_to_eval
+        # The last batch may run past num_nodes_to_eval; that overshoot is the
+        # residual carried to the next call.
+        f_evals, tracked_lists, num_nodes_evaluated = self._evaluate_f_in_batches(
+            f, f_args, nodes_flat, num_nodes_to_eval, max_batch
+        )
         num_residual_nodes = num_nodes_evaluated - num_nodes_to_eval
         # Get the residual evaluations of the last mesh step
         if num_residual_nodes == 0:
@@ -1699,20 +1630,6 @@ class AdaptiveQuadrature(SolverBase):
         )
 
         return nodes, f_evals, tracked_out, step_idxs, split_node_state
-
-        # node_split_state = (split_nodes)
-        # return torch.flatten(nodes, start_dim=0, end_dim=-2), step_idxs,
-        # # Find barrier indices where mesh_trackers is True, take up to max_steps
-        # step_idxs = torch.arange(len(mesh), device=self.device)
-        # step_idxs = step_idxs[mesh_trackers]
-        # step_idxs = step_idxs[:max_steps]
-        # # Place C quadrature points within each selected step
-        # nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
-
-        # # --- Step 2: Evaluate the integrand at all quadrature points ---
-        # # Flatten [N, C, T] -> [N*C, T] for batch evaluation, then reshape back
-        # # shape = nodes.shape
-        # return torch.flatten(nodes, start_dim=0, end_dim=-2), step_idxs, node_bucket
 
     def _sort_evals_into_mesh(
         self, take_gradient, nodes_flat, y_step_eval, y_step_bucket
@@ -2775,6 +2692,25 @@ class AdaptiveQuadrature(SolverBase):
         else:
             return self._get_cpu_memory()
 
+    def _release_memory(self) -> None:
+        """
+        Free memory after an out-of-memory error or a memory benchmark.
+
+        Always runs the garbage collector. On a CUDA solver it also empties
+        PyTorch's caching allocator, which releases the cache of every GPU
+        (NativeCachingAllocator::emptyCache in c10/cuda/CUDACachingAllocator.cpp
+        loops over all devices), so no device context is needed. A CPU solver
+        never touches the GPU.
+        """
+        gc.collect()
+        if self.device.type == "cuda":
+            torch.cuda.empty_cache()
+            # Small grace period for any async CUDA cleanup to land. Avoiding
+            # `torch.cuda.synchronize()` here on purpose: after a CUDA OOM the
+            # default stream can be in an error state, and synchronize on a
+            # faulted stream has been observed to block indefinitely.
+            time.sleep(0.05)
+
     def _setup_memory_checks(
         self,
         f: Callable,
@@ -2826,16 +2762,7 @@ class AdaptiveQuadrature(SolverBase):
                 t_input = torch.tile(node_test, (N, 1))
                 result = f(t_input, *f_args)
             except torch.OutOfMemoryError:
-                gc.collect()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                    # Small grace period for any async CUDA cleanup to land.
-                    # Avoiding `torch.cuda.synchronize()` here on purpose: post-
-                    # CUDA-OOM the default stream can be in an error state, and
-                    # synchronize on a faulted stream has been observed to
-                    # block indefinitely — matching the futex-wait-on-all-threads
-                    # signature of the prior deadlock.
-                    time.sleep(0.02)
+                self._release_memory()
                 overshot_memory = True
                 N = int(min(0.75 * N, N - 1))
                 continue
@@ -2854,9 +2781,7 @@ class AdaptiveQuadrature(SolverBase):
                 break
             N = 10 * N
 
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        self._release_memory()
 
         # The benchmark never evaluated a tile larger than max_test, so the
         # per-eval cost from the time-based / fallback branches can imply a

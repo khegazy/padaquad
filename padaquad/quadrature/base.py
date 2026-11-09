@@ -63,6 +63,8 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+_GB = 1024**3  # bytes per GB; every memory quantity below is in GB
+
 # Multiplies the measured memory cost of one f evaluation when
 # take_gradient=True: backpropagation uses roughly twice the forward memory.
 # A heuristic, not a measurement.
@@ -2687,8 +2689,8 @@ class AdaptiveQuadrature(SolverBase):
             Tuple of (free_gb, total_gb).
         """
         mem = psutil.virtual_memory()
-        free = mem.available / 1024**3
-        total = mem.total / 1024**3
+        free = mem.available / _GB
+        total = mem.total / _GB
         return free, total
 
     def _get_cuda_memory(self) -> tuple[float, float]:
@@ -2704,13 +2706,13 @@ class AdaptiveQuadrature(SolverBase):
         """
         mem_info = torch.cuda.mem_get_info(self.device)
         # Total memory on the GPU
-        total_gpu = mem_info[1] / 1024**3
+        total_gpu = mem_info[1] / _GB
         # Memory that is free outside of the PyTorch cache
-        free_gpu = mem_info[0] / 1024**3
+        free_gpu = mem_info[0] / _GB
         # Memory reserved for the PyTorch cache
-        torch_cache = torch.cuda.memory_reserved(self.device) / 1024**3
+        torch_cache = torch.cuda.memory_reserved(self.device) / _GB
         # Cache memory being used by tensors
-        torch_cache_used = torch.cuda.memory_allocated(self.device) / 1024**3
+        torch_cache_used = torch.cuda.memory_allocated(self.device) / _GB
         # Total free amount of memory that can be used
         total_free = free_gpu + (torch_cache - torch_cache_used)
 
@@ -2766,42 +2768,29 @@ class AdaptiveQuadrature(SolverBase):
         ``get_max_batch`` -> ``_get_max_f_evals`` = usable memory / c.
 
         f is called on N = 1, 10, 100, ... copies of ``node_test``. For each
-        call, M is the memory the call used and c = s * (M + E) / N, where s is
+        call, M is the memory the call used (``_measure_call``, with the method
+        chosen by ``_peak_memory_reader``) and c = s * (M + E) / N. s is
         ``_GRADIENT_MEMORY_SAFETY_FACTOR`` (a heuristic for backpropagation)
-        when ``take_gradient`` and 1 otherwise. M is measured as:
+        when ``take_gradient`` and 1 otherwise; E is the most the memory reading
+        can be too low (nonzero only on Linux CPUs).
 
-        - CUDA: peak allocated memory during the call minus allocated memory
-          before it. The peak counters of ``self.device`` are reset first, which
-          also resets ``max_memory_reserved``.
-        - CPU on Linux: the process's peak resident memory (``VmHWM`` in
-          ``/proc/self/status``) minus its value before the call, after resetting
-          the peak by writing 5 to ``/proc/self/clear_refs`` (Linux >= 4.0). This
-          also resets the peak that the caller's own ``getrusage`` or
-          ``/usr/bin/time`` report from then on. ``ru_maxrss`` is not used: it is
-          the larger of VmHWM and the peak of the process this one was started
-          from (``signal->maxrss``, set at exec), so in a worker started by a
-          larger process (``subprocess``, multiprocessing ``spawn``) it would stay
-          at the parent's peak, and M would read 0 until this process exceeds
-          it. The kernel's per-CPU memory counters can read low by up to
-          E = cores * max(32, 2 * cores) pages (``lib/percpu_counter.c``,
-          ``compute_batch_value``), so E is added to M; E = 0 elsewhere.
-        - Other CPUs (macOS, Windows): resident memory after the call, with its
-          result alive, minus before. Memory that f frees before returning (for
-          example Jacobian intermediates) is missed, so c can be too low.
+        The search stops, keeping the latest c, when:
 
-        The "before" reading precedes building the input tile, so the tile is
-        counted. Memory allocated outside PyTorch's CUDA allocator (custom
-        ``cudaMalloc``, CuPy, NCCL) is not counted, and one input value is used
-        for every point, so an f whose memory depends on t can be mismeasured.
+        1. c changes by less than 1 % from N/10 to N;
+        2. a call takes longer than 1 s;
+        3. N reaches 1e9;
+        4. the next call is predicted not to fit (10 * M > usable memory).
 
-        The search stops when c changes by less than 1 % from N/10 to N, a call
-        takes longer than 1 s, N reaches 1e9, or the next
-        call is predicted not to fit (10 * M > usable memory). After an
-        out-of-memory error at N, c from the previous N is kept if that N was
-        >= 100; otherwise c = max(previous c, s * F / (0.75 * N)) with F the free
-        memory before the call, because the peak counters undercount a failed
-        call. The start and end messages are logged at WARNING level, so they
-        are silent if the application configures logging above WARNING.
+        After an out-of-memory error at N, the c from the previous N is kept if
+        that N was >= 100; otherwise c = max(previous c, s * F / (0.75 * N)) with
+        F the free memory before the call, because the peak counters undercount
+        a failed call. Finally c is floored at usable / 1e9, so the batch size
+        never exceeds 1e9 points.
+
+        Only one input value is used for every point, so an f whose memory
+        depends on t can be mismeasured. The start and end messages are logged
+        at WARNING level, so they are silent if the application configures
+        logging above WARNING.
 
         Args:
             f: The integrand function to benchmark.
@@ -2827,98 +2816,84 @@ class AdaptiveQuadrature(SolverBase):
         )
         t0 = time.time()
 
+        # node_test is one quadrature node, [T] or [1, T]. Make it a [1, T] row
+        # on the solver's device, so each test call can stack N copies of it.
         assert len(node_test.shape) <= 2
         if len(node_test.shape) == 2:
             node_test = node_test[0]
         node_test = node_test.unsqueeze(0).to(self.device)
         self.f_unit_mem_size = None
 
-        GB = 1024**3
-        on_cuda = self.device.type == "cuda"
+        # The test calls run f forward only. With take_gradient=True the
+        # integration also backpropagates through every batch, which needs
+        # roughly as much memory again, so the measured cost is scaled by s.
         s = _GRADIENT_MEMORY_SAFETY_FACTOR if take_gradient else 1.0
-        time_limit = 1.0  # seconds per test call, on CUDA and CPU
-        max_test = 1000000000
-        # On Linux the process's peak resident memory can be reset; elsewhere
-        # (macOS, Windows, a locked /proc) M is a before/after difference.
-        clear_refs = Path("/proc/self/clear_refs")
-        linux_peak = False
-        if not on_cuda:
-            try:
-                clear_refs.write_text("5")
-                linux_peak = True
-            except OSError:
-                pass
-        if linux_peak:
-            cores = os.cpu_count() or 1
-            E = cores * max(32, 2 * cores) * os.sysconf("SC_PAGE_SIZE") / GB
-        else:
-            E = 0.0
+        time_limit = 1.0  # seconds; a slower test call ends the search
+        max_test = 1_000_000_000  # largest N tried, and the batch-size cap
+        # How the memory of one call is read on this device, and E (GB), the
+        # most that reading can be too low.
+        reset_peak, read_memory, E = self._peak_memory_reader()
 
-        def memory_in_use() -> int:
-            """Bytes in use (CUDA allocated, or process RSS / its reset peak)."""
-            if on_cuda:
-                return torch.cuda.max_memory_allocated(self.device)
-            if linux_peak:  # "VmHWM:   14336 kB" (KiB), the peak clear_refs resets
-                status = Path("/proc/self/status").read_text()
-                return int(status.split("VmHWM:")[1].split()[0]) * 1024
-            return psutil.Process().memory_info().rss
-
+        # Search state. c is the latest cost per evaluation (GB). c_prev and
+        # N_prev belong to the previous call, which had 10x fewer points
+        # (N_prev = 0 before the first call). The stop that ends the search
+        # sets reason, which the end message reports.
         N, c, c_prev, N_prev, reason = 1, 0.0, 0.0, 0, None
         try:
             while reason is None:
+                # Memory available right before this call: usable (after the
+                # total_mem_usage reserve) is what the next call must fit in;
+                # free (raw) bounds the cost if this call runs out of memory.
                 usable = self._get_usable_memory(total_mem_usage)
                 free = self._get_memory()[0]
-                if on_cuda:
-                    torch.cuda.reset_peak_memory_stats(self.device)
-                elif linux_peak:
-                    clear_refs.write_text("5")
-                before = memory_in_use()
-                eval_t0 = time.time()
-                out_of_memory = False
-                t_input: torch.Tensor | None = None
-                result = None
-                try:
-                    t_input = torch.tile(node_test, (N, 1))
-                    result = f(t_input, *f_args)
-                except (RuntimeError, MemoryError) as e:
-                    if not _is_out_of_memory(e):
-                        raise
-                    if N == 1:
-                        raise torch.OutOfMemoryError(
-                            f"{e}\n\nA single evaluation of f does not fit in "
-                            f"memory on {self.device} with "
-                            f"total_mem_usage={total_mem_usage}."
-                        ) from e
-                    out_of_memory = True
-                if out_of_memory:
-                    # After the except block, so f's tensors can be freed. The
-                    # peak counters undercount a failed call, so use free memory.
-                    t_input = result = None
-                    self._release_memory()
+                measured = self._measure_call(
+                    f, f_args, node_test, N, reset_peak, read_memory, total_mem_usage
+                )
+
+                if measured is None:
+                    # N points did not fit. If the previous call had at least
+                    # 100 points, its c is a trustworthy measurement and is kept
+                    # (c still holds it). Otherwise also use what the failure
+                    # shows: N points needed more than the free memory F, so one
+                    # point costs more than F / N; 0.75 * N makes that bound
+                    # stricter. The peak counters cannot be used here, because
+                    # they count only the allocations that succeeded.
                     if N_prev < 100:
                         c = max(c_prev, s * free / (0.75 * N))
                     reason = "an evaluation ran out of memory"
                     continue
 
-                if on_cuda:
-                    torch.cuda.synchronize(self.device)
-                eval_time = time.time() - eval_t0
-                M = max(memory_in_use() - before, 0) / GB
-                del result, t_input
+                # Cost per evaluation: the call's memory, plus the reading's
+                # possible shortfall E, spread over its N points. A fixed
+                # per-call cost (allocator rounding, workspaces) shrinks as 1/N.
+                M, seconds = measured
                 c = s * (M + E) / N
+
+                # Stops, checked in order; each keeps this call's c.
                 if N_prev and abs(c - c_prev) < 0.01 * c_prev:
+                    # 10x more points changed c by < 1 %: the fixed per-call
+                    # cost is spread out, and c is the per-point cost.
                     reason = "the cost per evaluation stopped changing"
-                elif eval_time > time_limit:
+                elif seconds > time_limit:
+                    # The next call has 10x the points, so it would take ~10x
+                    # longer; stop to keep the measurement short.
                     reason = f"an evaluation took longer than {time_limit} s"
                 elif max_test <= N:
                     reason = "the 1e9 search limit was reached"
                 elif usable < 10 * M:
+                    # The next call would need about 10 * M. Do not make it: on
+                    # a GPU it would run out of memory, and on a CPU the
+                    # operating system could kill the process without an error.
                     reason = "the next test would not fit in memory"
                 else:
                     c_prev, N_prev, N = c, N, 10 * N
         except torch.OutOfMemoryError:
+            # A single evaluation of f does not fit (raised by _measure_call at
+            # N = 1): memory really is too small, so pass the error through.
             raise
         except Exception as e:
+            # Anything else (for example a bug in f that appears only for more
+            # than one point, or a CUDA error) means c could not be measured.
             raise RuntimeError(
                 f"padaquad could not measure the memory cost of f after "
                 f"{time.time() - t0:.2f} s ({type(e).__name__}: {e}). Specify "
@@ -2927,17 +2902,160 @@ class AdaptiveQuadrature(SolverBase):
 
         self._release_memory()
 
-        # Cap the batch size at the 1e9 search limit: for tiny integrands (a few
-        # bytes per point) usable / c would otherwise exceed what was ever tried.
+        # Floor c at usable / 1e9, so the batch size usable / c never exceeds
+        # 1e9 points, the largest N the search could try. This matters for tiny
+        # integrands, which use only a few bytes per point.
         c = max(c, self._get_usable_memory(total_mem_usage) / max_test)
         self.f_unit_mem_size = c
 
         max_batch = self._get_max_f_evals(total_mem_usage)
         logger.warning(
             f"Memory measurement finished in {time.time() - t0:.2f} s: "
-            f"{c * GB:.0f} bytes per evaluation, max_batch = "
+            f"{c * _GB:.0f} bytes per evaluation, max_batch = "
             f"{max_batch} now (stopped because {reason})."
         )
+
+    def _peak_memory_reader(
+        self,
+    ) -> tuple[Callable[[], None], Callable[[], int], float]:
+        """
+        Choose how the memory one test call uses (M) is measured on this device.
+
+        M = read() after the call minus read() before it, with reset() called
+        right before the "before" reading. Three methods, best first:
+
+        - CUDA: PyTorch's caching allocator tracks the peak of allocated memory
+          per device. ``reset`` sets that peak to the memory allocated now, and
+          ``read`` returns the peak. Exact to its 512-byte allocation blocks.
+          Resetting also resets ``max_memory_reserved`` for ``self.device``.
+          Memory allocated outside PyTorch's allocator (custom ``cudaMalloc``,
+          CuPy, NCCL) is not counted.
+        - CPU on Linux: writing 5 to ``/proc/self/clear_refs`` (Linux >= 4.0)
+          resets the process's peak resident memory, ``VmHWM`` in
+          ``/proc/self/status``, to its current value; ``read`` returns
+          ``VmHWM``. The reset also resets what the caller's own ``getrusage``
+          or ``/usr/bin/time`` report as the peak from then on. ``ru_maxrss``
+          is not read: it also includes the peak of the process this one was
+          started from, so in a worker started by a larger process
+          (``subprocess``, multiprocessing ``spawn``) it would stay at the
+          parent's peak. The kernel keeps each CPU core's share of the count
+          private until it reaches max(32, 2 * cores) pages, so the reading can
+          be low by up to E = cores * max(32, 2 * cores) pages
+          (``lib/percpu_counter.c``, ``compute_batch_value``).
+        - Other CPUs (macOS, Windows, a locked ``/proc``): no resettable peak
+          exists. ``read`` returns the current resident memory, so M is the
+          memory still held after the call (its result is kept alive for the
+          reading). Memory that f frees before returning, such as the
+          intermediates of a Jacobian, is missed, so c can be too low.
+
+        Returns:
+            reset: Starts a new peak measurement (a no-op for the last method).
+            read: Memory in bytes, as described above.
+            E: GB to add to every M, the most the reading can be too low.
+        """
+        if self.device.type == "cuda":
+
+            def reset_cuda() -> None:
+                torch.cuda.reset_peak_memory_stats(self.device)
+
+            def read_cuda() -> int:
+                return torch.cuda.max_memory_allocated(self.device)
+
+            return reset_cuda, read_cuda, 0.0
+
+        clear_refs = Path("/proc/self/clear_refs")
+        try:
+            # Probe: succeeds only on Linux with a writable /proc.
+            clear_refs.write_text("5")
+        except OSError:
+
+            def no_reset() -> None:
+                pass
+
+            def read_rss() -> int:
+                return psutil.Process().memory_info().rss
+
+            return no_reset, read_rss, 0.0
+
+        def reset_linux() -> None:
+            clear_refs.write_text("5")
+
+        def read_vmhwm() -> int:
+            # The line reads "VmHWM:   14336 kB", in KiB.
+            status = Path("/proc/self/status").read_text()
+            return int(status.split("VmHWM:")[1].split()[0]) * 1024
+
+        cores = os.cpu_count() or 1
+        E = cores * max(32, 2 * cores) * os.sysconf("SC_PAGE_SIZE") / _GB
+        return reset_linux, read_vmhwm, E
+
+    def _measure_call(
+        self,
+        f: Callable,
+        f_args: tuple,
+        node_test: torch.Tensor,
+        N: int,
+        reset_peak: Callable[[], None],
+        read_memory: Callable[[], int],
+        total_mem_usage: float,
+    ) -> tuple[float, float] | None:
+        """
+        Call f once on N copies of node_test; return the memory and time it took.
+
+        Args:
+            f, f_args: The integrand and its extra arguments.
+            node_test: One node as a [1, T] row on ``self.device``.
+            N: Number of points in this call.
+            reset_peak, read_memory: The measurement method from
+                ``_peak_memory_reader``.
+            total_mem_usage: Only quoted in the single-evaluation error.
+
+        Returns:
+            (M, seconds): the memory the call used (GB) and its wall time, or
+            None if the call ran out of memory (N > 1).
+
+        Raises:
+            torch.OutOfMemoryError: N = 1 ran out of memory, so a single
+                evaluation of f does not fit.
+            Exception: any other error from f propagates unchanged.
+        """
+        # Read "before" first, then build the input: the N-point input tile is
+        # memory the integration also needs per point, so it is counted in M.
+        reset_peak()
+        before = read_memory()
+        t0 = time.time()
+        out_of_memory = False
+        t_input: torch.Tensor | None = None
+        result = None
+        try:
+            t_input = torch.tile(node_test, (N, 1))
+            result = f(t_input, *f_args)
+        except (RuntimeError, MemoryError) as e:
+            if not _is_out_of_memory(e):
+                raise
+            if N == 1:
+                raise torch.OutOfMemoryError(
+                    f"{e}\n\nA single evaluation of f does not fit in memory on "
+                    f"{self.device} with total_mem_usage={total_mem_usage}."
+                ) from e
+            out_of_memory = True
+        if out_of_memory:
+            # Clean up here, after the except block: inside it, the error's
+            # traceback still holds f's tensors, so they could not be freed.
+            t_input = result = None
+            self._release_memory()
+            return None
+
+        if self.device.type == "cuda":
+            # GPU calls return once their work is queued, not when it is done;
+            # wait for it, so the time below is the real compute time.
+            torch.cuda.synchronize(self.device)
+        seconds = time.time() - t0
+        # Read while the result is still alive, so a before/after difference
+        # (the third method) counts the output too.
+        M = max(read_memory() - before, 0) / _GB
+        del result, t_input
+        return M, seconds
 
     def _get_usable_memory(self, total_mem_usage: float) -> float:
         """

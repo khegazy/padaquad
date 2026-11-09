@@ -45,6 +45,7 @@ from tests._helpers import (
     TAKE_GRADIENT_IDS,
     TAKE_GRADIENT_VALUES,
     cached_max_batch,
+    make_solver_for_unit_test,
     make_uniform_solver,
 )
 
@@ -458,3 +459,42 @@ def test_check_f_output_finite_helper():
     solver._check_f_output_finite(1.0, nodes)
     with pytest.raises(ValueError, match=r"non-finite"):
         solver._check_f_output_finite(float("inf"), nodes)
+
+
+# -----------------------------------------------------------------------------
+# The integrand test call receives one point of shape [1, T].
+# -----------------------------------------------------------------------------
+
+
+class _StopAfterFirstCall(Exception):
+    """Raised by the recording integrand so integrate() stops after f's 1st call."""
+
+
+@pytest.mark.parametrize("T", [1, 2])
+def test_integrand_test_call_shape(T, monkeypatch):
+    """integrate()'s first call to f (the output check) passes t shaped [1, T].
+
+    The call used torch.tensor([[mesh_init]]), which only works when mesh_init
+    holds one number: T=1 gave [1, 1], T=2 raised "only one element tensors
+    can be converted to Python scalars". Through the public path T>1 is
+    stopped earlier by the scalar `mesh_init < mesh_final` assert in
+    _setup_integral_bounds (T>1 is not supported end to end yet), so for T=2
+    that method is stubbed on this instance to reach the test call.
+    """
+    solver = make_solver_for_unit_test()
+    if T > 1:
+        monkeypatch.setattr(solver, "_setup_integral_bounds", lambda mesh, a, b: (a, b))
+    shapes = []
+
+    def f(t):
+        shapes.append(tuple(t.shape))
+        raise _StopAfterFirstCall
+
+    with pytest.raises(_StopAfterFirstCall):
+        solver.integrate(
+            f,
+            mesh_init=torch.zeros(T, dtype=torch.float64),
+            mesh_final=torch.ones(T, dtype=torch.float64),
+            max_batch=10000,
+        )
+    assert shapes == [(1, T)]

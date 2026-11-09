@@ -511,9 +511,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # before the memory benchmark also warms f up, so one-time costs (CUDA
         # start-up, lazy model loading, cuBLAS workspace) stay out of it.
         assert f is not None, "Must specify f or pass it during class initialization."
-        test_output = f(
-            torch.tensor([[mesh_init]], dtype=self.dtype, device=self.device), *f_args
-        )
+        assert mesh_init is not None  # narrows the Optional type for mypy
+        # One point, shaped [1, T] like every batch f receives. mesh_init is
+        # already on the solver's dtype and device (_check_variables).
+        test_output = f(mesh_init.reshape(1, -1), *f_args)
         test_integrand, _ = self._split_f_output(test_output)
         assert len(test_integrand.shape) >= 2
         del test_output, test_integrand

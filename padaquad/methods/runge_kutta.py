@@ -27,6 +27,7 @@ from ._base import MethodClass, _Tableau
 # Adaptive Heun: 2nd-order method with 2 evaluations per step (endpoints only)
 _ADAPTIVE_HEUN = MethodClass(
     order=2,
+    error_exponent=2,  # embedded Euler, exact degree 0
     tableau=_Tableau(
         c=torch.tensor([0.0, 1.0], dtype=torch.float64),
         b=torch.tensor([[0.5, 0.5]], dtype=torch.float64),
@@ -37,6 +38,7 @@ _ADAPTIVE_HEUN = MethodClass(
 # Fehlberg2: 2nd-order method with 3 evaluations per step (start, mid, end)
 _FEHLBERG2 = MethodClass(
     order=2,
+    error_exponent=2,  # embedded 1st-order rule, exact degree 0
     tableau=_Tableau(
         c=torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64),
         b=torch.tensor([1 / 512, 255 / 256, 1 / 512], dtype=torch.float64),
@@ -47,6 +49,7 @@ _FEHLBERG2 = MethodClass(
 # Bogacki-Shampine: 3rd-order method with 4 evaluations per step
 _BOGACKI_SHAMPINE = MethodClass(
     order=3,
+    error_exponent=3,  # embedded 2nd-order rule, exact degree 1
     tableau=_Tableau(
         c=torch.tensor([0.0, 0.5, 0.75, 1.0], dtype=torch.float64),
         b=torch.tensor([2 / 9, 1 / 3, 4 / 9, 0.0], dtype=torch.float64),
@@ -59,6 +62,7 @@ _BOGACKI_SHAMPINE = MethodClass(
 # Dormand-Prince: 5th-order method with 7 evaluations per step
 _DORMAND_PRINCE_SHAMPINE = MethodClass(
     order=5,
+    error_exponent=5,  # embedded 4th-order rule, exact degree 3
     tableau=_Tableau(
         c=torch.tensor(
             [0.0, 1.0 / 5, 3.0 / 10, 4.0 / 5, 8.0 / 9, 1.0, 1.0], dtype=torch.float64

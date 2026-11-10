@@ -46,7 +46,6 @@ import contextlib
 import logging
 import math
 import time
-import warnings
 from abc import abstractmethod
 from typing import TYPE_CHECKING
 
@@ -82,12 +81,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         - ``_calculate_integral(t, y, y0)``: Compute RK integral + error for a batch.
 
     Attributes:
-        remove_cut: Error ratio threshold for merging steps (default 0.1).
+        remove_cut: Largest predicted error ratio of a merged step pair in the
+            optimal mesh (default 0.1).
         max_batch: Maximum number of integrand evaluations per batch. If None,
             determined dynamically from available memory.
         total_mem_usage: Fraction of total memory to use (0 < value <= 1).
-        max_path_change: If set, stops integration when the fraction of failing
-            steps exceeds this value (used with pre-specified meshes).
+        max_path_change: If set, stops integration when the failing fraction of
+            the starting mesh's steps reaches this value (used with a given or
+            stored starting mesh).
         use_absolute_error_ratio: If True, uses the total integral for error
             normalization. If False, uses cumulative integral up to each step.
         error_norm: Vector-error reduction / acceptance scheme (one of "2",
@@ -118,16 +119,22 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Initialize the parallel adaptive solver.
 
         Args:
-            remove_cut: Error ratio threshold below which consecutive step pairs
-                are merged. Must be < 1. Lower values keep more steps (more
-                conservative). Default: 0.1.
+            remove_cut: Largest predicted error ratio of a merged step pair when
+                the optimal mesh is built. A pair is merged only if the merged
+                step's error ratio, predicted from the two steps' errors, is
+                below this value (see ``_prune_excess_mesh``). Must be < 1.
+                Lower values keep more steps (more conservative). Default: 0.1.
             max_batch: Maximum number of integrand evaluations per batch. If None,
                 batch size is determined dynamically based on available memory.
             total_mem_usage: Fraction of total device memory the solver may use
                 for batched evaluations (0 < value <= 1). Default: 0.9.
-            max_path_change: If set, and the user provides a mesh (mesh is not
-                None), integration stops early if this fraction of steps fail
-                the error tolerance. Useful for iterative optimization.
+            max_path_change: If set, and the starting mesh is the caller's
+                ``mesh`` or the stored mesh used by ``same_f=True`` (not
+                a freshly generated one), integration stops early, returning
+                ``converged=False``, once the steps of the starting mesh that
+                fail the error tolerance reach this fraction of the starting
+                mesh's step count. The count spans every batch; halves of split
+                steps are not counted. Useful for iterative optimization.
             max_adaptive_splits: Maximum number of times a panel may be split
                 during adaptive refinement. A panel that has been split this
                 many times is accepted even if it still fails the error
@@ -142,7 +149,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
                   - ``"2"`` (default, matches ``scipy.integrate.quad_vec``):
                     L2 norm ``sqrt(sum(e**2))`` of the error vector, compared
-                    against ``atol + rtol * L2(integral)`` (reduce-then-compare).
+                    against ``max(atol, rtol * L2(integral))``
+                    (reduce-then-compare).
                   - ``"max"``: L-infinity norm ``max(|e|)`` (reduce-then-compare).
                   - ``"rms"``: root-mean-square ``sqrt(mean(e**2))``
                     (reduce-then-compare; padaquad's historical reduction).
@@ -153,7 +161,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     ``atol + rtol * |integral_d|``; a panel is accepted when the
                     fraction of failing elements is ``<= mesh_failure_tolerance``.
 
-                For D == 1 every option reduces to ``|e| / (atol + rtol*|I|)``.
+                For D == 1 the norm family reduces to
+                ``|e| / max(atol, rtol*|I|)`` and ``"failure_fraction"`` to
+                ``|e| / (atol + rtol*|I|)``.
             mesh_failure_tolerance: Used only when ``error_norm ==
                 "failure_fraction"``. Fraction in ``[0, 1]`` of output elements
                 that may exceed tolerance while a panel is still accepted.
@@ -174,17 +184,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         self.remove_cut = remove_cut
 
         # Memory handling variables
+        # max_batch of the last integrate() call that returned (converged or
+        # stopped early by max_path_change); reused by same_f=True.
         self.previous_max_batch: int | None = None
-        # Per-evaluation memory cost; populated by _setup_memory_checks on the
-        # first benchmarked run and reused thereafter.
+        # Per-evaluation memory cost; set by each _setup_memory_checks run and
+        # used by get_max_batch to size batches from live free memory.
         self.f_unit_mem_size = None
         # Cap discovered after an OOM during a take_gradient=False evaluation;
-        # None until one occurs. It persists across integrate() calls while f
-        # is the same object and clamps an explicit max_batch too; a new f, a
-        # take_gradient=True call, or a new solver clears it. Like
-        # previous_max_batch it may survive a run that raised after the OOM
-        # (previous_f_id updates only on convergence): a smaller batch on the
-        # next call with the same f, never a wrong result.
+        # None until one occurs. Cleared at the start of every integrate() call
+        # (same_f=True carries it over through previous_max_batch).
         self._oom_max_batch = None
 
         # Construction-time defaults; each integrate() call falls back to these
@@ -298,7 +306,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh: torch.Tensor | None = None,
         mesh_init: torch.Tensor | None = None,
         mesh_final: torch.Tensor | None = None,
-        reuse_mesh: bool = False,
+        same_f: bool = False,
         random_initial_mesh: bool = True,
         N_init_steps: int = 13,
         f_args: tuple = (),
@@ -338,7 +346,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 If None, uses the function from construction.
             y0: Initial integral accumulator value. Shape: [D].
             mesh: Optional initial step barriers. If provided, these are the
-                starting mesh. If None, a random mesh is generated. Shape: [N, T].
+                starting mesh. If None, a random mesh is generated. Replaced by
+                the stored mesh when ``same_f=True`` and one is stored.
+                Shape: [N, T].
             mesh_init: Lower integration bound. Shape: [T].
             mesh_final: Upper integration bound. Shape: [T].
             N_init_steps: Approximate number of initial steps when mesh is None.
@@ -352,10 +362,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             loss_fxn: Custom loss function. Takes an IntegrationResult, returns a
                 scalar tensor. If None, uses the integral value itself.
             max_batch: Maximum evaluations per batch. Overrides dynamic memory
-                calculation if provided. Silently clamped by the OOM cap learned
-                on an earlier ``take_gradient=False`` call with the same ``f``
-                object; a new ``f``, a ``take_gradient=True`` call, or a new
-                solver clears that cap.
+                calculation if provided. Replaced by the stored value when
+                ``same_f=True`` and one is stored.
             max_adaptive_splits: Maximum number of times a panel may be split
                 during adaptive refinement; a panel split this many times is
                 accepted even if it still fails the tolerance. If None
@@ -368,7 +376,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             error_integral_reference: Reference value for the relative-tolerance
                 denominator in absolute error mode
                 (``use_absolute_error_ratio=True``), where a panel's tolerance is
-                ``atol + rtol * |reference|``. By default the reference is the
+                ``max(atol, rtol * |reference|)`` (``atol + rtol * |reference|``
+                for ``"failure_fraction"``). By default the reference is the
                 *running* integral, which is incomplete during the early batches
                 (it has not yet accumulated contributions from regions evaluated
                 later). When much of the integral's mass lies at later times,
@@ -403,17 +412,27 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 against uniform-mesh aliasing; reproducibility is
                 better achieved via ``torch.manual_seed`` before the
                 call.
-            reuse_mesh: When True, seed the integration from the optimal mesh
-                cached by the previous successful call (warm start). Default
-                False. The cached mesh is the *optimal* mesh produced after
-                prune-and-refine on the previous call; reusing it across
-                training-loop iterations where the integrand changes only
-                slightly between calls saves substantial adaptive-refinement
-                cost. If reuse_mesh=True but no cache exists, falls back to
-                a fresh initial mesh and emits a warning. If the cached mesh
-                was produced for a different integrand (id mismatch), emits
-                a warning but proceeds. Ignored when ``mesh`` is provided
-                explicitly (the explicit ``mesh`` always takes precedence).
+            same_f: Set True when f is the same integrand as in the
+                previous call, or changes only slightly (e.g. between
+                training-loop iterations). The solver then starts from the mesh
+                and ``max_batch`` stored by the last call that returned on this
+                solver (converged, or stopped early by ``max_path_change``),
+                in place of the caller's ``mesh`` and ``max_batch``, and skips
+                the memory benchmark. The integration bounds still come from
+                the caller's arguments; the stored mesh is filtered and padded
+                to them. If nothing is stored yet (first call), the caller's
+                values or the defaults are used, so the flag can be passed from
+                the first iteration. Default False: the caller's values are
+                used (the stored values are still updated). The stored mesh is
+                the previous ``mesh_optimal`` (pruned and refined, or partly
+                refined after an early exit). The stored ``max_batch`` is a
+                fixed number computed when that call returned, whatever its
+                integrand or ``take_gradient`` setting: a value learned with
+                ``take_gradient=False`` has no backpropagation memory margin
+                and can be below the step size C, so pass
+                ``same_f=False`` on a call that switches
+                ``take_gradient``. For a batch size that follows live free
+                memory, pass ``max_batch=solver.get_max_batch()`` instead.
             result_device: Device the per-step output records (nodes, y, ...)
                 are moved to (default 'cpu'). An index-less 'cuda' means the
                 solver's GPU; None keeps them on the solver's device.
@@ -425,11 +444,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Note:
             If mesh is provided, the solver uses these as initial barriers.
             Steps may be split or merged, but the bounds [mesh[0], mesh[-1]]
-            are preserved. If mesh is None and reuse_mesh is False (default),
-            a random initial mesh is generated in [mesh_init, mesh_final].
+            are preserved. If mesh is None and no stored mesh is used, a
+            random initial mesh is generated in [mesh_init, mesh_final].
         """
         # Set dtype based on input
-        self.set_dtype_by_input(mesh=mesh, mesh_init=mesh_init, mesh_final=mesh_init)
+        self.set_dtype_by_input(mesh=mesh, mesh_init=mesh_init, mesh_final=mesh_final)
 
         # Setup results device
         result_device = _resolve_device(
@@ -489,38 +508,25 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         MEM_ERROR = "total_mem_usage is a ratio and must be 0 < total_mem_usage <= 1"
         assert total_mem_usage <= 1.0, MEM_ERROR
         assert total_mem_usage > 0, MEM_ERROR
-        # Has memory been benchmarked for this integrand yet? Skip the
-        # benchmark if id(f) matches what we've already measured.
-        # Using id() avoids the lambda-collision bug present in earlier
-        # versions which compared f.__name__ (every lambda has
-        # __name__ == "<lambda>").
-        same_integrand_fxn = (
-            self.previous_f_id is not None and id(f) == self.previous_f_id
-        )
-
-        # Keep the OOM cap while f is unchanged (its memory footprint is what
-        # the cap measured), so an explicit max_batch does not re-trigger the
-        # same OOMs every call. Clear it for a new f, and for take_gradient=True:
-        # that path has no OOM recovery, keeps the autograd graph (a larger
-        # footprint than the one the cap was learned on), and fails its
-        # max_mesh_steps >= 1 assert if the cap is below C.
-        if not same_integrand_fxn or take_gradient:
-            self._oom_max_batch = None
+        # The OOM cap lasts one call; same_f=True carries it over
+        # through the stored previous_max_batch, which the cap clamps.
+        self._oom_max_batch = None
 
         # Make sure f exists and provides the correct output. Running this
         # before the memory benchmark also warms f up, so one-time costs (CUDA
         # start-up, lazy model loading, cuBLAS workspace) stay out of it.
         assert f is not None, "Must specify f or pass it during class initialization."
-        test_output = f(
-            torch.tensor([[mesh_init]], dtype=self.dtype, device=self.device), *f_args
-        )
+        assert mesh_init is not None  # narrows the Optional type for mypy
+        # One point, shaped [1, T] like every batch f receives. mesh_init is
+        # already on the solver's dtype and device (_check_variables).
+        test_output = f(mesh_init.reshape(1, -1), *f_args)
         test_integrand, _ = self._split_f_output(test_output)
         assert len(test_integrand.shape) >= 2
         del test_output, test_integrand
 
-        # Benchmark memory footprint on first call with a new integrand
-        if same_integrand_fxn and force_max_batch is None:
-            # Use the previous max_batch, running memory check everytime is slow
+        # same_f=True: the stored max_batch replaces the caller's and
+        # skips the memory benchmark.
+        if same_f and self.previous_max_batch is not None:
             force_max_batch = self.previous_max_batch
         if force_max_batch is None:
             self._setup_memory_checks(
@@ -533,28 +539,32 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         loss_fxn = loss_fxn if loss_fxn is not None else self._integral_loss
 
         # Decide initial mesh:
-        #   - explicit mesh passed in: use it (always takes precedence);
-        #   - reuse_mesh=True with a populated cache: warm-start from the
-        #     cached optimal mesh, snapping its endpoints to [mesh_init, mesh_final];
+        #   - same_f=True with a stored mesh: warm-start from it,
+        #     snapping its endpoints to [mesh_init, mesh_final];
+        #   - explicit mesh passed in: use it;
         #   - otherwise: generate a fresh random initial mesh.
         mesh, mesh_trackers, mesh_indices, mesh_is_given = self._setup_initial_mesh(
             mesh,
             mesh_init,
             mesh_final,
-            reuse_mesh,
-            same_integrand_fxn,
+            same_f,
             random_initial_mesh,
             N_init_steps,
         )
+        # max_path_change counts failing steps of the starting mesh (split
+        # depth 0) across all batches, against the starting step count.
+        check_path_change = mesh_is_given and self.max_path_change is not None
+        n_start_steps = len(mesh) - 1
+        n_start_failed = 0
 
         record = {}
         split_node_state = (None, None, None, None)
         # Per-panel split counter, parallel to mesh/mesh_trackers. Only
-        # maintained when a depth cap is active (None ⇒ zero overhead, no
-        # behavior change).
+        # maintained when a depth cap or the max_path_change check needs it
+        # (None ⇒ zero overhead, no behavior change).
         split_counts = (
             torch.zeros(len(mesh), dtype=torch.long, device=self.device)
-            if max_adaptive_splits is not None
+            if max_adaptive_splits is not None or check_path_change
             else None
         )
         # === Main integration loop ===
@@ -617,11 +627,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
             # --- Step 4: Compute error ratios for each step ---
             t0 = time.time()
-            # The rtol denominator (atol + rtol*|reference_integral|). By default
-            # this is the running integral, which is incomplete in the early
-            # batches; a user-supplied error_integral_reference (≈ the true total
-            # integral) replaces it so rtol is judged against the right scale
-            # from the first batch.
+            # The tolerance denominator is max(atol, rtol*|reference_integral|)
+            # (atol + rtol*|reference_integral| for failure_fraction). By
+            # default the reference is the running integral, which is
+            # incomplete in the early batches; a user-supplied
+            # error_integral_reference (≈ the true total integral) replaces it
+            # so rtol is judged against the right scale from the first batch.
             reference_integral = current_integral
             if error_integral_reference is not None:
                 reference_integral = error_integral_reference
@@ -645,23 +656,57 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             logger.debug("error_ratios: %s", error_ratios)
             logger.debug("error_ratios_2steps: %s", error_ratios_2steps)
 
-            # Early exit if too many steps fail and user-provided mesh is given.
-            # Bug B6 fix: previously returned bare `None`, breaking the
+            # Early exit if too many steps of a given or stored starting mesh
+            # fail. Bug B6 fix: previously returned bare `None`, breaking the
             # documented return-type contract. Now returns an
             # IntegrationResult with converged=False populated from the
             # most-recent batch's intermediate result so callers can
             # inspect partial state instead of having to special-case
             # None.
-            if mesh_is_given and self.max_path_change is not None:
+            if check_path_change:
                 # A "failed step" is one that would be split under the active
                 # error_norm scheme (consistent with the accept/reject masks).
-                fail_ratio = remove_mask.to(float).sum() / len(remove_mask)
+                # Only steps of the starting mesh (split depth 0) count, each
+                # once (it is evaluated once), against the starting step count,
+                # so the ratio covers the whole starting mesh even when it spans
+                # several batches. The count only grows, so the call exits as
+                # soon as the ratio is certain to reach max_path_change.
+                # Both set whenever check_path_change (narrows for mypy).
+                assert split_counts is not None
+                assert self.max_path_change is not None
+                is_start_step = split_counts[step_idxs] == 0
+                n_start_failed += int((remove_mask & is_start_step).sum())
+                fail_ratio = n_start_failed / n_start_steps
                 if fail_ratio >= self.max_path_change:
                     logger.warning(
-                        "%.1f%% of integration steps failed error requirements, "
-                        "which is greater than max_path_change (%s), now exiting.",
+                        "%.1f%% of the starting mesh's integration steps failed "
+                        "error requirements, which is at least max_path_change "
+                        "(%s), now exiting.",
                         fail_ratio * 100,
                         self.max_path_change,
+                    )
+                    # Store this call's mesh and max_batch for same_f
+                    # (as on convergence), with this batch's failing steps
+                    # split as the loop would have done next, so the next call
+                    # refines further instead of restarting from (and stopping
+                    # on) the same mesh: the default path evaluates the whole
+                    # starting mesh in its first batch, before any split.
+                    mesh = self._adaptively_increase_mesh(
+                        method_output=None,
+                        error_ratios=error_ratios,
+                        y_step_eval=None,
+                        nodes=None,
+                        mesh=mesh,
+                        mesh_idxs=step_idxs,
+                        mesh_trackers=mesh_trackers.clone(),
+                        split_counts=split_counts,
+                        max_adaptive_splits=max_adaptive_splits,
+                        keep_mask=keep_mask,
+                        remove_mask=remove_mask,
+                    )[4]
+                    self.mesh_previous = mesh
+                    self.previous_max_batch = self.get_max_batch(
+                        total_mem_usage, force_max_batch
                     )
                     # Place the partial result on result_device for a
                     # device-consistent return, matching the converged path.
@@ -699,7 +744,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     )
 
             # --- Step 4b: Re-check already-accepted (recorded) panels ---
-            # The accept/reject denominator (atol + rtol*|reference_integral|)
+            # The accept/reject denominator (built from reference_integral, Step 4)
             # drifts as the running integral changes, so a panel accepted early
             # can violate the *current* tolerance. Re-check the recorded panels
             # against the SAME reference_integral the batch just used (so a panel
@@ -864,8 +909,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # the next call, so it must match the integration device (its endpoints
         # are mesh_init/mesh_final, which live on self.device).
         mesh_optimal = mesh_optimal.to(self.device)
+        # Stored together for same_f=True; only a returning call writes
+        # them (also on the max_path_change exit), so both come from one call.
         self.mesh_previous = mesh_optimal
-        self.previous_f_id = id(f)
+        self.previous_max_batch = self.get_max_batch(total_mem_usage, force_max_batch)
 
         # Move the resident record fields to result_device so the rest of the
         # returned IntegrationResult lives on result_device. The integration-
@@ -1220,7 +1267,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     ):
         # Determine how many f evaluations fit in one batch based on memory
         max_batch = self.get_max_batch(total_mem_usage, force_max_batch)
-        self.previous_max_batch = max_batch
 
         # Rescue a zero budget to the minimum workable value of 1 before
         # dispatching to either evaluation path. Placed ahead of the
@@ -1363,7 +1409,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     "avoid deleting and rerunning evaluations."
                 )
                 max_batch = self._oom_max_batch
-                self.previous_max_batch = self._oom_max_batch
                 continue
 
             integrand, tracked = self._split_f_output(f_output)
@@ -1627,30 +1672,49 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         self, nodes, mesh_quadratures, mesh_quadrature_errors, error_ratios_2steps
     ):
         """
-        Remove a single integration mesh step where
-        error_ratios_2steps < remove_cut by merging two neighboring mesh steps,
-        error_ratios_2steps corresponds to the first mesh step of the pair. This
-        function only alters nodes, where remove_fxn merges the two mesh steps.
+        Merge pairs of neighboring steps whose merged step is predicted to pass.
+
+        Pair i (steps i and i+1) is merged when its summed error ratio
+        ``error_ratios_2steps[i] < remove_cut / 2^(error_exponent - 1)``, i.e.
+        when the merged step's predicted error ratio is below ``remove_cut``
+        (derivation in the comment below). Of several adjacent qualifying
+        pairs, ``_rec_remove`` keeps every other one, so no step is merged
+        twice; one call merges at most one level. The merge itself is
+        ``_merge_excess_nodes`` (uniform or variable sampling).
 
         Args:
-            nodes (Tensor): Per-step quadrature point positions.
-            error_ratios_2steps (Tensor): The merged errors of neighboring mesh
-                steps, these indices align with the first step of the pair
-                (error_ratios_2steps[i] -> nodes[i])
+            nodes: Per-step quadrature point positions. Shape: [N, C, T].
+            mesh_quadratures: Per-step integral contributions. Shape: [N, D].
+            mesh_quadrature_errors: Per-step error estimates. Shape: [N, D].
+            error_ratios_2steps: Summed error ratio of each pair of neighboring
+                steps, indexed by the pair's first step. Shape: [N-1].
 
-        Shapes:
-            nodes: [N, C, T]
-            error_ratios_2steps: [N-1]
+        Returns:
+            Tuple ``(nodes, mesh_quadratures, mesh_quadrature_errors)`` with
+            each merged pair replaced by one step whose contribution and error
+            are the pair's sums. Shapes: [N-R, C, T], [N-R, D], [N-R, D] for R
+            merged pairs.
         """
 
         if len(error_ratios_2steps) == 0:
             return nodes, mesh_quadratures, mesh_quadrature_errors
+        # Merge cutoff. error_ratios_2steps is the SUM of the two steps' error
+        # ratios, S = (e_i + e_{i+1}) / tol; the merged step is never evaluated.
+        # With e(h) ~ C F h^k for a step of width h (k = error_exponent, from the
+        # Taylor remainder of the estimate's less accurate rule), each half has
+        # ratio ~ S/2, so the merged step has ratio ~ 2^k S/2 = 2^(k-1) S.
+        # Requiring that predicted ratio to stay below remove_cut gives
+        # S < remove_cut / 2^(k-1). Assumes steps small enough that the leading
+        # Taylor term dominates; on coarse steps the growth can be larger. When
+        # the estimate is round-off (high k, tight tolerance, float32) it does
+        # not grow as h^k, so the cut is conservative and pairs rarely merge.
+        merge_cut = self.remove_cut / 2 ** (self.method.error_exponent - 1)
         # Since error ratios encompasses 2 RK steps each neighboring element shares
         # a step, we cannot remove that same step twice and therefore remove the
         # first in pair of steps that it appears in
-        ratio_idxs_cut = torch.where(
-            self._rec_remove(error_ratios_2steps < self.remove_cut)
-        )[0]  # Index for first interval of 2
+        ratio_idxs_cut = torch.where(self._rec_remove(error_ratios_2steps < merge_cut))[
+            0
+        ]  # Index for first interval of 2
         assert not torch.any(ratio_idxs_cut[:-1] + 1 == ratio_idxs_cut[1:])
 
         if len(ratio_idxs_cut) == 0:
@@ -1703,10 +1767,18 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         After the integration loop converges, this method produces a refined
         mesh that can be reused for subsequent integrations of the same function.
         It does two things:
-        1. Prunes: merges consecutive step pairs whose combined error ratio
-           is below remove_cut (they were over-resolved).
-        2. Adds: inserts midpoints for steps that still have high error ratios
-           relative to the final integral value.
+        1. Prunes: merges consecutive step pairs whose merged step is
+           predicted to have an error ratio below remove_cut
+           (``_prune_excess_mesh``).
+        2. Adds: inserts midpoints for steps whose error ratio against the
+           final integral is still >= 1. A merged step carries the pair's
+           summed error, so its ratio is the pair's (below the merge cutoff,
+           < 1) unless the rounding floor sets the tolerance (see
+           ``_error_ratios_norm``): this does not split a merged step, and it
+           is not a check of the merge prediction. Steps fail here only when
+           no re-check ran against the final integral (``take_gradient=True``,
+           or a fixed ``error_integral_reference``) or when
+           ``max_adaptive_splits`` stopped their refinement.
 
         This produces a mesh tailored to the difficulty of the integrand at
         different positions along the integration domain.
@@ -1777,9 +1849,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Ensure no two adjacent True values exist in a boolean mask.
 
         When merging step pairs, two adjacent steps cannot both be merged
-        (they share a boundary). This recursively resolves conflicts by
-        keeping the first flagged step in any adjacent pair and un-flagging
-        the second.
+        (they share a boundary). Conflicts are resolved left to right: the
+        first flagged entry of a run is kept and its neighbor un-flagged, so a
+        run of Trues alternates (TTT -> TFT, TTTT -> TFTF).
 
         Example: [True, True, False, True] -> [True, False, False, True]
 
@@ -1849,30 +1921,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh,
         mesh_init,
         mesh_final,
-        reuse_mesh,
-        same_integrand_fxn,
+        same_f,
         random_initial_mesh,
         N_init_steps,
     ):
-        if mesh is not None:
-            # The user-provided mesh enters the loop here; _setup_integral_bounds
-            # only moved a local copy for its assertions, so coerce it onto the
-            # solver's device (DistributedEnvironment owns the device; inputs are
-            # moved to it). Without this, the loop indexes a CPU mesh with
-            # device-side indices and crashes on GPU.
-            mesh = mesh.to(self.dtype).to(self.device)
+        # mesh_is_given: the starting mesh came from outside (the stored mesh
+        # or the caller's), not freshly generated; the max_path_change check
+        # runs only then.
+        if same_f and self.mesh_previous is not None:
+            # The stored mesh replaces the caller's mesh.
             mesh_is_given = True
-        elif reuse_mesh and self.mesh_previous is not None:
-            mesh_is_given = False
-            # Warn if the cached mesh was produced for a different integrand;
-            # the user has opted into reuse but we should flag the mismatch.
-            if not same_integrand_fxn:
-                warnings.warn(
-                    "reuse_mesh=True but f id differs from the cached "
-                    "integrand; warm-started mesh may be poorly tuned for "
-                    "this f.",
-                    stacklevel=2,
-                )
             # Filter cached barriers to within the new [mesh_init, mesh_final]
             # box, comparing every time dimension (min/max handles either
             # integration direction). For 1-D forward integration this is the
@@ -1892,15 +1950,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # the new mesh_final.)
             if not torch.all(mesh[-1] == mesh_final):
                 mesh = torch.concatenate([mesh, mesh_final.unsqueeze(0)], dim=0)
+        elif mesh is not None:
+            # The user-provided mesh enters the loop here; _setup_integral_bounds
+            # only moved a local copy for its assertions, so coerce it onto the
+            # solver's device (DistributedEnvironment owns the device; inputs are
+            # moved to it). Without this, the loop indexes a CPU mesh with
+            # device-side indices and crashes on GPU.
+            mesh = mesh.to(self.dtype).to(self.device)
+            mesh_is_given = True
         else:
             mesh_is_given = False
-            if reuse_mesh:
-                warnings.warn(
-                    "reuse_mesh=True but no cached mesh is available "
-                    "(first call, or after solver state was reset). "
-                    "Falling back to a fresh initial mesh.",
-                    stacklevel=2,
-                )
             # Generate a fresh initial mesh of barriers across [mesh_init, mesh_final].
             # Layout: sqrt(N_init_steps) evenly-spaced top-level segments, each
             # subdivided into sqrt(N_init_steps)+1 sub-barriers. The total
@@ -2022,10 +2081,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         Machine-precision floor on the per-element error estimate.
 
-        Mirrors ``scipy.integrate.quad_vec``'s ``round_err = norm(50*eps*h*s_k)``
-        guard: it keeps the controller from splitting a panel forever chasing an
-        error that is already at/below floating-point round-off. ``s_k`` is the
-        panel's own integral contribution (``mesh_quadratures``).
+        Modeled on ``scipy.integrate.quad_vec``'s rounding guard: it keeps the
+        controller from splitting a panel forever chasing an error that is
+        already at/below floating-point round-off. scipy uses
+        ``round_err = norm(50*eps*h*s_k_abs)`` with ``h*s_k_abs`` the panel's
+        quadrature of ``|f|``, and raises the error estimate to it
+        (``_quadrature_gk`` in ``scipy/integrate/_quad_vec.py``, scipy 1.17).
+        Here the floor is ``50*eps*|s_k|`` with ``s_k`` the panel's signed
+        contribution (``mesh_quadratures``), smaller than scipy's on panels
+        where f changes sign, and the error-ratio helpers use it as a lower
+        bound on the tolerance.
 
         Args:
             mesh_quadratures: Per-step integral contributions. Shape: [N, D].
@@ -2098,11 +2163,21 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         compared to a single tolerance built from the *same* norm of the
         integral::
 
-            error_ratio[k] = R(|e[k]|) / (atol + rtol * R(I))      (absolute)
-            error_ratio[k] = R(|e[k]|) / (atol + rtol * R(cum[k])) (cumulative)
+            error_ratio[k] = R(|e[k]|) / max(atol, rtol * R(I))      (absolute)
+            error_ratio[k] = R(|e[k]|) / max(atol, rtol * R(cum[k])) (cumulative)
 
-        where ``R`` is the configured norm. A panel is accepted when
+        where ``R`` is the configured norm and ``cum[k]`` the running integral
+        through step k (as ``scipy.integrate.quad_vec``, which uses
+        ``max(epsabs, epsrel*norm(I))``). A panel is accepted when
         ``error_ratio < 1`` (see ``_accept_reject_masks``).
+
+        The pair ratio ``error_ratio_2steps[k] = R(|e[k]| + |e[k+1]|) /
+        tol_2steps[k]`` (used only to merge steps, ``_prune_excess_mesh``)
+        uses the tolerance the merged step would get: the same ``tol`` in
+        absolute mode, step k+1's (the merged step's right end) in cumulative
+        mode. Its rounding floor is ``R(floor[k]) + R(floor[k+1])``, at least
+        the merged step's own floor (equal when both contributions have the
+        same sign).
 
         The rounding floor enters as a *lower bound on the tolerance*
         (``effective_tol = max(tol, R(round_floor))``), not as an inflation of
@@ -2137,14 +2212,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             error_tol = torch.maximum(
                 atol, rtol * self._reduce_norm(torch.abs(cum_steps))
             )
-            error_tol_2steps = torch.maximum(
-                atol,
-                rtol
-                * torch.maximum(
-                    self._reduce_norm(torch.abs(cum_steps[:-1])),
-                    self._reduce_norm(torch.abs(cum_steps[1:])),
-                ),
-            )
+            # A merged pair (i, i+1) ends where step i+1 ends, so it is judged
+            # against step i+1's cumulative tolerance (not the larger of the
+            # two, which under-predicts the merged ratio when |cum| falls).
+            error_tol_2steps = error_tol[1:]
 
         if floor is not None:
             # Broadcasts a scalar (absolute mode) or per-step (cumulative) tol.
@@ -2171,6 +2242,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         A panel is accepted when ``failure_fraction <= mesh_failure_tolerance``
         (applied in ``_accept_reject_masks``). The raw per-element ratio is also
         returned so non-finite (NaN/Inf) panels can be detected downstream.
+        The pair ratio (used only to merge steps) is the max over elements of
+        ``(|e[k, d]| + |e[k+1, d]|) / tol_2steps[k, d]``, with the merged
+        step's tolerance as in ``_error_ratios_norm``.
 
         The rounding floor enters per element as a lower bound on the tolerance
         (``effective_tol = max(tol, round_floor)``), so an element whose error is
@@ -2194,9 +2268,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             else:
                 raise ValueError("Must give mesh_quadratures or cum_mesh_quadratures")
             error_tol = atol + rtol * torch.abs(cum_steps)  # [N, D]
-            error_tol_2steps = atol + rtol * torch.maximum(
-                torch.abs(cum_steps[:-1]), torch.abs(cum_steps[1:])
-            )
+            # Merged pair's tolerance: step i+1's (see _error_ratios_norm).
+            error_tol_2steps = error_tol[1:]
 
         if mesh_quadratures is not None:
             floor = self._round_floor(mesh_quadratures)  # [N, D]

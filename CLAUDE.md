@@ -73,7 +73,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_convergence_rate.py` | Empirical convergence-rate slope matches each method's theoretical rate |
 | `test_autodiff_consistency.py` | $\nabla_\theta\int f_\theta dt$ via backprop equals $\int \nabla_\theta f_\theta dt$ |
 | `test_error_indicator.py` | Behavior of absolute vs cumulative error indicators (Bug B8 investigation) |
-| `test_bug_regressions.py` | Regression tests for bugs B1, B2, B4, B6 fixed in Phase 1 |
+| `test_bug_regressions.py` | Regression tests for bugs B1, B4, B6 fixed in Phase 1, and the `same_f` flag |
 | `test_snapshots.py` | Golden-value regression net for the file-split refactor; CPU-only float64 |
 | `test_public_api.py` | Smoke test of every public symbol and `IntegrationResult` fields |
 | `test_rk_integral.py` | `_RK_integral`: constant / linear / multi-step / multi-dim / zero-width / variable-b inputs |
@@ -87,7 +87,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed error ratios, midpoint placement |
 | `test_record_and_sort.py` | `_record_results` and `_sort_record` |
 | `test_evaluate_and_merge.py` | `_evaluate_adaptive_nodes` + `_merge_excess_nodes` for both uniform and variable solvers |
-| `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh` |
+| `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: `mesh_optimal` re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
 | `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
 
@@ -197,8 +197,9 @@ is a boolean array where `True` means the panel still needs evaluation.
 1. **Initialize barriers.** When `mesh=None`, generate
    ~$\sqrt{N_\text{init}}$ evenly-spaced top-level segments with random
    sub-barriers (random by default — uniform aliases on
-   uniform-feature integrands). When `reuse_mesh=True`, seed from the
-   cached `mesh_optimal` of the previous successful run.
+   uniform-feature integrands). When `same_f=True` and a mesh is
+   stored, seed from the stored `mesh_optimal` of the last call that
+   returned.
 2. **Main loop.** While any `mesh_trackers` are `True`:
    - Determine `max_steps` from GPU memory budget or explicit `max_batch`.
    - Select up to `max_steps` unevaluated panels.
@@ -223,15 +224,17 @@ Two orthogonal axes control the adaptive accept/reject decision: the
 reduction scheme** (`error_norm`).
 
 **Tolerance reference** (`use_absolute_error_ratio`):
-- **Absolute** (default): denominator is `atol + rtol * |total_integral|`. Every panel uses the same denominator. Best for path integrals where the total is the meaningful quantity.
-- **Cumulative**: denominator is `atol + rtol * |cumsum_to_step|`, growing with the running integral (traditional ODE-style). Per-panel ratios *decrease* as integration progresses.
+- **Absolute** (default): denominator is `max(atol, rtol * |total_integral|)` (`atol + rtol * |I_d|` for `"failure_fraction"`, below). Every panel uses the same denominator. Best for path integrals where the total is the meaningful quantity.
+- **Cumulative**: the same with `|cumsum_to_step|` (the running integral through the panel) in place of `|total_integral|` (traditional ODE-style). Per-panel ratios *decrease* as integration progresses.
 
 **Vector-error reduction** (`error_norm`, modeled on
 `scipy.integrate.quad_vec`'s `norm`): for vector-valued integrands (`D > 1`)
 the per-step error must be reduced to one accept/reject decision. Two families,
-both reducing to `|error| / (atol + rtol*|I|) < 1` when `D == 1`:
+reducing to `|error| / max(atol, rtol*|I|) < 1` (norm family) or
+`|error| / (atol + rtol*|I|) < 1` (`"failure_fraction"`) when `D == 1`:
 - **Norm family** — *reduce-then-compare* (scipy style): reduce the error
-  vector to a scalar with the norm, compare to `atol + rtol * norm(integral)`.
+  vector to a scalar with the norm, compare to `max(atol, rtol * norm(integral))`
+  (scipy `quad_vec` uses `max(epsabs, epsrel*norm(I))`).
   Accept when `< 1`. Options: `"2"` (default, L2 = `sqrt(sum(e²))`), `"max"`
   (L∞), `"rms"` (`sqrt(mean(e²))`, padaquad's historical reduction), or a
   callable reducing the last (`D`) axis.
@@ -250,9 +253,19 @@ panel's error is at/below round-off. The scheme is set at construction
 `_error_ratios_failure_fraction`; `_accept_reject_masks` turns the result into
 keep/split masks consumed by `_adaptively_increase_mesh`.
 
-`error_ratios_2steps`: combined error of consecutive step pairs, used for
-merging. When `error_ratio_2steps < remove_cut` (default 0.1), pairs are
-merged. `_rec_remove` ensures no two adjacent pairs are both flagged.
+`error_ratios_2steps`: summed error ratio S of consecutive step pairs, used
+only by `_get_optimal_mesh` to merge pairs. A merged step of width 2h has an
+error of about 2^(k-1)·S (the method's error estimate scales as h^k, k =
+`error_exponent` on each method), so a pair is merged when
+`S < remove_cut / 2^(k-1)` (`remove_cut` default 0.1): the merged step's
+predicted ratio stays below `remove_cut`. S uses the tolerance the merged step
+gets: in cumulative mode the right step's `|cumsum|` (the merged step ends
+there). `_rec_remove` ensures no two adjacent pairs are both flagged, so one
+call merges at most one level. The merged step records the pair's summed error,
+so the add phase of `_get_optimal_mesh` does not split it (unless the rounding
+floor sets the tolerance). The prediction assumes
+the h^k regime; when the estimate is round-off (high-order methods, tight
+tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
 
 ### Uniform vs variable sampling
 
@@ -289,8 +302,9 @@ merged. `_rec_remove` ensures no two adjacent pairs are both flagged.
   kernel's counter error E; elsewhere an RSS before/after difference.
   Stops: c changes < 1 %, call slower than 1 s,
   N = 1e9, or 10·M > usable memory.
-- The batch size is computed at every evaluation from live memory:
-  `get_max_batch` → `_get_max_f_evals = usable_memory / c` (capped at 1e9).
+- Unless `max_batch` or `same_f=True` fixes it, the batch size is
+  computed at every evaluation from live memory: `get_max_batch` →
+  `_get_max_f_evals = usable_memory / c` (capped at 1e9).
 - Out-of-memory errors are recognized by `_is_out_of_memory` (GPU OOM, CPU
   `DefaultCPUAllocator` refusal, CUDA "out of memory" and CUDA-library
   `*ALLOC*_FAILED` statuses, `MemoryError`);
@@ -327,17 +341,24 @@ merged. `_rec_remove` ensures no two adjacent pairs are both flagged.
 - `f_args` is a tuple forwarded positionally to the integrand:
   `f(t, *f_args)`. Used by `examples/pode/` for path parameters.
 
-### Warm-starting (`reuse_mesh=True`)
+### Warm-starting (`same_f=True`)
 
-- Solver caches `mesh_optimal` from the previous successful call.
-- On the next call with `reuse_mesh=True`, the cached mesh is filtered
-  to `[mesh_init, mesh_final]`, padded if needed, and used as the
-  initial mesh.
-- Integrand identity is sanity-checked via `id(f)` (Phase 1 fix; the
-  prior `__name__` check collided across all lambdas). On id mismatch
-  the solver warns but proceeds.
-- Default is `reuse_mesh=False` so that calling the same solver on a
-  new integrand never silently reuses a stale mesh.
+- Every call that returns (converged, or stopped early by
+  `max_path_change`) stores its mesh (`mesh_previous`: `mesh_optimal`, or
+  after an early exit the mesh at the exit with the failing steps of that
+  batch split, so the next call refines further) and its `max_batch`
+  (`previous_max_batch`) together. A call that raises stores nothing.
+- With `same_f=True` and stored values, the stored mesh (filtered
+  to `[mesh_init, mesh_final]`, padded if needed) and `max_batch` replace
+  the caller's `mesh` / `max_batch`, and the memory benchmark is skipped.
+  With nothing stored (first call), the caller's values or the defaults
+  are used.
+- The solver does not identify integrands (no `id(f)` matching); the
+  caller says when the integrand is the same. Default is
+  `same_f=False`.
+- `max_path_change` runs on a given or stored starting mesh (never a
+  fresh one) and counts failing steps of that starting mesh across all
+  batches (split depth 0, via `split_counts`) against its step count.
 
 ### Dtype management
 

@@ -46,6 +46,10 @@ class steps(Enum):
     ADAPTIVE_VARIABLE = 2
 
 
+# Sampling type used when the caller gives none (adaptive_quadrature, integrate).
+DEFAULT_SAMPLING_TYPE = "uniform"
+
+
 def get_sampling_type(sampling_type: str) -> steps:
     """
     Convert a string sampling type name into the corresponding ``steps`` enum.
@@ -61,7 +65,7 @@ def get_sampling_type(sampling_type: str) -> steps:
         The corresponding ``steps`` enum value.
 
     Raises:
-        KeyError: If sampling_type is not a recognized name.
+        ValueError: If sampling_type is not a recognized name.
     """
     types = {
         "fixed": steps.FIXED,
@@ -70,6 +74,10 @@ def get_sampling_type(sampling_type: str) -> steps:
         "adaptive_variable": steps.ADAPTIVE_VARIABLE,
         "variable": steps.ADAPTIVE_VARIABLE,
     }
+    if sampling_type not in types:
+        raise ValueError(
+            f"Unknown sampling_type {sampling_type!r}; valid names are {sorted(types)}."
+        )
     return types[sampling_type]
 
 
@@ -90,9 +98,9 @@ class SolverBase(ABC, DistributedEnvironment):
     - Device management: inherited from DistributedEnvironment.
     - Default parameter storage: f, y0, mesh_init, mesh_final can be set at
       construction and reused across multiple integrate() calls.
-    - Warm-start caching: stores mesh_previous and previous_f_id
-      so that repeated integration of the same function can reuse the optimized
-      time mesh from the prior run.
+    - Warm-start caching: stores mesh_previous, reused with
+      ``integrate(..., same_f=True)`` so that repeated integration of
+      the same function starts from the optimized time mesh of the prior run.
 
     Subclasses must implement:
         - ``_set_solver_dtype(dtype)``: update solver-specific state when dtype changes.
@@ -122,7 +130,8 @@ class SolverBase(ABC, DistributedEnvironment):
             method: Name of the RK integration method (e.g. 'dopri5', 'bosh3').
                 Converted to lowercase.
             atol: Absolute error tolerance for adaptive step control. Steps with
-                error below atol + rtol*|integral| are accepted.
+                error below max(atol, rtol*|integral|) are accepted
+                (atol + rtol*|integral| for ``error_norm="failure_fraction"``).
             rtol: Relative error tolerance for adaptive step control.
             y0: Initial value of the integral (accumulator starting point).
                 Shape: [D].
@@ -180,16 +189,12 @@ class SolverBase(ABC, DistributedEnvironment):
             if mesh_final is not None
             else torch.tensor([1], dtype=dtype, device=self.device)
         )
-        # Cached time barriers from last integration for warm-starting.
-        # Used only when integrate(..., reuse_mesh=True) is passed; otherwise
-        # ignored. The cached barriers are the *optimal* mesh from the
-        # previous successful run (post-prune-and-refine).
-        self.mesh_previous = None
-        # id() of the last integrated function. Stored as a sanity-check
-        # signal so that reuse_mesh=True can warn if the cached mesh was
-        # tuned for a different integrand. Replaces the prior __name__
-        # comparison which collided across all lambdas.
-        self.previous_f_id = None
+        # Stored time barriers from the last integration for warm-starting.
+        # Used only when integrate(..., same_f=True) is passed;
+        # otherwise ignored. They are the *optimal* mesh of the last call that
+        # returned (post-prune-and-refine), or its partly refined mesh after a
+        # max_path_change early exit.
+        self.mesh_previous: torch.Tensor | None = None
 
         self._set_dtype(dtype)
 

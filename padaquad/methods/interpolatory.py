@@ -63,10 +63,12 @@ class _VARIABLE_SECOND_ORDER(_VariableSubclass):
 
     Attributes:
         order: Convergence order (2).
+        error_exponent: Error-estimate exponent (2; see ``MethodClass``).
         n_tableau_c: Number of quadrature points per step (2).
     """
 
     order = 2
+    error_exponent = 2  # same estimate as adaptive Heun: embedded Euler
     n_tableau_c = 2
 
     def __init__(self, device: str | torch.device | None = None) -> None:
@@ -126,11 +128,13 @@ class _Interpolatory3Variable(_VariableSubclass):
 
     Attributes:
         order: Convergence order (3).
+        error_exponent: Error-estimate exponent (3; see ``MethodClass``).
         n_tableau_c: Number of quadrature points per step (3).
         b_delta: Reference weights for error estimation. Shape: [1, 3].
     """
 
     order = 3
+    error_exponent = 3  # estimate against the trapezoidal rule, exact degree 1
     n_tableau_c = 3
 
     def __init__(self, device: str | torch.device | None = None) -> None:

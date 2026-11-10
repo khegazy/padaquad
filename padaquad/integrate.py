@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .base import steps
+from .base import DEFAULT_SAMPLING_TYPE, steps
 from .runge_kutta import adaptive_quadrature
 
 if TYPE_CHECKING:
@@ -25,7 +25,7 @@ if TYPE_CHECKING:
 def integrate(
     f: Callable,
     method: str = "gk21",
-    sampling: str = "uniform",
+    sampling: str = DEFAULT_SAMPLING_TYPE,
     atol: float = 1e-5,
     rtol: float = 1e-5,
     mesh: torch.Tensor | None = None,
@@ -80,9 +80,12 @@ def integrate(
             variable sampling: 'adaptive_heun', 'interpolatory3_variable'.
         sampling: 'uniform' uses fixed quadrature point positions within
             each step; 'variable' computes weights dynamically based on
-            actual point positions.
+            actual point positions. Defaults to ``DEFAULT_SAMPLING_TYPE``
+            ('uniform').
         atol: Absolute error tolerance. A step is accepted when its
-            estimated error < atol + rtol * |integral_value|.
+            estimated error < max(atol, rtol * |integral_value|)
+            (atol + rtol * |integral_value| for
+            ``error_norm="failure_fraction"``).
         rtol: Relative error tolerance. See atol.
         t: Optional initial time mesh (step barrier positions). If None,
             the solver generates an initial mesh automatically. Shape:

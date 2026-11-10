@@ -162,15 +162,17 @@ work.
 solver = adaptive_quadrature(method="gk21", atol=1e-8, rtol=1e-8)
 
 for epoch in range(N_epochs):
-    # On the second and later iterations, reuse the previous run's
-    # optimal mesh as the warm-start. Default is reuse_mesh=False so
-    # that integrating a *different* integrand never silently shares
-    # a stale mesh.
+    # same_f=True: from the second iteration on, start from the
+    # previous run's optimal mesh and max_batch (they replace any mesh or
+    # max_batch passed here) and skip the memory benchmark. The first
+    # iteration has nothing stored, so it uses a fresh mesh. The default,
+    # same_f=False, never reuses a stored mesh for a different
+    # integrand.
     result = solver.integrate(
         f=f_theta,
         mesh_init=mesh_init,
         mesh_final=mesh_final,
-        reuse_mesh=(epoch > 0),
+        same_f=True,
         take_gradient=True,
     )
     optimizer.step()
@@ -257,8 +259,8 @@ padaquad.adaptive_quadrature(
 solver.integrate(
     f=None, y0=None,
     mesh=None, mesh_init=None, mesh_final=None,
-    take_gradient=False, is_training=None,
-    reuse_mesh=False, random_initial_mesh=True,
+    take_gradient=True,
+    same_f=False, random_initial_mesh=True,
     loss_fxn=None, total_mem_usage=None, max_batch=None,
     N_init_steps=13, f_args=(),
 ) -> IntegrationResult
@@ -277,7 +279,8 @@ solver.integrate(
 - `mesh_quadratures`, `mesh_quadrature_errors`, `error_ratios` — per-step diagnostics.
 - `loss`, `gradient_taken`, `y0` — training-loop diagnostics.
 - `converged: bool` — `True` for normal completion; `False` only when
-  `max_path_change` triggers an early exit on a user-provided mesh.
+  `max_path_change` triggers an early exit on a user-provided mesh or on
+  the stored mesh used by `same_f=True`.
 
 ## How it works
 
@@ -299,17 +302,25 @@ solver.integrate(
 3. **Per-step error estimate.** Each method computes both a primary
    integral and an embedded lower-order estimate; their difference is
    the per-step error. The error ratio
-   $\text{step\\_error} / (\text{atol} + \text{rtol} \cdot |I|)$
-   controls acceptance: ratios $< 1$ accept; ratios $\geq 1$ reject and
-   split the step at its midpoint.
+   $\text{step\\_error} / \max(\text{atol}, \text{rtol} \cdot |I|)$
+   (with $\text{atol} + \text{rtol} \cdot |I_d|$ per output element for
+   `error_norm="failure_fraction"`) controls acceptance: ratios $< 1$
+   accept; ratios $\geq 1$ reject and split the step at its midpoint.
 
 4. **Adaptive refinement.** The solver alternates batched evaluation
-   with split (high-error steps subdivide) and merge (consecutive
-   low-error pairs combine) until every step's ratio is below 1.
+   with splitting (high-error steps subdivide) until every step's ratio
+   is below 1.
 
 5. **Optimal mesh.** After convergence, a final pruning + refinement
-   pass produces `mesh_optimal` — the smallest mesh that still meets
-   tolerance. This is what `reuse_mesh=True` consumes on the next call.
+   pass produces `mesh_optimal`: consecutive low-error pairs merge and
+   high-error steps split. A pair merges only when the merged step's
+   predicted error ratio is below `remove_cut`; merging two steps of
+   width $h$ multiplies the summed error by about $2^{k-1}$, where the
+   method's error estimate scales as $h^k$. This is what
+   `same_f=True` starts from on the next call. Each call merges
+   at most one level, so an over-resolved stored mesh shrinks over
+   repeated calls. An early `max_path_change` exit instead stores the
+   mesh it stopped on with its failing steps split.
 
 ## Comparisons
 

@@ -10,6 +10,8 @@ from _helpers import (
     T_INIT,
     UNIFORM_METHOD_NAMES,
     VARIABLE_METHOD_NAMES,
+    make_solver_for_unit_test,
+    make_variable_solver_for_unit_test,
 )
 
 from padaquad import UNIFORM_METHODS, integrand_dict
@@ -56,7 +58,8 @@ class TestGetSamplingType:
         assert get_sampling_type("fixed") == steps.FIXED
 
     def test_invalid_raises(self):
-        with pytest.raises(KeyError):
+        """An unknown name raises ValueError naming it and the valid names."""
+        with pytest.raises(ValueError, match=r"'nonexistent'.*'uniform'"):
             get_sampling_type("nonexistent")
 
 
@@ -118,6 +121,44 @@ class TestGetMethod:
         """Unknown method name raises KeyError."""
         with pytest.raises(KeyError):
             _get_method(steps.ADAPTIVE_UNIFORM, "nonexistent", "cpu", torch.float64)
+
+    @pytest.mark.parametrize(
+        ("kind", "method_name"),
+        [("uniform", m) for m in UNIFORM_METHOD_NAMES]
+        + [("variable", m) for m in VARIABLE_METHOD_NAMES],
+    )
+    def test_error_exponent_matches_weights(self, kind, method_name):
+        """``error_exponent`` k: the per-step error estimate scales as h^k.
+
+        On a unit step with nodes x = 2c - 1, the estimate applied to x^j is the
+        moment m_j = sum_i b_error_i x_i^j. It is zero (round-off) for every j
+        the estimate's less accurate rule integrates exactly, and the first
+        nonzero moment is at j = k - 1 (the error of a degree-j term on a step
+        of width h scales as h^(j+1)). The 1e-13 relative threshold sits between
+        the round-off of the zero moments (< 1e-15) and the smallest first
+        nonzero moment of any method (cc65, ~1e-12).
+        """
+        solver = (
+            make_solver_for_unit_test(method_name)
+            if kind == "uniform"
+            else make_variable_solver_for_unit_test(method_name)
+        )
+        nodes = solver._compute_nodes(
+            torch.zeros(1, 1, dtype=torch.float64),
+            torch.ones(1, 1, dtype=torch.float64),
+        )
+        _, b_error = solver._get_tableau_b(nodes)
+        b_error = b_error.reshape(-1)
+        x = 2 * nodes.reshape(-1) - 1
+
+        def relative_moment(j):
+            return float(
+                (b_error * x**j).sum().abs() / (b_error.abs() * x.abs() ** j).sum()
+            )
+
+        k = solver.method.error_exponent
+        assert all(relative_moment(j) < 1e-13 for j in range(k - 1))
+        assert relative_moment(k - 1) > 1e-13
 
 
 # ---------------------------------------------------------------------------

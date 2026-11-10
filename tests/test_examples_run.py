@@ -13,7 +13,7 @@ The examples are also useful as integration smoke tests that exercise:
   - ``integrate(f, method=..., mesh_init=..., mesh_final=...)`` (one-shot)
   - ``adaptive_quadrature(...).integrate(f, ...)`` (class API)
   - ``take_gradient=True`` autograd flow
-  - ``reuse_mesh=True`` warm-start across iterations
+  - ``same_f=True`` warm-start across iterations
   - the analytic-vs-autodiff consistency check (path A vs path B)
 """
 

@@ -67,41 +67,41 @@ class _MemoryManagement:
     Memory benchmark and batch-size budget, mixed into ``AdaptiveQuadrature``.
 
     Uses these attributes of the solver: ``device`` (set by
-    ``DistributedEnvironment``), and ``f_unit_mem_size``, ``_oom_max_batch``
-    and ``init_max_batch`` (set in ``AdaptiveQuadrature.__init__``).
+    ``DistributedEnvironment``), and ``f_unit_mem_size``, ``_oom_max_batch``,
+    ``init_max_batch`` and ``init_total_mem_usage`` (set in
+    ``AdaptiveQuadrature.__init__``).
     """
 
     device: torch.device
     f_unit_mem_size: float | None
     _oom_max_batch: int | None
     init_max_batch: int | None
+    init_total_mem_usage: float
 
-    def get_max_batch(self, total_mem_usage=0.9, default_max_batch=None):
+    def get_max_batch(self, total_mem_usage=None, default_max_batch=None):
         """Resolve the per-batch evaluation cap without re-benchmarking memory.
 
         Precedence: an explicit ``default_max_batch`` (e.g. the per-call
         ``max_batch``), then the construction-time ``init_max_batch``, then the
         dynamically computed budget from a prior memory benchmark
-        (``f_unit_mem_size``). The result is clamped by any ``_oom_max_batch``
-        discovered after an out-of-memory event.
+        (``f_unit_mem_size``) and the memory free now, using
+        ``total_mem_usage`` (default: the solver's own). The result is clamped
+        by any ``_oom_max_batch`` discovered after an out-of-memory event; the
+        cap is cleared only at the start of the next ``integrate()`` call, so
+        it is still applied here when a call returns.
 
         Tests and example loops use this to capture ``max_batch`` after a first
         run (where the memory benchmark ran once) and pass it back to later
-        solvers/calls so the slow benchmark is skipped. See also
-        ``previous_max_batch``.
-
-        The OOM cap only survives into the next ``integrate()`` call when ``f``
-        is the same object. Callers that rebuild their integrand closure every
-        call (a new ``id`` each time) should carry the cap themselves: after
-        each call, pass ``get_max_batch(default_max_batch=max_batch)`` back as
-        the next call's ``max_batch``. The cap is cleared only at the start of
-        the next call, so it is still applied here when the call returns.
+        solvers/calls, or use ``integrate(..., same_f=True)``, so the
+        slow benchmark is skipped. See also ``previous_max_batch``.
         """
+        if total_mem_usage is None:
+            total_mem_usage = self.init_total_mem_usage
         if default_max_batch is not None:
             max_batch = default_max_batch
         elif self.init_max_batch is not None:
             max_batch = self.init_max_batch
-        elif total_mem_usage is not None and self.f_unit_mem_size is not None:
+        elif self.f_unit_mem_size is not None:
             max_batch = self._get_max_f_evals(total_mem_usage)
         else:
             max_batch = None
@@ -241,10 +241,10 @@ class _MemoryManagement:
             "uses, to determine max_batch (the maximum number of evaluations per "
             "batch). This is needed because adaptive refinement changes the "
             "evaluation batch at each step during the integral. This measurement "
-            "is slow and runs again for every new integrand. Pass max_batch to "
-            "skip this: determine it on your own or from an earlier run "
-            "(solver.get_max_batch()), or if evaluating multiple integrals over f "
-            "pass solver.get_max_batch() into max_batch."
+            "is slow and runs on every integrate() call that has no max_batch. To "
+            "skip it, pass max_batch (your own value, or solver.get_max_batch() "
+            "after an earlier run), or pass same_f=True to reuse both the "
+            "max_batch and the mesh of the previous call."
         )
         t0 = time.time()
 
@@ -337,14 +337,19 @@ class _MemoryManagement:
         # Floor c at usable / 1e9, so the batch size usable / c never exceeds
         # 1e9 points, the largest N the search could try. This matters for tiny
         # integrands, which use only a few bytes per point.
-        c = max(c, self._get_usable_memory(total_mem_usage) / max_test)
+        usable = self._get_usable_memory(total_mem_usage)
+        c = max(c, usable / max_test)
         self.f_unit_mem_size = c
 
+        # The estimate depends on take_gradient: c includes the factor s only
+        # when it is True.
         max_batch = self._get_max_f_evals(total_mem_usage)
         logger.warning(
-            f"Memory measurement finished in {time.time() - t0:.2f} s: "
-            f"{c * _GB:.0f} bytes per evaluation, max_batch = "
-            f"{max_batch} now (stopped because {reason})."
+            f"Memory measurement finished in {time.time() - t0:.2f} s (stopped "
+            f"because {reason}): {c * _GB:.0f} bytes per evaluation. With the "
+            f"{usable:.1f} GB usable now, max_batch is about {max_batch} for "
+            f"take_gradient={take_gradient}; pass max_batch={max_batch} to skip "
+            "this measurement in later runs."
         )
 
     def _peak_memory_reader(

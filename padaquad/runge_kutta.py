@@ -24,7 +24,7 @@ import logging
 
 import torch
 
-from .base import get_sampling_type, steps
+from .base import DEFAULT_SAMPLING_TYPE, get_sampling_type, steps
 from .quadrature import (
     _UniformAdaptiveQuadratureBase,
     _VariableAdaptiveQuadratureBase,
@@ -254,7 +254,7 @@ class VariableAdaptiveQuadrature(_VariableAdaptiveQuadratureBase):
 
 
 def adaptive_quadrature(
-    sampling_type: str | steps, *args, **kwargs
+    sampling_type: str | steps = DEFAULT_SAMPLING_TYPE, *args, **kwargs
 ) -> UniformAdaptiveQuadrature | VariableAdaptiveQuadrature:
     """
     Factory function to create the appropriate parallel RK solver.
@@ -266,6 +266,7 @@ def adaptive_quadrature(
     Args:
         sampling_type: Either a ``steps`` enum value or a string name
             ('uniform', 'adaptive_uniform', 'variable', 'adaptive_variable').
+            Defaults to ``DEFAULT_SAMPLING_TYPE`` ('uniform').
         *args: Positional arguments forwarded to the solver constructor.
         **kwargs: Keyword arguments forwarded to the solver constructor
             (e.g., method, atol, rtol, f, etc.).
@@ -283,4 +284,7 @@ def adaptive_quadrature(
     elif sampling_type == steps.ADAPTIVE_VARIABLE:
         return VariableAdaptiveQuadrature(*args, **kwargs)
     else:
-        raise ValueError
+        raise ValueError(
+            f"adaptive_quadrature supports sampling_type {steps.ADAPTIVE_UNIFORM} "
+            f"or {steps.ADAPTIVE_VARIABLE}, got {sampling_type}."
+        )

@@ -13,7 +13,7 @@ the repo). Regenerate with::
 
 Regenerate is required:
   * before Phase 1 lands (the bug fixes are in code paths that this
-    test exercises only if reuse_mesh is on, which it isn't here);
+    test exercises only with a warm-started mesh, which it doesn't use);
   * at every Phase 5 file-split commit, to verify bit-equivalence;
   * any time a method's adaptive controller is intentionally changed.
 

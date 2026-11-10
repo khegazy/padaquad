@@ -30,7 +30,10 @@ requires-python = ">=3.10"
 # scipy is used by the test suite (cross-validation against
 # scipy.integrate.quad) but is also needed at runtime by future tanh-sinh
 # support, so it lives here too.
-dependencies = ["numpy", "torch", "scipy", "einops", "psutil"]
+# torch>=2.4: first release with the top-level torch.OutOfMemoryError used by
+# the out-of-memory handling (PyTorch v2.4.0 release notes, #121702). Only
+# torch 2.8 has been tested; CI installs the latest torch.
+dependencies = ["numpy", "torch>=2.4", "scipy", "einops", "psutil"]
 
 [project.optional-dependencies]
 dev = [

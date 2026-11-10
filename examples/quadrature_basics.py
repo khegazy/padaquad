@@ -137,23 +137,16 @@ def example_warm_start_loop() -> None:
     mesh_init = torch.tensor([0.0])
     mesh_final = torch.tensor([math.pi])
 
-    # Use a stateful callable so id(f) is stable across iterations —
-    # otherwise reuse_mesh=True warns that the integrand changed.
-    class ScaledSin:
-        def __init__(self, scale: float) -> None:
-            self.scale = scale
-
-        def __call__(self, t: torch.Tensor) -> torch.Tensor:
-            return self.scale * torch.sin(t)
-
-    f = ScaledSin(scale=1.0)
+    # One integrand whose scale changes slightly each iteration.
+    # same_f=True starts each call from the previous call's optimal
+    # mesh and max_batch (the first call has none stored, so it uses a fresh
+    # mesh and the memory benchmark).
     for k, scale in enumerate([1.0, 1.05, 1.1, 1.15]):
-        f.scale = scale
         result = solver.integrate(
-            f=f,
+            f=lambda t, s=scale: s * torch.sin(t),
             mesh_init=mesh_init,
             mesh_final=mesh_final,
-            reuse_mesh=(k > 0),
+            same_f=True,
         )
         print(
             f"  iter {k} (scale={scale:.2f}): integral={result.integral.item():.6f}  "

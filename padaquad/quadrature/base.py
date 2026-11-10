@@ -129,7 +129,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             total_mem_usage: Fraction of total device memory the solver may use
                 for batched evaluations (0 < value <= 1). Default: 0.9.
             max_path_change: If set, and the starting mesh is the caller's
-                ``mesh`` or the stored mesh used by ``same_integrand=True`` (not
+                ``mesh`` or the stored mesh used by ``same_f=True`` (not
                 a freshly generated one), integration stops early, returning
                 ``converged=False``, once the steps of the starting mesh that
                 fail the error tolerance reach this fraction of the starting
@@ -185,14 +185,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         # Memory handling variables
         # max_batch of the last integrate() call that returned (converged or
-        # stopped early by max_path_change); reused by same_integrand=True.
+        # stopped early by max_path_change); reused by same_f=True.
         self.previous_max_batch: int | None = None
         # Per-evaluation memory cost; set by each _setup_memory_checks run and
         # used by get_max_batch to size batches from live free memory.
         self.f_unit_mem_size = None
         # Cap discovered after an OOM during a take_gradient=False evaluation;
         # None until one occurs. Cleared at the start of every integrate() call
-        # (same_integrand=True carries it over through previous_max_batch).
+        # (same_f=True carries it over through previous_max_batch).
         self._oom_max_batch = None
 
         # Construction-time defaults; each integrate() call falls back to these
@@ -306,7 +306,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh: torch.Tensor | None = None,
         mesh_init: torch.Tensor | None = None,
         mesh_final: torch.Tensor | None = None,
-        same_integrand: bool = False,
+        same_f: bool = False,
         random_initial_mesh: bool = True,
         N_init_steps: int = 13,
         f_args: tuple = (),
@@ -347,7 +347,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             y0: Initial integral accumulator value. Shape: [D].
             mesh: Optional initial step barriers. If provided, these are the
                 starting mesh. If None, a random mesh is generated. Replaced by
-                the stored mesh when ``same_integrand=True`` and one is stored.
+                the stored mesh when ``same_f=True`` and one is stored.
                 Shape: [N, T].
             mesh_init: Lower integration bound. Shape: [T].
             mesh_final: Upper integration bound. Shape: [T].
@@ -363,7 +363,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 scalar tensor. If None, uses the integral value itself.
             max_batch: Maximum evaluations per batch. Overrides dynamic memory
                 calculation if provided. Replaced by the stored value when
-                ``same_integrand=True`` and one is stored.
+                ``same_f=True`` and one is stored.
             max_adaptive_splits: Maximum number of times a panel may be split
                 during adaptive refinement; a panel split this many times is
                 accepted even if it still fails the tolerance. If None
@@ -412,7 +412,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 against uniform-mesh aliasing; reproducibility is
                 better achieved via ``torch.manual_seed`` before the
                 call.
-            same_integrand: Set True when f is the same integrand as in the
+            same_f: Set True when f is the same integrand as in the
                 previous call, or changes only slightly (e.g. between
                 training-loop iterations). The solver then starts from the mesh
                 and ``max_batch`` stored by the last call that returned on this
@@ -430,7 +430,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 integrand or ``take_gradient`` setting: a value learned with
                 ``take_gradient=False`` has no backpropagation memory margin
                 and can be below the step size C, so pass
-                ``same_integrand=False`` on a call that switches
+                ``same_f=False`` on a call that switches
                 ``take_gradient``. For a batch size that follows live free
                 memory, pass ``max_batch=solver.get_max_batch()`` instead.
             result_device: Device the per-step output records (nodes, y, ...)
@@ -508,7 +508,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         MEM_ERROR = "total_mem_usage is a ratio and must be 0 < total_mem_usage <= 1"
         assert total_mem_usage <= 1.0, MEM_ERROR
         assert total_mem_usage > 0, MEM_ERROR
-        # The OOM cap lasts one call; same_integrand=True carries it over
+        # The OOM cap lasts one call; same_f=True carries it over
         # through the stored previous_max_batch, which the cap clamps.
         self._oom_max_batch = None
 
@@ -524,9 +524,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         assert len(test_integrand.shape) >= 2
         del test_output, test_integrand
 
-        # same_integrand=True: the stored max_batch replaces the caller's and
+        # same_f=True: the stored max_batch replaces the caller's and
         # skips the memory benchmark.
-        if same_integrand and self.previous_max_batch is not None:
+        if same_f and self.previous_max_batch is not None:
             force_max_batch = self.previous_max_batch
         if force_max_batch is None:
             self._setup_memory_checks(
@@ -539,7 +539,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         loss_fxn = loss_fxn if loss_fxn is not None else self._integral_loss
 
         # Decide initial mesh:
-        #   - same_integrand=True with a stored mesh: warm-start from it,
+        #   - same_f=True with a stored mesh: warm-start from it,
         #     snapping its endpoints to [mesh_init, mesh_final];
         #   - explicit mesh passed in: use it;
         #   - otherwise: generate a fresh random initial mesh.
@@ -547,7 +547,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh,
             mesh_init,
             mesh_final,
-            same_integrand,
+            same_f,
             random_initial_mesh,
             N_init_steps,
         )
@@ -685,7 +685,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                         fail_ratio * 100,
                         self.max_path_change,
                     )
-                    # Store this call's mesh and max_batch for same_integrand
+                    # Store this call's mesh and max_batch for same_f
                     # (as on convergence), with this batch's failing steps
                     # split as the loop would have done next, so the next call
                     # refines further instead of restarting from (and stopping
@@ -909,7 +909,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # the next call, so it must match the integration device (its endpoints
         # are mesh_init/mesh_final, which live on self.device).
         mesh_optimal = mesh_optimal.to(self.device)
-        # Stored together for same_integrand=True; only a returning call writes
+        # Stored together for same_f=True; only a returning call writes
         # them (also on the max_path_change exit), so both come from one call.
         self.mesh_previous = mesh_optimal
         self.previous_max_batch = self.get_max_batch(total_mem_usage, force_max_batch)
@@ -1921,14 +1921,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh,
         mesh_init,
         mesh_final,
-        same_integrand,
+        same_f,
         random_initial_mesh,
         N_init_steps,
     ):
         # mesh_is_given: the starting mesh came from outside (the stored mesh
         # or the caller's), not freshly generated; the max_path_change check
         # runs only then.
-        if same_integrand and self.mesh_previous is not None:
+        if same_f and self.mesh_previous is not None:
             # The stored mesh replaces the caller's mesh.
             mesh_is_given = True
             # Filter cached barriers to within the new [mesh_init, mesh_final]

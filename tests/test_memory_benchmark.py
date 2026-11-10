@@ -339,7 +339,7 @@ def test_messages_when_measuring(caplog, monkeypatch):
     text = caplog.text
     assert "PadaQuad is measuring how much memory" in text
     assert "To skip it, pass max_batch" in text
-    assert "same_integrand=True" in text
+    assert "same_f=True" in text
     assert "Memory measurement finished in" in text
     assert "bytes per evaluation" in text
     assert "stopped because" in text

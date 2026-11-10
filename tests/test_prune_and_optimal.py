@@ -214,7 +214,7 @@ def _warm_start_passes(solver, f) -> bool:
     """Re-integrate f from the solver's stored mesh; True when no starting step
     fails. The solver must have ``max_path_change`` tiny, so one failing
     starting step stops the call with ``converged=False``."""
-    return solver.integrate(f=f, same_integrand=True, take_gradient=False).converged
+    return solver.integrate(f=f, same_f=True, take_gradient=False).converged
 
 
 @pytest.mark.parametrize("method", UNIFORM_METHOD_NAMES)
@@ -297,7 +297,7 @@ def test_pair_ratio_is_merged_step_ratio(use_absolute_error_ratio, error_norm):
 
 @pytest.mark.parametrize("method", ["dopri5", "gk7", "gk21", "cc17"])
 def test_repeated_warm_starts_prune_to_a_fixed_point(method):
-    """Starting from an over-resolved 128-step mesh, repeated same_integrand
+    """Starting from an over-resolved 128-step mesh, repeated same_f
     calls halve the over-resolved steps (one merge level per call) until the
     mesh stops changing; no call fails a starting step and every integral
     stays within tolerance of the exact value."""
@@ -310,7 +310,7 @@ def test_repeated_warm_starts_prune_to_a_fixed_point(method):
     out = solver.integrate(f=f, mesh=mesh, take_gradient=False)
     sizes = [len(mesh) - 1, len(out.mesh_optimal) - 1]
     for _ in range(8):
-        out = solver.integrate(f=f, same_integrand=True, take_gradient=False)
+        out = solver.integrate(f=f, same_f=True, take_gradient=False)
         assert out.converged is True
         assert torch.allclose(out.integral.cpu(), exact, atol=1e-9, rtol=1e-6)
         sizes.append(len(out.mesh_optimal) - 1)

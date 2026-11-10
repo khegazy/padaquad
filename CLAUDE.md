@@ -73,7 +73,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_convergence_rate.py` | Empirical convergence-rate slope matches each method's theoretical rate |
 | `test_autodiff_consistency.py` | $\nabla_\theta\int f_\theta dt$ via backprop equals $\int \nabla_\theta f_\theta dt$ |
 | `test_error_indicator.py` | Behavior of absolute vs cumulative error indicators (Bug B8 investigation) |
-| `test_bug_regressions.py` | Regression tests for bugs B1, B4, B6 fixed in Phase 1, and the `same_integrand` flag |
+| `test_bug_regressions.py` | Regression tests for bugs B1, B4, B6 fixed in Phase 1, and the `same_f` flag |
 | `test_snapshots.py` | Golden-value regression net for the file-split refactor; CPU-only float64 |
 | `test_public_api.py` | Smoke test of every public symbol and `IntegrationResult` fields |
 | `test_rk_integral.py` | `_RK_integral`: constant / linear / multi-step / multi-dim / zero-width / variable-b inputs |
@@ -197,7 +197,7 @@ is a boolean array where `True` means the panel still needs evaluation.
 1. **Initialize barriers.** When `mesh=None`, generate
    ~$\sqrt{N_\text{init}}$ evenly-spaced top-level segments with random
    sub-barriers (random by default — uniform aliases on
-   uniform-feature integrands). When `same_integrand=True` and a mesh is
+   uniform-feature integrands). When `same_f=True` and a mesh is
    stored, seed from the stored `mesh_optimal` of the last call that
    returned.
 2. **Main loop.** While any `mesh_trackers` are `True`:
@@ -302,7 +302,7 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
   kernel's counter error E; elsewhere an RSS before/after difference.
   Stops: c changes < 1 %, call slower than 1 s,
   N = 1e9, or 10·M > usable memory.
-- Unless `max_batch` or `same_integrand=True` fixes it, the batch size is
+- Unless `max_batch` or `same_f=True` fixes it, the batch size is
   computed at every evaluation from live memory: `get_max_batch` →
   `_get_max_f_evals = usable_memory / c` (capped at 1e9).
 - Out-of-memory errors are recognized by `_is_out_of_memory` (GPU OOM, CPU
@@ -341,21 +341,21 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
 - `f_args` is a tuple forwarded positionally to the integrand:
   `f(t, *f_args)`. Used by `examples/pode/` for path parameters.
 
-### Warm-starting (`same_integrand=True`)
+### Warm-starting (`same_f=True`)
 
 - Every call that returns (converged, or stopped early by
   `max_path_change`) stores its mesh (`mesh_previous`: `mesh_optimal`, or
   after an early exit the mesh at the exit with the failing steps of that
   batch split, so the next call refines further) and its `max_batch`
   (`previous_max_batch`) together. A call that raises stores nothing.
-- With `same_integrand=True` and stored values, the stored mesh (filtered
+- With `same_f=True` and stored values, the stored mesh (filtered
   to `[mesh_init, mesh_final]`, padded if needed) and `max_batch` replace
   the caller's `mesh` / `max_batch`, and the memory benchmark is skipped.
   With nothing stored (first call), the caller's values or the defaults
   are used.
 - The solver does not identify integrands (no `id(f)` matching); the
   caller says when the integrand is the same. Default is
-  `same_integrand=False`.
+  `same_f=False`.
 - `max_path_change` runs on a given or stored starting mesh (never a
   fresh one) and counts failing steps of that starting mesh across all
   batches (split depth 0, via `split_counts`) against its step count.

@@ -131,7 +131,7 @@ for f in integrands:
     )
     # Pass the max_batch measured by the first run back in, so the memory
     # benchmark runs only on the first call (get_max_batch() is None before it).
-    # same_integrand=True would also skip it, but it reuses the mesh too and
+    # same_f=True would also skip it, but it reuses the mesh too and
     # would change what is timed.
     for _ in range(n_runs):
         t0 = time.time()

@@ -5,7 +5,7 @@ split evaluation handlers
 (``_evaluate_f_on_split_nodes`` / ``_evaluate_f_on_split_residual_nodes``) are
 supposed to shrink ``max_batch`` and retry the failed batch, caching the new cap
 in ``self._oom_max_batch`` so every later batch stays clamped. The cap is
-cleared at the start of every ``integrate()`` call; ``same_integrand=True``
+cleared at the start of every ``integrate()`` call; ``same_f=True``
 carries it over through the stored ``previous_max_batch``. The reduction
 repeats until the batch fits or a single
 evaluation (``max_batch == 1``) still fails, at which point an informative error
@@ -303,7 +303,7 @@ class TestIntegrateOOMRecovery:
 
     def test_oom_max_batch_reset_between_calls(self):
         """``_oom_max_batch`` is cleared at the start of every ``integrate()``
-        call, even for the same ``f`` object: without ``same_integrand=True``
+        call, even for the same ``f`` object: without ``same_f=True``
         the solver does not assume the next call has the same footprint."""
         solver = make_uniform_solver(
             "gk21", atol=1e-6, rtol=1e-6, device="cpu", max_batch=self.BIG_BATCH
@@ -331,8 +331,8 @@ class TestIntegrateOOMRecovery:
         ],
         ids=["constructor", "per_call"],
     )
-    def test_oom_max_batch_kept_for_same_integrand(self, solver_kwargs, call_kwargs):
-        """With ``same_integrand=True`` the cap learned on one call (stored as
+    def test_oom_max_batch_kept_for_same_f(self, solver_kwargs, call_kwargs):
+        """With ``same_f=True`` the cap learned on one call (stored as
         ``previous_max_batch``) clamps the next call even when an explicit
         ``max_batch`` (constructor or per call) asks for more: no OOM is
         re-triggered and no batch exceeds the cap."""
@@ -352,7 +352,7 @@ class TestIntegrateOOMRecovery:
 
         assert solver.previous_max_batch == cap
 
-        result = solver.integrate(oom, same_integrand=True, **call)
+        result = solver.integrate(oom, same_f=True, **call)
 
         assert math.isclose(float(result.integral.sum()), 1.0, abs_tol=1e-5)
         assert oom.n_oom == n_oom, "cap was forgotten: the second call OOM'd again"

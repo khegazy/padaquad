@@ -138,7 +138,7 @@ def example_warm_start_loop() -> None:
     mesh_final = torch.tensor([math.pi])
 
     # One integrand whose scale changes slightly each iteration.
-    # same_integrand=True starts each call from the previous call's optimal
+    # same_f=True starts each call from the previous call's optimal
     # mesh and max_batch (the first call has none stored, so it uses a fresh
     # mesh and the memory benchmark).
     for k, scale in enumerate([1.0, 1.05, 1.1, 1.15]):
@@ -146,7 +146,7 @@ def example_warm_start_loop() -> None:
             f=lambda t, s=scale: s * torch.sin(t),
             mesh_init=mesh_init,
             mesh_final=mesh_final,
-            same_integrand=True,
+            same_f=True,
         )
         print(
             f"  iter {k} (scale={scale:.2f}): integral={result.integral.item():.6f}  "

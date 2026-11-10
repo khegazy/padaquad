@@ -99,7 +99,7 @@ class SolverBase(ABC, DistributedEnvironment):
     - Default parameter storage: f, y0, mesh_init, mesh_final can be set at
       construction and reused across multiple integrate() calls.
     - Warm-start caching: stores mesh_previous, reused with
-      ``integrate(..., same_integrand=True)`` so that repeated integration of
+      ``integrate(..., same_f=True)`` so that repeated integration of
       the same function starts from the optimized time mesh of the prior run.
 
     Subclasses must implement:
@@ -190,7 +190,7 @@ class SolverBase(ABC, DistributedEnvironment):
             else torch.tensor([1], dtype=dtype, device=self.device)
         )
         # Stored time barriers from the last integration for warm-starting.
-        # Used only when integrate(..., same_integrand=True) is passed;
+        # Used only when integrate(..., same_f=True) is passed;
         # otherwise ignored. They are the *optimal* mesh of the last call that
         # returned (post-prune-and-refine), or its partly refined mesh after a
         # max_path_change early exit.

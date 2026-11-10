@@ -162,17 +162,17 @@ work.
 solver = adaptive_quadrature(method="gk21", atol=1e-8, rtol=1e-8)
 
 for epoch in range(N_epochs):
-    # same_integrand=True: from the second iteration on, start from the
+    # same_f=True: from the second iteration on, start from the
     # previous run's optimal mesh and max_batch (they replace any mesh or
     # max_batch passed here) and skip the memory benchmark. The first
     # iteration has nothing stored, so it uses a fresh mesh. The default,
-    # same_integrand=False, never reuses a stored mesh for a different
+    # same_f=False, never reuses a stored mesh for a different
     # integrand.
     result = solver.integrate(
         f=f_theta,
         mesh_init=mesh_init,
         mesh_final=mesh_final,
-        same_integrand=True,
+        same_f=True,
         take_gradient=True,
     )
     optimizer.step()
@@ -260,7 +260,7 @@ solver.integrate(
     f=None, y0=None,
     mesh=None, mesh_init=None, mesh_final=None,
     take_gradient=True,
-    same_integrand=False, random_initial_mesh=True,
+    same_f=False, random_initial_mesh=True,
     loss_fxn=None, total_mem_usage=None, max_batch=None,
     N_init_steps=13, f_args=(),
 ) -> IntegrationResult
@@ -280,7 +280,7 @@ solver.integrate(
 - `loss`, `gradient_taken`, `y0` — training-loop diagnostics.
 - `converged: bool` — `True` for normal completion; `False` only when
   `max_path_change` triggers an early exit on a user-provided mesh or on
-  the stored mesh used by `same_integrand=True`.
+  the stored mesh used by `same_f=True`.
 
 ## How it works
 
@@ -317,7 +317,7 @@ solver.integrate(
    predicted error ratio is below `remove_cut`; merging two steps of
    width $h$ multiplies the summed error by about $2^{k-1}$, where the
    method's error estimate scales as $h^k$. This is what
-   `same_integrand=True` starts from on the next call. Each call merges
+   `same_f=True` starts from on the next call. Each call merges
    at most one level, so an over-resolved stored mesh shrinks over
    repeated calls. An early `max_path_change` exit instead stores the
    mesh it stopped on with its failing steps split.

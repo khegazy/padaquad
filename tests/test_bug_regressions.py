@@ -3,10 +3,10 @@
 Tests in this file:
 
   - test_no_warm_start_path_correctness: anchors the no-warm-start path.
-  - test_same_integrand_prefers_stored_mesh_and_max_batch,
-    test_same_integrand_skips_memory_benchmark,
+  - test_same_f_prefers_stored_mesh_and_max_batch,
+    test_same_f_skips_memory_benchmark,
     test_stored_values_not_written_by_a_raising_call: the explicit
-    ``same_integrand`` flag, which replaced matching integrands by ``id(f)``
+    ``same_f`` flag, which replaced matching integrands by ``id(f)``
     (that matching was bug B2's fix; ids are reused and closures get new ones).
   - test_warm_start_with_new_t_final_yields_correct_mesh: Bug B1, the
     warm-started mesh ends at the new ``mesh_final``.
@@ -67,7 +67,7 @@ def test_no_warm_start_path_correctness(take_gradient):
 
 
 # -----------------------------------------------------------------------------
-# same_integrand: stored mesh and max_batch replace the caller's.
+# same_f: stored mesh and max_batch replace the caller's.
 # -----------------------------------------------------------------------------
 
 
@@ -86,19 +86,19 @@ def _record_initial_mesh(solver, monkeypatch):
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
-def test_same_integrand_prefers_stored_mesh_and_max_batch(take_gradient, monkeypatch):
-    """With ``same_integrand=True`` the stored mesh and max_batch of the last
+def test_same_f_prefers_stored_mesh_and_max_batch(take_gradient, monkeypatch):
+    """With ``same_f=True`` the stored mesh and max_batch of the last
     call replace the caller's; with nothing stored, or with
-    ``same_integrand=False``, the caller's values are used."""
+    ``same_f=False``, the caller's values are used."""
     solver = make_uniform_solver("dopri5", atol=1e-6, rtol=1e-6)
     recorded = _record_initial_mesh(solver, monkeypatch)
     user_mesh = torch.linspace(0.0, math.pi, 5, dtype=torch.float64).unsqueeze(-1)
 
-    def call(same_integrand, max_batch):
+    def call(same_f, max_batch):
         return solver.integrate(
             f=lambda t, *_: torch.sin(10 * t),
             mesh=user_mesh,
-            same_integrand=same_integrand,
+            same_f=same_f,
             max_batch=max_batch,
             take_gradient=take_gradient,
         )
@@ -106,25 +106,25 @@ def test_same_integrand_prefers_stored_mesh_and_max_batch(take_gradient, monkeyp
     # 1. Nothing stored: the caller's mesh and max_batch, and no warning.
     with warnings.catch_warnings():
         warnings.simplefilter("error", UserWarning)
-        call(same_integrand=True, max_batch=300)
+        call(same_f=True, max_batch=300)
     assert torch.equal(recorded[-1], user_mesh)
     assert solver.previous_max_batch == 300
 
     # 2. Stored values replace the caller's.
     stored = solver.mesh_previous.cpu().clone()
     assert not torch.equal(stored, user_mesh)  # else step 2 proves nothing
-    call(same_integrand=True, max_batch=50)
+    call(same_f=True, max_batch=50)
     assert torch.equal(recorded[-1], stored)
     assert solver.previous_max_batch == 300
 
-    # 3. same_integrand=False: the caller's values again.
-    call(same_integrand=False, max_batch=50)
+    # 3. same_f=False: the caller's values again.
+    call(same_f=False, max_batch=50)
     assert torch.equal(recorded[-1], user_mesh)
     assert solver.previous_max_batch == 50
 
 
-def test_same_integrand_skips_memory_benchmark(monkeypatch):
-    """The memory benchmark runs once for two ``same_integrand=True`` calls and
+def test_same_f_skips_memory_benchmark(monkeypatch):
+    """The memory benchmark runs once for two ``same_f=True`` calls and
     on every call otherwise, even for the same f object (no id(f) matching)."""
     solver = make_solver_for_unit_test("dopri5")
     calls = []
@@ -140,16 +140,16 @@ def test_same_integrand_skips_memory_benchmark(monkeypatch):
         "mesh_final": torch.tensor([1.0], dtype=torch.float64),
     }
     for _ in range(2):
-        solver.integrate(f=f, same_integrand=True, take_gradient=False, **bounds)
+        solver.integrate(f=f, same_f=True, take_gradient=False, **bounds)
     assert len(calls) == 1
     for _ in range(2):
-        solver.integrate(f=f, same_integrand=False, take_gradient=False, **bounds)
+        solver.integrate(f=f, same_f=False, take_gradient=False, **bounds)
     assert len(calls) == 3
 
 
 def test_stored_values_not_written_by_a_raising_call():
     """A call that raises leaves the stored mesh and max_batch of the last
-    returning call untouched, so same_integrand never mixes two calls."""
+    returning call untouched, so same_f never mixes two calls."""
     solver = make_uniform_solver("dopri5", atol=1e-6, rtol=1e-6)
     bounds = {
         "mesh_init": torch.tensor([0.0], dtype=torch.float64),
@@ -182,7 +182,7 @@ def test_stored_values_not_written_by_a_raising_call():
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 def test_warm_start_with_new_t_final_yields_correct_mesh(take_gradient):
-    """Calling the solver a second time with ``same_integrand=True`` and a
+    """Calling the solver a second time with ``same_f=True`` and a
     *different* ``mesh_final`` than the first call must still produce a
     monotone mesh that ends at the new ``mesh_final``. This exercises the
     warm-start path (Bug B1).
@@ -206,7 +206,7 @@ def test_warm_start_with_new_t_final_yields_correct_mesh(take_gradient):
         f=f,
         mesh_init=mesh_init,
         mesh_final=torch.tensor([1.5], dtype=torch.float64),
-        same_integrand=True,
+        same_f=True,
         take_gradient=take_gradient,
     )
     assert out_second is not None

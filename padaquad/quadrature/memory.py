@@ -92,7 +92,7 @@ class _MemoryManagement:
 
         Tests and example loops use this to capture ``max_batch`` after a first
         run (where the memory benchmark ran once) and pass it back to later
-        solvers/calls, or use ``integrate(..., same_integrand=True)``, so the
+        solvers/calls, or use ``integrate(..., same_f=True)``, so the
         slow benchmark is skipped. See also ``previous_max_batch``.
         """
         if total_mem_usage is None:
@@ -243,7 +243,7 @@ class _MemoryManagement:
             "evaluation batch at each step during the integral. This measurement "
             "is slow and runs on every integrate() call that has no max_batch. To "
             "skip it, pass max_batch (your own value, or solver.get_max_batch() "
-            "after an earlier run), or pass same_integrand=True to reuse both the "
+            "after an earlier run), or pass same_f=True to reuse both the "
             "max_batch and the mesh of the previous call."
         )
         t0 = time.time()

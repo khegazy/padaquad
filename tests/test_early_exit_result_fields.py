@@ -260,9 +260,9 @@ def test_fail_ratio_spans_batches():
 
 
 def test_max_path_change_runs_on_stored_mesh(monkeypatch):
-    """The check runs on the stored mesh used by same_integrand=True, never on
+    """The check runs on the stored mesh used by same_f=True, never on
     a freshly generated mesh, and an early exit stores its partly refined mesh
-    so the next same_integrand=True call continues from it."""
+    so the next same_f=True call continues from it."""
     bounds = {
         "mesh_init": torch.tensor([0.0], dtype=torch.float64),
         "mesh_final": torch.tensor([4.0], dtype=torch.float64),
@@ -287,7 +287,7 @@ def test_max_path_change_runs_on_stored_mesh(monkeypatch):
     )
     first = solver.integrate(
         f=sharp,
-        same_integrand=True,
+        same_f=True,
         random_initial_mesh=False,
         take_gradient=False,
         **bounds,
@@ -297,11 +297,11 @@ def test_max_path_change_runs_on_stored_mesh(monkeypatch):
     # 2. Converge on the smooth integrand, then switch to the sharp one: the
     #    check runs on the stored (smooth-tuned) mesh and stops the call.
     solver.integrate(f=smooth, take_gradient=False, **bounds)
-    out = solver.integrate(f=sharp, same_integrand=True, take_gradient=False, **bounds)
+    out = solver.integrate(f=sharp, same_f=True, take_gradient=False, **bounds)
     assert out.converged is False
 
     # 3. The early exit stored its partly refined mesh and max_batch, and the
-    #    next same_integrand=True call starts from that mesh.
+    #    next same_f=True call starts from that mesh.
     assert torch.equal(solver.mesh_previous, out.mesh_optimal.to(solver.device))
     assert solver.previous_max_batch is not None
     recorded = []
@@ -314,14 +314,14 @@ def test_max_path_change_runs_on_stored_mesh(monkeypatch):
 
     monkeypatch.setattr(solver, "_setup_initial_mesh", wrapper)
     stored = solver.mesh_previous.clone()
-    solver.integrate(f=sharp, same_integrand=True, take_gradient=False, **bounds)
+    solver.integrate(f=sharp, same_f=True, take_gradient=False, **bounds)
     assert torch.equal(recorded[0], stored)
 
 
 def test_early_exit_stores_start_mesh_with_failing_steps_split():
     """An early exit stores the starting mesh with this batch's failing steps
     split at their midpoints (what the loop would have done next), so repeated
-    same_integrand=True calls refine further until one converges. Storing the
+    same_f=True calls refine further until one converges. Storing the
     unsplit mesh made every later call start from, and stop on, the same mesh:
     the default path evaluates the whole starting mesh in its first batch."""
     bounds = {
@@ -336,7 +336,7 @@ def test_early_exit_stores_start_mesh_with_failing_steps_split():
     sharp = lambda t, *_: torch.sin(20 * t)  # noqa: E731
 
     start = solver.mesh_previous.clone()
-    out = solver.integrate(f=sharp, same_integrand=True, take_gradient=False, **bounds)
+    out = solver.integrate(f=sharp, same_f=True, take_gradient=False, **bounds)
     assert out.converged is False
     # One batch held every starting step: out.error_ratios is per starting step.
     failed = (out.error_ratios >= 1.0).to(start.device)
@@ -347,9 +347,7 @@ def test_early_exit_stores_start_mesh_with_failing_steps_split():
 
     sizes = [len(start), len(expected)]
     for _ in range(6):
-        out = solver.integrate(
-            f=sharp, same_integrand=True, take_gradient=False, **bounds
-        )
+        out = solver.integrate(f=sharp, same_f=True, take_gradient=False, **bounds)
         sizes.append(len(solver.mesh_previous))
         if out.converged:
             break

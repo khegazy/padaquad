@@ -83,7 +83,9 @@ def integrate(
             actual point positions. Defaults to ``DEFAULT_SAMPLING_TYPE``
             ('uniform').
         atol: Absolute error tolerance. A step is accepted when its
-            estimated error < atol + rtol * |integral_value|.
+            estimated error < max(atol, rtol * |integral_value|)
+            (atol + rtol * |integral_value| for
+            ``error_norm="failure_fraction"``).
         rtol: Relative error tolerance. See atol.
         t: Optional initial time mesh (step barrier positions). If None,
             the solver generates an initial mesh automatically. Shape:

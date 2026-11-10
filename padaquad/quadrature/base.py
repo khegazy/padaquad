@@ -149,7 +149,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
                   - ``"2"`` (default, matches ``scipy.integrate.quad_vec``):
                     L2 norm ``sqrt(sum(e**2))`` of the error vector, compared
-                    against ``atol + rtol * L2(integral)`` (reduce-then-compare).
+                    against ``max(atol, rtol * L2(integral))``
+                    (reduce-then-compare).
                   - ``"max"``: L-infinity norm ``max(|e|)`` (reduce-then-compare).
                   - ``"rms"``: root-mean-square ``sqrt(mean(e**2))``
                     (reduce-then-compare; padaquad's historical reduction).
@@ -160,7 +161,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     ``atol + rtol * |integral_d|``; a panel is accepted when the
                     fraction of failing elements is ``<= mesh_failure_tolerance``.
 
-                For D == 1 every option reduces to ``|e| / (atol + rtol*|I|)``.
+                For D == 1 the norm family reduces to
+                ``|e| / max(atol, rtol*|I|)`` and ``"failure_fraction"`` to
+                ``|e| / (atol + rtol*|I|)``.
             mesh_failure_tolerance: Used only when ``error_norm ==
                 "failure_fraction"``. Fraction in ``[0, 1]`` of output elements
                 that may exceed tolerance while a panel is still accepted.
@@ -373,7 +376,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             error_integral_reference: Reference value for the relative-tolerance
                 denominator in absolute error mode
                 (``use_absolute_error_ratio=True``), where a panel's tolerance is
-                ``atol + rtol * |reference|``. By default the reference is the
+                ``max(atol, rtol * |reference|)`` (``atol + rtol * |reference|``
+                for ``"failure_fraction"``). By default the reference is the
                 *running* integral, which is incomplete during the early batches
                 (it has not yet accumulated contributions from regions evaluated
                 later). When much of the integral's mass lies at later times,
@@ -623,11 +627,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
             # --- Step 4: Compute error ratios for each step ---
             t0 = time.time()
-            # The rtol denominator (atol + rtol*|reference_integral|). By default
-            # this is the running integral, which is incomplete in the early
-            # batches; a user-supplied error_integral_reference (≈ the true total
-            # integral) replaces it so rtol is judged against the right scale
-            # from the first batch.
+            # The tolerance denominator is max(atol, rtol*|reference_integral|)
+            # (atol + rtol*|reference_integral| for failure_fraction). By
+            # default the reference is the running integral, which is
+            # incomplete in the early batches; a user-supplied
+            # error_integral_reference (≈ the true total integral) replaces it
+            # so rtol is judged against the right scale from the first batch.
             reference_integral = current_integral
             if error_integral_reference is not None:
                 reference_integral = error_integral_reference
@@ -681,8 +686,24 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                         self.max_path_change,
                     )
                     # Store this call's mesh and max_batch for same_integrand
-                    # (as on convergence), so the next call refines further
-                    # instead of restarting from the same stored mesh.
+                    # (as on convergence), with this batch's failing steps
+                    # split as the loop would have done next, so the next call
+                    # refines further instead of restarting from (and stopping
+                    # on) the same mesh: the default path evaluates the whole
+                    # starting mesh in its first batch, before any split.
+                    mesh = self._adaptively_increase_mesh(
+                        method_output=None,
+                        error_ratios=error_ratios,
+                        y_step_eval=None,
+                        nodes=None,
+                        mesh=mesh,
+                        mesh_idxs=step_idxs,
+                        mesh_trackers=mesh_trackers.clone(),
+                        split_counts=split_counts,
+                        max_adaptive_splits=max_adaptive_splits,
+                        keep_mask=keep_mask,
+                        remove_mask=remove_mask,
+                    )[4]
                     self.mesh_previous = mesh
                     self.previous_max_batch = self.get_max_batch(
                         total_mem_usage, force_max_batch
@@ -723,7 +744,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     )
 
             # --- Step 4b: Re-check already-accepted (recorded) panels ---
-            # The accept/reject denominator (atol + rtol*|reference_integral|)
+            # The accept/reject denominator (built from reference_integral, Step 4)
             # drifts as the running integral changes, so a panel accepted early
             # can violate the *current* tolerance. Re-check the recorded panels
             # against the SAME reference_integral the batch just used (so a panel
@@ -1651,22 +1672,28 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         self, nodes, mesh_quadratures, mesh_quadrature_errors, error_ratios_2steps
     ):
         """
-        Remove a single integration mesh step where
-        error_ratios_2steps < remove_cut / 2^(error_exponent - 1) (the merged
-        step's predicted error ratio is below remove_cut) by merging two
-        neighboring mesh steps,
-        error_ratios_2steps corresponds to the first mesh step of the pair. This
-        function only alters nodes, where remove_fxn merges the two mesh steps.
+        Merge pairs of neighboring steps whose merged step is predicted to pass.
+
+        Pair i (steps i and i+1) is merged when its summed error ratio
+        ``error_ratios_2steps[i] < remove_cut / 2^(error_exponent - 1)``, i.e.
+        when the merged step's predicted error ratio is below ``remove_cut``
+        (derivation in the comment below). Of several adjacent qualifying
+        pairs, ``_rec_remove`` keeps every other one, so no step is merged
+        twice; one call merges at most one level. The merge itself is
+        ``_merge_excess_nodes`` (uniform or variable sampling).
 
         Args:
-            nodes (Tensor): Per-step quadrature point positions.
-            error_ratios_2steps (Tensor): The merged errors of neighboring mesh
-                steps, these indices align with the first step of the pair
-                (error_ratios_2steps[i] -> nodes[i])
+            nodes: Per-step quadrature point positions. Shape: [N, C, T].
+            mesh_quadratures: Per-step integral contributions. Shape: [N, D].
+            mesh_quadrature_errors: Per-step error estimates. Shape: [N, D].
+            error_ratios_2steps: Summed error ratio of each pair of neighboring
+                steps, indexed by the pair's first step. Shape: [N-1].
 
-        Shapes:
-            nodes: [N, C, T]
-            error_ratios_2steps: [N-1]
+        Returns:
+            Tuple ``(nodes, mesh_quadratures, mesh_quadrature_errors)`` with
+            each merged pair replaced by one step whose contribution and error
+            are the pair's sums. Shapes: [N-R, C, T], [N-R, D], [N-R, D] for R
+            merged pairs.
         """
 
         if len(error_ratios_2steps) == 0:
@@ -1675,10 +1702,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # ratios, S = (e_i + e_{i+1}) / tol; the merged step is never evaluated.
         # With e(h) ~ C F h^k for a step of width h (k = error_exponent, from the
         # Taylor remainder of the estimate's less accurate rule), each half has
-        # e ~ C F h^k, so the merged step has e(2h) ~ C F (2h)^k = 2^(k-1) S.
+        # ratio ~ S/2, so the merged step has ratio ~ 2^k S/2 = 2^(k-1) S.
         # Requiring that predicted ratio to stay below remove_cut gives
         # S < remove_cut / 2^(k-1). Assumes steps small enough that the leading
-        # Taylor term dominates; on coarse steps the growth can be larger.
+        # Taylor term dominates; on coarse steps the growth can be larger. When
+        # the estimate is round-off (high k, tight tolerance, float32) it does
+        # not grow as h^k, so the cut is conservative and pairs rarely merge.
         merge_cut = self.remove_cut / 2 ** (self.method.error_exponent - 1)
         # Since error ratios encompasses 2 RK steps each neighboring element shares
         # a step, we cannot remove that same step twice and therefore remove the
@@ -1738,10 +1767,18 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         After the integration loop converges, this method produces a refined
         mesh that can be reused for subsequent integrations of the same function.
         It does two things:
-        1. Prunes: merges consecutive step pairs whose combined error ratio
-           is below remove_cut (they were over-resolved).
-        2. Adds: inserts midpoints for steps that still have high error ratios
-           relative to the final integral value.
+        1. Prunes: merges consecutive step pairs whose merged step is
+           predicted to have an error ratio below remove_cut
+           (``_prune_excess_mesh``).
+        2. Adds: inserts midpoints for steps whose error ratio against the
+           final integral is still >= 1. A merged step carries the pair's
+           summed error, so its ratio is the pair's (below the merge cutoff,
+           < 1) unless the rounding floor sets the tolerance (see
+           ``_error_ratios_norm``): this does not split a merged step, and it
+           is not a check of the merge prediction. Steps fail here only when
+           no re-check ran against the final integral (``take_gradient=True``,
+           or a fixed ``error_integral_reference``) or when
+           ``max_adaptive_splits`` stopped their refinement.
 
         This produces a mesh tailored to the difficulty of the integrand at
         different positions along the integration domain.
@@ -1812,9 +1849,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Ensure no two adjacent True values exist in a boolean mask.
 
         When merging step pairs, two adjacent steps cannot both be merged
-        (they share a boundary). This recursively resolves conflicts by
-        keeping the first flagged step in any adjacent pair and un-flagging
-        the second.
+        (they share a boundary). Conflicts are resolved left to right: the
+        first flagged entry of a run is kept and its neighbor un-flagged, so a
+        run of Trues alternates (TTT -> TFT, TTTT -> TFTF).
 
         Example: [True, True, False, True] -> [True, False, False, True]
 
@@ -2044,10 +2081,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         Machine-precision floor on the per-element error estimate.
 
-        Mirrors ``scipy.integrate.quad_vec``'s ``round_err = norm(50*eps*h*s_k)``
-        guard: it keeps the controller from splitting a panel forever chasing an
-        error that is already at/below floating-point round-off. ``s_k`` is the
-        panel's own integral contribution (``mesh_quadratures``).
+        Modeled on ``scipy.integrate.quad_vec``'s rounding guard: it keeps the
+        controller from splitting a panel forever chasing an error that is
+        already at/below floating-point round-off. scipy uses
+        ``round_err = norm(50*eps*h*s_k_abs)`` with ``h*s_k_abs`` the panel's
+        quadrature of ``|f|``, and raises the error estimate to it
+        (``_quadrature_gk`` in ``scipy/integrate/_quad_vec.py``, scipy 1.17).
+        Here the floor is ``50*eps*|s_k|`` with ``s_k`` the panel's signed
+        contribution (``mesh_quadratures``), smaller than scipy's on panels
+        where f changes sign, and the error-ratio helpers use it as a lower
+        bound on the tolerance.
 
         Args:
             mesh_quadratures: Per-step integral contributions. Shape: [N, D].
@@ -2120,11 +2163,21 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         compared to a single tolerance built from the *same* norm of the
         integral::
 
-            error_ratio[k] = R(|e[k]|) / (atol + rtol * R(I))      (absolute)
-            error_ratio[k] = R(|e[k]|) / (atol + rtol * R(cum[k])) (cumulative)
+            error_ratio[k] = R(|e[k]|) / max(atol, rtol * R(I))      (absolute)
+            error_ratio[k] = R(|e[k]|) / max(atol, rtol * R(cum[k])) (cumulative)
 
-        where ``R`` is the configured norm. A panel is accepted when
+        where ``R`` is the configured norm and ``cum[k]`` the running integral
+        through step k (as ``scipy.integrate.quad_vec``, which uses
+        ``max(epsabs, epsrel*norm(I))``). A panel is accepted when
         ``error_ratio < 1`` (see ``_accept_reject_masks``).
+
+        The pair ratio ``error_ratio_2steps[k] = R(|e[k]| + |e[k+1]|) /
+        tol_2steps[k]`` (used only to merge steps, ``_prune_excess_mesh``)
+        uses the tolerance the merged step would get: the same ``tol`` in
+        absolute mode, step k+1's (the merged step's right end) in cumulative
+        mode. Its rounding floor is ``R(floor[k]) + R(floor[k+1])``, at least
+        the merged step's own floor (equal when both contributions have the
+        same sign).
 
         The rounding floor enters as a *lower bound on the tolerance*
         (``effective_tol = max(tol, R(round_floor))``), not as an inflation of
@@ -2159,14 +2212,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             error_tol = torch.maximum(
                 atol, rtol * self._reduce_norm(torch.abs(cum_steps))
             )
-            error_tol_2steps = torch.maximum(
-                atol,
-                rtol
-                * torch.maximum(
-                    self._reduce_norm(torch.abs(cum_steps[:-1])),
-                    self._reduce_norm(torch.abs(cum_steps[1:])),
-                ),
-            )
+            # A merged pair (i, i+1) ends where step i+1 ends, so it is judged
+            # against step i+1's cumulative tolerance (not the larger of the
+            # two, which under-predicts the merged ratio when |cum| falls).
+            error_tol_2steps = error_tol[1:]
 
         if floor is not None:
             # Broadcasts a scalar (absolute mode) or per-step (cumulative) tol.
@@ -2193,6 +2242,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         A panel is accepted when ``failure_fraction <= mesh_failure_tolerance``
         (applied in ``_accept_reject_masks``). The raw per-element ratio is also
         returned so non-finite (NaN/Inf) panels can be detected downstream.
+        The pair ratio (used only to merge steps) is the max over elements of
+        ``(|e[k, d]| + |e[k+1, d]|) / tol_2steps[k, d]``, with the merged
+        step's tolerance as in ``_error_ratios_norm``.
 
         The rounding floor enters per element as a lower bound on the tolerance
         (``effective_tol = max(tol, round_floor)``), so an element whose error is
@@ -2216,9 +2268,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             else:
                 raise ValueError("Must give mesh_quadratures or cum_mesh_quadratures")
             error_tol = atol + rtol * torch.abs(cum_steps)  # [N, D]
-            error_tol_2steps = atol + rtol * torch.maximum(
-                torch.abs(cum_steps[:-1]), torch.abs(cum_steps[1:])
-            )
+            # Merged pair's tolerance: step i+1's (see _error_ratios_norm).
+            error_tol_2steps = error_tol[1:]
 
         if mesh_quadratures is not None:
             floor = self._round_floor(mesh_quadratures)  # [N, D]

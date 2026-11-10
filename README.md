@@ -302,9 +302,10 @@ solver.integrate(
 3. **Per-step error estimate.** Each method computes both a primary
    integral and an embedded lower-order estimate; their difference is
    the per-step error. The error ratio
-   $\text{step\\_error} / (\text{atol} + \text{rtol} \cdot |I|)$
-   controls acceptance: ratios $< 1$ accept; ratios $\geq 1$ reject and
-   split the step at its midpoint.
+   $\text{step\\_error} / \max(\text{atol}, \text{rtol} \cdot |I|)$
+   (with $\text{atol} + \text{rtol} \cdot |I_d|$ per output element for
+   `error_norm="failure_fraction"`) controls acceptance: ratios $< 1$
+   accept; ratios $\geq 1$ reject and split the step at its midpoint.
 
 4. **Adaptive refinement.** The solver alternates batched evaluation
    with splitting (high-error steps subdivide) until every step's ratio
@@ -316,7 +317,10 @@ solver.integrate(
    predicted error ratio is below `remove_cut`; merging two steps of
    width $h$ multiplies the summed error by about $2^{k-1}$, where the
    method's error estimate scales as $h^k$. This is what
-   `same_integrand=True` starts from on the next call.
+   `same_integrand=True` starts from on the next call. Each call merges
+   at most one level, so an over-resolved stored mesh shrinks over
+   repeated calls. An early `max_path_change` exit instead stores the
+   mesh it stopped on with its failing steps split.
 
 ## Comparisons
 

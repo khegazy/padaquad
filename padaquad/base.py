@@ -130,7 +130,8 @@ class SolverBase(ABC, DistributedEnvironment):
             method: Name of the RK integration method (e.g. 'dopri5', 'bosh3').
                 Converted to lowercase.
             atol: Absolute error tolerance for adaptive step control. Steps with
-                error below atol + rtol*|integral| are accepted.
+                error below max(atol, rtol*|integral|) are accepted
+                (atol + rtol*|integral| for ``error_norm="failure_fraction"``).
             rtol: Relative error tolerance for adaptive step control.
             y0: Initial value of the integral (accumulator starting point).
                 Shape: [D].

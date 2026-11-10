@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import pytest
 import torch
-from _helpers import make_solver_for_unit_test, make_uniform_solver
+from _helpers import (
+    ATOL_LOOSE,
+    RTOL_LOOSE,
+    T_FINAL,
+    T_INIT,
+    UNIFORM_METHOD_NAMES,
+    make_solver_for_unit_test,
+    make_uniform_solver,
+)
 
 from padaquad import integrand_dict
 
@@ -59,6 +67,18 @@ class TestPruneExcessT:
         t_p, _ss_p, _se_p = solver._prune_excess_mesh(t, ss, se, er2)
 
         assert t_p.shape[0] == 1
+        assert torch.equal(t_p, t)
+
+    def test_nonfinite_pair_ratio_not_merged(self):
+        """A NaN or Inf pair ratio (non-finite step error) never merges."""
+        solver = make_solver_for_unit_test()
+        t = self._make_t(solver, 0.0, 1.0, 5)
+        ss = torch.ones(5, 1, dtype=torch.float64)
+        se = torch.ones(5, 1, dtype=torch.float64) * 0.01
+        er2 = torch.tensor([float("nan"), 0.8, float("inf"), 0.8])
+
+        t_p, _, _ = solver._prune_excess_mesh(t, ss, se, er2)
+
         assert torch.equal(t_p, t)
 
     def test_no_adjacent_merges(self):
@@ -185,22 +205,133 @@ class TestGetOptimalTStepBarriers:
         )
 
 
-@pytest.mark.parametrize("method", ["dopri5", "gk7", "cc17"])
-def test_optimal_mesh_passes_when_reevaluated(method):
+# ---------------------------------------------------------------------------
+# Merge cutoff end to end: a merged step must pass when it is re-evaluated.
+# ---------------------------------------------------------------------------
+
+
+def _warm_start_passes(solver, f) -> bool:
+    """Re-integrate f from the solver's stored mesh; True when no starting step
+    fails. The solver must have ``max_path_change`` tiny, so one failing
+    starting step stops the call with ``converged=False``."""
+    return solver.integrate(f=f, same_integrand=True, take_gradient=False).converged
+
+
+@pytest.mark.parametrize("method", UNIFORM_METHOD_NAMES)
+@pytest.mark.parametrize("integrand", ["sine_squared", "exp", "damped_sine"])
+@pytest.mark.parametrize(
+    ("atol", "rtol"), [(ATOL_LOOSE, RTOL_LOOSE), (1e-9, 1e-9)], ids=["loose", "tight"]
+)
+def test_optimal_mesh_passes_when_reevaluated(method, integrand, atol, rtol):
     """Re-integrating the same integrand from its own mesh_optimal fails no
     step: merged steps are predicted to stay below tolerance. With the old cut
     (summed ratio < remove_cut) 7-22 % of these steps failed. max_path_change
     (tiny) turns any failing starting step into converged=False."""
-    torch.manual_seed(0)
-    f = integrand_dict["damped_sine"][0]
+    if (atol, rtol) == (1e-9, 1e-9) and method in ("adaptive_heun", "fehlberg2"):
+        pytest.skip("1e5+ panels at this tolerance; covered at the loose one")
+    f = integrand_dict[integrand][0]
     solver = make_uniform_solver(
-        method, atol=1e-9, rtol=1e-9, device="cpu", max_path_change=1e-12
+        method, atol=atol, rtol=rtol, device="cpu", max_path_change=1e-12
     )
-    solver.integrate(
-        f=f,
-        mesh_init=torch.tensor([0.0], dtype=torch.float64),
-        mesh_final=torch.tensor([1.0], dtype=torch.float64),
-        take_gradient=False,
+    torch.manual_seed(0)
+    solver.integrate(f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False)
+    assert _warm_start_passes(solver, f)
+
+
+@pytest.mark.parametrize(
+    ("method", "f", "atol", "rtol"),
+    [
+        ("dopri5", lambda t: torch.cos(2 * torch.pi * t), 1e-14, 1e-6),
+        ("cc17", lambda t: torch.sin(2 * torch.pi * 3.7 * t), 1e-12, 1e-8),
+    ],
+    ids=["dopri5-cos", "cc17-sin"],
+)
+def test_optimal_mesh_passes_when_reevaluated_cumulative(method, f, atol, rtol):
+    """Cumulative tolerance with a running integral that falls toward 0
+    (cos 2 pi t at t -> 1, sin 2 pi 3.7 t near t = 0.5). A merged pair is
+    judged on re-evaluation against |cum| at its right end; the pair ratio
+    used the larger of the two steps' |cum|, so pairs merged whose merged step
+    failed (merged-step ratio 10.9 and 5.0 in these two cases)."""
+    solver = make_uniform_solver(
+        method,
+        atol=atol,
+        rtol=rtol,
+        device="cpu",
+        max_path_change=1e-12,
+        use_absolute_error_ratio=False,
     )
-    out = solver.integrate(f=f, same_integrand=True, take_gradient=False)
-    assert out.converged is True
+    torch.manual_seed(0)
+    solver.integrate(f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False)
+    assert _warm_start_passes(solver, f)
+
+
+@pytest.mark.parametrize("use_absolute_error_ratio", [True, False])
+@pytest.mark.parametrize("error_norm", ["2", "max", "failure_fraction"])
+def test_pair_ratio_is_merged_step_ratio(use_absolute_error_ratio, error_norm):
+    """error_ratios_2steps of a pair equals the error ratio the merged step
+    gets when its error is the pair's summed error: same tolerance, including
+    the cumulative tolerance at the merged step's right end (|cum| drops from
+    1 to 1e-3 across this pair). Tolerances sit far above the rounding floor.
+    D = 2 checks the vector reductions."""
+    solver = make_solver_for_unit_test(
+        atol=1e-14,
+        rtol=1e-6,
+        use_absolute_error_ratio=use_absolute_error_ratio,
+        error_norm=error_norm,
+    )
+    quad = torch.tensor([[1.0, 2.0], [-0.999, -1.998]], dtype=torch.float64)
+    err = torch.tensor([[1e-11, 3e-11], [2e-11, 1e-11]], dtype=torch.float64)
+    integral = quad.sum(0)
+    _, pair, _ = solver._compute_error_ratios(
+        mesh_quadrature_errors=err, mesh_quadratures=quad, integral=integral
+    )
+    merged, _, merged_per_dim = solver._compute_error_ratios(
+        mesh_quadrature_errors=err.sum(0, keepdim=True),
+        mesh_quadratures=quad.sum(0, keepdim=True),
+        integral=integral,
+    )
+    if error_norm == "failure_fraction":
+        merged = merged_per_dim.amax(dim=-1)  # the pair ratio's reduction
+    assert torch.allclose(pair, merged, rtol=1e-12, atol=0)
+
+
+@pytest.mark.parametrize("method", ["dopri5", "gk7", "gk21", "cc17"])
+def test_repeated_warm_starts_prune_to_a_fixed_point(method):
+    """Starting from an over-resolved 128-step mesh, repeated same_integrand
+    calls halve the over-resolved steps (one merge level per call) until the
+    mesh stops changing; no call fails a starting step and every integral
+    stays within tolerance of the exact value."""
+    f, solution, _ = integrand_dict["damped_sine"]
+    exact = solution(T_INIT, T_FINAL)
+    solver = make_uniform_solver(
+        method, atol=1e-9, rtol=1e-7, device="cpu", max_path_change=1e-12
+    )
+    mesh = torch.linspace(0.0, 1.0, 129, dtype=torch.float64).unsqueeze(-1)
+    out = solver.integrate(f=f, mesh=mesh, take_gradient=False)
+    sizes = [len(mesh) - 1, len(out.mesh_optimal) - 1]
+    for _ in range(8):
+        out = solver.integrate(f=f, same_integrand=True, take_gradient=False)
+        assert out.converged is True
+        assert torch.allclose(out.integral.cpu(), exact, atol=1e-9, rtol=1e-6)
+        sizes.append(len(out.mesh_optimal) - 1)
+        if sizes[-1] == sizes[-2]:
+            break
+    assert sizes[-1] == sizes[-2], f"no fixed point: {sizes}"
+    assert sizes == sorted(sizes, reverse=True), sizes
+    assert sizes[-1] <= 0.6 * sizes[0], sizes
+
+
+@pytest.mark.parametrize("n_steps", [1, 2])
+def test_optimal_mesh_of_one_or_two_steps(n_steps):
+    """One step has no pair to merge; an over-resolved pair merges into one
+    step spanning both."""
+    solver = make_solver_for_unit_test(atol=1e-3, rtol=1e-3)
+    mesh = torch.linspace(0.0, 1.0, n_steps + 1, dtype=torch.float64).unsqueeze(-1)
+    mesh_opt = solver._get_optimal_mesh(
+        nodes=solver._compute_nodes(mesh[:-1], mesh[1:]),
+        mesh_quadratures=torch.full((n_steps, 1), 1.0 / n_steps, dtype=torch.float64),
+        mesh_quadrature_errors=torch.full((n_steps, 1), 1e-12, dtype=torch.float64),
+        integral=torch.tensor([1.0], dtype=torch.float64),
+        mesh=mesh,
+    )
+    assert torch.equal(mesh_opt, mesh[[0, -1]])

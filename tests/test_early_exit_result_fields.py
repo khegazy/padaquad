@@ -316,3 +316,43 @@ def test_max_path_change_runs_on_stored_mesh(monkeypatch):
     stored = solver.mesh_previous.clone()
     solver.integrate(f=sharp, same_integrand=True, take_gradient=False, **bounds)
     assert torch.equal(recorded[0], stored)
+
+
+def test_early_exit_stores_start_mesh_with_failing_steps_split():
+    """An early exit stores the starting mesh with this batch's failing steps
+    split at their midpoints (what the loop would have done next), so repeated
+    same_integrand=True calls refine further until one converges. Storing the
+    unsplit mesh made every later call start from, and stop on, the same mesh:
+    the default path evaluates the whole starting mesh in its first batch."""
+    bounds = {
+        "mesh_init": torch.tensor([0.0], dtype=torch.float64),
+        "mesh_final": torch.tensor([4.0], dtype=torch.float64),
+    }
+    solver = make_uniform_solver(
+        "dopri5", atol=1e-8, rtol=1e-8, device="cpu", max_path_change=0.3
+    )
+    torch.manual_seed(0)
+    solver.integrate(f=lambda t, *_: torch.sin(t), take_gradient=False, **bounds)
+    sharp = lambda t, *_: torch.sin(20 * t)  # noqa: E731
+
+    start = solver.mesh_previous.clone()
+    out = solver.integrate(f=sharp, same_integrand=True, take_gradient=False, **bounds)
+    assert out.converged is False
+    # One batch held every starting step: out.error_ratios is per starting step.
+    failed = (out.error_ratios >= 1.0).to(start.device)
+    midpoints = 0.5 * (start[:-1] + start[1:])[failed]
+    expected = torch.sort(torch.cat([start, midpoints]), dim=0).values
+    assert torch.equal(solver.mesh_previous, expected)
+    assert torch.equal(out.mesh_optimal, solver.mesh_previous)
+
+    sizes = [len(start), len(expected)]
+    for _ in range(6):
+        out = solver.integrate(
+            f=sharp, same_integrand=True, take_gradient=False, **bounds
+        )
+        sizes.append(len(solver.mesh_previous))
+        if out.converged:
+            break
+    assert out.converged is True, sizes
+    # Each early exit stored a larger mesh than it started from.
+    assert sizes[:-1] == sorted(set(sizes[:-1])), sizes

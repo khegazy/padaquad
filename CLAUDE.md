@@ -87,7 +87,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed error ratios, midpoint placement |
 | `test_record_and_sort.py` | `_record_results` and `_sort_record` |
 | `test_evaluate_and_merge.py` | `_evaluate_adaptive_nodes` + `_merge_excess_nodes` for both uniform and variable solvers |
-| `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh` |
+| `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: `mesh_optimal` re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
 | `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
 
@@ -224,15 +224,17 @@ Two orthogonal axes control the adaptive accept/reject decision: the
 reduction scheme** (`error_norm`).
 
 **Tolerance reference** (`use_absolute_error_ratio`):
-- **Absolute** (default): denominator is `atol + rtol * |total_integral|`. Every panel uses the same denominator. Best for path integrals where the total is the meaningful quantity.
-- **Cumulative**: denominator is `atol + rtol * |cumsum_to_step|`, growing with the running integral (traditional ODE-style). Per-panel ratios *decrease* as integration progresses.
+- **Absolute** (default): denominator is `max(atol, rtol * |total_integral|)` (`atol + rtol * |I_d|` for `"failure_fraction"`, below). Every panel uses the same denominator. Best for path integrals where the total is the meaningful quantity.
+- **Cumulative**: the same with `|cumsum_to_step|` (the running integral through the panel) in place of `|total_integral|` (traditional ODE-style). Per-panel ratios *decrease* as integration progresses.
 
 **Vector-error reduction** (`error_norm`, modeled on
 `scipy.integrate.quad_vec`'s `norm`): for vector-valued integrands (`D > 1`)
 the per-step error must be reduced to one accept/reject decision. Two families,
-both reducing to `|error| / (atol + rtol*|I|) < 1` when `D == 1`:
+reducing to `|error| / max(atol, rtol*|I|) < 1` (norm family) or
+`|error| / (atol + rtol*|I|) < 1` (`"failure_fraction"`) when `D == 1`:
 - **Norm family** — *reduce-then-compare* (scipy style): reduce the error
-  vector to a scalar with the norm, compare to `atol + rtol * norm(integral)`.
+  vector to a scalar with the norm, compare to `max(atol, rtol * norm(integral))`
+  (scipy `quad_vec` uses `max(epsabs, epsrel*norm(I))`).
   Accept when `< 1`. Options: `"2"` (default, L2 = `sqrt(sum(e²))`), `"max"`
   (L∞), `"rms"` (`sqrt(mean(e²))`, padaquad's historical reduction), or a
   callable reducing the last (`D`) axis.
@@ -256,8 +258,14 @@ only by `_get_optimal_mesh` to merge pairs. A merged step of width 2h has an
 error of about 2^(k-1)·S (the method's error estimate scales as h^k, k =
 `error_exponent` on each method), so a pair is merged when
 `S < remove_cut / 2^(k-1)` (`remove_cut` default 0.1): the merged step's
-predicted ratio stays below `remove_cut`. `_rec_remove` ensures no two
-adjacent pairs are both flagged.
+predicted ratio stays below `remove_cut`. S uses the tolerance the merged step
+gets: in cumulative mode the right step's `|cumsum|` (the merged step ends
+there). `_rec_remove` ensures no two adjacent pairs are both flagged, so one
+call merges at most one level. The merged step records the pair's summed error,
+so the add phase of `_get_optimal_mesh` does not split it (unless the rounding
+floor sets the tolerance). The prediction assumes
+the h^k regime; when the estimate is round-off (high-order methods, tight
+tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
 
 ### Uniform vs variable sampling
 
@@ -337,7 +345,8 @@ adjacent pairs are both flagged.
 
 - Every call that returns (converged, or stopped early by
   `max_path_change`) stores its mesh (`mesh_previous`: `mesh_optimal`, or
-  the partly refined mesh after an early exit) and its `max_batch`
+  after an early exit the mesh at the exit with the failing steps of that
+  batch split, so the next call refines further) and its `max_batch`
   (`previous_max_batch`) together. A call that raises stores nothing.
 - With `same_integrand=True` and stored values, the stored mesh (filtered
   to `[mesh_init, mesh_final]`, padded if needed) and `max_batch` replace

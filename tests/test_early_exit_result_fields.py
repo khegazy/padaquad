@@ -202,3 +202,117 @@ def test_early_exit_does_not_corrupt_solver_for_subsequent_calls():
     # really about the API contract — the result must come back as
     # an IntegrationResult, not a None or an exception.
     assert isinstance(out2, IntegrationResult)
+
+
+# ---------------------------------------------------------------------------
+# The fail ratio covers the whole starting mesh (given or stored), across
+# batches; halves of split steps are never counted.
+# ---------------------------------------------------------------------------
+
+_MESH20 = torch.linspace(0.0, 1.0, 21, dtype=torch.float64).unsqueeze(-1)
+
+
+def _gk21_solver(max_batch, max_path_change=0.3):
+    return make_uniform_solver(
+        "gk21",
+        atol=1e-10,
+        rtol=1e-10,
+        device="cpu",
+        max_batch=max_batch,
+        max_path_change=max_path_change,
+    )
+
+
+def test_split_halves_do_not_trigger_early_exit():
+    """One narrow peak: 1 of 20 starting steps fails, and its halves keep
+    failing for a few splits. Only starting steps count, so the call converges
+    (a per-batch ratio exited here: the second batch is 2 failing halves)."""
+    out = _gk21_solver(max_batch=10**6).integrate(
+        f=lambda t, *_: torch.exp(-(((t - 0.523) / 0.002) ** 2)),
+        mesh=_MESH20,
+        take_gradient=False,
+    )
+    assert out.converged is True
+
+
+def test_fail_ratio_spans_batches():
+    """A starting mesh of 20 steps evaluated 5 steps per batch. A rough
+    region over the first 20 % of the interval fails 4 of the 20 starting
+    steps (all in the first batch, 80 % of it): under max_path_change=0.3 the
+    call converges. Over the first 40 % it fails 8 of 20: the call stops."""
+
+    def rough_until(edge):
+        return lambda t, *_: torch.where(
+            t < edge, torch.sin(400 * t), torch.ones_like(t)
+        )
+
+    def run(edge):
+        solver = _gk21_solver(max_batch=None)
+        return solver.integrate(
+            f=rough_until(edge),
+            mesh=_MESH20,
+            max_batch=5 * solver.C,
+            take_gradient=False,
+        )
+
+    assert run(0.2).converged is True
+    assert run(0.4).converged is False
+
+
+def test_max_path_change_runs_on_stored_mesh(monkeypatch):
+    """The check runs on the stored mesh used by same_integrand=True, never on
+    a freshly generated mesh, and an early exit stores its partly refined mesh
+    so the next same_integrand=True call continues from it."""
+    bounds = {
+        "mesh_init": torch.tensor([0.0], dtype=torch.float64),
+        "mesh_final": torch.tensor([4.0], dtype=torch.float64),
+    }
+    smooth = lambda t, *_: torch.sin(t)  # noqa: E731
+    sharp = lambda t, *_: torch.sin(20 * t)  # noqa: E731
+    solver = make_uniform_solver(
+        "dopri5", atol=1e-8, rtol=1e-8, device="cpu", max_path_change=0.3
+    )
+
+    # Control: the fresh mesh, passed explicitly, fails the check.
+    fresh = solver._setup_initial_mesh(
+        None, bounds["mesh_init"], bounds["mesh_final"], False, False, 13
+    )[0]
+    control = solver.integrate(f=sharp, mesh=fresh.clone(), take_gradient=False)
+    assert control.converged is False
+
+    # 1. A fresh solver: nothing stored, so the fresh mesh is used and the
+    #    check does not run on it.
+    solver = make_uniform_solver(
+        "dopri5", atol=1e-8, rtol=1e-8, device="cpu", max_path_change=0.3
+    )
+    first = solver.integrate(
+        f=sharp,
+        same_integrand=True,
+        random_initial_mesh=False,
+        take_gradient=False,
+        **bounds,
+    )
+    assert first.converged is True
+
+    # 2. Converge on the smooth integrand, then switch to the sharp one: the
+    #    check runs on the stored (smooth-tuned) mesh and stops the call.
+    solver.integrate(f=smooth, take_gradient=False, **bounds)
+    out = solver.integrate(f=sharp, same_integrand=True, take_gradient=False, **bounds)
+    assert out.converged is False
+
+    # 3. The early exit stored its partly refined mesh and max_batch, and the
+    #    next same_integrand=True call starts from that mesh.
+    assert torch.equal(solver.mesh_previous, out.mesh_optimal.to(solver.device))
+    assert solver.previous_max_batch is not None
+    recorded = []
+    real = solver._setup_initial_mesh
+
+    def wrapper(*args, **kwargs):
+        result = real(*args, **kwargs)
+        recorded.append(result[0].clone())
+        return result
+
+    monkeypatch.setattr(solver, "_setup_initial_mesh", wrapper)
+    stored = solver.mesh_previous.clone()
+    solver.integrate(f=sharp, same_integrand=True, take_gradient=False, **bounds)
+    assert torch.equal(recorded[0], stored)

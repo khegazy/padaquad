@@ -129,12 +129,13 @@ for f in integrands:
         y0=y0,
         device=device,
     )
-    # Reusing one integrator on the same f means the memory benchmark runs only
-    # on the first call (id(f) matches thereafter, so previous_max_batch is
-    # reused) — no extra handling needed here.
+    # Pass the max_batch measured by the first run back in, so the memory
+    # benchmark runs only on the first call (get_max_batch() is None before it).
+    # same_integrand=True would also skip it, but it reuses the mesh too and
+    # would change what is timed.
     for _ in range(n_runs):
         t0 = time.time()
-        _ = integrator.integrate()
+        _ = integrator.integrate(max_batch=integrator.get_max_batch())
         total_time = total_time + (time.time() - t0)
     tpdiffeq_int_results.append(total_time / n_runs)
 

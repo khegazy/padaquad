@@ -35,7 +35,8 @@ class IntegrationResult:
         integral_error: Estimated total error (sum of per-step errors)
             using the embedded lower-order method. Shape: [D].
         mesh_optimal: Optimized step-barrier mesh for warm-start reuse
-            in subsequent integration calls with the same integrand.
+            in subsequent integration calls with the same integrand (pass
+            ``same_integrand=True``).
             Shape: [M, T].
         mesh_init: Lower integration bound used. Shape: [T].
         mesh_final: Upper integration bound used. Shape: [T].

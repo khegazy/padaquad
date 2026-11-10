@@ -98,9 +98,9 @@ class SolverBase(ABC, DistributedEnvironment):
     - Device management: inherited from DistributedEnvironment.
     - Default parameter storage: f, y0, mesh_init, mesh_final can be set at
       construction and reused across multiple integrate() calls.
-    - Warm-start caching: stores mesh_previous and previous_f_id
-      so that repeated integration of the same function can reuse the optimized
-      time mesh from the prior run.
+    - Warm-start caching: stores mesh_previous, reused with
+      ``integrate(..., same_integrand=True)`` so that repeated integration of
+      the same function starts from the optimized time mesh of the prior run.
 
     Subclasses must implement:
         - ``_set_solver_dtype(dtype)``: update solver-specific state when dtype changes.
@@ -188,16 +188,12 @@ class SolverBase(ABC, DistributedEnvironment):
             if mesh_final is not None
             else torch.tensor([1], dtype=dtype, device=self.device)
         )
-        # Cached time barriers from last integration for warm-starting.
-        # Used only when integrate(..., reuse_mesh=True) is passed; otherwise
-        # ignored. The cached barriers are the *optimal* mesh from the
-        # previous successful run (post-prune-and-refine).
-        self.mesh_previous = None
-        # id() of the last integrated function. Stored as a sanity-check
-        # signal so that reuse_mesh=True can warn if the cached mesh was
-        # tuned for a different integrand. Replaces the prior __name__
-        # comparison which collided across all lambdas.
-        self.previous_f_id = None
+        # Stored time barriers from the last integration for warm-starting.
+        # Used only when integrate(..., same_integrand=True) is passed;
+        # otherwise ignored. They are the *optimal* mesh of the last call that
+        # returned (post-prune-and-refine), or its partly refined mesh after a
+        # max_path_change early exit.
+        self.mesh_previous: torch.Tensor | None = None
 
         self._set_dtype(dtype)
 

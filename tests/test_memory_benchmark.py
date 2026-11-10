@@ -323,8 +323,9 @@ def test_real_linux_reader_in_child_of_larger_process():
 
 def test_messages_when_measuring(caplog, monkeypatch):
     """Without max_batch the start warning explains the measurement and tells
-    the user to pass max_batch; the end warning reports time, c, max_batch and
-    the reason. With max_batch, neither appears."""
+    the user to pass max_batch; the end warning reports time, the reason, c,
+    and a max_batch estimate (for this take_gradient) to pass later. With
+    max_batch, neither appears."""
     clock = FakeClock()
     monkeypatch.setattr(qmem, "time", clock)
 
@@ -337,10 +338,14 @@ def test_messages_when_measuring(caplog, monkeypatch):
         solver.integrate(slow_sin, mesh_init=T_INIT, mesh_final=T_FINAL)
     text = caplog.text
     assert "PadaQuad is measuring how much memory" in text
-    assert "Pass max_batch to skip this" in text
+    assert "To skip it, pass max_batch" in text
+    assert "same_integrand=True" in text
     assert "Memory measurement finished in" in text
     assert "bytes per evaluation" in text
     assert "stopped because" in text
+    assert "usable now, max_batch is about" in text
+    assert "for take_gradient=True" in text
+    assert "pass max_batch=" in text
 
     caplog.clear()
     solver = make_solver_for_unit_test(method_name="gk21", max_batch=1000)
@@ -370,6 +375,22 @@ def test_slow_integrand_gradient_path_completes(monkeypatch):
     assert float(result.integral.sum()) == pytest.approx(
         torch.sin(T_FINAL).item(), abs=1e-5
     )
+
+
+def test_get_max_batch_uses_solver_total_mem_usage(monkeypatch):
+    """get_max_batch() without total_mem_usage uses the solver's own value, not
+    a second hard-coded default."""
+    solver = make_solver_for_unit_test(total_mem_usage=0.5)
+    seen = []
+
+    def usable(total_mem_usage):
+        seen.append(total_mem_usage)
+        return 1.0  # GB
+
+    monkeypatch.setattr(solver, "_get_usable_memory", usable)
+    solver.f_unit_mem_size = 1e-6  # GB per evaluation
+    assert solver.get_max_batch() == pytest.approx(10**6, abs=1)
+    assert seen == [0.5]
 
 
 def test_release_memory_never_touches_gpu_on_cpu_solver(monkeypatch):

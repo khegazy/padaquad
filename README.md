@@ -162,15 +162,17 @@ work.
 solver = adaptive_quadrature(method="gk21", atol=1e-8, rtol=1e-8)
 
 for epoch in range(N_epochs):
-    # On the second and later iterations, reuse the previous run's
-    # optimal mesh as the warm-start. Default is reuse_mesh=False so
-    # that integrating a *different* integrand never silently shares
-    # a stale mesh.
+    # same_integrand=True: from the second iteration on, start from the
+    # previous run's optimal mesh and max_batch (they replace any mesh or
+    # max_batch passed here) and skip the memory benchmark. The first
+    # iteration has nothing stored, so it uses a fresh mesh. The default,
+    # same_integrand=False, never reuses a stored mesh for a different
+    # integrand.
     result = solver.integrate(
         f=f_theta,
         mesh_init=mesh_init,
         mesh_final=mesh_final,
-        reuse_mesh=(epoch > 0),
+        same_integrand=True,
         take_gradient=True,
     )
     optimizer.step()
@@ -257,8 +259,8 @@ padaquad.adaptive_quadrature(
 solver.integrate(
     f=None, y0=None,
     mesh=None, mesh_init=None, mesh_final=None,
-    take_gradient=False, is_training=None,
-    reuse_mesh=False, random_initial_mesh=True,
+    take_gradient=True,
+    same_integrand=False, random_initial_mesh=True,
     loss_fxn=None, total_mem_usage=None, max_batch=None,
     N_init_steps=13, f_args=(),
 ) -> IntegrationResult
@@ -277,7 +279,8 @@ solver.integrate(
 - `mesh_quadratures`, `mesh_quadrature_errors`, `error_ratios` — per-step diagnostics.
 - `loss`, `gradient_taken`, `y0` — training-loop diagnostics.
 - `converged: bool` — `True` for normal completion; `False` only when
-  `max_path_change` triggers an early exit on a user-provided mesh.
+  `max_path_change` triggers an early exit on a user-provided mesh or on
+  the stored mesh used by `same_integrand=True`.
 
 ## How it works
 
@@ -309,7 +312,8 @@ solver.integrate(
 
 5. **Optimal mesh.** After convergence, a final pruning + refinement
    pass produces `mesh_optimal` — the smallest mesh that still meets
-   tolerance. This is what `reuse_mesh=True` consumes on the next call.
+   tolerance. This is what `same_integrand=True` starts from on the next
+   call.
 
 ## Comparisons
 

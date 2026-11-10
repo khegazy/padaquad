@@ -57,15 +57,15 @@ class _UniformAdaptiveQuadratureBase(AdaptiveQuadrature):
 
     method: MethodClass
 
-    def _setup_method(self, dtype: torch.dtype) -> None:
+    def _set_solver_dtype(self, dtype: torch.dtype) -> None:
         """
-        Initialize the RK method and extract its properties.
+        Build the RK method at ``dtype`` and extract its properties.
 
-        Called through ``_set_solver_dtype`` from ``SolverBase._set_dtype``,
-        which runs at the end of ``SolverBase.__init__`` and on every later
-        dtype change. Loads the named method from UNIFORM_METHODS, moves its tableau
-        tensors to the correct device and dtype, and stores the method's
-        order and number of quadrature points (C).
+        Called from ``SolverBase._set_dtype``, which runs at the end of
+        ``SolverBase.__init__`` (the method's first build) and on every later
+        dtype change. Loads the named method from UNIFORM_METHODS, moves its
+        tableau tensors to the correct device and dtype, and stores the
+        method's order and number of quadrature points (C).
 
         Args:
             dtype: Floating-point dtype for the tableau tensors.
@@ -83,10 +83,6 @@ class _UniformAdaptiveQuadratureBase(AdaptiveQuadrature):
         self.order = self.method.order
         self.C = len(self.method.tableau.c)
         self.Cm1 = self.C - 1
-
-    def _set_solver_dtype(self, dtype: torch.dtype) -> None:
-        """Re-initialize the method when the solver's dtype changes."""
-        self._setup_method(dtype)
 
     def _compute_nodes(
         self, mesh_left: torch.Tensor, mesh_right: torch.Tensor

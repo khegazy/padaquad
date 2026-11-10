@@ -64,12 +64,12 @@ class _VariableAdaptiveQuadratureBase(AdaptiveQuadrature):
 
     method: _VariableSubclass
 
-    def _setup_method(self, dtype: torch.dtype) -> None:
+    def _set_solver_dtype(self, dtype: torch.dtype) -> None:
         """
-        Initialize the variable method on the solver's device and dtype.
+        Build the variable method on the solver's device at ``dtype``.
 
-        Called through ``_set_solver_dtype`` from ``SolverBase._set_dtype``,
-        which runs at the end of ``SolverBase.__init__`` and on every later
+        Called from ``SolverBase._set_dtype``, which runs at the end of
+        ``SolverBase.__init__`` (the method's first build) and on every later
         dtype change. ``_get_method`` builds a fresh instance and moves its
         tensors (e.g. ``b_delta``) onto ``self.device``, so they never clash
         with device-side nodes in ``tableau_b(c)``.
@@ -91,10 +91,6 @@ class _VariableAdaptiveQuadratureBase(AdaptiveQuadrature):
         self.order = self.method.order
         self.C = self.method.n_tableau_c
         self.Cm1 = self.C - 1
-
-    def _set_solver_dtype(self, dtype: torch.dtype) -> None:
-        """Re-initialize the method when the solver's dtype changes."""
-        self._setup_method(dtype)
 
     def _compute_nodes(
         self, mesh_left: torch.Tensor, mesh_right: torch.Tensor

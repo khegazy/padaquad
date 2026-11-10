@@ -216,8 +216,9 @@ class SolverBase(ABC, DistributedEnvironment):
         """
         Update solver-specific state when dtype changes.
 
-        Called by ``_set_dtype()`` after converting base tensors. Subclasses
-        must implement this to convert their own tensors (e.g., RK tableaux).
+        Called by ``_set_dtype()`` after converting base tensors, including
+        its first call at the end of ``__init__``. Subclasses must implement
+        this to build or convert their own tensors (e.g., RK tableaux).
 
         Args:
             dtype: The new dtype to convert to.

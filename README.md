@@ -291,6 +291,11 @@ except where noted.
   `max_path_change` triggers an early exit on a user-provided mesh or on
   the stored mesh used by `same_f=True`.
 
+The per-batch result that `loss_fxn` receives covers only that batch's
+accepted steps: `integral` is their contribution without `y0`, `y0` is
+zero, `mesh_optimal` and `loss` are `None`, and `nodes`, `y` and
+`tracked_variables` keep one row per step (`[N, C, T]`, `[N, C, D]`).
+
 ## How it works
 
 1. **Initial mesh.** When `mesh` is not given, the integration domain

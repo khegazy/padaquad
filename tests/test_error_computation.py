@@ -231,6 +231,17 @@ class TestComputeErrorRatiosAbsolute:
         # 1e-4 / 1e-3 = 0.1
         assert torch.allclose(error_ratio, torch.tensor([0.1]))
 
+    @pytest.mark.parametrize("error_norm", ["2", "failure_fraction"])
+    def test_missing_integral_raises(self, error_norm):
+        """Absolute mode without the integral raises ValueError (both families)."""
+        solver = self._make_solver()
+        solver.error_norm = error_norm
+        with pytest.raises(ValueError, match="Must give integral"):
+            solver._compute_error_ratios(
+                mesh_quadrature_errors=torch.tensor([[1e-4]]),
+                mesh_quadratures=torch.tensor([[1.0]]),
+            )
+
     def test_2steps_shape(self):
         """N=3 steps: error_ratio has len 3, error_ratio_2steps has len 2."""
         solver = self._make_solver()

@@ -63,8 +63,11 @@ if TYPE_CHECKING:
 
     from padaquad.methods import MethodClass, _VariableSubclass
 
-#: State carried across batches when a batch's f evaluations are split:
-#: (nodes, y, tracked variables, mesh step indices) of the evaluated part.
+#: State carried across batches by ``conserve_memory=True`` when one step's
+#: evaluation is split between batches: (nodes, f evaluations, tracked
+#: variables) of its evaluated part, and the step's left-barrier coordinate
+#: (shape [T], not an index, so it survives mesh refinement). All None when
+#: nothing is carried.
 _SplitState = tuple[
     torch.Tensor | None,
     torch.Tensor | None,
@@ -112,9 +115,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Cm1: C - 1, used frequently in index calculations (set by subclass).
     """
 
-    # Set by the subclass's ``_setup_method``, which ``SolverBase.__init__``
-    # reaches through ``_set_dtype`` -> ``_set_solver_dtype``. Subclasses narrow
-    # ``method`` to their own method type.
+    # Set by the subclass's ``_set_solver_dtype``, which ``SolverBase.__init__``
+    # reaches through ``_set_dtype``. Subclasses narrow ``method`` to their own
+    # method type.
     method: MethodClass | _VariableSubclass
     order: int
     C: int
@@ -1226,7 +1229,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         - a bare integrand tensor (existing contract) -> tracked is None, or
         - a 2-tuple ``(integrand, tracked_variables)`` where
           ``tracked_variables`` is a tuple of tensors, a single tensor (wrapped
-          into a 1-tuple), or ``None``.
+          into a 1-tuple), or ``None`` (an empty tuple is treated as ``None``).
 
         Args:
             out: The raw return value of a call to ``f``.
@@ -1240,7 +1243,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 return integrand, None
             if torch.is_tensor(tracked):
                 tracked = (tracked,)
-            return integrand, tuple(tracked)
+            # An empty tuple means no tracked variables, like None. The record
+            # stores one key per tracked variable, so it could not tell the two
+            # apart at the end of the run.
+            return integrand, tuple(tracked) or None
         return out, None
 
     def _check_f_output_finite(
@@ -2492,12 +2498,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             one key per tracked variable.
         """
         assert results.loss is not None, "loss must be set before recording"
-        fields = {
-            "integral": results.integral,
-            "integral_error": results.integral_error,
-            "loss": results.loss,
+        fields: dict[str, torch.Tensor] = {
+            key: getattr(results, key)
+            for key in self._RECORD_SCALAR_KEYS + self._RECORD_STEP_KEYS
         }
-        fields.update({key: getattr(results, key) for key in self._RECORD_STEP_KEYS})
         for i, tracked in enumerate(results.tracked_variables or ()):
             fields[f"{self._TRACKED_KEY_PREFIX}{i}"] = tracked
         return fields

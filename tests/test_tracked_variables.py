@@ -132,6 +132,51 @@ def test_single_tensor_tracked_is_wrapped():
     assert torch.allclose(result.tracked_variables[0], result.nodes**2)
 
 
+def test_empty_tracked_tuple_is_none():
+    """An empty tuple of tracked variables is reported as None, like none."""
+
+    def f(t):
+        return torch.sin(t), ()
+
+    solver = make_uniform_solver("gk21", atol=ATOL_MED, rtol=RTOL_MED)
+    result = solver.integrate(
+        f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
+    )
+    assert result.tracked_variables is None
+
+
+@pytest.mark.parametrize(
+    ("take_gradient", "conserve_memory"),
+    [(True, False), (False, False), (False, True)],
+    ids=["grad", "nograd", "nograd-conserve"],
+)
+def test_many_tracked_variables_keep_order(take_gradient, conserve_memory):
+    """Twelve tracked variables come back in the integrand's order.
+
+    Each tracked variable is its own record key (``tracked_variables_<i>``);
+    with ten or more, sorting the keys as strings would put ``_10`` before
+    ``_2``, so this pins the order through multi-batch insert and sort.
+    """
+    n_tracked = 12
+
+    def f(t):
+        return torch.sin(t), tuple(k * t + k for k in range(n_tracked))
+
+    solver = make_uniform_solver("bosh3", atol=1e-8, rtol=1e-8)
+    result = solver.integrate(
+        f=f,
+        mesh_init=T_INIT,
+        mesh_final=T_FINAL,
+        take_gradient=take_gradient,
+        conserve_memory=conserve_memory,
+        max_batch=solver.C * 2,
+    )
+    tv = result.tracked_variables
+    assert len(tv) == n_tracked
+    for k in range(n_tracked):
+        assert torch.equal(tv[k], k * result.nodes + k)
+
+
 def test_multidim_trailing_shape_preserved():
     """A tracked variable with trailing shape [3] keeps that shape."""
 

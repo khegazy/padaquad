@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 from _helpers import make_solver_for_unit_test
 
@@ -186,6 +187,32 @@ class TestRecordResults:
         # Coordinate 0 is non-monotonic -> proves order is by mesh, not coord 0.
         coord0 = record["nodes"][:, 0, 0]
         assert not torch.all(coord0[1:] - coord0[:-1] > 0)
+
+    def test_tracked_variables_are_record_keys(self):
+        """Each tracked variable is merged under its own key, in mesh order."""
+        batch1 = _make_integral_output(0.5, 1.0, N=2)
+        batch2 = _make_integral_output(0.0, 0.5, N=2)
+        for batch in (batch1, batch2):
+            # Tag each value with its node time so the merge order is visible.
+            batch.tracked_variables = (batch.nodes.clone(), 2 * batch.nodes)
+        mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
+
+        record = self.solver._record_results({}, False, batch1, mi)
+        record = self.solver._record_results(record, False, batch2, mi)
+
+        assert torch.equal(record["tracked_variables_0"], record["nodes"])
+        assert torch.equal(record["tracked_variables_1"], 2 * record["nodes"])
+
+    def test_changed_tracked_variables_raise(self):
+        """A batch whose tracked variables differ from the record's raises."""
+        batch1 = _make_integral_output(0.0, 0.5, N=1)
+        batch2 = _make_integral_output(0.5, 1.0, N=1)
+        batch2.tracked_variables = (batch2.nodes.clone(),)
+        mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
+
+        record = self.solver._record_results({}, False, batch1, mi)
+        with pytest.raises(ValueError, match="different set of tracked variables"):
+            self.solver._record_results(record, False, batch2, mi)
 
 
 # ---------------------------------------------------------------------------

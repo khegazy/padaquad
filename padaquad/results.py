@@ -31,8 +31,17 @@ class IntegrationResult:
     the optimized mesh for potential warm-start reuse.
 
     Construct it with keyword arguments only (``kw_only=True``). Every field is
-    a tensor except ``mesh_optimal``, ``tracked_variables`` and ``loss``, which
-    may be ``None`` as described below.
+    required except ``mesh_optimal``, ``tracked_variables``, ``loss`` and
+    ``converged``. The first three may be ``None`` as described below;
+    ``gradient_taken`` and ``converged`` are ``bool``, ``tracked_variables`` is
+    a tuple of tensors, and every other field is a tensor.
+
+    ``integrate()`` also builds one result per batch and passes it to
+    ``loss_fxn``. That result covers only the batch's accepted steps:
+    ``integral`` is their contribution without ``y0``, ``y0`` is zero,
+    ``mesh_optimal`` and ``loss`` are ``None``, and ``nodes``, ``y`` and
+    ``tracked_variables`` keep one row per step (shapes [N, C, T], [N, C, D]
+    and [N, C, *var_dims]) instead of the flattened shapes below.
 
     Attributes:
         integral: The computed integral value. Shape: [D].

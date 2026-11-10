@@ -21,6 +21,7 @@ method). The error estimate drives the adaptive step refinement.
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import torch
 
@@ -98,10 +99,6 @@ class UniformAdaptiveQuadrature(_UniformAdaptiveQuadratureBase):
     (the difference between the primary and embedded lower-order methods).
     """
 
-    def __init__(self, *args, **kwargs) -> None:
-        """Initialize the uniform RK solver."""
-        super().__init__(*args, **kwargs)
-
     def _calculate_integral(
         self, t: torch.Tensor, y: torch.Tensor, y0: torch.Tensor
     ) -> MethodOutput:
@@ -157,18 +154,6 @@ class UniformAdaptiveQuadrature(_UniformAdaptiveQuadratureBase):
             -1
         ), self.method.tableau.b_error.unsqueeze(-1)
 
-    def _get_num_tableau_c(self) -> int:
-        """
-        Return C, the number of quadrature points per integration step.
-
-        This equals the number of tableau c values (node positions) and
-        determines how many integrand evaluations are needed per step.
-
-        Returns:
-            Number of quadrature points per step.
-        """
-        return len(self.method.tableau.c)
-
 
 class VariableAdaptiveQuadrature(_VariableAdaptiveQuadratureBase):
     """
@@ -182,10 +167,6 @@ class VariableAdaptiveQuadrature(_VariableAdaptiveQuadratureBase):
     The b weights are computed by normalizing the time points within each step
     to [0, 1] and passing them to the method's ``tableau_b()`` function.
     """
-
-    def __init__(self, *args, **kwargs) -> None:
-        """Initialize the variable RK solver."""
-        super().__init__(*args, **kwargs)
 
     def _calculate_integral(
         self, t: torch.Tensor, y: torch.Tensor, y0: torch.Tensor
@@ -243,18 +224,9 @@ class VariableAdaptiveQuadrature(_VariableAdaptiveQuadratureBase):
         b, b_error = self.method.tableau_b(norm_dt)
         return b.unsqueeze(-1), b_error.unsqueeze(-1)
 
-    def _get_num_tableau_c(self) -> int:
-        """
-        Return C, the number of quadrature points per integration step.
-
-        Returns:
-            Number of quadrature points per step.
-        """
-        return self.method.n_tableau_c
-
 
 def adaptive_quadrature(
-    sampling_type: str | steps = DEFAULT_SAMPLING_TYPE, *args, **kwargs
+    sampling_type: str | steps = DEFAULT_SAMPLING_TYPE, *args: Any, **kwargs: Any
 ) -> UniformAdaptiveQuadrature | VariableAdaptiveQuadrature:
     """
     Factory function to create the appropriate parallel RK solver.

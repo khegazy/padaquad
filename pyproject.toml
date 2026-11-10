@@ -39,7 +39,7 @@ dependencies = ["numpy", "torch>=2.4", "scipy", "einops", "psutil"]
 dev = [
   "pytest>=7.4.0",
   "pytest-cov>=3.10.0",
-  "mypy",
+  "mypy~=2.1.0",
   "pre-commit",
   "ruff>=0.4.0",
   "typos",
@@ -174,5 +174,12 @@ black = true
 ignore_missing_imports = true
 namespace_packages = true
 explicit_package_bases = true
-no_implicit_optional = false
-disable_error_code = "annotation-unchecked"
+# Every function is annotated and every body is checked; enforced in CI
+# (.github/workflows/tests.yaml), which installs torch so its types are real.
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_any_generics = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true

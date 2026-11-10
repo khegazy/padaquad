@@ -97,6 +97,7 @@ def _get_method(
         An initialized method object with tensors on the correct
         device/dtype, independent of any other solver instance.
     """
+    method: MethodClass | _VariableSubclass
     if sampling_type == steps.ADAPTIVE_UNIFORM:
         # Clone the canonical float64 singleton so dtype/device
         # mutations below don't affect other solvers.

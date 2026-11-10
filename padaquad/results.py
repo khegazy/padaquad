@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     import torch
 
 
-@dataclass
+@dataclass(kw_only=True)
 class IntegrationResult:
     """
     Complete output of a numerical integration run.
@@ -30,6 +30,10 @@ class IntegrationResult:
     integral value along with diagnostics about step sizes, errors, and
     the optimized mesh for potential warm-start reuse.
 
+    Construct it with keyword arguments only (``kw_only=True``). Every field is
+    a tensor except ``mesh_optimal``, ``tracked_variables`` and ``loss``, which
+    may be ``None`` as described below.
+
     Attributes:
         integral: The computed integral value. Shape: [D].
         integral_error: Estimated total error (sum of per-step errors)
@@ -37,7 +41,9 @@ class IntegrationResult:
         mesh_optimal: Optimized step-barrier mesh for warm-start reuse
             in subsequent integration calls with the same integrand (pass
             ``same_f=True``).
-            Shape: [M, T].
+            Shape: [M, T]. ``None`` in the per-batch result passed to
+            ``loss_fxn`` during integration (no optimal mesh exists yet);
+            always a tensor on a result returned by ``integrate()``.
         mesh_init: Lower integration bound used. Shape: [T].
         mesh_final: Upper integration bound used. Shape: [T].
         nodes: Quadrature node positions flattened across panels into a
@@ -62,7 +68,9 @@ class IntegrationResult:
             > 1 indicate the step did not meet accuracy requirements.
             Shape: [N].
         loss: Loss value computed by the loss function (defaults to
-            the integral itself). Shape: scalar or [D].
+            the integral itself). Shape: scalar or [D]. ``None`` when the
+            run stopped early on ``max_path_change`` and in the per-batch
+            result before ``loss_fxn`` is applied.
         gradient_taken: Whether per-batch backpropagation was performed
             during this integration run.
         y0: Initial integral accumulator value used. Shape: [D].
@@ -73,20 +81,20 @@ class IntegrationResult:
     """
 
     integral: torch.Tensor
-    integral_error: torch.Tensor = None
-    mesh_optimal: torch.Tensor = None
-    mesh_init: torch.Tensor = None
-    mesh_final: torch.Tensor = None
-    nodes: torch.Tensor = None
-    h: torch.Tensor = None
-    y: torch.Tensor = None
+    integral_error: torch.Tensor
+    mesh_init: torch.Tensor
+    mesh_final: torch.Tensor
+    nodes: torch.Tensor
+    h: torch.Tensor
+    y: torch.Tensor
+    mesh_quadratures: torch.Tensor
+    mesh_quadrature_errors: torch.Tensor
+    error_ratios: torch.Tensor
+    gradient_taken: bool
+    y0: torch.Tensor
+    mesh_optimal: torch.Tensor | None = None
     tracked_variables: tuple[torch.Tensor, ...] | None = None
-    mesh_quadratures: torch.Tensor = None
-    mesh_quadrature_errors: torch.Tensor = None
-    error_ratios: torch.Tensor = None
-    loss: torch.Tensor = None
-    gradient_taken: bool = None
-    y0: torch.Tensor = None
+    loss: torch.Tensor | None = None
     converged: bool = True
 
 

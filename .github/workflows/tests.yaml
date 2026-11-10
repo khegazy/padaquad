@@ -36,6 +36,11 @@ jobs:
           pip install uv
           uv pip install --system -r tests/requirements.txt .[dev]
 
+      # Runs here, not in lint.yaml: mypy needs torch installed, or every tensor
+      # type silently becomes Any (ignore_missing_imports = true).
+      - name: Type check with mypy
+        run: mypy padaquad/
+
       - name: Run tests with pytest
         run: pytest --cov=padaquad --cov-report=xml
 

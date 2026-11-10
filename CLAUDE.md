@@ -43,9 +43,16 @@ TPD_REGENERATE_SNAPSHOTS=1 .venv/bin/pytest tests/test_snapshots.py
 # Lint with ruff
 .venv/bin/ruff check padaquad/
 
-# Type check
+# Type check (enforced in CI by .github/workflows/tests.yaml; must report no issues)
 .venv/bin/mypy padaquad/
 ```
+
+mypy runs with every function annotated and every body checked
+(`disallow_untyped_defs`, `check_untyped_defs`, `disallow_any_generics`,
+`no_implicit_optional`; `[tool.mypy]` in `pyproject.toml`). It must run where
+torch is installed: with `ignore_missing_imports = true` a missing torch turns
+every tensor type into `Any` and the check passes without checking anything.
+The package ships `py.typed`.
 
 ## Test structure
 
@@ -83,7 +90,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_sorted_insert.py` | `_get_sorted_indices` and `_insert_sorted_results` |
 | `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables`, `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects) |
 | `test_methods_extra.py` | Variable subclass `tableau_b`, `to_device`, dtype conversion |
-| `test_rk_solver_methods.py` | `adaptive_quadrature` factory, `_get_tableau_b`, `_get_num_tableau_c` |
+| `test_rk_solver_methods.py` | `adaptive_quadrature` factory, `_get_tableau_b`, per-step node count `solver.C` |
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed error ratios, midpoint placement |
 | `test_record_and_sort.py` | `_record_results` and `_sort_record` |
 | `test_evaluate_and_merge.py` | `_evaluate_adaptive_nodes` + `_merge_excess_nodes` for both uniform and variable solvers |

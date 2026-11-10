@@ -28,6 +28,10 @@ def _make_integral_output(t_start, t_end, N=2, C=4, D=1):
         mesh_quadrature_errors=torch.ones(N, D, dtype=torch.float64) * 0.001,
         error_ratios=torch.ones(N, dtype=torch.float64) * 0.5,
         loss=torch.tensor([1.0], dtype=torch.float64),
+        mesh_init=torch.tensor([t_start], dtype=torch.float64),
+        mesh_final=torch.tensor([t_end], dtype=torch.float64),
+        gradient_taken=False,
+        y0=torch.zeros(D, dtype=torch.float64),
     )
 
 
@@ -59,6 +63,10 @@ def _make_multidim_output(left_barriers):
         mesh_quadrature_errors=torch.ones(N, D, dtype=torch.float64) * 0.001,
         error_ratios=torch.ones(N, dtype=torch.float64) * 0.5,
         loss=torch.tensor([1.0], dtype=torch.float64),
+        mesh_init=left_barriers[0],
+        mesh_final=left_barriers[-1] + 0.05,
+        gradient_taken=False,
+        y0=torch.zeros(D, dtype=torch.float64),
     )
 
 
@@ -286,9 +294,9 @@ class TestSortRecord:
             "h": torch.ones(N, T, dtype=torch.float64) * 0.05,
             "y": torch.ones(N, C, D, dtype=torch.float64),
             # Tag each row with its mesh position so the reordering is visible.
-            "mesh_quadratures": torch.tensor(
-                positions, dtype=torch.float64
-            ).unsqueeze(-1),
+            "mesh_quadratures": torch.tensor(positions, dtype=torch.float64).unsqueeze(
+                -1
+            ),
             "mesh_quadrature_errors": torch.ones(N, D, dtype=torch.float64) * 0.01,
             "error_ratios": torch.ones(N, dtype=torch.float64) * 0.5,
         }

@@ -257,7 +257,7 @@ class DistributedEnvironment:
         if not master_addr_port_none and not master_addr_port_not_none:
             raise ValueError("Master address and port must both be specified")
 
-        if master_addr_port_not_none:
+        if master_addr is not None and master_port is not None:
             os.environ["MASTER_ADDR"] = master_addr
             os.environ["MASTER_PORT"] = master_port
         self.master_addr = os.environ.get("MASTER_ADDR", None)

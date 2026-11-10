@@ -38,7 +38,16 @@ class _VariableSubclass(ABC):
 
     Attributes:
         device: The device tensors are stored on.
+        order: Convergence order of the method.
+        error_exponent: k such that the per-step error estimate scales as h^k
+            (see ``MethodClass``).
+        n_tableau_c: Number of quadrature points per step.
     """
+
+    # Set as class attributes by every concrete subclass.
+    order: int
+    error_exponent: int
+    n_tableau_c: int
 
     def __init__(self, device: str | torch.device | None = None) -> None:
         """Initialize with an optional device for tensor placement."""
@@ -51,6 +60,10 @@ class _VariableSubclass(ABC):
     @abstractmethod
     def to_dtype(self, dtype: torch.dtype) -> None:
         """Convert method tensors to the specified dtype."""
+
+    @abstractmethod
+    def tableau_b(self, c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the (b, b_error) weights for normalized node positions c."""
 
 
 class _VARIABLE_SECOND_ORDER(_VariableSubclass):
@@ -74,7 +87,6 @@ class _VARIABLE_SECOND_ORDER(_VariableSubclass):
     def __init__(self, device: str | torch.device | None = None) -> None:
         """Initialize the 2nd-order variable method using adaptive Heun's tableau."""
         super().__init__(device)
-        self.device = device
         # Clone instead of aliasing the canonical RK singleton: ``to_dtype``
         # below mutates the tableau in place, so an alias would corrupt the
         # global ``_ADAPTIVE_HEUN`` (the same hazard Phase 4 fixed for the
@@ -140,7 +152,6 @@ class _Interpolatory3Variable(_VariableSubclass):
     def __init__(self, device: str | torch.device | None = None) -> None:
         """Initialize the 3rd-order variable method with Sanderse-Veldman weights."""
         super().__init__(device)
-        self.device = device
         # Reference weights (trapezoidal rule) used for error estimation
         self.b_delta = torch.tensor(
             [[0.5, 0.0, 0.5]], dtype=torch.float64, device=self.device

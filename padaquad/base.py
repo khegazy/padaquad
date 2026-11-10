@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 from abc import ABC, abstractmethod
 from enum import Enum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -108,20 +108,25 @@ class SolverBase(ABC, DistributedEnvironment):
         - ``integrate(...)``: run the full integration procedure.
     """
 
+    # Set by ``_set_dtype`` (first called at the end of ``__init__``). Declared
+    # without a value: ``_set_dtype`` uses ``hasattr(self, "dtype")`` to detect
+    # its first call.
+    dtype: torch.dtype
+
     def __init__(
         self,
         method: str = "gk21",
         atol: float = 1e-5,
         rtol: float = 1e-5,
         y0: torch.Tensor | None = None,
-        f: Callable | None = None,
+        f: Callable[..., Any] | None = None,
         mesh_init: torch.Tensor | None = None,
         mesh_final: torch.Tensor | None = None,
         output_speed_info: bool = False,
         dtype: torch.dtype = torch.float64,
         device: str | torch.device | None = None,
-        *args,
-        **kwargs,
+        *args: Any,
+        **kwargs: Any,
     ) -> None:
         """
         Initialize the solver base with integration parameters.
@@ -154,9 +159,13 @@ class SolverBase(ABC, DistributedEnvironment):
             **kwargs: Additional keyword arguments forwarded to
                 DistributedEnvironment.
         """
-        super().__init__(*args, **kwargs, device=device)
+        # ``device`` is a named parameter here, so it can never also be in
+        # ``kwargs``; pass it through kwargs so the call is statically checkable.
+        kwargs["device"] = device
+        super().__init__(*args, **kwargs)
 
         # Speed timing logger — writes to a dedicated file, no other output
+        self.speed_logger: logging.Logger | None
         if output_speed_info:
             self.speed_logger = logging.getLogger("padaquad.speed")
             self.speed_logger.propagate = False
@@ -173,7 +182,7 @@ class SolverBase(ABC, DistributedEnvironment):
         # Construction-time defaults; each integrate() call falls back to these
         # when its corresponding argument is None (the active value is the local
         # resolved in _check_variables).
-        self.init_f = f
+        self.init_f: Callable[..., Any] | None = f
         self.init_y0 = (
             y0.to(self.device)
             if y0 is not None
@@ -219,7 +228,7 @@ class SolverBase(ABC, DistributedEnvironment):
         self,
         t: torch.Tensor,
         y: torch.Tensor,
-        y0: torch.Tensor | None,
+        y0: torch.Tensor,
     ) -> MethodOutput:
         """
         Compute the integral and error estimate for a batch of integration steps.
@@ -244,42 +253,40 @@ class SolverBase(ABC, DistributedEnvironment):
     @abstractmethod
     def integrate(
         self,
-        f: Callable,
+        f: Callable[..., Any] | None = None,
         y0: torch.Tensor | None = None,
+        mesh: torch.Tensor | None = None,
         mesh_init: torch.Tensor | None = None,
         mesh_final: torch.Tensor | None = None,
-        mesh: torch.Tensor | None = None,
-        f_args: tuple = (),
+        *,
+        f_args: tuple[Any, ...] = (),
     ) -> IntegrationResult:
         """
-        Perform numerical path integration of f from mesh_init to mesh_final.
+        Integrate f from mesh_init to mesh_final.
 
-        This is the main entry point that users call. Subclasses implement
-        the actual integration logic (serial or parallel adaptive).
+        This is the main entry point that users call. Every override must
+        accept these arguments (it may add more); see
+        ``AdaptiveQuadrature.integrate`` for the full parameter list.
+        ``f_args`` is keyword-only here so an override may place it after its
+        own extra parameters.
 
-        The integrand f should be a function of time only: f(t) -> Tensor.
-        It does NOT depend on accumulated state y (this is numerical quadrature,
-        not ODE solving). This independence between steps is what enables
+        The integrand f is a function of time only: f(t, *f_args). It does
+        NOT depend on accumulated state y (this is numerical quadrature, not
+        ODE solving). This independence between steps is what enables
         parallel evaluation.
 
         Args:
-            f: The integrand function. Takes time points of shape [N, T]
-                and returns values of shape [N, D].
-            y0: Initial value of the integral (accumulator start). Shape: [D].
+            f: The integrand. Takes time points of shape [N, T] and returns
+                values of shape [N, D]. None uses the construction-time f.
+            y0: Additive offset of the returned integral. Shape: [D].
+            mesh: Optional starting mesh of step barriers. Shape: [M, T].
             mesh_init: Lower integration bound. Shape: [T].
             mesh_final: Upper integration bound. Shape: [T].
-            t: Optional initial time points. If provided, these serve as the
-                starting mesh for adaptive refinement. Shape depends on solver:
-                [N, T] for step barriers, [N, C, T] for full quadrature points.
             f_args: Extra arguments passed to f after the time tensor.
 
         Returns:
-            IntegrationResult containing the computed integral, error estimates,
-            time mesh, and optimization diagnostics.
-
-        Note:
-            Handling of the input time ``t`` differs between parallel and serial
-            solvers. See each solver's documentation for details.
+            IntegrationResult containing the computed integral, error
+            estimates, mesh, and diagnostics.
         """
 
     # -------------------------------------------------------------------------------- #
@@ -376,13 +383,11 @@ class SolverBase(ABC, DistributedEnvironment):
 
     def _check_variables(
         self,
-        f: Callable | None = None,
+        f: Callable[..., Any] | None = None,
         mesh_init: torch.Tensor | None = None,
         mesh_final: torch.Tensor | None = None,
         y0: torch.Tensor | None = None,
-    ) -> tuple[
-        Callable | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None
-    ]:
+    ) -> tuple[Callable[..., Any], torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Fill in missing arguments with stored defaults and move to correct device.
 
@@ -399,8 +404,16 @@ class SolverBase(ABC, DistributedEnvironment):
         Returns:
             Tuple of (f, mesh_init, mesh_final, y0) with defaults filled
             in and tensors on the correct device/dtype.
+
+        Raises:
+            ValueError: If no integrand was given here or at construction.
         """
         f = self.init_f if f is None else f
+        if f is None:
+            raise ValueError(
+                "No integrand given: pass f to integrate() or to the solver "
+                "constructor."
+            )
         mesh_init = self.init_mesh_init if mesh_init is None else mesh_init
         mesh_final = self.init_mesh_final if mesh_final is None else mesh_final
         y0 = self.init_y0 if y0 is None else y0
@@ -418,8 +431,8 @@ class SolverBase(ABC, DistributedEnvironment):
     def _integral_loss(
         self,
         result: IntegrationResult,
-        *args,  # noqa: ARG002
-        **kwargs,  # noqa: ARG002
+        *args: Any,  # noqa: ARG002
+        **kwargs: Any,  # noqa: ARG002
     ) -> torch.Tensor:
         """
         Default loss function: returns the integral value itself.

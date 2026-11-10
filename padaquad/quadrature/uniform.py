@@ -20,13 +20,13 @@ solvers subclass this with a specific RK family for the
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 from einops import rearrange
 
 from padaquad.base import steps
-from padaquad.methods import UNIFORM_METHODS, _get_method
+from padaquad.methods import UNIFORM_METHODS, MethodClass, _get_method
 
 from .base import AdaptiveQuadrature
 
@@ -55,16 +55,15 @@ class _UniformAdaptiveQuadratureBase(AdaptiveQuadrature):
         Cm1: C - 1, used for indexing and step calculations.
     """
 
-    def __init__(self, *args, **kwargs) -> None:
-        """Initialize the uniform solver and set up its RK method."""
-        super().__init__(*args, **kwargs)
-        self._setup_method(self.dtype)
+    method: MethodClass
 
     def _setup_method(self, dtype: torch.dtype) -> None:
         """
         Initialize the RK method and extract its properties.
 
-        Loads the named method from UNIFORM_METHODS, moves its tableau
+        Called through ``_set_solver_dtype`` from ``SolverBase._set_dtype``,
+        which runs at the end of ``SolverBase.__init__`` and on every later
+        dtype change. Loads the named method from UNIFORM_METHODS, moves its tableau
         tensors to the correct device and dtype, and stores the method's
         order and number of quadrature points (C).
 
@@ -76,9 +75,11 @@ class _UniformAdaptiveQuadratureBase(AdaptiveQuadrature):
         """
         error_message = f"Cannot find method '{self.method_name}' in supported method: {list(UNIFORM_METHODS.keys())}"
         assert self.method_name in UNIFORM_METHODS, error_message
-        self.method = _get_method(
+        method = _get_method(
             steps.ADAPTIVE_UNIFORM, self.method_name, self.device, dtype
         )
+        assert isinstance(method, MethodClass)
+        self.method = method
         self.order = self.method.order
         self.C = len(self.method.tableau.c)
         self.Cm1 = self.C - 1
@@ -113,11 +114,11 @@ class _UniformAdaptiveQuadratureBase(AdaptiveQuadrature):
 
     def _evaluate_adaptive_nodes(
         self,
-        f: Callable,
+        f: Callable[..., Any],
         idxs_add: torch.Tensor,
         _y: torch.Tensor,
         nodes: torch.Tensor,
-        f_args: tuple = (),
+        f_args: tuple[Any, ...] = (),
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Split failed steps at their midpoints and evaluate the integrand.

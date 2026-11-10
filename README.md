@@ -307,13 +307,16 @@ solver.integrate(
    split the step at its midpoint.
 
 4. **Adaptive refinement.** The solver alternates batched evaluation
-   with split (high-error steps subdivide) and merge (consecutive
-   low-error pairs combine) until every step's ratio is below 1.
+   with splitting (high-error steps subdivide) until every step's ratio
+   is below 1.
 
 5. **Optimal mesh.** After convergence, a final pruning + refinement
-   pass produces `mesh_optimal` — the smallest mesh that still meets
-   tolerance. This is what `same_integrand=True` starts from on the next
-   call.
+   pass produces `mesh_optimal`: consecutive low-error pairs merge and
+   high-error steps split. A pair merges only when the merged step's
+   predicted error ratio is below `remove_cut`; merging two steps of
+   width $h$ multiplies the summed error by about $2^{k-1}$, where the
+   method's error estimate scales as $h^k$. This is what
+   `same_integrand=True` starts from on the next call.
 
 ## Comparisons
 

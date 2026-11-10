@@ -155,6 +155,7 @@ _GK21_G_INDICES = [1, 3, 5, 7, 9]
 
 _GAUSS_KRONROD_21 = MethodClass(
     order=32,  # K21 polynomial exactness 31, global convergence rate 32
+    error_exponent=21,  # estimate dominated by G10, exactness 2n-1 = 19
     tableau=_build_gauss_kronrod_tableau(
         _GK21_XGK_HALF,
         _GK21_WGK_HALF,
@@ -188,6 +189,7 @@ _GK7_WG_CENTER = 0.888888888888888888888888888889
 
 _GAUSS_KRONROD_7 = MethodClass(
     order=11,  # K7 polynomial exactness 10, global convergence rate 11
+    error_exponent=7,  # estimate dominated by G3, exactness 2n-1 = 5
     tableau=_build_gauss_kronrod_tableau(
         _GK7_XGK_HALF,
         _GK7_WGK_HALF,
@@ -232,6 +234,7 @@ _GK15_WG_CENTER = 0.417959183673469387755102040816327
 
 _GAUSS_KRONROD_15 = MethodClass(
     order=23,  # K15 polynomial exactness 22, global convergence rate 23
+    error_exponent=15,  # estimate dominated by G7, exactness 2n-1 = 13
     tableau=_build_gauss_kronrod_tableau(
         _GK15_XGK_HALF,
         _GK15_WGK_HALF,
@@ -295,6 +298,7 @@ _GK31_WG_CENTER = 0.202578241925561272880620199967519
 
 _GAUSS_KRONROD_31 = MethodClass(
     order=47,  # K31 polynomial exactness 46, global convergence rate 47
+    error_exponent=31,  # estimate dominated by G15, exactness 2n-1 = 29
     tableau=_build_gauss_kronrod_tableau(
         _GK31_XGK_HALF,
         _GK31_WGK_HALF,

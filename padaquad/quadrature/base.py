@@ -81,7 +81,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         - ``_calculate_integral(t, y, y0)``: Compute RK integral + error for a batch.
 
     Attributes:
-        remove_cut: Error ratio threshold for merging steps (default 0.1).
+        remove_cut: Largest predicted error ratio of a merged step pair in the
+            optimal mesh (default 0.1).
         max_batch: Maximum number of integrand evaluations per batch. If None,
             determined dynamically from available memory.
         total_mem_usage: Fraction of total memory to use (0 < value <= 1).
@@ -118,9 +119,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Initialize the parallel adaptive solver.
 
         Args:
-            remove_cut: Error ratio threshold below which consecutive step pairs
-                are merged. Must be < 1. Lower values keep more steps (more
-                conservative). Default: 0.1.
+            remove_cut: Largest predicted error ratio of a merged step pair when
+                the optimal mesh is built. A pair is merged only if the merged
+                step's error ratio, predicted from the two steps' errors, is
+                below this value (see ``_prune_excess_mesh``). Must be < 1.
+                Lower values keep more steps (more conservative). Default: 0.1.
             max_batch: Maximum number of integrand evaluations per batch. If None,
                 batch size is determined dynamically based on available memory.
             total_mem_usage: Fraction of total device memory the solver may use
@@ -1649,7 +1652,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     ):
         """
         Remove a single integration mesh step where
-        error_ratios_2steps < remove_cut by merging two neighboring mesh steps,
+        error_ratios_2steps < remove_cut / 2^(error_exponent - 1) (the merged
+        step's predicted error ratio is below remove_cut) by merging two
+        neighboring mesh steps,
         error_ratios_2steps corresponds to the first mesh step of the pair. This
         function only alters nodes, where remove_fxn merges the two mesh steps.
 
@@ -1666,12 +1671,21 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         if len(error_ratios_2steps) == 0:
             return nodes, mesh_quadratures, mesh_quadrature_errors
+        # Merge cutoff. error_ratios_2steps is the SUM of the two steps' error
+        # ratios, S = (e_i + e_{i+1}) / tol; the merged step is never evaluated.
+        # With e(h) ~ C F h^k for a step of width h (k = error_exponent, from the
+        # Taylor remainder of the estimate's less accurate rule), each half has
+        # e ~ C F h^k, so the merged step has e(2h) ~ C F (2h)^k = 2^(k-1) S.
+        # Requiring that predicted ratio to stay below remove_cut gives
+        # S < remove_cut / 2^(k-1). Assumes steps small enough that the leading
+        # Taylor term dominates; on coarse steps the growth can be larger.
+        merge_cut = self.remove_cut / 2 ** (self.method.error_exponent - 1)
         # Since error ratios encompasses 2 RK steps each neighboring element shares
         # a step, we cannot remove that same step twice and therefore remove the
         # first in pair of steps that it appears in
-        ratio_idxs_cut = torch.where(
-            self._rec_remove(error_ratios_2steps < self.remove_cut)
-        )[0]  # Index for first interval of 2
+        ratio_idxs_cut = torch.where(self._rec_remove(error_ratios_2steps < merge_cut))[
+            0
+        ]  # Index for first interval of 2
         assert not torch.any(ratio_idxs_cut[:-1] + 1 == ratio_idxs_cut[1:])
 
         if len(ratio_idxs_cut) == 0:

@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
-from _helpers import make_solver_for_unit_test
+from _helpers import make_solver_for_unit_test, make_uniform_solver
+
+from padaquad import integrand_dict
 
 # ---------------------------------------------------------------------------
 # _prune_excess_mesh
@@ -39,7 +42,7 @@ class TestPruneExcessT:
         t = self._make_t(solver, 0.0, 1.0, 4)
         ss = torch.ones(4, 1, dtype=torch.float64)
         se = torch.ones(4, 1, dtype=torch.float64) * 0.01
-        er2 = torch.tensor([0.05, 0.8, 0.9])  # Pair 0 below 0.1
+        er2 = torch.tensor([0.01, 0.8, 0.9])  # Pair 0 below 0.1 / 2**(3 - 1)
 
         t_p, _, _ = solver._prune_excess_mesh(t, ss, se, er2)
 
@@ -85,6 +88,29 @@ class TestPruneExcessT:
         assert ss_p.shape[0] == 2
         # Merged: 1+2=3, remaining: 3
         assert torch.allclose(ss_p[0], torch.tensor([3.0], dtype=torch.float64))
+
+    @pytest.mark.parametrize("method", ["bosh3", "dopri5", "gk21", "cc17"])
+    def test_merge_cut_accounts_for_merged_step_error(self, method):
+        """A pair merges only when its summed ratio is below
+        remove_cut / 2**(k - 1): the merged step's error is ~2**(k - 1) times
+        the sum, k = error_exponent. A pair between that cut and remove_cut
+        (merged before) is kept."""
+        solver = make_solver_for_unit_test(method)
+        merge_cut = solver.remove_cut / 2 ** (solver.method.error_exponent - 1)
+        t = self._make_t(solver, 0.0, 1.0, 3)
+        ss = torch.ones(3, 1, dtype=torch.float64)
+        se = torch.ones(3, 1, dtype=torch.float64) * 0.01
+
+        kept, _, _ = solver._prune_excess_mesh(
+            t, ss, se, torch.tensor([2 * merge_cut, 0.8])
+        )
+        merged, _, _ = solver._prune_excess_mesh(
+            t, ss, se, torch.tensor([0.5 * merge_cut, 0.8])
+        )
+
+        assert 2 * merge_cut < solver.remove_cut
+        assert kept.shape[0] == 3
+        assert merged.shape[0] == 2
 
 
 # ---------------------------------------------------------------------------
@@ -157,3 +183,24 @@ class TestGetOptimalTStepBarriers:
         assert torch.allclose(
             barriers_opt[-1], torch.tensor([1.0], dtype=torch.float64)
         )
+
+
+@pytest.mark.parametrize("method", ["dopri5", "gk7", "cc17"])
+def test_optimal_mesh_passes_when_reevaluated(method):
+    """Re-integrating the same integrand from its own mesh_optimal fails no
+    step: merged steps are predicted to stay below tolerance. With the old cut
+    (summed ratio < remove_cut) 7-22 % of these steps failed. max_path_change
+    (tiny) turns any failing starting step into converged=False."""
+    torch.manual_seed(0)
+    f = integrand_dict["damped_sine"][0]
+    solver = make_uniform_solver(
+        method, atol=1e-9, rtol=1e-9, device="cpu", max_path_change=1e-12
+    )
+    solver.integrate(
+        f=f,
+        mesh_init=torch.tensor([0.0], dtype=torch.float64),
+        mesh_final=torch.tensor([1.0], dtype=torch.float64),
+        take_gradient=False,
+    )
+    out = solver.integrate(f=f, same_integrand=True, take_gradient=False)
+    assert out.converged is True

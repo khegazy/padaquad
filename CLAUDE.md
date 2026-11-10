@@ -251,9 +251,13 @@ panel's error is at/below round-off. The scheme is set at construction
 `_error_ratios_failure_fraction`; `_accept_reject_masks` turns the result into
 keep/split masks consumed by `_adaptively_increase_mesh`.
 
-`error_ratios_2steps`: combined error of consecutive step pairs, used for
-merging. When `error_ratio_2steps < remove_cut` (default 0.1), pairs are
-merged. `_rec_remove` ensures no two adjacent pairs are both flagged.
+`error_ratios_2steps`: summed error ratio S of consecutive step pairs, used
+only by `_get_optimal_mesh` to merge pairs. A merged step of width 2h has an
+error of about 2^(k-1)·S (the method's error estimate scales as h^k, k =
+`error_exponent` on each method), so a pair is merged when
+`S < remove_cut / 2^(k-1)` (`remove_cut` default 0.1): the merged step's
+predicted ratio stays below `remove_cut`. `_rec_remove` ensures no two
+adjacent pairs are both flagged.
 
 ### Uniform vs variable sampling
 

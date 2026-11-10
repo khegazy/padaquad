@@ -88,15 +88,21 @@ class MethodClass:
 
     Attributes:
         order: Convergence order of the method.
+        error_exponent: k such that the per-step error estimate (``b_error``
+            weights) scales as h^k for a step of width h: k = d + 2, where d is
+            the polynomial exactness of the less accurate rule in the estimate.
+            Sets the step-merging cutoff (``_prune_excess_mesh``).
         tableau: The Butcher tableau defining the method's coefficients.
     """
 
     order: int
+    error_exponent: int
     tableau: _Tableau
 
-    def __init__(self, order: int, tableau: _Tableau) -> None:
-        """Initialize with the method's convergence order and Butcher tableau."""
+    def __init__(self, order: int, error_exponent: int, tableau: _Tableau) -> None:
+        """Initialize with the method's orders and Butcher tableau."""
         self.order = order
+        self.error_exponent = error_exponent
         self.tableau = tableau
 
     def to_dtype(self, dtype: torch.dtype) -> None:
@@ -108,5 +114,9 @@ class MethodClass:
         self.tableau.to_device(device)
 
     def clone(self) -> MethodClass:
-        """Return a copy with a deep-cloned tableau but the same order."""
-        return MethodClass(order=self.order, tableau=self.tableau.clone())
+        """Return a copy with a deep-cloned tableau but the same orders."""
+        return MethodClass(
+            order=self.order,
+            error_exponent=self.error_exponent,
+            tableau=self.tableau.clone(),
+        )

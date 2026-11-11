@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 from _helpers import make_solver_for_unit_test
 
@@ -28,6 +29,10 @@ def _make_integral_output(t_start, t_end, N=2, C=4, D=1):
         mesh_quadrature_errors=torch.ones(N, D, dtype=torch.float64) * 0.001,
         error_ratios=torch.ones(N, dtype=torch.float64) * 0.5,
         loss=torch.tensor([1.0], dtype=torch.float64),
+        mesh_init=torch.tensor([t_start], dtype=torch.float64),
+        mesh_final=torch.tensor([t_end], dtype=torch.float64),
+        gradient_taken=False,
+        y0=torch.zeros(D, dtype=torch.float64),
     )
 
 
@@ -59,6 +64,10 @@ def _make_multidim_output(left_barriers):
         mesh_quadrature_errors=torch.ones(N, D, dtype=torch.float64) * 0.001,
         error_ratios=torch.ones(N, dtype=torch.float64) * 0.5,
         loss=torch.tensor([1.0], dtype=torch.float64),
+        mesh_init=left_barriers[0],
+        mesh_final=left_barriers[-1] + 0.05,
+        gradient_taken=False,
+        y0=torch.zeros(D, dtype=torch.float64),
     )
 
 
@@ -179,6 +188,32 @@ class TestRecordResults:
         coord0 = record["nodes"][:, 0, 0]
         assert not torch.all(coord0[1:] - coord0[:-1] > 0)
 
+    def test_tracked_variables_are_record_keys(self):
+        """Each tracked variable is merged under its own key, in mesh order."""
+        batch1 = _make_integral_output(0.5, 1.0, N=2)
+        batch2 = _make_integral_output(0.0, 0.5, N=2)
+        for batch in (batch1, batch2):
+            # Tag each value with its node time so the merge order is visible.
+            batch.tracked_variables = (batch.nodes.clone(), 2 * batch.nodes)
+        mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
+
+        record = self.solver._record_results({}, False, batch1, mi)
+        record = self.solver._record_results(record, False, batch2, mi)
+
+        assert torch.equal(record["tracked_variables_0"], record["nodes"])
+        assert torch.equal(record["tracked_variables_1"], 2 * record["nodes"])
+
+    def test_changed_tracked_variables_raise(self):
+        """A batch whose tracked variables differ from the record's raises."""
+        batch1 = _make_integral_output(0.0, 0.5, N=1)
+        batch2 = _make_integral_output(0.5, 1.0, N=1)
+        batch2.tracked_variables = (batch2.nodes.clone(),)
+        mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
+
+        record = self.solver._record_results({}, False, batch1, mi)
+        with pytest.raises(ValueError, match="different set of tracked variables"):
+            self.solver._record_results(record, False, batch2, mi)
+
 
 # ---------------------------------------------------------------------------
 # _sort_record
@@ -286,9 +321,9 @@ class TestSortRecord:
             "h": torch.ones(N, T, dtype=torch.float64) * 0.05,
             "y": torch.ones(N, C, D, dtype=torch.float64),
             # Tag each row with its mesh position so the reordering is visible.
-            "mesh_quadratures": torch.tensor(
-                positions, dtype=torch.float64
-            ).unsqueeze(-1),
+            "mesh_quadratures": torch.tensor(positions, dtype=torch.float64).unsqueeze(
+                -1
+            ),
             "mesh_quadrature_errors": torch.ones(N, D, dtype=torch.float64) * 0.01,
             "error_ratios": torch.ones(N, dtype=torch.float64) * 0.5,
         }

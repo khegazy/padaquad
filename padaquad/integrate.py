@@ -9,7 +9,7 @@ returns the result.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from .base import DEFAULT_SAMPLING_TYPE, steps
 from .runge_kutta import adaptive_quadrature
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 
 def integrate(
-    f: Callable,
+    f: Callable[..., Any],
     method: str = "gk21",
     sampling: str = DEFAULT_SAMPLING_TYPE,
     atol: float = 1e-5,
@@ -35,14 +35,14 @@ def integrate(
     remove_cut: float = 0.1,
     total_mem_usage: float = 0.9,
     use_absolute_error_ratio: bool = True,
-    error_norm: str | Callable = "2",
+    error_norm: str | Callable[[torch.Tensor], torch.Tensor] = "2",
     mesh_failure_tolerance: float = 0.0,
     take_gradient: bool = True,
     max_adaptive_splits: int | None = None,
     error_on_nonfinite: bool = True,
     device: str | torch.device | None = None,
     result_device: str | torch.device | None = "cpu",
-    **kwargs,
+    **kwargs: Any,
 ) -> IntegrationResult:
     """
     Compute the definite integral of f from mesh_init to mesh_final.

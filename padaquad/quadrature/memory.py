@@ -21,7 +21,7 @@ import logging
 import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import psutil
 import torch
@@ -78,7 +78,11 @@ class _MemoryManagement:
     init_max_batch: int | None
     init_total_mem_usage: float
 
-    def get_max_batch(self, total_mem_usage=None, default_max_batch=None):
+    def get_max_batch(
+        self,
+        total_mem_usage: float | None = None,
+        default_max_batch: int | None = None,
+    ) -> int | None:
         """Resolve the per-batch evaluation cap without re-benchmarking memory.
 
         Precedence: an explicit ``default_max_batch`` (e.g. the per-call
@@ -186,11 +190,11 @@ class _MemoryManagement:
 
     def _setup_memory_checks(
         self,
-        f: Callable,
+        f: Callable[..., Any],
         node_test: torch.Tensor,
         take_gradient: bool,
         total_mem_usage: float,
-        f_args: tuple = (),
+        f_args: tuple[Any, ...] = (),
     ) -> None:
         """
         Measure c, the memory cost of one evaluation of f (``f_unit_mem_size``, GB).
@@ -428,8 +432,8 @@ class _MemoryManagement:
 
     def _measure_call(
         self,
-        f: Callable,
-        f_args: tuple,
+        f: Callable[..., Any],
+        f_args: tuple[Any, ...],
         node_test: torch.Tensor,
         N: int,
         reset_peak: Callable[[], None],
@@ -524,5 +528,10 @@ class _MemoryManagement:
         Returns:
             Maximum number of evaluations (integer).
         """
+        if self.f_unit_mem_size is None:
+            raise RuntimeError(
+                "The per-evaluation memory cost is unknown; run the memory "
+                "benchmark (_setup_memory_checks) before sizing a batch."
+            )
         usable = self._get_usable_memory(total_mem_usage)
         return int(usable // (1e-12 + self.f_unit_mem_size))

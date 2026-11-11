@@ -20,12 +20,13 @@ solvers subclass this with a specific RK family for the
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 from einops import rearrange
 
-from padaquad.methods import VARIABLE_METHODS
+from padaquad.base import steps
+from padaquad.methods import VARIABLE_METHODS, _get_method, _VariableSubclass
 
 from .base import AdaptiveQuadrature
 
@@ -61,29 +62,35 @@ class _VariableAdaptiveQuadratureBase(AdaptiveQuadrature):
         Cm1: C - 1, used for indexing.
     """
 
-    def __init__(self, *args, **kwargs) -> None:
-        """Initialize the variable solver and set up its RK method."""
-        super().__init__(*args, **kwargs)
+    method: _VariableSubclass
+
+    def _set_solver_dtype(self, dtype: torch.dtype) -> None:
+        """
+        Build the variable method on the solver's device at ``dtype``.
+
+        Called from ``SolverBase._set_dtype``, which runs at the end of
+        ``SolverBase.__init__`` (the method's first build) and on every later
+        dtype change. ``_get_method`` builds a fresh instance and moves its
+        tensors (e.g. ``b_delta``) onto ``self.device``, so they never clash
+        with device-side nodes in ``tableau_b(c)``.
+
+        Args:
+            dtype: Floating-point dtype for the method's tensors.
+
+        Raises:
+            AssertionError: If method_name is not in VARIABLE_METHODS.
+        """
         assert self.method_name in VARIABLE_METHODS, (
             f"Cannot find method '{self.method_name}' in supported methods: {list(VARIABLE_METHODS.keys())}"
         )
-        self.method = VARIABLE_METHODS[self.method_name]()
-        self.method.to_dtype(self.dtype)
-        # Move the method's tensors onto the solver device. The uniform solver
-        # does this via _get_method(..., self.device, ...); the variable solver
-        # built its method without a device, so its tensors (e.g. b_delta) would
-        # otherwise stay on CPU and clash with device-side nodes during
-        # tableau_b(c). DistributedEnvironment owns the device; the method is
-        # moved onto it.
-        self.method.to_device(self.device)
+        method = _get_method(
+            steps.ADAPTIVE_VARIABLE, self.method_name, self.device, dtype
+        )
+        assert isinstance(method, _VariableSubclass)
+        self.method = method
         self.order = self.method.order
         self.C = self.method.n_tableau_c
         self.Cm1 = self.C - 1
-
-    def _set_solver_dtype(self, dtype: torch.dtype) -> None:
-        """Convert variable method tensors to the new dtype."""
-        if hasattr(self, "method"):
-            self.method.to_dtype(dtype)
 
     def _compute_nodes(
         self, mesh_left: torch.Tensor, mesh_right: torch.Tensor
@@ -120,11 +127,11 @@ class _VariableAdaptiveQuadratureBase(AdaptiveQuadrature):
 
     def _evaluate_adaptive_nodes(
         self,
-        f: Callable,
+        f: Callable[..., Any],
         idxs_add: torch.Tensor,
         y: torch.Tensor,
         nodes: torch.Tensor,
-        f_args: tuple = (),
+        f_args: tuple[Any, ...] = (),
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Split failed steps and reuse existing evaluations where possible.

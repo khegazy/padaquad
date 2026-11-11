@@ -216,9 +216,9 @@ class TestCheckVariables:
     """Tests for SolverBase._check_variables: default filling and type conversion."""
 
     def test_fills_defaults(self):
-        """All None args are replaced with stored defaults."""
+        """All None tensor args are replaced with stored defaults."""
         solver = make_solver_for_unit_test()
-        _f, mesh_init, mesh_final, y0 = solver._check_variables()
+        _f, mesh_init, mesh_final, y0 = solver._check_variables(f=torch.sin)
         assert mesh_init is not None
         assert mesh_final is not None
         assert y0 is not None
@@ -234,7 +234,10 @@ class TestCheckVariables:
         custom_y0 = torch.tensor([10.0], dtype=torch.float64)
 
         _, mesh_init, mesh_final, y0 = solver._check_variables(
-            mesh_init=custom_t_init, mesh_final=custom_t_final, y0=custom_y0
+            f=torch.sin,
+            mesh_init=custom_t_init,
+            mesh_final=custom_t_final,
+            y0=custom_y0,
         )
         assert torch.equal(mesh_init, custom_t_init)
         assert torch.equal(mesh_final, custom_t_final)
@@ -244,13 +247,46 @@ class TestCheckVariables:
         """Tensors are converted to solver's dtype."""
         solver = make_solver_for_unit_test()
         t_init_f32 = torch.tensor([0.0], dtype=torch.float32)
-        _, mesh_init, _, _ = solver._check_variables(mesh_init=t_init_f32)
+        _, mesh_init, _, _ = solver._check_variables(f=torch.sin, mesh_init=t_init_f32)
         assert mesh_init.dtype == torch.float64
+
+    def test_missing_f_raises(self):
+        """No integrand here or at construction raises ValueError."""
+        solver = make_solver_for_unit_test()
+        assert solver.init_f is None
+        with pytest.raises(ValueError, match="No integrand given"):
+            solver._check_variables()
+
+    def test_falls_back_to_constructor_f(self):
+        """f=None uses the integrand given at construction."""
+        solver = make_solver_for_unit_test()
+        solver.init_f = torch.sin
+        f, _, _, _ = solver._check_variables()
+        assert f is torch.sin
 
 
 # ---------------------------------------------------------------------------
 # _integral_loss
 # ---------------------------------------------------------------------------
+
+
+def _result_with_integral(integral: torch.Tensor) -> IntegrationResult:
+    """IntegrationResult whose only meaningful field is ``integral``."""
+    empty = torch.zeros(0)
+    return IntegrationResult(
+        integral=integral,
+        integral_error=torch.zeros_like(integral),
+        mesh_init=torch.zeros(1),
+        mesh_final=torch.ones(1),
+        nodes=empty,
+        h=empty,
+        y=empty,
+        mesh_quadratures=empty,
+        mesh_quadrature_errors=empty,
+        error_ratios=empty,
+        gradient_taken=False,
+        y0=torch.zeros_like(integral),
+    )
 
 
 class TestIntegralLoss:
@@ -259,14 +295,14 @@ class TestIntegralLoss:
     def test_returns_integral(self):
         """Default loss is the integral value itself."""
         solver = make_solver_for_unit_test()
-        output = IntegrationResult(integral=torch.tensor([5.0]))
+        output = _result_with_integral(torch.tensor([5.0]))
         result = solver._integral_loss(output)
         assert torch.equal(result, torch.tensor([5.0]))
 
     def test_multidim(self):
         """Works with multi-dimensional integral."""
         solver = make_solver_for_unit_test()
-        output = IntegrationResult(integral=torch.tensor([1.0, 2.0]))
+        output = _result_with_integral(torch.tensor([1.0, 2.0]))
         result = solver._integral_loss(output)
         assert torch.equal(result, torch.tensor([1.0, 2.0]))
 

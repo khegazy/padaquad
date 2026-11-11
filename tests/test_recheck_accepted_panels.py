@@ -272,7 +272,9 @@ def test_recheck_preserves_gradient():
 
     solver_a = _solver()
     torch.manual_seed(0)
-    res_a = _run(solver_a, lambda t, *a: theta * _grad_integrand(t), take_gradient=False)
+    res_a = _run(
+        solver_a, lambda t, *a: theta * _grad_integrand(t), take_gradient=False
+    )
     res_a.integral.sum().backward()
     grad = float(theta.grad.reshape(-1)[0])
 
@@ -423,6 +425,10 @@ def _make_record(solver, n_panels=4, result_device=None):
         mesh_quadrature_errors=err_vals,
         error_ratios=torch.full((n_panels,), 0.5, dtype=torch.float64),
         loss=quad_vals.sum(0),
+        mesh_init=torch.tensor([0.0], dtype=torch.float64),
+        mesh_final=torch.tensor([1.0], dtype=torch.float64),
+        gradient_taken=False,
+        y0=torch.zeros(1, dtype=torch.float64),
     )
     mesh = torch.cat(
         [nodes[:, 0, :], torch.tensor([[1.0]], dtype=torch.float64)], dim=0
@@ -446,7 +452,9 @@ def test_remove_failed_record_panels_subset():
     assert record["mesh_quadratures"].shape[0] == 2
     assert torch.allclose(record["integral"], quad_vals[keep].sum(0))
     # integral_error subtracts the removed panels' (abs) errors.
-    assert torch.allclose(record["integral_error"], orig_err_total - err_vals[~keep].sum(0))
+    assert torch.allclose(
+        record["integral_error"], orig_err_total - err_vals[~keep].sum(0)
+    )
     # Default loss tracks the rebuilt integral (regression for the bound-method
     # identity bug: obj.m is obj.m is False).
     assert torch.allclose(record["loss"], record["integral"])
@@ -485,6 +493,10 @@ def test_remove_all_then_record_does_not_crash(result_device):
         mesh_quadrature_errors=torch.tensor([[0.01]], dtype=torch.float64),
         error_ratios=torch.tensor([0.5], dtype=torch.float64),
         loss=torch.tensor([0.5], dtype=torch.float64),
+        mesh_init=torch.tensor([0.0], dtype=torch.float64),
+        mesh_final=torch.tensor([1.0], dtype=torch.float64),
+        gradient_taken=False,
+        y0=torch.zeros(1, dtype=torch.float64),
     )
     mi_fresh = solver._get_mesh_indices(
         torch.tensor([[0.0], [1.0]], dtype=torch.float64)

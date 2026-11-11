@@ -67,7 +67,7 @@ cd padaquad
 pip install -e .
 ```
 
-Runtime dependencies: Python 3.10+, PyTorch, NumPy, SciPy, einops, psutil.
+Runtime dependencies: Python 3.11+, PyTorch, NumPy, SciPy, einops, psutil.
 
 ### For developers
 
@@ -268,19 +268,33 @@ solver.integrate(
 
 ### `IntegrationResult` fields
 
+`IntegrationResult` is a keyword-only dataclass. Every field is a tensor
+except where noted.
+
 - `integral` — the computed integral, shape `[D]`.
 - `integral_error` — estimated total error, shape `[D]`.
 - `mesh_optimal` — refined-and-pruned barriers from this run, shape
-  `[M, T]`. Pass back via `mesh=...` for explicit warm-start.
+  `[M, T]`. Pass back via `mesh=...` for explicit warm-start. Always a
+  tensor on a returned result; `None` in the per-batch result that
+  `loss_fxn` receives.
 - `mesh_init`, `mesh_final` — bounds used.
-- `nodes` — per-step quadrature points, shape `[N, C, T]`.
+- `nodes` — quadrature points, flattened across steps with shared step
+  boundaries deduplicated, shape `[P, T]`.
 - `h` — per-step widths, shape `[N, T]`.
-- `y` — integrand evaluations at `nodes`, shape `[N, C, D]`.
+- `y` — integrand evaluations at `nodes`, shape `[P, D]`.
+- `tracked_variables` — extra outputs of the integrand at `nodes`, a tuple
+  of tensors, or `None` when the integrand returns none.
 - `mesh_quadratures`, `mesh_quadrature_errors`, `error_ratios` — per-step diagnostics.
-- `loss`, `gradient_taken`, `y0` — training-loop diagnostics.
+- `loss` (`None` after a `max_path_change` early exit), `gradient_taken`
+  (`bool`), `y0` — training-loop diagnostics.
 - `converged: bool` — `True` for normal completion; `False` only when
   `max_path_change` triggers an early exit on a user-provided mesh or on
   the stored mesh used by `same_f=True`.
+
+The per-batch result that `loss_fxn` receives covers only that batch's
+accepted steps: `integral` is their contribution without `y0`, `y0` is
+zero, `mesh_optimal` and `loss` are `None`, and `nodes`, `y` and
+`tracked_variables` keep one row per step (`[N, C, T]`, `[N, C, D]`).
 
 ## How it works
 

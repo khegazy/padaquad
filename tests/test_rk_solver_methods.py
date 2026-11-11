@@ -1,4 +1,4 @@
-"""Unit tests for adaptive_quadrature factory, _get_tableau_b, and _get_num_tableau_c."""
+"""Unit tests for adaptive_quadrature factory, _get_tableau_b, and the per-step node count C."""
 
 from __future__ import annotations
 
@@ -177,32 +177,24 @@ class TestVariableGetTableauB:
 
 
 # ---------------------------------------------------------------------------
-# _get_num_tableau_c
+# Number of quadrature points per step (solver.C)
 # ---------------------------------------------------------------------------
 
 
-class TestGetNumTableauC:
-    """Tests for _get_num_tableau_c on both solver types."""
+class TestNumQuadraturePoints:
+    """Tests that solver.C matches the method's node count on both solver types."""
 
     def test_uniform_bosh3(self):
-        assert make_solver_for_unit_test("bosh3")._get_num_tableau_c() == 4
+        assert make_solver_for_unit_test("bosh3").C == 4
 
     def test_uniform_dopri5(self):
-        assert make_solver_for_unit_test("dopri5")._get_num_tableau_c() == 7
+        assert make_solver_for_unit_test("dopri5").C == 7
 
     def test_uniform_adaptive_heun(self):
-        assert make_solver_for_unit_test("adaptive_heun")._get_num_tableau_c() == 2
+        assert make_solver_for_unit_test("adaptive_heun").C == 2
 
     def test_variable_adaptive_heun(self):
-        assert (
-            make_variable_solver_for_unit_test("adaptive_heun")._get_num_tableau_c()
-            == 2
-        )
+        assert make_variable_solver_for_unit_test("adaptive_heun").C == 2
 
     def test_variable_generic3(self):
-        assert (
-            make_variable_solver_for_unit_test(
-                "interpolatory3_variable"
-            )._get_num_tableau_c()
-            == 3
-        )
+        assert make_variable_solver_for_unit_test("interpolatory3_variable").C == 3

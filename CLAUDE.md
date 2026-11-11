@@ -9,7 +9,7 @@ with code in this repository.
 quadrature**: it computes definite integrals
 $\int_a^b f(t)\,dt$ for a known integrand $f$ by evaluating many
 quadrature panels in parallel batches on GPU, with full autograd through
-the integration loop. v0.2.0 (Alpha), Python 3.10+.
+the integration loop. v0.2.0 (Alpha), Python 3.11+.
 
 **Critical distinction.** The integrand `f` depends only on `t` (and
 optional extra args), NOT on accumulated state `y`. This independence
@@ -43,9 +43,16 @@ TPD_REGENERATE_SNAPSHOTS=1 .venv/bin/pytest tests/test_snapshots.py
 # Lint with ruff
 .venv/bin/ruff check padaquad/
 
-# Type check
+# Type check (enforced in CI by .github/workflows/tests.yaml; must report no issues)
 .venv/bin/mypy padaquad/
 ```
+
+mypy runs with every function annotated and every body checked
+(`disallow_untyped_defs`, `check_untyped_defs`, `disallow_any_generics`,
+`no_implicit_optional`; `[tool.mypy]` in `pyproject.toml`). It must run where
+torch is installed: with `ignore_missing_imports = true` a missing torch turns
+every tensor type into `Any` and the check passes without checking anything.
+The package ships `py.typed`.
 
 ## Test structure
 
@@ -83,7 +90,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_sorted_insert.py` | `_get_sorted_indices` and `_insert_sorted_results` |
 | `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables`, `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects) |
 | `test_methods_extra.py` | Variable subclass `tableau_b`, `to_device`, dtype conversion |
-| `test_rk_solver_methods.py` | `adaptive_quadrature` factory, `_get_tableau_b`, `_get_num_tableau_c` |
+| `test_rk_solver_methods.py` | `adaptive_quadrature` factory, `_get_tableau_b`, per-step node count `solver.C` |
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed error ratios, midpoint placement |
 | `test_record_and_sort.py` | `_record_results` and `_sort_record` |
 | `test_evaluate_and_merge.py` | `_evaluate_adaptive_nodes` + `_merge_excess_nodes` for both uniform and variable solvers |
@@ -94,7 +101,10 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 **Snapshot tests** are the regression net for internal refactors: the
 file `tests/test_snapshots_data.json` pins `integral`, `integral_error`,
 and `n_optimal_mesh` for every (method × integrand × tolerance) cell.
-Regenerate with `TPD_REGENERATE_SNAPSHOTS=1 pytest tests/test_snapshots.py`.
+`n_optimal_mesh` is checked only where the stored error estimate is above
+float64 rounding level (|error| > 10·eps·|I|); below it, last-bit differences
+between CPUs change the mesh-merge decisions and the count varies between CI
+runners. Regenerate with `TPD_REGENERATE_SNAPSHOTS=1 pytest tests/test_snapshots.py`.
 
 ## Architecture
 

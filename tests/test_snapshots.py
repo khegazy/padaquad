@@ -182,6 +182,12 @@ def test_snapshot(snapshots, method, integrand, tol_label, take_gradient):
     re-check runs only on the ``take_gradient=False`` path, so the two modes can
     diverge (they coincide only when every panel fits in one batch). Each mode is
     pinned against its own stored value.
+
+    ``n_optimal_mesh`` is pinned only when the stored error estimate is above
+    float64 rounding level (|integral_error| > 10 * eps * |integral|). It comes
+    from comparing step-pair error estimates with a cutoff (``_get_optimal_mesh``);
+    at rounding level, last-bit differences between CPUs decide that comparison,
+    so the count differs between CI runners while the integral does not.
     """
     key = _case_key(method, integrand, tol_label, take_gradient)
     expected = snapshots.get(key)
@@ -192,8 +198,17 @@ def test_snapshot(snapshots, method, integrand, tol_label, take_gradient):
     atol, rtol = TOLERANCES[tol_label]
     got = _run_case(method, integrand, atol, rtol, take_gradient=take_gradient)
 
+    # Decided from the stored values, so every machine checks the same cases.
+    eps = torch.finfo(torch.float64).eps
+    error_is_roundoff = all(
+        abs(e) <= 10 * eps * abs(i)
+        for e, i in zip(expected["integral_error"], expected["integral"], strict=True)
+    )
+
     # Compare element-wise, allowing 1e-12 absolute drift.
     for field, expected_val in expected.items():
+        if field == "n_optimal_mesh" and error_is_roundoff:
+            continue
         got_val = got[field]
         if isinstance(expected_val, list):
             for e, g in zip(expected_val, got_val, strict=True):

@@ -44,7 +44,7 @@ class TestVariableHeunWeights:
 
 
 # ---------------------------------------------------------------------------
-# _Tableau.to_device / MethodClass.to_device
+# _Tableau.to_device / UniformMethodClass.to_device
 # ---------------------------------------------------------------------------
 
 
@@ -64,7 +64,7 @@ class TestTableauToDevice:
         assert tableau.b_error.device.type == "cpu"
 
     def test_method_class_to_device_cpu(self):
-        """MethodClass.to_device('cpu') moves tableau to CPU."""
+        """UniformMethodClass.to_device('cpu') moves tableau to CPU."""
         # Clone to avoid mutating the singleton (cpu->cpu is a no-op
         # in terms of values, but keeping the test isolated is good
         # practice now that singletons are no longer self-protecting).
@@ -82,7 +82,7 @@ class TestTableauToDevice:
 
 
 # ---------------------------------------------------------------------------
-# Variable subclass dtype conversion
+# _Interpolatory3Variable dtype conversion
 # ---------------------------------------------------------------------------
 
 

@@ -3,7 +3,7 @@ Variable-sampling adaptive quadrature: ``VariableAdaptiveQuadrature``.
 
 In variable sampling, quadrature points within each step can sit at
 arbitrary positions; the b weights are recomputed dynamically from the
-actual node positions via the method's ``tableau_b(c)`` callable.
+actual node positions by the method's ``weights(nodes)``.
 
 This flexibility is what enables the variable solver's main
 optimization: when an existing step is split into two sub-steps, the
@@ -144,7 +144,7 @@ class VariableAdaptiveQuadrature(AdaptiveQuadrature):
         duplicated from the second step), then subsamples every other point to
         get back to C points. Because the points are now at non-standard
         fractional positions within the merged step, the variable method's
-        ``tableau_b(c)`` will recompute appropriate weights on the next evaluation.
+        ``weights(nodes)`` will recompute appropriate weights on the next evaluation.
 
         Args:
             nodes: Quadrature point positions for all steps. Shape: [N, C, T].

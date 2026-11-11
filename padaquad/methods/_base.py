@@ -1,5 +1,5 @@
 """
-Base abstractions for quadrature methods: Butcher tableau and method wrapper.
+Base abstractions for quadrature methods: the abstract rule and the fixed table.
 
 This module is part of the ``methods/`` subpackage that organizes the
 library's quadrature method definitions by family. Each family lives in
@@ -54,9 +54,10 @@ class _Tableau:
     def to_dtype(self, dtype: torch.dtype) -> None:
         """Convert all tableau tensors to the specified dtype.
 
-        Mutates in place. Use ``clone()`` first if you want to leave
-        the original tensors at their pre-conversion precision (which
-        is irreversibly lossy when going to lower-precision dtypes).
+        Mutates in place. Clone the owning method first
+        (``MethodClass.clone()``) if you want to leave the original tensors
+        at their pre-conversion precision (which is irreversibly lossy when
+        going to lower-precision dtypes).
         """
         self.c = self.c.to(dtype)
         self.b = self.b.to(dtype)
@@ -176,7 +177,8 @@ class UniformMethodClass(MethodClass):
 
         Returns:
             Tuple (b, b_error), each ``[C]`` expanded (a view, no copy) to
-            [N, C, 1].
+            [N, C, 1]. The views share memory with the tableau: do not modify
+            them in place.
         """
         n_panels = len(nodes)
         return (

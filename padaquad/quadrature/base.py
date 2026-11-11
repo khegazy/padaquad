@@ -9,7 +9,7 @@ only on x, not on accumulated state -- each step's contribution to the integral
 is independent and can be computed in parallel.
 
 The integration domain [mesh_init, mesh_final] is divided by "barriers" into steps.
-Within each step, C quadrature points are placed (per the RK tableau). The
+Within each step, C quadrature points are placed (per the rule's node fractions). The
 solver adaptively refines this mesh: steps with too much error are split into
 smaller steps; consecutive steps with very little error are merged.
 
@@ -317,7 +317,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             )
 
     # -------------------------------------------------------------------------------- #
-    #                          OPERATIONS ON THE QUADRATURE RULE                         #
+    #                        OPERATIONS ON THE QUADRATURE RULE                         #
     # -------------------------------------------------------------------------------- #
 
     def _set_solver_dtype(self, dtype: torch.dtype) -> None:
@@ -2632,7 +2632,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         A panel's left barrier is ``nodes[:, 0, :]`` -- the first quadrature
         node, which equals the left mesh barrier bit-for-bit because every
-        method's tableau has ``c[0] == 0`` (so ``mesh_left + 0*(...) ==
+        rule's ``node_fractions()`` start at 0 (so ``mesh_left + 0*(...) ==
         mesh_left`` exactly). ``mesh_indices`` maps each barrier (keyed on its
         full coordinate tuple) to its position in the ordered mesh, so this
         gives a robust total order for any time dimensionality T -- no single

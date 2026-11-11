@@ -111,10 +111,9 @@ def integrate(
             Tracked variables are evaluated at every node but NOT
             integrated; they are returned at the accepted nodes in
             ``result.tracked_variables``.
-        method: Name of the quadrature method. Available:
-            uniform sampling: 'adaptive_heun', 'fehlberg2', 'bosh3',
-              'dopri5', 'gk15', 'gk21', 'gk31', 'cc17', 'cc33', 'cc65';
-            variable sampling: 'adaptive_heun', 'interpolatory3_variable'.
+        method: Name of the quadrature method: a key of ``UNIFORM_METHODS``
+            for uniform sampling or of ``VARIABLE_METHODS`` for variable
+            sampling.
         sampling: 'uniform' uses fixed quadrature point positions within
             each step; 'variable' computes weights dynamically based on
             actual point positions. Defaults to ``DEFAULT_SAMPLING_TYPE``
@@ -171,7 +170,8 @@ def integrate(
         time mesh, and optimization diagnostics.
 
     Raises:
-        ValueError: If sampling is not 'uniform' or 'variable'.
+        ValueError: If sampling is not 'uniform' or 'variable', or if method
+            is not a method of that sampling type.
 
     Note:
         If t is None, the solver creates an initial mesh of

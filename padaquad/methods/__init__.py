@@ -17,11 +17,11 @@ fixed-node methods and ``VARIABLE_METHODS`` for variable-node methods —
 and exposes the ``_get_method`` factory used by the parallel solver.
 Every registry value is a ``MethodClass`` instance (see ``_base.py``).
 
-Each method is specified by a Butcher tableau containing:
+Each method is specified by:
 
-- **c** (nodes): Fractional positions within a step where the integrand
-  is evaluated. ``c[0] = 0`` is the step start, ``c[-1] = 1`` is the
-  step end.
+- **c** (nodes): Fractional positions within a fresh step where the
+  integrand is evaluated (``node_fractions()``). ``c[0] = 0`` is the step
+  start, ``c[-1] = 1`` is the step end.
 - **b** (weights): Weights for combining evaluations into the integral
   estimate. The integral over one step is ``h * sum(b_i * f(t_i))``.
 - **b_error**: Difference between the primary and embedded-method
@@ -33,11 +33,12 @@ There are two families of methods:
 fixed constants. Quadrature points within each step are always at the
 same fractional positions regardless of step size. Simple and efficient.
 
-**Variable methods** (``VARIABLE_METHODS``): The tableau ``b`` weights
-are recomputed dynamically based on the actual positions of the
-quadrature points (the ``c`` values). This allows quadrature points to
-be at arbitrary positions within each step, which is useful when
-refining the mesh by inserting new points between existing ones.
+**Variable methods** (``VARIABLE_METHODS``): The ``b`` weights are
+recomputed dynamically based on the actual positions of the quadrature
+points (``adaptive_heun``, whose two nodes are the step ends, keeps its
+fixed weights and is the uniform object itself). This allows quadrature
+points to be at arbitrary positions within each step, which is useful
+when refining the mesh by inserting new points between existing ones.
 """
 
 from __future__ import annotations

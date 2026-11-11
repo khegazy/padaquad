@@ -25,7 +25,7 @@ python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 .venv/bin/pre-commit install
 
-# Run all tests (1020 currently)
+# Run all tests (3182 pass and 125 skip on a 1-GPU node)
 .venv/bin/pytest tests/ -v
 
 # Run all tests with coverage

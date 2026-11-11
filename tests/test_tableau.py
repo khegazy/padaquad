@@ -38,8 +38,8 @@ def test_variable_tableau_b_sums_to_one(method_name):
         ],
         dim=1,
     )
-    b_tensor, _ = method.tableau_b(c_tensor)
-    b_sums = torch.sum(b_tensor, dim=-1)
+    b_tensor, _ = method.weights(c_tensor)  # [n_samples, 3, 1]
+    b_sums = torch.sum(b_tensor[..., 0], dim=-1)
 
     assert torch.all(torch.abs(b_sums - 1.0) < 1e-5), (
         f"Variable method '{method_name}': some b weight sums deviate from 1.0. "

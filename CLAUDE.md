@@ -25,7 +25,7 @@ python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 .venv/bin/pre-commit install
 
-# Run all tests (3182 pass and 125 skip on a 1-GPU node)
+# Run all tests (3203 pass and 125 skip on a 1-GPU node)
 .venv/bin/pytest tests/ -v
 
 # Run all tests with coverage
@@ -89,7 +89,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_interpolation.py` | `_compute_nodes`: endpoints, shapes, monotonicity, tableau-c matching |
 | `test_sorted_insert.py` | `_get_sorted_indices` and `_insert_sorted_results` |
 | `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables`, `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects) |
-| `test_methods_extra.py` | Variable-mode `adaptive_heun` (the uniform heun object) weights, `to_device`, dtype conversion |
+| `test_methods_extra.py` | Variable-mode `adaptive_heun` (the uniform heun object) weights, the generic `VariableMethodClass` (normalized nodes reach the weight function, shape check), node-fraction validation, `to_device`, dtype conversion |
 | `test_solver_methods.py` | `adaptive_quadrature` factory, `method.weights` through both solvers, per-step node count `solver.C` |
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed error ratios, midpoint placement |
 | `test_record_and_sort.py` | `_record_results` and `_sort_record` |
@@ -116,7 +116,8 @@ padaquad/
 ├── base.py                # SolverBase, steps enum, get_sampling_type
 ├── results.py             # IntegrationResult, MethodOutput dataclasses
 ├── methods/               # quadrature method registries
-│   ├── _base.py             # MethodClass (ABC), UniformMethodClass, _Tableau
+│   ├── _base.py             # MethodClass (ABC), UniformMethodClass,
+│   │                        #   VariableMethodClass, _Tableau
 │   ├── runge_kutta.py       # adaptive_heun, fehlberg2, bosh3, dopri5
 │   ├── gauss_kronrod.py     # gk7, gk15, gk21, gk31  (with builder)
 │   ├── clenshaw_curtis.py   # cc5, cc9, cc17, cc33, cc65  (cosine-series weights)
@@ -144,8 +145,8 @@ DistributedEnvironment (distributed.py)
               └── VariableAdaptiveQuadrature (quadrature/variable.py)
 
 MethodClass (ABC, methods/_base.py)        one quadrature rule
-  ├── UniformMethodClass (methods/_base.py)          fixed _Tableau
-  └── _Interpolatory3Variable (methods/interpolatory.py)  weights from positions
+  ├── UniformMethodClass (methods/_base.py)    fixed _Tableau
+  └── VariableMethodClass (methods/_base.py)   node fractions + weight_function
 ```
 
 The two concrete solvers (`UniformAdaptiveQuadrature` and
@@ -156,8 +157,11 @@ via `adaptive_quadrature(...)` factory or directly. They differ only in
 `_calculate_integral` live once in `AdaptiveQuadrature` and reach the
 rule only through `MethodClass.node_fractions()` and
 `MethodClass.weights(nodes)` (both families return weights `[N, C, 1]`).
-Both registries hold `MethodClass` instances; `adaptive_heun` is one
-object in both.
+Every registered rule is an instance of one of the two generic classes,
+built from data (a `_Tableau`; or node fractions and a module-level
+`weight_function`), never of a rule-specific subclass; both classes reject
+malformed node fractions with `ValueError`. `adaptive_heun` is one object in
+both registries.
 
 ### Public API
 
@@ -296,7 +300,8 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
     spanning `[A.start, B.end]`.
 - **Variable** (`quadrature/variable.py`): nodes at arbitrary positions.
   Weights computed from each panel's actual nodes by `method.weights(nodes)`
-  (`_Interpolatory3Variable.tableau_b`, Sanderse-Veldman formulas).
+  (`VariableMethodClass.weight_function`; for `interpolatory3_variable`
+  the Sanderse-Veldman weights, `_interpolatory3_weights`).
   - *Splitting*: reuses existing evaluations by inserting new midpoints
     between each pair of consecutive points and interleaving old + new
     into a 2C-length array, reshaped into two C-point sub-panels.

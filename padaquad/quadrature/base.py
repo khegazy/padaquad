@@ -348,8 +348,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         Node i of a step is ``mesh_left + c_i * (mesh_right - mesh_left)``, with
         c the rule's ``node_fractions()``: the tableau fractions for a uniform
-        rule, evenly spaced fractions for a position-dependent rule. For example,
-        with c = [0, 0.5, 1], points are placed at the start, midpoint, and end.
+        rule, the rule's own ``c`` for a ``VariableMethodClass`` rule (evenly
+        spaced for ``interpolatory3_variable``). For example, with
+        c = [0, 0.5, 1], points are placed at the start, midpoint, and end.
 
         Args:
             mesh_left: Left barrier of each step. Shape: [N, T].

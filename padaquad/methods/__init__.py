@@ -15,7 +15,8 @@ This ``__init__`` aggregates all family registries into the two
 top-level dicts the solver consumes — ``UNIFORM_METHODS`` for
 fixed-node methods and ``VARIABLE_METHODS`` for variable-node methods —
 and exposes the ``_get_method`` factory used by the parallel solver.
-Every registry value is a ``MethodClass`` instance (see ``_base.py``).
+Every registry value is an instance of one of the two generic classes in
+``_base.py``: ``UniformMethodClass`` or ``VariableMethodClass``.
 
 Each method is specified by:
 
@@ -47,10 +48,10 @@ from typing import TYPE_CHECKING
 
 from padaquad.base import steps
 
-from ._base import MethodClass, UniformMethodClass, _Tableau
+from ._base import MethodClass, UniformMethodClass, VariableMethodClass, _Tableau
 from .clenshaw_curtis import CC_METHODS
 from .gauss_kronrod import GK_METHODS
-from .interpolatory import INTERPOLATORY_METHODS, _Interpolatory3Variable
+from .interpolatory import INTERPOLATORY_METHODS
 from .runge_kutta import RK_METHODS
 
 if TYPE_CHECKING:
@@ -122,7 +123,7 @@ __all__ = [
     "VARIABLE_METHODS",
     "MethodClass",
     "UniformMethodClass",
-    "_Interpolatory3Variable",
+    "VariableMethodClass",
     "_Tableau",
     "_get_method",
 ]

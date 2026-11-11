@@ -143,10 +143,12 @@ def test_variable_method_clone_returns_independent_object():
     clone = canonical.clone()
     assert clone is not canonical
     assert clone.c.data_ptr() != canonical.c.data_ptr()
-    assert clone.b_delta.data_ptr() != canonical.b_delta.data_ptr()
+    # The weight function is shared on purpose: it is a module-level function
+    # that holds no state.
+    assert clone.weight_function is canonical.weight_function
     clone.to_dtype(torch.float32)
-    assert clone.c.dtype == clone.b_delta.dtype == torch.float32
-    assert canonical.c.dtype == canonical.b_delta.dtype == torch.float64
+    assert clone.c.dtype == torch.float32
+    assert canonical.c.dtype == torch.float64
     assert torch.equal(clone.c, torch.tensor([0.0, 0.5, 1.0], dtype=torch.float32))
 
 

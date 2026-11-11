@@ -32,7 +32,8 @@ from padaquad.examples import (
 from padaquad.examples import (
     t as t_fn,
 )
-from padaquad.methods import MethodClass, _get_method, _Interpolatory3Variable
+from padaquad.methods import MethodClass, _get_method
+from padaquad.methods.interpolatory import _interpolatory3_weights
 
 # ---------------------------------------------------------------------------
 # get_sampling_type
@@ -171,65 +172,46 @@ class TestGetMethod:
 
 
 # ---------------------------------------------------------------------------
-# _Interpolatory3Variable weight computation
+# Sanderse-Veldman 3-node weight function (interpolatory3_variable)
 # ---------------------------------------------------------------------------
 
 
+def _nodes_at(a: torch.Tensor) -> torch.Tensor:
+    """Normalized 3-node panels [0, a, 1]. Shape: [len(a), 3, 1]."""
+    return torch.stack([torch.zeros_like(a), a, torch.ones_like(a)], dim=1).unsqueeze(
+        -1
+    )
+
+
 class TestVariableThirdOrder:
-    """Tests for the Sanderse-Veldman 3rd-order variable weight formulas."""
+    """Tests for ``_interpolatory3_weights`` (Sanderse-Veldman 3-node weights)."""
 
-    def test_b0_at_half(self):
-        """b0(0.5) = 0.5 - 1/(6*0.5) = 1/6."""
-        method = _Interpolatory3Variable()
-        a = torch.tensor([0.5])
-        assert torch.allclose(method._b0(a), torch.tensor([1.0 / 6]))
-
-    def test_ba_at_half(self):
-        """ba(0.5) = 1/(6*0.5*0.5) = 2/3."""
-        method = _Interpolatory3Variable()
-        a = torch.tensor([0.5])
-        assert torch.allclose(method._ba(a), torch.tensor([2.0 / 3]))
-
-    def test_b1_at_half(self):
-        """b1(0.5) = (2-1.5)/(6*0.5) = 1/6."""
-        method = _Interpolatory3Variable()
-        a = torch.tensor([0.5])
-        assert torch.allclose(method._b1(a), torch.tensor([1.0 / 6]))
+    def test_weights_at_half(self):
+        """At a = 0.5: b0 = 0.5 - 1/3 = 1/6, ba = 1/(6/4) = 2/3, b1 = 0.5/3 = 1/6."""
+        b, _ = _interpolatory3_weights(_nodes_at(torch.tensor([0.5])))
+        assert torch.allclose(b, torch.tensor([[1.0 / 6, 2.0 / 3, 1.0 / 6]]))
 
     def test_weights_sum_to_one_sweep(self):
         """b0 + ba + b1 = 1 for many values of a in (0, 1)."""
-        method = _Interpolatory3Variable()
-        a_vals = torch.linspace(0.01, 0.99, 50)
-        b0 = method._b0(a_vals)
-        ba = method._ba(a_vals)
-        b1 = method._b1(a_vals)
-        sums = b0 + ba + b1
+        a_vals = torch.linspace(0.01, 0.99, 50, dtype=torch.float64)
+        b, _ = _interpolatory3_weights(_nodes_at(a_vals))
+        sums = b.sum(dim=1)
         assert torch.allclose(sums, torch.ones_like(sums), atol=1e-12), (
             f"Max deviation from 1: {torch.max(torch.abs(sums - 1)).item():.2e}"
         )
 
-    def test_tableau_b_shape(self):
-        """tableau_b returns correct shapes for N=5, C=3."""
-        method = _Interpolatory3Variable()
-        c = torch.rand(5, 3, 1)
-        # Ensure c[:,0,:] = 0 and c[:,2,:] = 1 (endpoints)
-        c[:, 0, :] = 0.0
-        c[:, 2, :] = 1.0
-        # Middle values in (0, 1)
-        c[:, 1, :] = torch.rand(5, 1) * 0.8 + 0.1
+    def test_error_weights_are_b_minus_trapezoid(self):
+        """b_error = b - [1/2, 0, 1/2] (error estimate against the trapezoidal rule)."""
+        a_vals = torch.linspace(0.05, 0.95, 19, dtype=torch.float64)
+        b, b_error = _interpolatory3_weights(_nodes_at(a_vals))
+        trapezoid = torch.tensor([[0.5, 0.0, 0.5]], dtype=torch.float64)
+        assert torch.equal(b_error, b - trapezoid)
 
-        b, b_error = method.tableau_b(c)
-
+    def test_weight_shape(self):
+        """The weight function returns [N, C] for N=5, C=3."""
+        b, b_error = _interpolatory3_weights(_nodes_at(torch.rand(5) * 0.8 + 0.1))
         assert b.shape == (5, 3)
         assert b_error.shape == (5, 3)
-
-    def test_tableau_b_midpoint_weights(self):
-        """With a=0.5 (midpoint), weights should be [1/6, 2/3, 1/6] (Simpson's rule)."""
-        method = _Interpolatory3Variable()
-        c = torch.tensor([[[0.0], [0.5], [1.0]]])  # [1, 3, 1]
-        b, _ = method.tableau_b(c)
-        expected = torch.tensor([[1.0 / 6, 2.0 / 3, 1.0 / 6]])
-        assert torch.allclose(b, expected, atol=1e-12)
 
 
 # ---------------------------------------------------------------------------

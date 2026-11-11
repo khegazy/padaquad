@@ -196,11 +196,11 @@ class TestVariableThirdOrderExactness:
     def test_simpson_reduction_at_half(self, method):
         # Verify the weights themselves match Simpson's rule.
         c = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64).view(1, 3, 1)
-        b, _ = method.tableau_b(c)
+        b, _ = method.weights(c)  # [1, 3, 1]
         expected = torch.tensor([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0], dtype=torch.float64)
-        assert torch.allclose(b[0], expected, atol=1e-15), (
+        assert torch.allclose(b[0, :, 0], expected, atol=1e-15), (
             f"generic3 at a=1/2 should be Simpson's rule [1/6, 2/3, 1/6]; "
-            f"got {b[0].tolist()}"
+            f"got {b[0, :, 0].tolist()}"
         )
 
     def test_simpson_exact_through_degree_3(self, method):

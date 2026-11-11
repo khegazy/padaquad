@@ -14,11 +14,12 @@ Risks introduced by the split:
     silently — a method could move families with no error).
   * A method could be registered but never reachable through the public
     factory ``adaptive_quadrature(...)``.
-  * The ``_get_method`` factory's clone path (uniform) and per-instance
-    construction path (variable) could fall out of sync with the
-    family-style each method belongs to.
+  * A rule could be registered as an instance of a bespoke subclass
+    instead of one of the two generic classes (``UniformMethodClass``,
+    ``VariableMethodClass``), so it would need handling of its own.
 
-This file pins all four invariants. It is a lightweight registry-shape
+This file pins all four invariants, plus ``_get_method``'s clone isolation
+and the ``MethodClass`` interface for every registered rule. It is a lightweight registry-shape
 sanity net for any future family addition.
 """
 
@@ -36,6 +37,7 @@ from padaquad.methods import (
     RK_METHODS,
     MethodClass,
     UniformMethodClass,
+    VariableMethodClass,
     _get_method,
 )
 from padaquad.methods._base import _Tableau
@@ -261,3 +263,14 @@ def test_only_adaptive_heun_is_in_both_registries():
         f"unexpected uniform/variable name collision: {overlap}"
     )
     assert VARIABLE_METHODS["adaptive_heun"] is UNIFORM_METHODS["adaptive_heun"]
+
+
+@pytest.mark.parametrize(("sampling_type", "name"), _registered())
+def test_every_rule_is_an_instance_of_a_generic_class(sampling_type, name):
+    """Every registered rule is an instance of exactly one of the two generic
+    classes, never of a bespoke subclass: a new rule is data (a ``_Tableau``,
+    or node fractions and a weight function), not a new class."""
+    method = _registry(sampling_type)[name]
+    assert type(method) in (UniformMethodClass, VariableMethodClass), (
+        f"{name}: registered as {type(method).__name__}"
+    )

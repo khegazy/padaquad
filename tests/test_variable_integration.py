@@ -12,9 +12,7 @@ from __future__ import annotations
 import pytest
 import torch
 from _helpers import (
-    ATOL_TIGHT,
     INTEGRAND_NAMES,
-    RTOL_TIGHT,
     SEED,
     T_FINAL,
     T_INIT,

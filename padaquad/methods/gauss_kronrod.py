@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import torch
 
-from ._base import MethodClass, _Tableau
+from ._base import UniformMethodClass, _Tableau
 
 
 def _build_gauss_kronrod_tableau(
@@ -154,7 +154,7 @@ _GK21_WG = [
 ]
 _GK21_G_INDICES = [1, 3, 5, 7, 9]
 
-_GAUSS_KRONROD_21 = MethodClass(
+_GAUSS_KRONROD_21 = UniformMethodClass(
     order=32,  # K21 polynomial exactness 31, global convergence rate 32
     error_exponent=21,  # estimate dominated by G10, exactness 2n-1 = 19
     tableau=_build_gauss_kronrod_tableau(
@@ -188,7 +188,7 @@ _GK7_G_INDICES = [1]
 # G3 weight at the center node 0.0 = 8/9 (G3 has odd n, so it includes 0.0).
 _GK7_WG_CENTER = 0.888888888888888888888888888889
 
-_GAUSS_KRONROD_7 = MethodClass(
+_GAUSS_KRONROD_7 = UniformMethodClass(
     order=11,  # K7 polynomial exactness 10, global convergence rate 11
     error_exponent=7,  # estimate dominated by G3, exactness 2n-1 = 5
     tableau=_build_gauss_kronrod_tableau(
@@ -233,7 +233,7 @@ _GK15_G_INDICES = [1, 3, 5]
 # G7 weight at the center node (G7 has odd n, so it includes 0.0).
 _GK15_WG_CENTER = 0.417959183673469387755102040816327
 
-_GAUSS_KRONROD_15 = MethodClass(
+_GAUSS_KRONROD_15 = UniformMethodClass(
     order=23,  # K15 polynomial exactness 22, global convergence rate 23
     error_exponent=15,  # estimate dominated by G7, exactness 2n-1 = 13
     tableau=_build_gauss_kronrod_tableau(
@@ -297,7 +297,7 @@ _GK31_WG = [
 _GK31_G_INDICES = [1, 3, 5, 7, 9, 11, 13]
 _GK31_WG_CENTER = 0.202578241925561272880620199967519
 
-_GAUSS_KRONROD_31 = MethodClass(
+_GAUSS_KRONROD_31 = UniformMethodClass(
     order=47,  # K31 polynomial exactness 46, global convergence rate 47
     error_exponent=31,  # estimate dominated by G15, exactness 2n-1 = 29
     tableau=_build_gauss_kronrod_tableau(

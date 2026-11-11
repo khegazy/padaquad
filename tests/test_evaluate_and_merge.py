@@ -17,7 +17,7 @@ from padaquad import UNIFORM_METHODS
 
 
 class TestUniformEvaluateAdaptiveY:
-    """Tests for _UniformAdaptiveQuadratureBase._evaluate_adaptive_nodes."""
+    """Tests for UniformAdaptiveQuadrature._evaluate_adaptive_nodes."""
 
     def _make_t(self, solver, t_start, t_end, N):
         """Create [N, C, 1] time tensor with uniform steps."""
@@ -106,7 +106,7 @@ class TestUniformEvaluateAdaptiveY:
 
 
 class TestUniformMergeExcessT:
-    """Tests for _UniformAdaptiveQuadratureBase._merge_excess_nodes."""
+    """Tests for UniformAdaptiveQuadrature._merge_excess_nodes."""
 
     def _make_t(self, solver, t_start, t_end, N):
         """Create [N, C, 1] time tensor with uniform steps."""
@@ -212,7 +212,7 @@ class TestUniformMergeExcessT:
 
 
 class TestVariableEvaluateAdaptiveY:
-    """Tests for _VariableAdaptiveQuadratureBase._evaluate_adaptive_nodes."""
+    """Tests for VariableAdaptiveQuadrature._evaluate_adaptive_nodes."""
 
     def test_reuses_old_evals(self):
         """Split step: old y values appear in y_add."""
@@ -284,7 +284,7 @@ class TestVariableEvaluateAdaptiveY:
 
 
 class TestVariableMergeExcessT:
-    """Tests for _VariableAdaptiveQuadratureBase._merge_excess_nodes."""
+    """Tests for VariableAdaptiveQuadrature._merge_excess_nodes."""
 
     def test_concatenate_and_subsample(self):
         """C=2: two steps merged → 3 combined → subsample to 2."""

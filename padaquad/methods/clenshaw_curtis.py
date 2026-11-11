@@ -25,7 +25,7 @@ import math
 
 import torch
 
-from ._base import MethodClass, _Tableau
+from ._base import UniformMethodClass, _Tableau
 
 
 def _clenshaw_curtis_weights_unit(n: int) -> list[float]:
@@ -102,7 +102,7 @@ def _build_clenshaw_curtis_tableau(n: int) -> _Tableau:
 
 
 # CC_4 (5 nodes): polynomial exactness 4, error vs CC_2 (3 nodes, exactness 2)
-_CLENSHAW_CURTIS_5 = MethodClass(
+_CLENSHAW_CURTIS_5 = UniformMethodClass(
     order=5,  # CC_n exactness = n; convergence rate ~ n + 1 in RK convention
     # Estimate dominated by the embedded CC_(n/2) (n/2 + 1 points), exact
     # through degree n/2 + 1 (n/2 even), so error_exponent = n/2 + 3.
@@ -110,25 +110,25 @@ _CLENSHAW_CURTIS_5 = MethodClass(
     tableau=_build_clenshaw_curtis_tableau(4),
 )
 # CC_8 (9 nodes): polynomial exactness 8, error vs CC_4 (5 nodes, exactness 4)
-_CLENSHAW_CURTIS_9 = MethodClass(
+_CLENSHAW_CURTIS_9 = UniformMethodClass(
     order=9,
     error_exponent=7,
     tableau=_build_clenshaw_curtis_tableau(8),
 )
 # CC_16 (17 nodes): polynomial exactness 16, error vs CC_8 (9 nodes, exactness 8)
-_CLENSHAW_CURTIS_17 = MethodClass(
+_CLENSHAW_CURTIS_17 = UniformMethodClass(
     order=17,
     error_exponent=11,
     tableau=_build_clenshaw_curtis_tableau(16),
 )
 # CC_32 (33 nodes): polynomial exactness 32, error vs CC_16 (17 nodes, exactness 16)
-_CLENSHAW_CURTIS_33 = MethodClass(
+_CLENSHAW_CURTIS_33 = UniformMethodClass(
     order=33,
     error_exponent=19,
     tableau=_build_clenshaw_curtis_tableau(32),
 )
 # CC_64 (65 nodes): polynomial exactness 64, error vs CC_32 (33 nodes, exactness 32)
-_CLENSHAW_CURTIS_65 = MethodClass(
+_CLENSHAW_CURTIS_65 = UniformMethodClass(
     order=65,
     error_exponent=35,
     tableau=_build_clenshaw_curtis_tableau(64),

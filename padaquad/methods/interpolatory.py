@@ -1,19 +1,15 @@
 """
-Variable-node interpolatory quadrature rules.
+Quadrature rules whose weights depend on the node positions.
 
-Unlike the uniform-sampling families (RK, Gauss-Kronrod, Clenshaw-Curtis)
-which use fixed node positions, these rules accept arbitrary node
-placements within each panel and recompute their weights from the actual
-positions via a ``tableau_b(c)`` callable.
+Unlike the fixed-table families (RK, Gauss-Kronrod, Clenshaw-Curtis),
+these rules accept arbitrary node placements within each panel and
+compute their weights from the actual positions (``tableau_b(c)``).
+They are the rules of the variable-sampling solver.
 
-This flexibility is what enables the parallel solver's variable-sampling
-mode to reuse evaluations across mesh refinement: when a step is split,
-existing evaluation points end up at non-standard fractional positions
-within the new sub-steps, and these methods just recompute the weights
-that integrate them correctly.
-
-Methods provided:
-  adaptive_heun (variable):  2 nodes, polynomial exactness 1
+Variable-sampling registry (``INTERPOLATORY_METHODS``):
+  adaptive_heun:             the uniform ``_ADAPTIVE_HEUN`` object itself.
+      Its two nodes are the panel ends, so its weights cannot depend on
+      positions and one object serves both sampling modes.
   interpolatory3_variable:   3 nodes, polynomial exactness 2 (degree 3
       at a=1/2 — Simpson's rule reduction; Sanderse-Veldman formula
       otherwise)
@@ -21,105 +17,13 @@ Methods provided:
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-
 import torch
 
+from ._base import MethodClass
 from .runge_kutta import _ADAPTIVE_HEUN
 
 
-class _VariableSubclass(ABC):
-    """
-    Base class for variable-sampling RK methods.
-
-    Unlike uniform methods where b weights are fixed, variable methods
-    compute b weights from the actual quadrature point positions via
-    ``tableau_b(c)``.
-
-    Attributes:
-        device: The device tensors are stored on.
-        order: Convergence order of the method.
-        error_exponent: k such that the per-step error estimate scales as h^k
-            (see ``MethodClass``).
-        n_tableau_c: Number of quadrature points per step.
-    """
-
-    # Set as class attributes by every concrete subclass.
-    order: int
-    error_exponent: int
-    n_tableau_c: int
-
-    def __init__(self, device: str | torch.device | None = None) -> None:
-        """Initialize with an optional device for tensor placement."""
-        self.device = device
-
-    @abstractmethod
-    def to_device(self, device: str | torch.device) -> None:
-        """Move method tensors to the specified device."""
-
-    @abstractmethod
-    def to_dtype(self, dtype: torch.dtype) -> None:
-        """Convert method tensors to the specified dtype."""
-
-    @abstractmethod
-    def tableau_b(self, c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the (b, b_error) weights for normalized node positions c."""
-
-
-class _VARIABLE_SECOND_ORDER(_VariableSubclass):
-    """
-    Variable-sampling 2nd-order method (adaptive Heun variant).
-
-    For 2nd-order methods, the b weights happen to be independent of the
-    quadrature point positions, so this simply returns the fixed adaptive
-    Heun tableau b values regardless of the input c.
-
-    Attributes:
-        order: Convergence order (2).
-        error_exponent: Error-estimate exponent (2; see ``MethodClass``).
-        n_tableau_c: Number of quadrature points per step (2).
-    """
-
-    order = 2
-    error_exponent = 2  # same estimate as adaptive Heun: embedded Euler
-    n_tableau_c = 2
-
-    def __init__(self, device: str | torch.device | None = None) -> None:
-        """Initialize the 2nd-order variable method using adaptive Heun's tableau."""
-        super().__init__(device)
-        # Clone instead of aliasing the canonical RK singleton: ``to_dtype``
-        # below mutates the tableau in place, so an alias would corrupt the
-        # global ``_ADAPTIVE_HEUN`` (the same hazard Phase 4 fixed for the
-        # uniform side via MethodClass.clone()).
-        self.tableau = _ADAPTIVE_HEUN.tableau.clone()
-
-    def to_device(self, device: str | torch.device) -> None:
-        """Move tableau tensors to the specified device."""
-        self.tableau.to_device(device)
-
-    def to_dtype(self, dtype: torch.dtype) -> None:
-        """Convert tableau tensors to the specified dtype."""
-        self.tableau.to_dtype(dtype)
-
-    def tableau_b(self, _c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Return b weights for the given quadrature positions.
-
-        For 2nd-order, the weights are constant regardless of c positions.
-
-        Args:
-            c: Normalized quadrature positions within each step.
-                Shape: [N, C, T] where values are in [0, 1].
-
-        Returns:
-            Tuple of (b, b_error) tensors. Shape: [C].
-        """
-        b = self.tableau.b
-        b_error = self.tableau.b_error
-        return b, b_error
-
-
-class _Interpolatory3Variable(_VariableSubclass):
+class _Interpolatory3Variable(MethodClass):
     """
     Variable-sampling 3rd-order method (generic Sanderse-Veldman).
 
@@ -141,28 +45,52 @@ class _Interpolatory3Variable(_VariableSubclass):
     Attributes:
         order: Convergence order (3).
         error_exponent: Error-estimate exponent (3; see ``MethodClass``).
-        n_tableau_c: Number of quadrature points per step (3).
+        c: Node fractions of a fresh panel, [0, 1/2, 1]. Shape: [3].
         b_delta: Reference weights for error estimation. Shape: [1, 3].
     """
 
-    order = 3
-    error_exponent = 3  # estimate against the trapezoidal rule, exact degree 1
-    n_tableau_c = 3
-
-    def __init__(self, device: str | torch.device | None = None) -> None:
+    def __init__(self) -> None:
         """Initialize the 3rd-order variable method with Sanderse-Veldman weights."""
-        super().__init__(device)
+        # Estimate against the trapezoidal rule, exact through degree 1.
+        super().__init__(order=3, error_exponent=3)
+        # Fresh-panel node fractions [0, 1/2, 1], built in float64 and cast by
+        # to_dtype. A float64 linspace cast to float32 equals a float32
+        # linspace only for 2 and 3 nodes; recheck this if a rule with more
+        # nodes is added.
+        self.c = torch.linspace(0.0, 1.0, 3, dtype=torch.float64)
         # Reference weights (trapezoidal rule) used for error estimation
-        self.b_delta = torch.tensor(
-            [[0.5, 0.0, 0.5]], dtype=torch.float64, device=self.device
-        )
+        self.b_delta = torch.tensor([[0.5, 0.0, 0.5]], dtype=torch.float64)
+
+    def node_fractions(self) -> torch.Tensor:
+        """Evenly spaced fractions [0, 1/2, 1]. Shape: [3]."""
+        return self.c
+
+    def weights(self, nodes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Weights computed from each panel's actual node positions.
+
+        Normalizes each panel's nodes to [0, 1] (shift so the first node is 0,
+        divide by the panel width) and evaluates ``tableau_b`` there.
+
+        Args:
+            nodes: Node positions of each panel. Shape: [N, C, T].
+
+        Returns:
+            Tuple (b, b_error), each of shape [N, C, 1].
+        """
+        norm_dt = nodes - nodes[:, 0, None]
+        norm_dt = norm_dt / norm_dt[:, -1, None]
+        b, b_error = self.tableau_b(norm_dt)
+        return b.unsqueeze(-1), b_error.unsqueeze(-1)
 
     def to_device(self, device: str | torch.device) -> None:
         """Move tensors to the specified device."""
+        self.c = self.c.to(device)
         self.b_delta = self.b_delta.to(device)
 
     def to_dtype(self, dtype: torch.dtype) -> None:
         """Convert tensors to the specified dtype."""
+        self.c = self.c.to(dtype)
         self.b_delta = self.b_delta.to(dtype)
 
     def _b0(self, a: torch.Tensor) -> torch.Tensor:
@@ -214,9 +142,11 @@ class _Interpolatory3Variable(_VariableSubclass):
         return b, b_error
 
 
-# Registry of variable-sampling methods, keyed by name.
-# These are classes (not instances) since they need per-device initialization.
-INTERPOLATORY_METHODS = {
-    "adaptive_heun": _VARIABLE_SECOND_ORDER,
-    "interpolatory3_variable": _Interpolatory3Variable,
+# Registry of the variable-sampling solver, keyed by name: rules that are
+# valid at the node positions that solver produces. Instances, cloned per
+# solver by ``_get_method``. ``adaptive_heun`` is the uniform heun object
+# (see the module docstring).
+INTERPOLATORY_METHODS: dict[str, MethodClass] = {
+    "adaptive_heun": _ADAPTIVE_HEUN,
+    "interpolatory3_variable": _Interpolatory3Variable(),
 }

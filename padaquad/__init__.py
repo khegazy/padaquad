@@ -2,14 +2,10 @@ from __future__ import annotations
 
 from .base import steps
 from .examples import integrand_dict, wolf_schlegel
-from .integrate import integrate
+from .integrate import adaptive_quadrature, integrate
 from .methods import UNIFORM_METHODS, VARIABLE_METHODS
+from .quadrature import UniformAdaptiveQuadrature, VariableAdaptiveQuadrature
 from .results import IntegrationResult
-from .runge_kutta import (
-    UniformAdaptiveQuadrature,
-    VariableAdaptiveQuadrature,
-    adaptive_quadrature,
-)
 
 __all__ = [
     "UNIFORM_METHODS",

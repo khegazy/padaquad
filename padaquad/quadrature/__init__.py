@@ -12,31 +12,29 @@ Submodules:
 
   - ``base``: ``AdaptiveQuadrature``, the abstract base class with
     the main integration loop, error computation, mesh refinement,
-    and memory management. Subclasses implement
-    ``_calculate_integral``, ``_compute_nodes``,
-    ``_evaluate_adaptive_nodes``, and ``_merge_excess_nodes``.
+    node placement and the integral computation, which reach the
+    quadrature rule only through its ``MethodClass`` interface.
+    Subclasses set ``sampling_type`` and implement
+    ``_evaluate_adaptive_nodes`` and ``_merge_excess_nodes``.
 
-  - ``uniform``: ``_UniformAdaptiveQuadratureBase`` — overrides for
-    methods with fixed tableau ``c`` (RK, Gauss-Kronrod,
-    Clenshaw-Curtis).
+  - ``uniform``: ``UniformAdaptiveQuadrature`` — the solver for rules with
+    fixed node fractions (RK, Gauss-Kronrod, Clenshaw-Curtis).
 
-  - ``variable``: ``_VariableAdaptiveQuadratureBase`` — overrides
-    for methods with arbitrary node positions where weights are
-    recomputed per-step from the actual ``c``.
+  - ``variable``: ``VariableAdaptiveQuadrature`` — the solver for rules
+    whose weights are recomputed per step from the actual nodes.
 
-The concrete classes that users instantiate (``UniformAdaptiveQuadrature``
-and ``VariableAdaptiveQuadrature``) live in ``padaquad.runge_kutta``
-together with the RK-specific ``_calculate_integral`` implementation.
+  - ``memory``: the ``_MemoryManagement`` mixin (memory benchmark, batch
+    budget, out-of-memory recognition).
 """
 
 from __future__ import annotations
 
 from .base import AdaptiveQuadrature
-from .uniform import _UniformAdaptiveQuadratureBase
-from .variable import _VariableAdaptiveQuadratureBase
+from .uniform import UniformAdaptiveQuadrature
+from .variable import VariableAdaptiveQuadrature
 
 __all__ = [
     "AdaptiveQuadrature",
-    "_UniformAdaptiveQuadratureBase",
-    "_VariableAdaptiveQuadratureBase",
+    "UniformAdaptiveQuadrature",
+    "VariableAdaptiveQuadrature",
 ]

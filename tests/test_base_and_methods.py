@@ -32,7 +32,7 @@ from padaquad.examples import (
 from padaquad.examples import (
     t as t_fn,
 )
-from padaquad.methods import _get_method, _Interpolatory3Variable
+from padaquad.methods import MethodClass, _get_method, _Interpolatory3Variable
 
 # ---------------------------------------------------------------------------
 # get_sampling_type
@@ -111,16 +111,25 @@ class TestGetMethod:
         assert hasattr(method.tableau, "b_error")
 
     @pytest.mark.parametrize("method_name", VARIABLE_METHOD_NAMES)
-    def test_variable_has_tableau_b_method(self, method_name):
-        """Variable methods have a callable tableau_b method and an order."""
+    def test_variable_has_method_interface(self, method_name):
+        """Variable methods implement the MethodClass interface."""
         method = _get_method(steps.ADAPTIVE_VARIABLE, method_name, "cpu", torch.float64)
-        assert hasattr(method, "order")
-        assert callable(getattr(method, "tableau_b", None))
+        assert isinstance(method, MethodClass)
+        assert method.n_nodes == len(method.node_fractions())
+        assert callable(method.weights)
 
-    def test_invalid_uniform_name_raises(self):
-        """Unknown method name raises KeyError."""
-        with pytest.raises(KeyError):
-            _get_method(steps.ADAPTIVE_UNIFORM, "nonexistent", "cpu", torch.float64)
+    @pytest.mark.parametrize(
+        "sampling_type", [steps.ADAPTIVE_UNIFORM, steps.ADAPTIVE_VARIABLE]
+    )
+    def test_invalid_name_raises(self, sampling_type):
+        """Unknown method name raises ValueError naming the valid methods."""
+        with pytest.raises(ValueError, match=r"nonexistent.*choose one of"):
+            _get_method(sampling_type, "nonexistent", "cpu", torch.float64)
+
+    def test_solver_with_invalid_name_raises(self):
+        """A solver built with an unknown method name raises ValueError."""
+        with pytest.raises(ValueError, match="nonexistent"):
+            make_solver_for_unit_test("nonexistent")
 
     @pytest.mark.parametrize(
         ("kind", "method_name"),
@@ -147,7 +156,7 @@ class TestGetMethod:
             torch.zeros(1, 1, dtype=torch.float64),
             torch.ones(1, 1, dtype=torch.float64),
         )
-        _, b_error = solver._get_tableau_b(nodes)
+        _, b_error = solver.method.weights(nodes)
         b_error = b_error.reshape(-1)
         x = 2 * nodes.reshape(-1) - 1
 

@@ -33,11 +33,15 @@ Class hierarchy (defined here):
   (the memory benchmark, the batch-size budget, out-of-memory recognition)
   comes from the ``_MemoryManagement`` mixin in ``memory.py``.
 
-- ``_UniformAdaptiveQuadratureBase``: Concrete subclass for methods with
-  fixed tableau c values (quadrature points at constant fractional positions).
+- ``UniformAdaptiveQuadrature`` (``uniform.py``): concrete solver for rules
+  with fixed node fractions (quadrature points at constant fractional
+  positions).
 
-- ``_VariableAdaptiveQuadratureBase``: Concrete subclass for methods
-  where quadrature points can be at arbitrary positions within each step.
+- ``VariableAdaptiveQuadrature`` (``variable.py``): concrete solver for rules
+  whose weights depend on the node positions.
+
+The quadrature rule itself is a ``MethodClass`` (``padaquad/methods``); the
+engine reaches it only through ``node_fractions()`` and ``weights()``.
 """
 
 from __future__ import annotations
@@ -47,12 +51,13 @@ import logging
 import math
 import time
 from abc import abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
-from padaquad.base import SolverBase
+from padaquad.base import SolverBase, steps
 from padaquad.distributed import _resolve_device
+from padaquad.methods import _get_method
 from padaquad.quadrature.memory import _is_out_of_memory, _MemoryManagement
 from padaquad.results import IntegrationResult, MethodOutput
 
@@ -61,7 +66,7 @@ logger = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterator
 
-    from padaquad.methods import MethodClass, _VariableSubclass
+    from padaquad.methods import MethodClass
 
 #: State carried across batches by ``conserve_memory=True`` when one step's
 #: evaluation is split between batches: (nodes, f evaluations, tracked
@@ -76,6 +81,57 @@ _SplitState = tuple[
 ]
 
 
+def _RK_integral(
+    t: torch.Tensor,
+    y: torch.Tensor,
+    tableau_b: torch.Tensor,
+    y0: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """
+    Compute the Runge-Kutta weighted sum for a batch of integration steps.
+
+    This is the core numerical operation: for each step, multiply the integrand
+    evaluations by the tableau b weights, sum over the C quadrature points
+    within the step, and multiply by the step size h. Then sum all step
+    contributions to get the total integral.
+
+    The formula per step i is:
+        RK_step_i = h_i * sum_j(b_j * y_ij)
+
+    And the total integral is:
+        integral = y0 + sum_i(RK_step_i)
+
+    Args:
+        t: Time points for each step. The step size h is computed as
+            t[:,-1] - t[:,0] (last minus first point in each step).
+            Shape: [N, C, T].
+        y: Integrand evaluations at the time points in t.
+            Shape: [N, C, D].
+        tableau_b: Weights for combining evaluations within each step, from
+            ``MethodClass.weights``. Shape: [N, C, 1].
+        y0: Starting accumulator value. Shape: [D].
+
+    Returns:
+        Tuple of:
+            - integral: Total integral value (y0 + sum of all step contributions).
+              Shape: [D].
+            - RK_steps: Per-step contributions to the integral. Each entry is
+              h_i * sum(b_j * y_ij). Shape: [N, D].
+            - h: Step sizes (t_last - t_first) for each step. Shape: [N, T].
+    """
+    # Step size: difference between last and first time point in each step
+    h = t[:, -1] - t[:, 0]
+    logger.debug("H shape=%s values=%s", h.shape, h)
+
+    # Weighted sum of integrand evaluations within each step, scaled by step size.
+    # tableau_b*y: weight each evaluation, dim=1 sums over C quadrature points
+    RK_steps = h * torch.sum(tableau_b * y, dim=1)
+    logger.debug("RK_steps shape=%s values=%s", RK_steps.shape, RK_steps)
+    # Sum all step contributions to get the total integral
+    integral = y0 + torch.sum(RK_steps, dim=0)
+    return integral, RK_steps, h
+
+
 class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     """
     Base class for parallel adaptive-stepsize numerical integration.
@@ -83,16 +139,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     Implements the main integration loop that:
     1. Initializes a mesh of quadrature step barriers across the integration domain.
     2. Evaluates the integrand at quadrature points within each step (in batches).
-    3. Computes integral contributions and error estimates per step using RK methods.
+    3. Computes integral contributions and error estimates per step with the
+       method's quadrature weights.
     4. Adaptively refines the mesh: splits high-error steps, merges low-error pairs.
     5. Repeats until all steps meet the error tolerance.
     6. Computes an optimal mesh for potential reuse.
 
-    Subclasses must implement:
-        - ``_compute_nodes(mesh_left, mesh_right)``: Place quadrature points within steps.
+    Subclasses must set ``sampling_type`` (it selects the method registry)
+    and implement:
         - ``_evaluate_adaptive_nodes(...)``: Evaluate integrand at refined points.
         - ``_merge_excess_nodes(...)``: Merge consecutive low-error steps.
-        - ``_calculate_integral(t, y, y0)``: Compute RK integral + error for a batch.
 
     Attributes:
         remove_cut: Largest predicted error ratio of a merged step pair in the
@@ -109,19 +165,18 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             "max", "rms", "failure_fraction", or a callable). See __init__.
         mesh_failure_tolerance: Fraction of output elements allowed to fail when
             error_norm == "failure_fraction".
-        method: The RK method object (set by subclass).
-        order: Convergence order of the RK method (set by subclass).
-        C: Number of quadrature points per integration step (set by subclass).
-        Cm1: C - 1, used frequently in index calculations (set by subclass).
+        method: The quadrature rule, a ``MethodClass`` (set by
+            ``_set_solver_dtype``).
+        C: Number of quadrature points per integration step (set by
+            ``_set_solver_dtype``).
     """
 
-    # Set by the subclass's ``_set_solver_dtype``, which ``SolverBase.__init__``
-    # reaches through ``_set_dtype``. Subclasses narrow ``method`` to their own
-    # method type.
-    method: MethodClass | _VariableSubclass
-    order: int
+    #: Sampling mode of the concrete solver; selects the method registry.
+    sampling_type: ClassVar[steps]
+    # Set by ``_set_solver_dtype``, which ``SolverBase.__init__`` reaches
+    # through ``_set_dtype``.
+    method: MethodClass
     C: int
-    Cm1: int
 
     def __init__(
         self,
@@ -262,15 +317,39 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             )
 
     # -------------------------------------------------------------------------------- #
-    #                                 ABSTRACT METHODS                                 #
+    #                          OPERATIONS ON THE QUADRATURE RULE                         #
     # -------------------------------------------------------------------------------- #
 
-    @abstractmethod
+    def _set_solver_dtype(self, dtype: torch.dtype) -> None:
+        """
+        Build the quadrature rule at ``dtype`` on the solver's device.
+
+        Called from ``SolverBase._set_dtype``, which runs at the end of
+        ``SolverBase.__init__`` (the rule's first build) and on every later
+        dtype change. ``_get_method`` clones the named rule from the registry
+        of this solver's ``sampling_type``.
+
+        Args:
+            dtype: Floating-point dtype for the rule's tensors.
+
+        Raises:
+            ValueError: If ``method_name`` is not in that registry.
+        """
+        self.method = _get_method(
+            self.sampling_type, self.method_name, self.device, dtype
+        )
+        self.C = self.method.n_nodes
+
     def _compute_nodes(
         self, mesh_left: torch.Tensor, mesh_right: torch.Tensor
     ) -> torch.Tensor:
         """
         Place the C quadrature points of each step between its barriers.
+
+        Node i of a step is ``mesh_left + c_i * (mesh_right - mesh_left)``, with
+        c the rule's ``node_fractions()``: the tableau fractions for a uniform
+        rule, evenly spaced fractions for a position-dependent rule. For example,
+        with c = [0, 0.5, 1], points are placed at the start, midpoint, and end.
 
         Args:
             mesh_left: Left barrier of each step. Shape: [N, T].
@@ -279,6 +358,45 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Returns:
             Quadrature point positions. Shape: [N, C, T].
         """
+        dt = (mesh_right - mesh_left).unsqueeze(1)
+        return mesh_left.unsqueeze(1) + self.method.node_fractions().unsqueeze(-1) * dt
+
+    def _calculate_integral(
+        self, t: torch.Tensor, y: torch.Tensor, y0: torch.Tensor
+    ) -> MethodOutput:
+        """
+        Compute the integral and error estimate for a batch of steps.
+
+        Runs the weighted sum twice: with the rule's weights b for the
+        integral, and with b_error for the error estimate (b_error is the
+        difference between the primary and the embedded lower-order rule). The
+        error estimates are detached from the autograd graph: they only drive
+        the accept/split decisions, so no gradient flows through them and the
+        graph they would hold is not kept.
+
+        Args:
+            t: Quadrature points of each step. Shape: [N, C, T].
+            y: Integrand evaluations at the points. Shape: [N, C, D].
+            y0: Starting accumulator value. Shape: [D].
+
+        Returns:
+            MethodOutput with the integral, error estimate, per-step
+            contributions, per-step errors, and step sizes.
+        """
+        b, b_error = self.method.weights(t)
+        integral, mesh_quadratures, h = _RK_integral(t, y, b, y0=y0)
+        integral_error, mesh_quadrature_errors, _ = _RK_integral(t, y, b_error, y0=y0)
+        return MethodOutput(
+            integral=integral,
+            integral_error=integral_error.detach(),
+            mesh_quadratures=mesh_quadratures,
+            mesh_quadrature_errors=mesh_quadrature_errors.detach(),
+            h=h,
+        )
+
+    # -------------------------------------------------------------------------------- #
+    #                                 ABSTRACT METHODS                                 #
+    # -------------------------------------------------------------------------------- #
 
     @abstractmethod
     def _evaluate_adaptive_nodes(

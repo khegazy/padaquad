@@ -48,9 +48,9 @@ class TestStepAdding:
         )
 
     def test_steps_added_on_coarse_mesh(self, method_name, take_gradient):
-        """A minimal mesh (Cm1+1 points) should grow after integration."""
+        """A minimal mesh (C points) should grow after integration."""
         solver = self._make_solver(method_name)
-        t = torch.linspace(0, 1.0, solver.Cm1 + 1).unsqueeze(1)
+        t = torch.linspace(0, 1.0, solver.C).unsqueeze(1)
         output = solver.integrate(
             mesh=t, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=take_gradient
         )
@@ -62,7 +62,7 @@ class TestStepAdding:
     def test_time_ordering_after_refinement(self, method_name, take_gradient):
         """Time points remain ordered after adaptive refinement."""
         solver = self._make_solver(method_name)
-        t = torch.linspace(0, 1.0, solver.Cm1 + 1).unsqueeze(1)
+        t = torch.linspace(0, 1.0, solver.C).unsqueeze(1)
         output = solver.integrate(
             mesh=t, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=take_gradient
         )
@@ -71,7 +71,7 @@ class TestStepAdding:
     def test_step_continuity_after_refinement(self, method_name, take_gradient):
         """Consecutive steps share boundaries after adaptive refinement."""
         solver = self._make_solver(method_name)
-        t = torch.linspace(0, 1.0, solver.Cm1 + 1).unsqueeze(1)
+        t = torch.linspace(0, 1.0, solver.C).unsqueeze(1)
         output = solver.integrate(
             mesh=t, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=take_gradient
         )
@@ -82,7 +82,7 @@ class TestStepAdding:
     ):
         """Feeding t_optimal back in should stabilize (mesh stops growing)."""
         solver = self._make_solver(method_name)
-        t = torch.linspace(0, 1.0, solver.Cm1 + 1).unsqueeze(1)
+        t = torch.linspace(0, 1.0, solver.C).unsqueeze(1)
         for idx in range(3):
             output = solver.integrate(
                 mesh=t,

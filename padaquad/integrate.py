@@ -2,17 +2,17 @@
 High-level public API for adaptive numerical quadrature.
 
 Provides ``integrate()``, the main entry point for users who want
-to compute a definite integral without manually constructing solver objects.
-This function creates the appropriate solver, runs the integration, and
-returns the result.
+to compute a definite integral without manually constructing solver objects,
+and ``adaptive_quadrature()``, the factory that builds the solver for a
+sampling type (``integrate()`` uses it).
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
 
-from .base import DEFAULT_SAMPLING_TYPE, steps
-from .runge_kutta import adaptive_quadrature
+from .base import DEFAULT_SAMPLING_TYPE, get_sampling_type, steps
+from .quadrature import UniformAdaptiveQuadrature, VariableAdaptiveQuadrature
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -20,6 +20,43 @@ if TYPE_CHECKING:
     import torch
 
     from .results import IntegrationResult
+
+
+def adaptive_quadrature(
+    sampling_type: str | steps = DEFAULT_SAMPLING_TYPE, *args: Any, **kwargs: Any
+) -> UniformAdaptiveQuadrature | VariableAdaptiveQuadrature:
+    """
+    Factory function to create the appropriate parallel adaptive solver.
+
+    Selects between the uniform-sampling and variable-sampling solver
+    based on the requested sampling type. All additional arguments are
+    forwarded to the solver constructor.
+
+    Args:
+        sampling_type: Either a ``steps`` enum value or a string name
+            ('uniform', 'adaptive_uniform', 'variable', 'adaptive_variable').
+            Defaults to ``DEFAULT_SAMPLING_TYPE`` ('uniform').
+        *args: Positional arguments forwarded to the solver constructor.
+        **kwargs: Keyword arguments forwarded to the solver constructor
+            (e.g., method, atol, rtol, f, etc.).
+
+    Returns:
+        An initialized parallel adaptive solver instance.
+
+    Raises:
+        ValueError: If sampling_type is not a recognized uniform or variable type.
+    """
+    if isinstance(sampling_type, str):
+        sampling_type = get_sampling_type(sampling_type)
+    if sampling_type == steps.ADAPTIVE_UNIFORM:
+        return UniformAdaptiveQuadrature(*args, **kwargs)
+    elif sampling_type == steps.ADAPTIVE_VARIABLE:
+        return VariableAdaptiveQuadrature(*args, **kwargs)
+    else:
+        raise ValueError(
+            f"adaptive_quadrature supports sampling_type {steps.ADAPTIVE_UNIFORM} "
+            f"or {steps.ADAPTIVE_VARIABLE}, got {sampling_type}."
+        )
 
 
 def integrate(

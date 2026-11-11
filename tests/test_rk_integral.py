@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from padaquad import UNIFORM_METHODS
-from padaquad.runge_kutta import _RK_integral
+from padaquad.quadrature.base import _RK_integral
 
 
 class TestRKIntegralBasic:

@@ -24,6 +24,7 @@ sanity net for any future family addition.
 
 from __future__ import annotations
 
+import pytest
 import torch
 
 from padaquad import UNIFORM_METHODS, VARIABLE_METHODS, adaptive_quadrature
@@ -34,6 +35,7 @@ from padaquad.methods import (
     INTERPOLATORY_METHODS,
     RK_METHODS,
     MethodClass,
+    UniformMethodClass,
     _get_method,
 )
 from padaquad.methods._base import _Tableau
@@ -87,12 +89,12 @@ def test_uniform_and_variable_registries_have_well_known_methods():
 
 
 def test_every_uniform_method_has_well_formed_tableau():
-    """Singleton ``MethodClass`` entries must have a populated
-    ``_Tableau`` with c/b/b_error tensors of matching length.
+    """Singleton ``UniformMethodClass`` entries must have a populated
+    ``_Tableau`` with 1-D c/b/b_error tensors of matching length.
     """
     for name, method in UNIFORM_METHODS.items():
-        assert isinstance(method, MethodClass), (
-            f"{name}: expected MethodClass, got {type(method).__name__}"
+        assert isinstance(method, UniformMethodClass), (
+            f"{name}: expected UniformMethodClass, got {type(method).__name__}"
         )
         assert isinstance(method.tableau, _Tableau), (
             f"{name}: tableau is not _Tableau ({type(method.tableau).__name__})"
@@ -104,9 +106,12 @@ def test_every_uniform_method_has_well_formed_tableau():
         assert c.dtype == torch.float64, f"{name}: c dtype={c.dtype}"
         assert b.dtype == torch.float64, f"{name}: b dtype={b.dtype}"
         assert b_error.dtype == torch.float64, f"{name}: b_error dtype={b_error.dtype}"
-        # b and b_error must broadcast against C; shape compatibility
-        # check: their last dim equals len(c).
-        assert c.shape[-1] == b.shape[-1] == b_error.shape[-1], (
+        # One stored shape for every method: c, b, b_error are all [C].
+        assert c.ndim == b.ndim == b_error.ndim == 1, (
+            f"{name}: expected 1-D tables, got c={tuple(c.shape)} "
+            f"b={tuple(b.shape)} b_error={tuple(b_error.shape)}"
+        )
+        assert c.shape == b.shape == b_error.shape, (
             f"{name}: shape mismatch c={tuple(c.shape)} b={tuple(b.shape)} "
             f"b_error={tuple(b_error.shape)}"
         )
@@ -117,39 +122,72 @@ def test_every_uniform_method_has_well_formed_tableau():
         assert method.order >= 1, f"{name}: order={method.order!r}, expected >= 1"
 
 
-def test_get_method_returns_clone_for_every_uniform_method():
-    """Every registered uniform method must be retrievable via
-    ``_get_method`` — and the returned instance must NOT alias the
-    canonical singleton (clone isolation guarantee).
+def _registered() -> list[tuple[steps, str]]:
+    """(sampling type, name) for every method in both registries."""
+    return [(steps.ADAPTIVE_UNIFORM, name) for name in UNIFORM_METHODS] + [
+        (steps.ADAPTIVE_VARIABLE, name) for name in VARIABLE_METHODS
+    ]
+
+
+def _registry(sampling_type: steps) -> dict:
+    return (
+        UNIFORM_METHODS if sampling_type == steps.ADAPTIVE_UNIFORM else VARIABLE_METHODS
+    )
+
+
+def _tensors(method) -> list[torch.Tensor]:
+    """Every tensor attribute of a method, including those of its tableau."""
+    found = [v for v in vars(method).values() if torch.is_tensor(v)]
+    if isinstance(method, UniformMethodClass):
+        found += [method.tableau.c, method.tableau.b, method.tableau.b_error]
+    return found
+
+
+@pytest.mark.parametrize(("sampling_type", "name"), _registered())
+def test_get_method_returns_independent_clone(sampling_type, name):
+    """``_get_method`` returns a copy of the registry instance that shares no
+    tensor storage with it, at both dtypes; changing the copy's dtype leaves
+    the registry instance at float64 (clone isolation guarantee).
     """
-    for name, canonical in UNIFORM_METHODS.items():
-        instance = _get_method(steps.ADAPTIVE_UNIFORM, name, "cpu", torch.float64)
+    canonical = _registry(sampling_type)[name]
+    for dtype in (torch.float64, torch.float32):
+        instance = _get_method(sampling_type, name, "cpu", dtype)
+        assert isinstance(instance, MethodClass)
         assert instance is not canonical, (
             f"{name}: _get_method returned the singleton, not a clone"
         )
-        assert instance.tableau is not canonical.tableau, (
-            f"{name}: tableau aliases the canonical singleton"
+        canonical_ptrs = {t.data_ptr() for t in _tensors(canonical)}
+        assert not canonical_ptrs & {t.data_ptr() for t in _tensors(instance)}, (
+            f"{name}: a tensor aliases the registry instance"
         )
-        # Tensor identity: distinct storage.
-        assert instance.tableau.b.data_ptr() != canonical.tableau.b.data_ptr(), (
-            f"{name}: b tensor aliases the singleton"
-        )
+        assert all(t.dtype == dtype for t in _tensors(instance))
+        assert all(t.dtype == torch.float64 for t in _tensors(canonical))
 
 
-def test_get_method_returns_fresh_instance_for_every_variable_method():
-    """Variable methods are constructed fresh per-solver (they manage
-    their own per-instance state). Verify each one constructs OK at
-    both supported dtypes.
+@pytest.mark.parametrize(("sampling_type", "name"), _registered())
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_method_interface(sampling_type, name, dtype):
+    """Every registered rule implements the MethodClass interface the
+    solvers use: ``node_fractions`` ascending from 0 to 1 with ``n_nodes``
+    entries, and ``weights`` of shape exactly [N, C, 1] whose b sums to 1
+    over the nodes of every panel.
     """
-    for name in VARIABLE_METHODS:
-        for dtype in (torch.float64, torch.float32):
-            instance = _get_method(steps.ADAPTIVE_VARIABLE, name, "cpu", dtype)
-            # Variable subclasses expose tableau_b(c) — this is the
-            # variable-method calling convention. Just verify it's not
-            # accidentally a uniform MethodClass.
-            assert hasattr(instance, "tableau_b"), (
-                f"{name}: variable method missing tableau_b method"
-            )
+    method = _get_method(sampling_type, name, "cpu", dtype)
+    c = method.node_fractions()
+    assert c.ndim == 1
+    assert len(c) == method.n_nodes
+    assert float(c[0]) == 0.0
+    assert float(c[-1]) == 1.0
+    assert torch.all(c[1:] >= c[:-1])
+    # N = 4 panels of different widths, nodes at the rule's own fractions.
+    left = torch.tensor([0.0, 1.0, 1.5, 4.0], dtype=dtype).unsqueeze(-1)
+    width = torch.tensor([1.0, 0.5, 2.5, 0.25], dtype=dtype).unsqueeze(-1)
+    nodes = (left + c.unsqueeze(0) * width).unsqueeze(-1)  # [4, C, 1]
+    b, b_error = method.weights(nodes)
+    assert b.shape == (4, method.n_nodes, 1)
+    assert b_error.shape == (4, method.n_nodes, 1)
+    tol = 1e-12 if dtype == torch.float64 else 1e-5
+    assert torch.allclose(b.sum(dim=1), torch.ones(4, 1, dtype=dtype), atol=tol)
 
 
 def test_factory_can_construct_a_solver_for_every_registered_method():
@@ -212,17 +250,14 @@ def test_uniform_methods_b_weights_sum_to_one():
         )
 
 
-def test_no_method_name_appears_in_both_registries_with_different_class_kinds():
+def test_only_adaptive_heun_is_in_both_registries():
     """``adaptive_heun`` is the only method that legitimately appears
-    in both registries (same name, different family). Any other
-    name collision is a bug.
-
-    The dual registration is intentional because adaptive_heun is the
-    second-order rule that admits both fixed and variable nodes — the
-    sampling_type chooses which version is used. Verify this is the
-    only such case.
+    in both registries, and it is one object: its two nodes are the panel
+    ends, so its weights cannot depend on node positions and the same rule
+    serves both sampling modes. Any other name collision is a bug.
     """
     overlap = set(UNIFORM_METHODS.keys()) & set(VARIABLE_METHODS.keys())
     assert overlap == {"adaptive_heun"}, (
         f"unexpected uniform/variable name collision: {overlap}"
     )
+    assert VARIABLE_METHODS["adaptive_heun"] is UNIFORM_METHODS["adaptive_heun"]

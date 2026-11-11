@@ -1,47 +1,45 @@
-"""Unit tests for _VARIABLE_SECOND_ORDER.tableau_b, device methods, and variable dtype methods."""
+"""Unit tests for the variable-mode adaptive_heun weights, device methods, and
+variable dtype methods."""
 
 from __future__ import annotations
 
 import torch
 
-from padaquad import UNIFORM_METHODS
-from padaquad.methods import (
-    _VARIABLE_SECOND_ORDER,
-    _Interpolatory3Variable,
-    _Tableau,
-)
+from padaquad import UNIFORM_METHODS, VARIABLE_METHODS
+from padaquad.methods import _Interpolatory3Variable, _Tableau
 
 # ---------------------------------------------------------------------------
-# _VARIABLE_SECOND_ORDER.tableau_b
+# Variable-mode adaptive_heun: the uniform heun object, constant weights
 # ---------------------------------------------------------------------------
 
 
-class TestVariableSecondOrderTableauB:
-    """Tests for _VARIABLE_SECOND_ORDER.tableau_b: constant weights."""
+class TestVariableHeunWeights:
+    """Variable-mode adaptive_heun is the uniform heun rule: constant weights."""
+
+    def test_is_the_uniform_heun(self):
+        """One object serves both registries."""
+        assert VARIABLE_METHODS["adaptive_heun"] is UNIFORM_METHODS["adaptive_heun"]
 
     def test_returns_constant_b(self):
-        """b matches the adaptive_heun tableau b values."""
-        method = _VARIABLE_SECOND_ORDER()
-        c = torch.rand(5, 2, 1)
-        b, _b_error = method.tableau_b(c)
+        """b matches the adaptive_heun tableau b values on every panel."""
+        method = VARIABLE_METHODS["adaptive_heun"]
+        nodes = torch.rand(5, 2, 1, dtype=torch.float64)
+        b, _b_error = method.weights(nodes)
         expected_b = UNIFORM_METHODS["adaptive_heun"].tableau.b
-        assert torch.allclose(b, expected_b)
+        assert torch.equal(b[..., 0], expected_b.expand(5, -1))
 
     def test_shape(self):
-        """Output shapes are [C] for C=2, the stored tableau shape."""
-        method = _VARIABLE_SECOND_ORDER()
-        c = torch.rand(5, 2, 1)
-        b, b_error = method.tableau_b(c)
-        assert b.shape == (2,)
-        assert b_error.shape == (2,)
+        """Output shapes are [N, C, 1] for N=5, C=2."""
+        method = VARIABLE_METHODS["adaptive_heun"]
+        b, b_error = method.weights(torch.rand(5, 2, 1, dtype=torch.float64))
+        assert b.shape == (5, 2, 1)
+        assert b_error.shape == (5, 2, 1)
 
-    def test_ignores_c_values(self):
-        """Different c values produce identical b outputs."""
-        method = _VARIABLE_SECOND_ORDER()
-        c1 = torch.zeros(3, 2, 1)
-        c2 = torch.ones(3, 2, 1)
-        b1, _ = method.tableau_b(c1)
-        b2, _ = method.tableau_b(c2)
+    def test_ignores_node_values(self):
+        """Different node positions produce identical b outputs."""
+        method = VARIABLE_METHODS["adaptive_heun"]
+        b1, _ = method.weights(torch.zeros(3, 2, 1, dtype=torch.float64))
+        b2, _ = method.weights(torch.ones(3, 2, 1, dtype=torch.float64))
         assert torch.equal(b1, b2)
 
 
@@ -76,17 +74,11 @@ class TestTableauToDevice:
         assert method.tableau.b.device.type == "cpu"
 
     def test_variable_third_order_to_device(self):
-        """_Interpolatory3Variable().to_device('cpu') moves b_delta to CPU."""
+        """_Interpolatory3Variable().to_device('cpu') moves c and b_delta to CPU."""
         method = _Interpolatory3Variable()
         method.to_device("cpu")
+        assert method.c.device.type == "cpu"
         assert method.b_delta.device.type == "cpu"
-
-    def test_variable_second_order_to_device(self):
-        """_VARIABLE_SECOND_ORDER().to_device('cpu') moves tableau to CPU."""
-        method = _VARIABLE_SECOND_ORDER()
-        method.to_device("cpu")
-        assert method.tableau.c.device.type == "cpu"
-        assert method.tableau.b.device.type == "cpu"
 
 
 # ---------------------------------------------------------------------------
@@ -98,14 +90,8 @@ class TestVariableSubclassDtype:
     """Tests for variable method dtype conversion."""
 
     def test_third_order_to_dtype_float32(self):
-        """_Interpolatory3Variable b_delta converts to float32."""
+        """_Interpolatory3Variable c and b_delta convert to float32."""
         method = _Interpolatory3Variable()
         method.to_dtype(torch.float32)
+        assert method.c.dtype == torch.float32
         assert method.b_delta.dtype == torch.float32
-
-    def test_second_order_to_dtype_float32(self):
-        """_VARIABLE_SECOND_ORDER tableau converts to float32."""
-        method = _VARIABLE_SECOND_ORDER()
-        method.to_dtype(torch.float32)
-        assert method.tableau.b.dtype == torch.float32
-        assert method.tableau.c.dtype == torch.float32

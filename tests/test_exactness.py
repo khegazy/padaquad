@@ -33,7 +33,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from padaquad import UNIFORM_METHODS, VARIABLE_METHODS
+from padaquad import UNIFORM_METHODS
+from padaquad.base import steps
+from padaquad.methods import _get_method
 
 EXACTNESS_TOL = 1e-13  # absolute tolerance in float64
 INEXACTNESS_MARGIN = 1e-6  # one degree past exactness must miss by at least this
@@ -137,19 +139,16 @@ class TestUniformExactness:
 
 
 def _variable_quadrature(method, c_normalized: torch.Tensor, d: int) -> float:
-    """Apply a variable-sampling method's dynamically-computed weights.
+    """Apply a variable-sampling method's weights for nodes at ``c_normalized``.
 
     Args:
-        method: An instance of a variable-method class.
-        c_normalized: Normalized node positions ``[C]`` in ``[0, 1]``.
-            The method internally interprets ``c[N, C, T]`` so we reshape.
+        method: A variable-registry method (``_get_method`` result).
+        c_normalized: Node positions ``[C]`` in ``[0, 1]`` of one unit panel.
         d: Polynomial degree to integrate.
     """
-    c = c_normalized.to(torch.float64).view(1, -1, 1)
-    b, _ = method.tableau_b(c)
-    # Weights are [C] (constant rule) or [N, C]; take panel 0's weight vector.
-    b = b.reshape(-1, c.shape[1])[0]
-    return (b * c_normalized.to(torch.float64) ** d).sum().item()
+    c = c_normalized.to(torch.float64)
+    b, _ = method.weights(c.view(1, -1, 1))  # [1, C, 1]
+    return (b[0, :, 0] * c**d).sum().item()
 
 
 class TestVariableHeunExactness:
@@ -159,11 +158,9 @@ class TestVariableHeunExactness:
 
     @pytest.fixture
     def method(self):
-        cls = VARIABLE_METHODS["adaptive_heun"]
-        # Construct on CPU so we don't depend on device
-        instance = cls(device="cpu")
-        instance.to_dtype(torch.float64)
-        return instance
+        return _get_method(
+            steps.ADAPTIVE_VARIABLE, "adaptive_heun", "cpu", torch.float64
+        )
 
     def test_exact_through_degree_1(self, method):
         # Endpoints at [0, 1] is the natural choice for a 2-node trap rule
@@ -192,10 +189,9 @@ class TestVariableThirdOrderExactness:
 
     @pytest.fixture
     def method(self):
-        cls = VARIABLE_METHODS["interpolatory3_variable"]
-        instance = cls(device="cpu")
-        instance.to_dtype(torch.float64)
-        return instance
+        return _get_method(
+            steps.ADAPTIVE_VARIABLE, "interpolatory3_variable", "cpu", torch.float64
+        )
 
     def test_simpson_reduction_at_half(self, method):
         # Verify the weights themselves match Simpson's rule.

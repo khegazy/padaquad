@@ -72,7 +72,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_variable_integration.py` | Same but for variable methods (`adaptive_heun`, `interpolatory3_variable`) |
 | `test_data_types.py` | float32 and float64 handling |
 | `test_adaptivity.py` | Step adding (coarse mesh grows) and removal (dense mesh shrinks), mesh convergence |
-| `test_tableau.py` | Tableau b weights sum to 1 (uniform and variable methods) |
+| `test_tableau.py` | Weights sum to 1 (uniform tables and the position-dependent rule) |
 | `test_path_integral.py` | `integrate()` wrapper matches direct solver construction |
 | `test_chemistry.py` | Wolf-Schlegel 2D potential: parallel vs scipy.integrate.quad |
 | `test_exactness.py` | **Polynomial-exactness** for every method (each method is exact through its claimed degree, e.g. gk21 through degree 31) |
@@ -84,13 +84,13 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_snapshots.py` | Golden-value regression net for the file-split refactor; CPU-only float64 |
 | `test_public_api.py` | Smoke test of every public symbol and `IntegrationResult` fields |
 | `test_rk_integral.py` | `_RK_integral`: constant / linear / multi-step / multi-dim / zero-width / variable-b inputs |
-| `test_base_and_methods.py` | `get_sampling_type`, `_Tableau` dtype conversion, `_get_method` factory, weight formulas |
+| `test_base_and_methods.py` | `get_sampling_type`, `_Tableau` dtype conversion, `_get_method` factory (unknown name raises `ValueError`), `error_exponent`, weight formulas |
 | `test_error_computation.py` | `_error_norm`, `_rec_remove`, `_compute_error_ratios_absolute`/`_cumulative` |
 | `test_interpolation.py` | `_compute_nodes`: endpoints, shapes, monotonicity, tableau-c matching |
 | `test_sorted_insert.py` | `_get_sorted_indices` and `_insert_sorted_results` |
 | `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables`, `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects) |
-| `test_methods_extra.py` | Variable subclass `tableau_b`, `to_device`, dtype conversion |
-| `test_rk_solver_methods.py` | `adaptive_quadrature` factory, `_get_tableau_b`, per-step node count `solver.C` |
+| `test_methods_extra.py` | Variable-mode `adaptive_heun` (the uniform heun object) weights, `to_device`, dtype conversion |
+| `test_solver_methods.py` | `adaptive_quadrature` factory, `method.weights` through both solvers, per-step node count `solver.C` |
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed error ratios, midpoint placement |
 | `test_record_and_sort.py` | `_record_results` and `_sort_record` |
 | `test_evaluate_and_merge.py` | `_evaluate_adaptive_nodes` + `_merge_excess_nodes` for both uniform and variable solvers |
@@ -116,20 +116,19 @@ padaquad/
 ├── base.py                # SolverBase, steps enum, get_sampling_type
 ├── results.py             # IntegrationResult, MethodOutput dataclasses
 ├── methods/               # quadrature method registries
-│   ├── _base.py             # _Tableau, MethodClass
+│   ├── _base.py             # MethodClass (ABC), UniformMethodClass, _Tableau
 │   ├── runge_kutta.py       # adaptive_heun, fehlberg2, bosh3, dopri5
 │   ├── gauss_kronrod.py     # gk7, gk15, gk21, gk31  (with builder)
-│   ├── clenshaw_curtis.py   # cc5, cc9, cc17, cc33, cc65  (with FFT-based weights)
-│   └── interpolatory.py     # variable adaptive_heun, interpolatory3_variable
+│   ├── clenshaw_curtis.py   # cc5, cc9, cc17, cc33, cc65  (cosine-series weights)
+│   └── interpolatory.py     # interpolatory3_variable; variable registry
 ├── quadrature/            # adaptive integration engine
-│   ├── base.py              # AdaptiveQuadrature ABC + main integrate loop
+│   ├── base.py              # AdaptiveQuadrature ABC + main integrate loop,
+│   │                        #   node placement, _calculate_integral, _RK_integral
 │   ├── memory.py            # _MemoryManagement mixin: memory benchmark,
 │   │                        #   batch-size budget, OOM recognition
-│   ├── uniform.py           # _UniformAdaptiveQuadratureBase
-│   └── variable.py          # _VariableAdaptiveQuadratureBase
-├── runge_kutta.py         # _RK_integral, UniformAdaptiveQuadrature,
-│                          # VariableAdaptiveQuadrature, adaptive_quadrature factory
-├── integrate.py           # integrate() free function (one-shot wrapper)
+│   ├── uniform.py           # UniformAdaptiveQuadrature
+│   └── variable.py          # VariableAdaptiveQuadrature
+├── integrate.py           # integrate() free function + adaptive_quadrature factory
 ├── examples.py            # integrand_dict (test integrands) + wolf_schlegel
 └── distributed.py         # multi-GPU / SLURM support (internal)
 ```
@@ -141,17 +140,24 @@ DistributedEnvironment (distributed.py)
   └── SolverBase (base.py)
         └── AdaptiveQuadrature (quadrature/base.py; also inherits the
             _MemoryManagement mixin from quadrature/memory.py)
-              ├── _UniformAdaptiveQuadratureBase (quadrature/uniform.py)
-              │     └── UniformAdaptiveQuadrature (runge_kutta.py)
-              └── _VariableAdaptiveQuadratureBase (quadrature/variable.py)
-                    └── VariableAdaptiveQuadrature (runge_kutta.py)
+              ├── UniformAdaptiveQuadrature (quadrature/uniform.py)
+              └── VariableAdaptiveQuadrature (quadrature/variable.py)
+
+MethodClass (ABC, methods/_base.py)        one quadrature rule
+  ├── UniformMethodClass (methods/_base.py)          fixed _Tableau
+  └── _Interpolatory3Variable (methods/interpolatory.py)  weights from positions
 ```
 
-The two concrete classes (`UniformAdaptiveQuadrature` and
+The two concrete solvers (`UniformAdaptiveQuadrature` and
 `VariableAdaptiveQuadrature`) are what user code instantiates, either
-via `adaptive_quadrature(...)` factory or directly. They add the RK-
-specific `_calculate_integral` to whichever sampling-mode base they
-inherit from.
+via `adaptive_quadrature(...)` factory or directly. They differ only in
+`sampling_type` (which selects the method registry) and in
+`_evaluate_adaptive_nodes` / `_merge_excess_nodes`. Node placement and
+`_calculate_integral` live once in `AdaptiveQuadrature` and reach the
+rule only through `MethodClass.node_fractions()` and
+`MethodClass.weights(nodes)` (both families return weights `[N, C, 1]`).
+Both registries hold `MethodClass` instances; `adaptive_heun` is one
+object in both.
 
 ### Public API
 
@@ -176,7 +182,7 @@ from padaquad import (
 methods/runge_kutta.py:    adaptive_heun, fehlberg2, bosh3, dopri5
 methods/gauss_kronrod.py:  gk7, gk15, gk21 (default), gk31
 methods/clenshaw_curtis.py: cc5, cc9, cc17, cc33, cc65
-methods/interpolatory.py:  adaptive_heun (variable), interpolatory3_variable
+methods/interpolatory.py:  interpolatory3_variable (+ adaptive_heun, the same object)
 ```
 
 For smooth integrands at academic-grade precision, prefer `gk21`
@@ -189,13 +195,14 @@ evaluations on smooth regions.
 ### Tensor shape conventions
 
 - **N**: number of integration steps in a batch
-- **C**: number of quadrature points per step (from the rule's tableau,
+- **C**: number of quadrature points per step (`method.n_nodes`,
   e.g. 4 for bosh3, 7 for dopri5, 23 for gk21 with endpoint padding)
 - **T**: dimensionality of time (usually 1, but supports multi-D)
 - **D**: dimensionality of `f`'s output
 
-Key tensors: `nodes: [N, C, T]`, `y: [N, C, D]`, `tableau_b: [1, C, 1]` or
-`[N, C, 1]`, `y0: [D]`, mesh barriers: `[M, T]`.
+Key tensors: `nodes: [N, C, T]`, `y: [N, C, D]`, weights from
+`method.weights(nodes)`: `b, b_error: [N, C, 1]`, stored tables
+`tableau.c/b/b_error: [C]`, `y0: [D]`, mesh barriers: `[M, T]`.
 
 ### Core algorithm (`AdaptiveQuadrature.integrate()` in `quadrature/base.py`)
 
@@ -215,8 +222,9 @@ is a boolean array where `True` means the panel still needs evaluation.
    - Select up to `max_steps` unevaluated panels.
    - Place C nodes per panel via `_compute_nodes`.
    - Evaluate `f` on all flattened nodes; reshape to `[N, C, D]`.
-   - Compute integral + error via `_calculate_integral` (RK weighted
-     sum using `b` and `b_error` tableaux).
+   - Compute integral + error via `_calculate_integral` (weighted sum
+     with the rule's `b` and `b_error` weights from `method.weights`; the
+     error estimates are detached).
    - Compute error ratios (absolute or cumulative mode).
    - `_adaptively_increase_mesh`: panels with ratio `< 1` are accepted;
      panels with ratio `>= 1` are split at midpoint into two
@@ -287,15 +295,15 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
   - *Merging*: re-interpolates C nodes at standard `c` positions
     spanning `[A.start, B.end]`.
 - **Variable** (`quadrature/variable.py`): nodes at arbitrary positions.
-  Tableau `b` values computed dynamically via
-  `method.tableau_b(c)` (Sanderse-Veldman formulas).
+  Weights computed from each panel's actual nodes by `method.weights(nodes)`
+  (`_Interpolatory3Variable.tableau_b`, Sanderse-Veldman formulas).
   - *Splitting*: reuses existing evaluations by inserting new midpoints
     between each pair of consecutive points and interleaving old + new
     into a 2C-length array, reshaped into two C-point sub-panels.
     Avoids redundant `f` calls.
   - *Merging*: concatenates points from both panels (C + C-1 = 2C-1,
     shared boundary not duplicated), then subsamples every other point
-    to get C. The `tableau_b(c)` call recomputes the right weights for
+    to get C. `method.weights(nodes)` recomputes the right weights for
     the new layout.
 
 ### Memory management
@@ -381,8 +389,9 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
   exceeds typical adaptive tolerances, so the previous loose-tolerance
   path silently produced wrong answers.
 - Methods are **cloned per solver instance** (`_get_method` calls
-  `MethodClass.clone()`); dtype/device mutations stay isolated to one
-  solver and never propagate via shared singletons. The previous
+  `MethodClass.clone()`, a deep copy, for both registries); dtype/device
+  mutations stay isolated to one solver and never propagate via shared
+  singletons. The previous
   global-singleton hazard (where a float32 round-trip could
   irreversibly degrade `UNIFORM_METHODS["dopri5"].tableau.b` for the
   rest of the test session) is gone.

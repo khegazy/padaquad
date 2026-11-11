@@ -1,5 +1,5 @@
 """
-Uniform-sampling adaptive quadrature: ``_UniformAdaptiveQuadratureBase``.
+Uniform-sampling adaptive quadrature: ``UniformAdaptiveQuadrature``.
 
 In uniform sampling, quadrature points within each step are placed at
 fixed fractional positions defined by the method's tableau.c values
@@ -12,10 +12,9 @@ are discarded. When merging two steps, a new combined step is built
 spanning ``[A.start, B.end]`` and re-evaluated at the standard c
 positions.
 
-This intermediate base class holds the uniform-specific overrides of
-the abstract methods declared in ``AdaptiveQuadrature``. Concrete
-solvers subclass this with a specific RK family for the
-``_calculate_integral`` implementation.
+This class holds the uniform-specific overrides of the abstract methods
+declared in ``AdaptiveQuadrature``; everything else, including the
+integral computation, is shared.
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ import torch
 from einops import rearrange
 
 from padaquad.base import steps
-from padaquad.methods import UNIFORM_METHODS, MethodClass, _get_method
 
 from .base import AdaptiveQuadrature
 
@@ -34,9 +32,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-class _UniformAdaptiveQuadratureBase(AdaptiveQuadrature):
+class UniformAdaptiveQuadrature(AdaptiveQuadrature):
     """
-    Parallel solver using uniform-sampling Runge-Kutta methods.
+    Parallel adaptive solver for rules with fixed node fractions and weights.
 
     In uniform sampling, quadrature points within each step are placed at
     fixed fractional positions defined by the tableau's c values. For example,
@@ -46,67 +44,11 @@ class _UniformAdaptiveQuadratureBase(AdaptiveQuadrature):
     This is the simpler and more common solver variant. When a step is split,
     the new sub-steps get fresh evaluations at the standard c positions.
 
-    Supported methods: 'adaptive_heun', 'fehlberg2', 'bosh3', 'dopri5'.
-
-    Attributes:
-        method: The MethodClass instance containing the Butcher tableau.
-        order: Convergence order of the RK method.
-        C: Number of quadrature points per step (len(tableau.c)).
-        Cm1: C - 1, used for indexing and step calculations.
+    Supported methods: every name in ``UNIFORM_METHODS`` (Runge-Kutta,
+    Gauss-Kronrod and Clenshaw-Curtis rules).
     """
 
-    method: MethodClass
-
-    def _set_solver_dtype(self, dtype: torch.dtype) -> None:
-        """
-        Build the RK method at ``dtype`` and extract its properties.
-
-        Called from ``SolverBase._set_dtype``, which runs at the end of
-        ``SolverBase.__init__`` (the method's first build) and on every later
-        dtype change. Loads the named method from UNIFORM_METHODS, moves its
-        tableau tensors to the correct device and dtype, and stores the
-        method's order and number of quadrature points (C).
-
-        Args:
-            dtype: Floating-point dtype for the tableau tensors.
-
-        Raises:
-            AssertionError: If method_name is not in UNIFORM_METHODS.
-        """
-        error_message = f"Cannot find method '{self.method_name}' in supported method: {list(UNIFORM_METHODS.keys())}"
-        assert self.method_name in UNIFORM_METHODS, error_message
-        method = _get_method(
-            steps.ADAPTIVE_UNIFORM, self.method_name, self.device, dtype
-        )
-        assert isinstance(method, MethodClass)
-        self.method = method
-        self.order = self.method.order
-        self.C = len(self.method.tableau.c)
-        self.Cm1 = self.C - 1
-
-    def _compute_nodes(
-        self, mesh_left: torch.Tensor, mesh_right: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Place quadrature points within each step using the tableau's c values.
-
-        For uniform sampling, quadrature points are at fixed fractional positions
-        within each step: node_i = mesh_left + c_i * (mesh_right - mesh_left).
-        For example, with c = [0, 0.5, 1], points are placed at the start,
-        midpoint, and end.
-
-        Args:
-            mesh_left: Left barrier of each step. Shape: [N, T].
-            mesh_right: Right barrier of each step. Shape: [N, T].
-
-        Returns:
-            Quadrature point positions. Shape: [N, C, T] where C is the
-            number of tableau c values.
-        """
-        # Compute step width and scale by tableau c positions
-        dt = (mesh_right - mesh_left).unsqueeze(1)
-        steps = self.method.tableau.c.unsqueeze(-1) * dt
-        return mesh_left.unsqueeze(1) + steps
+    sampling_type = steps.ADAPTIVE_UNIFORM
 
     def _evaluate_adaptive_nodes(
         self,

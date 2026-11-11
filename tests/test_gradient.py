@@ -14,7 +14,7 @@ from _helpers import (
     make_variable_solver_for_unit_test,
 )
 
-from padaquad.runge_kutta import _RK_integral
+from padaquad.quadrature.base import _RK_integral
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -174,18 +174,20 @@ class TestErrorDetaching:
         assert method_output.integral.grad_fn is not None
         assert method_output.mesh_quadratures.grad_fn is not None
 
-    def test_variable_error_keeps_grad(self):
-        """Variable solver: error estimates are NOT detached."""
-        solver = make_variable_solver_for_unit_test("adaptive_heun")
-        C = len(solver.method.tableau.c)
+    def test_variable_error_detached(self):
+        """Variable solver: error estimates are detached, as for uniform
+        solvers (one shared ``_calculate_integral``); the integral keeps grad."""
+        solver = make_variable_solver_for_unit_test("interpolatory3_variable")
+        C = solver.C
         t = torch.linspace(0, 1, C, dtype=torch.float64).unsqueeze(0).unsqueeze(-1)
         y = torch.ones(1, C, 1, dtype=torch.float64, requires_grad=True)
         y0 = torch.tensor([0.0], dtype=torch.float64)
 
         method_output = solver._calculate_integral(t, y, y0)
 
-        assert method_output.integral_error.grad_fn is not None
-        assert method_output.mesh_quadrature_errors.grad_fn is not None
+        assert method_output.integral_error.grad_fn is None
+        assert method_output.mesh_quadrature_errors.grad_fn is None
+        assert method_output.integral.grad_fn is not None
 
 
 # ---------------------------------------------------------------------------

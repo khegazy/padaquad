@@ -22,10 +22,10 @@ from __future__ import annotations
 
 import torch
 
-from ._base import MethodClass, _Tableau
+from ._base import UniformMethodClass, _Tableau
 
 # Adaptive Heun: 2nd-order method with 2 evaluations per step (endpoints only)
-_ADAPTIVE_HEUN = MethodClass(
+_ADAPTIVE_HEUN = UniformMethodClass(
     order=2,
     error_exponent=2,  # embedded Euler, exact degree 0
     tableau=_Tableau(
@@ -36,7 +36,7 @@ _ADAPTIVE_HEUN = MethodClass(
 )
 
 # Fehlberg2: 2nd-order method with 3 evaluations per step (start, mid, end)
-_FEHLBERG2 = MethodClass(
+_FEHLBERG2 = UniformMethodClass(
     order=2,
     error_exponent=2,  # embedded 1st-order rule, exact degree 0
     tableau=_Tableau(
@@ -47,7 +47,7 @@ _FEHLBERG2 = MethodClass(
 )
 
 # Bogacki-Shampine: 3rd-order method with 4 evaluations per step
-_BOGACKI_SHAMPINE = MethodClass(
+_BOGACKI_SHAMPINE = UniformMethodClass(
     order=3,
     error_exponent=3,  # embedded 2nd-order rule, exact degree 1
     tableau=_Tableau(
@@ -60,7 +60,7 @@ _BOGACKI_SHAMPINE = MethodClass(
 )
 
 # Dormand-Prince: 5th-order method with 7 evaluations per step
-_DORMAND_PRINCE_SHAMPINE = MethodClass(
+_DORMAND_PRINCE_SHAMPINE = UniformMethodClass(
     order=5,
     error_exponent=5,  # embedded 4th-order rule, exact degree 3
     tableau=_Tableau(

@@ -1,9 +1,9 @@
 """
-Variable-sampling adaptive quadrature: ``_VariableAdaptiveQuadratureBase``.
+Variable-sampling adaptive quadrature: ``VariableAdaptiveQuadrature``.
 
 In variable sampling, quadrature points within each step can sit at
 arbitrary positions; the b weights are recomputed dynamically from the
-actual node positions via the method's ``tableau_b(c)`` callable.
+actual node positions by the method's ``weights(nodes)``.
 
 This flexibility is what enables the variable solver's main
 optimization: when an existing step is split into two sub-steps, the
@@ -12,10 +12,9 @@ within the new sub-steps. The variable formula re-weights them
 correctly so the old f-evaluations are reused, avoiding the redundant
 recomputation that the uniform solver pays.
 
-This intermediate base class holds the variable-specific overrides of
-the abstract methods declared in ``AdaptiveQuadrature``. Concrete
-solvers subclass this with a specific RK family for the
-``_calculate_integral`` implementation.
+This class holds the variable-specific overrides of the abstract methods
+declared in ``AdaptiveQuadrature``; everything else, including node
+placement and the integral computation, is shared.
 """
 
 from __future__ import annotations
@@ -26,7 +25,6 @@ import torch
 from einops import rearrange
 
 from padaquad.base import steps
-from padaquad.methods import VARIABLE_METHODS, _get_method, _VariableSubclass
 
 from .base import AdaptiveQuadrature
 
@@ -34,14 +32,14 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-class _VariableAdaptiveQuadratureBase(AdaptiveQuadrature):
+class VariableAdaptiveQuadrature(AdaptiveQuadrature):
     """
-    Parallel solver using variable-sampling Runge-Kutta methods.
+    Parallel adaptive solver for rules whose weights depend on node positions.
 
     In variable sampling, quadrature points within each step can be at
     arbitrary positions (not fixed by the tableau). The b weights are
-    computed dynamically based on the actual positions of the points via
-    the method's ``tableau_b(c)`` function.
+    computed dynamically from the actual positions of the points by the
+    method's ``weights(nodes)``.
 
     This flexibility is especially useful during adaptive refinement: when
     a step is split, the existing evaluation points from the original step
@@ -53,77 +51,11 @@ class _VariableAdaptiveQuadratureBase(AdaptiveQuadrature):
     spaced indices to fit C points, and the b weights are recomputed for
     their new fractional positions.
 
-    Supported methods: 'adaptive_heun', 'interpolatory3_variable'.
-
-    Attributes:
-        method: The variable method instance with a ``tableau_b(c)`` method.
-        order: Convergence order of the RK method.
-        C: Number of quadrature points per step.
-        Cm1: C - 1, used for indexing.
+    Supported methods: every name in ``VARIABLE_METHODS``
+    ('adaptive_heun', 'interpolatory3_variable').
     """
 
-    method: _VariableSubclass
-
-    def _set_solver_dtype(self, dtype: torch.dtype) -> None:
-        """
-        Build the variable method on the solver's device at ``dtype``.
-
-        Called from ``SolverBase._set_dtype``, which runs at the end of
-        ``SolverBase.__init__`` (the method's first build) and on every later
-        dtype change. ``_get_method`` builds a fresh instance and moves its
-        tensors (e.g. ``b_delta``) onto ``self.device``, so they never clash
-        with device-side nodes in ``tableau_b(c)``.
-
-        Args:
-            dtype: Floating-point dtype for the method's tensors.
-
-        Raises:
-            AssertionError: If method_name is not in VARIABLE_METHODS.
-        """
-        assert self.method_name in VARIABLE_METHODS, (
-            f"Cannot find method '{self.method_name}' in supported methods: {list(VARIABLE_METHODS.keys())}"
-        )
-        method = _get_method(
-            steps.ADAPTIVE_VARIABLE, self.method_name, self.device, dtype
-        )
-        assert isinstance(method, _VariableSubclass)
-        self.method = method
-        self.order = self.method.order
-        self.C = self.method.n_tableau_c
-        self.Cm1 = self.C - 1
-
-    def _compute_nodes(
-        self, mesh_left: torch.Tensor, mesh_right: torch.Tensor
-    ) -> torch.Tensor:
-        """
-        Place initial quadrature points uniformly within each step.
-
-        Variable-sampling methods compute their tableau b weights
-        dynamically from the actual node positions, so any internally
-        consistent placement works as the *initial* layout. We use
-        evenly-spaced fractions ``[0, 1/(C-1), ..., 1]`` so that the
-        first call lays out C points spanning each panel from end to
-        end. Subsequent splits and merges (handled by
-        ``_evaluate_adaptive_nodes`` and ``_merge_excess_nodes``) reuse and
-        rearrange these points.
-
-        At ``a = 1/2`` for the 3-point ``interpolatory3_variable``
-        method this layout matches Simpson's rule exactly — see
-        tests/test_exactness.py for the reduction check.
-
-        Args:
-            mesh_left: Left barrier of each step. Shape: [N, T].
-            mesh_right: Right barrier of each step. Shape: [N, T].
-
-        Returns:
-            Quadrature point positions. Shape: [N, C, T].
-        """
-        dt = (mesh_right - mesh_left).unsqueeze(1)
-        # Uniformly-spaced fractions of [0, 1] across C points.
-        fractions = torch.linspace(
-            0.0, 1.0, self.C, dtype=self.dtype, device=self.device
-        ).view(self.C, 1)
-        return mesh_left.unsqueeze(1) + fractions * dt
+    sampling_type = steps.ADAPTIVE_VARIABLE
 
     def _evaluate_adaptive_nodes(
         self,
@@ -172,7 +104,7 @@ class _VariableAdaptiveQuadratureBase(AdaptiveQuadrature):
         # new midpoints (odd positions) into a 2*C-length array
         select_prev_idxs = torch.arange(self.C, device=self.device) * 2
         select_prev_idxs[select_prev_idxs >= self.C] += 1
-        select_add_idxs = torch.arange(self.Cm1, device=self.device) * 2 + 1
+        select_add_idxs = torch.arange(self.C - 1, device=self.device) * 2 + 1
         select_add_idxs[select_add_idxs >= self.C] += 1
 
         # Interleave old and new time points into a combined array
@@ -212,7 +144,7 @@ class _VariableAdaptiveQuadratureBase(AdaptiveQuadrature):
         duplicated from the second step), then subsamples every other point to
         get back to C points. Because the points are now at non-standard
         fractional positions within the merged step, the variable method's
-        ``tableau_b(c)`` will recompute appropriate weights on the next evaluation.
+        ``weights(nodes)`` will recompute appropriate weights on the next evaluation.
 
         Args:
             nodes: Quadrature point positions for all steps. Shape: [N, C, T].

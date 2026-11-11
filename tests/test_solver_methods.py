@@ -1,4 +1,5 @@
-"""Unit tests for adaptive_quadrature factory, _get_tableau_b, and the per-step node count C."""
+"""Unit tests for the adaptive_quadrature factory, MethodClass.weights through a
+solver, and the per-step node count C."""
 
 from __future__ import annotations
 
@@ -10,12 +11,12 @@ from _helpers import (
     make_variable_solver_for_unit_test,
 )
 
-from padaquad.base import steps
-from padaquad.runge_kutta import (
+from padaquad import (
     UniformAdaptiveQuadrature,
     VariableAdaptiveQuadrature,
     adaptive_quadrature,
 )
+from padaquad.base import steps
 
 # ---------------------------------------------------------------------------
 # adaptive_quadrature factory
@@ -92,49 +93,51 @@ class TestGetParallelRKSolver:
 
 
 # ---------------------------------------------------------------------------
-# Uniform _get_tableau_b
+# Uniform rule weights
 # ---------------------------------------------------------------------------
 
 
-class TestUniformGetTableauB:
-    """Tests for UniformAdaptiveQuadrature._get_tableau_b."""
+class TestUniformWeights:
+    """Tests for UniformMethodClass.weights through a uniform solver."""
 
     def test_shape(self):
-        """b and b_error have shape [C, 1] for bosh3 (C=4)."""
+        """b and b_error have shape [N, C, 1] for bosh3 (C=4)."""
         solver = make_solver_for_unit_test("bosh3")
         t = torch.rand(5, 4, 1, dtype=torch.float64)
-        b, b_error = solver._get_tableau_b(t)
-        assert b.shape == (4, 1)
-        assert b_error.shape == (4, 1)
+        b, b_error = solver.method.weights(t)
+        assert b.shape == (5, 4, 1)
+        assert b_error.shape == (5, 4, 1)
 
     def test_t_independent(self):
-        """Different t values give identical weights."""
+        """Different t values give identical weights for every panel."""
         solver = make_solver_for_unit_test("bosh3")
         t1 = torch.rand(3, 4, 1, dtype=torch.float64)
         t2 = torch.rand(7, 4, 1, dtype=torch.float64)
-        b1, _ = solver._get_tableau_b(t1)
-        b2, _ = solver._get_tableau_b(t2)
-        assert torch.equal(b1, b2)
+        b1, _ = solver.method.weights(t1)
+        b2, _ = solver.method.weights(t2)
+        assert torch.equal(b1[0], b2[0])
+        assert torch.equal(b1, b1[:1].expand_as(b1))
+        assert torch.equal(b2, b2[:1].expand_as(b2))
 
     def test_values_match_tableau(self):
         """Returned b matches method.tableau.b unsqueezed."""
         solver = make_solver_for_unit_test("bosh3")
         t = torch.rand(1, 4, 1, dtype=torch.float64)
-        b, _ = solver._get_tableau_b(t)
+        b, _ = solver.method.weights(t)
         expected = solver.method.tableau.b.unsqueeze(-1)
-        assert torch.equal(b, expected)
+        assert torch.equal(b[0], expected)
 
 
 # ---------------------------------------------------------------------------
-# Variable _get_tableau_b
+# Variable-solver rule weights
 # ---------------------------------------------------------------------------
 
 
-class TestVariableGetTableauB:
-    """Tests for VariableAdaptiveQuadrature._get_tableau_b."""
+class TestVariableWeights:
+    """Tests for MethodClass.weights through a variable solver."""
 
     def test_shape_adaptive_heun(self):
-        """adaptive_heun variable: b shape [1, 2, 1] (constant, broadcast over N)."""
+        """adaptive_heun variable: b shape [N, 2, 1] (constant over panels)."""
         solver = make_variable_solver_for_unit_test("adaptive_heun")
         t = torch.tensor(
             [
@@ -146,16 +149,16 @@ class TestVariableGetTableauB:
             ],
             dtype=torch.float64,
         )
-        b, b_error = solver._get_tableau_b(t)
-        # 2nd-order: weights are constant, returned as [1, C, 1]
-        assert b.shape == (1, 2, 1)
-        assert b_error.shape == (1, 2, 1)
+        b, b_error = solver.method.weights(t)
+        # 2nd-order: weights are constant, expanded to [N, C, 1]
+        assert b.shape == (5, 2, 1)
+        assert b_error.shape == (5, 2, 1)
 
     def test_normalizes_to_unit(self):
         """generic3: mesh=[2,3,4] normalizes to c=[0, 0.5, 1] → Simpson weights."""
         solver = make_variable_solver_for_unit_test("interpolatory3_variable")
         t = torch.tensor([[[2.0], [3.0], [4.0]]], dtype=torch.float64)
-        b, _ = solver._get_tableau_b(t)
+        b, _ = solver.method.weights(t)
         # At a=0.5: b0=1/6, ba=2/3, b1=1/6
         expected = torch.tensor(
             [[[1.0 / 6], [2.0 / 3], [1.0 / 6]]], dtype=torch.float64
@@ -172,7 +175,7 @@ class TestVariableGetTableauB:
             ],
             dtype=torch.float64,
         )
-        b, _ = solver._get_tableau_b(t)
+        b, _ = solver.method.weights(t)
         assert not torch.allclose(b[0], b[1])
 
 

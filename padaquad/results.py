@@ -112,7 +112,7 @@ class MethodOutput:
     """
     Output from a single batch of RK integration steps.
 
-    Produced by ``_calculate_integral()`` in concrete solver subclasses.
+    Produced by ``AdaptiveQuadrature._calculate_integral()``.
     Contains both the primary integral estimate and the embedded error
     estimate, broken down per step. Field names mirror
     ``IntegrationResult`` for consistency between the internal

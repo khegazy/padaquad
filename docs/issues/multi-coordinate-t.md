@@ -66,7 +66,7 @@ $s \in [0, 1]$, with `max_batch=10000`:
 |---|---|---|
 | `D = 1`, $f = xy$ (uniform `gk21`; variable `adaptive_heun`; `take_gradient` True and False) | `[0.6667, 1.3333]` | $\left(\int f\,dx,\ \int f\,dy\right) = \left(\tfrac{2}{3}, \tfrac{4}{3}\right)$, one integral per coordinate. Correct for that reading. |
 | `D = 2 = T`, $F = (x, y)$ | `[0.5, 2.0]` | $\left(\int F_1\,dx,\ \int F_2\,dy\right)$: the components are paired one-to-one, **not** summed into the line integral $\int F\cdot dr = 2.5$. |
-| `D = 3` | `RuntimeError: The size of tensor a (2) must match the size of tensor b (3)` at `padaquad/runge_kutta.py:82` | `_RK_integral` multiplies the panel width `h` (`[N, T]`) by the weighted sum of `f` (`[N, D]`). The two shapes only combine when `D` is 1 or `T`. |
+| `D = 3` | `RuntimeError: The size of tensor a (2) must match the size of tensor b (3)` at `padaquad/quadrature/base.py:128` (`_RK_integral`) | `_RK_integral` multiplies the panel width `h` (`[N, T]`) by the weighted sum of `f` (`[N, D]`). The two shapes only combine when `D` is 1 or `T`. |
 
 Analytic check of row 1: along the path, $f = 2s^2$, $dx = ds$ and $dy = 2\,ds$, so
 $\int f\,dx = \int_0^1 2s^2\,ds = 2/3$ and $\int f\,dy = \int_0^1 4s^2\,ds = 4/3$.

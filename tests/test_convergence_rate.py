@@ -23,6 +23,8 @@ import pytest
 import torch
 
 from padaquad import UNIFORM_METHODS, VARIABLE_METHODS
+from padaquad.base import steps
+from padaquad.methods import _get_method
 
 # Each method's expected convergence rate (= polynomial-exactness + 1, the
 # number of orders by which error scales as panel size shrinks).
@@ -71,8 +73,8 @@ def _fixed_panel_uniform(method, f, a: float, b: float, N: int) -> float:
     b64 = torch.tensor(b, dtype=torch.float64)
     h = (b64 - a64) / N
     barriers = a64 + h * torch.arange(N + 1, dtype=torch.float64)
-    c = method.tableau.c.to(torch.float64).flatten()
-    weights = method.tableau.b.to(torch.float64).flatten()
+    c = method.tableau.c.to(torch.float64)
+    weights = method.tableau.b.to(torch.float64)
     # Nodes: [N, C], panel i node j is barriers[i] + h*c[j]
     nodes = barriers[:-1, None] + h * c[None, :]
     y = f(nodes.flatten()).view(N, len(c))
@@ -88,16 +90,15 @@ def _fixed_panel_variable(method, f, a: float, b: float, N: int) -> float:
     b64 = torch.tensor(b, dtype=torch.float64)
     h = (b64 - a64) / N
     barriers = a64 + h * torch.arange(N + 1, dtype=torch.float64)
-    C = method.n_tableau_c
-    # For variable methods, the natural choice is a uniform spacing of
-    # nodes inside each panel. The middle node sits at the midpoint
+    C = method.n_nodes
+    # The variable solver places a fresh panel's nodes at the rule's
+    # node_fractions (evenly spaced). The middle node sits at the midpoint
     # (a=1/2 in tableau terms), so generic3 reduces to Simpson's rule
     # under this layout, raising its rate from 3 to 4.
-    c_pattern = torch.linspace(0.0, 1.0, C, dtype=torch.float64)  # [C]
+    c_pattern = method.node_fractions()  # [C]
     nodes = barriers[:-1, None] + h * c_pattern[None, :]  # [N, C]
-    # The variable methods compute weights from the per-panel normalized c.
-    c_3d = c_pattern.view(1, C, 1).expand(N, C, 1).contiguous()
-    weights, _ = method.tableau_b(c_3d)  # [N, C]
+    # The weights are computed from each panel's actual nodes.
+    weights = method.weights(nodes.unsqueeze(-1))[0][..., 0]  # [N, C]
     y = f(nodes.flatten()).view(N, C)
     return float(h * (weights * y).sum())
 
@@ -166,9 +167,7 @@ def test_variable_convergence_rate(method_name):
     its convergence rate rises from the general-position 3 to 4. This
     test pins that fact by parametrizing the expected rate to 4.
     """
-    cls = VARIABLE_METHODS[method_name]
-    method = cls(device="cpu")
-    method.to_dtype(torch.float64)
+    method = _get_method(steps.ADAPTIVE_VARIABLE, method_name, "cpu", torch.float64)
     expected_rate = VARIABLE_RATE[method_name]
 
     errors = []

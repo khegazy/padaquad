@@ -21,12 +21,12 @@ def test_uniform_tableau_b_sums_to_one(method_name):
 
 @pytest.mark.parametrize(
     "method_name",
-    [name for name, cls in VARIABLE_METHODS.items() if cls().order >= 3],
-    ids=[name for name, cls in VARIABLE_METHODS.items() if cls().order >= 3],
+    [name for name, method in VARIABLE_METHODS.items() if method.order >= 3],
+    ids=[name for name, method in VARIABLE_METHODS.items() if method.order >= 3],
 )
 def test_variable_tableau_b_sums_to_one(method_name):
     """Variable method b weights (computed from c) must sum to 1 for all valid c positions."""
-    method = VARIABLE_METHODS[method_name]()
+    method = VARIABLE_METHODS[method_name]
     n_samples = 100
 
     # Create c tensors with the interior node ranging from 0.01 to 0.99
@@ -38,8 +38,8 @@ def test_variable_tableau_b_sums_to_one(method_name):
         ],
         dim=1,
     )
-    b_tensor, _ = method.tableau_b(c_tensor)
-    b_sums = torch.sum(b_tensor, dim=-1)
+    b_tensor, _ = method.weights(c_tensor)  # [n_samples, 3, 1]
+    b_sums = torch.sum(b_tensor[..., 0], dim=-1)
 
     assert torch.all(torch.abs(b_sums - 1.0) < 1e-5), (
         f"Variable method '{method_name}': some b weight sums deviate from 1.0. "

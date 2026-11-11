@@ -29,7 +29,7 @@ from __future__ import annotations
 import torch
 from tests._helpers import make_uniform_solver
 
-from padaquad import UNIFORM_METHODS
+from padaquad import UNIFORM_METHODS, VARIABLE_METHODS
 from padaquad.base import steps
 from padaquad.methods import _get_method
 
@@ -133,6 +133,23 @@ def test_method_clone_returns_independent_object():
 
     # Order is copied (not shared reference behind tableau).
     assert clone1.order == canonical.order
+
+
+def test_variable_method_clone_returns_independent_object():
+    """``clone()`` of a position-dependent rule copies its tensors too: a
+    dtype change on the clone does not reach the registry instance.
+    """
+    canonical = VARIABLE_METHODS["interpolatory3_variable"]
+    clone = canonical.clone()
+    assert clone is not canonical
+    assert clone.c.data_ptr() != canonical.c.data_ptr()
+    # The weight function is shared on purpose: it is a module-level function
+    # that holds no state.
+    assert clone.weight_function is canonical.weight_function
+    clone.to_dtype(torch.float32)
+    assert clone.c.dtype == torch.float32
+    assert canonical.c.dtype == torch.float64
+    assert torch.equal(clone.c, torch.tensor([0.0, 0.5, 1.0], dtype=torch.float32))
 
 
 def test_clone_followed_by_dtype_round_trip_loses_clone_precision_only():

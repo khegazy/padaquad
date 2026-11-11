@@ -1,222 +1,77 @@
 """
-Variable-node interpolatory quadrature rules.
+Quadrature rules whose weights depend on the node positions.
 
-Unlike the uniform-sampling families (RK, Gauss-Kronrod, Clenshaw-Curtis)
-which use fixed node positions, these rules accept arbitrary node
-placements within each panel and recompute their weights from the actual
-positions via a ``tableau_b(c)`` callable.
+Unlike the fixed-table families (RK, Gauss-Kronrod, Clenshaw-Curtis),
+these rules accept arbitrary node placements within each panel and
+compute their weights from the actual positions with a weight function.
+Each is an instance of the generic ``VariableMethodClass``. They are the
+rules of the variable-sampling solver.
 
-This flexibility is what enables the parallel solver's variable-sampling
-mode to reuse evaluations across mesh refinement: when a step is split,
-existing evaluation points end up at non-standard fractional positions
-within the new sub-steps, and these methods just recompute the weights
-that integrate them correctly.
-
-Methods provided:
-  adaptive_heun (variable):  2 nodes, polynomial exactness 1
+Variable-sampling registry (``INTERPOLATORY_METHODS``):
+  adaptive_heun:             the uniform ``_ADAPTIVE_HEUN`` object itself.
+      Its two nodes are the panel ends, so its weights cannot depend on
+      positions and one object serves both sampling modes.
   interpolatory3_variable:   3 nodes, polynomial exactness 2 (degree 3
-      at a=1/2 — Simpson's rule reduction; Sanderse-Veldman formula
+      at a=1/2 — Simpson's rule reduction; Sanderse-Veldman weights
       otherwise)
 """
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-
 import torch
 
+from ._base import MethodClass, VariableMethodClass
 from .runge_kutta import _ADAPTIVE_HEUN
 
 
-class _VariableSubclass(ABC):
+def _interpolatory3_weights(c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     """
-    Base class for variable-sampling RK methods.
+    Sanderse-Veldman 3-node weights for normalized nodes [0, a, 1].
 
-    Unlike uniform methods where b weights are fixed, variable methods
-    compute b weights from the actual quadrature point positions via
-    ``tableau_b(c)``.
+    They are the interpolatory weights: the rule integrates 1, x and x^2
+    exactly on [0, 1], i.e. sum_i w_i x_i^k = 1/(k+1) for k = 0, 1, 2.
 
-    Attributes:
-        device: The device tensors are stored on.
-        order: Convergence order of the method.
-        error_exponent: k such that the per-step error estimate scales as h^k
-            (see ``MethodClass``).
-        n_tableau_c: Number of quadrature points per step.
+      1. k = 1 minus k = 2:  w_a (a - a^2) = 1/6  =>  w_a = 1/(6a(1-a))
+      2. k = 1:              w_1 = 1/2 - a w_a    =>  w_1 = (2-3a)/(6(1-a))
+      3. k = 0:              w_0 = 1 - w_a - w_1  =>  w_0 = 1/2 - 1/(6a)
+
+    At a = 1/2 this is Simpson's rule [1/6, 2/3, 1/6] (exact through
+    degree 3). The error weights are b minus the trapezoidal rule
+    [1/2, 0, 1/2] on the end nodes (exact through degree 1), written out per
+    node so no constant tensor is built (or copied to the GPU) per call.
+
+    Args:
+        c: Normalized node positions; the middle node is a = c[:, 1, 0].
+            Shape: [N, 3, T].
+
+    Returns:
+        Tuple (b, b_error), each of shape [N, 3], in the dtype and on the
+        device of ``c``.
     """
-
-    # Set as class attributes by every concrete subclass.
-    order: int
-    error_exponent: int
-    n_tableau_c: int
-
-    def __init__(self, device: str | torch.device | None = None) -> None:
-        """Initialize with an optional device for tensor placement."""
-        self.device = device
-
-    @abstractmethod
-    def to_device(self, device: str | torch.device) -> None:
-        """Move method tensors to the specified device."""
-
-    @abstractmethod
-    def to_dtype(self, dtype: torch.dtype) -> None:
-        """Convert method tensors to the specified dtype."""
-
-    @abstractmethod
-    def tableau_b(self, c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return the (b, b_error) weights for normalized node positions c."""
+    a = c[:, 1, 0]
+    b0 = 0.5 - 1.0 / (6 * a)
+    ba = 1.0 / (6 * a * (1 - a))
+    b1 = (2.0 - 3 * a) / (6 * (1.0 - a))
+    b = torch.stack([b0, ba, b1]).transpose(0, 1)
+    b_error = torch.stack([b0 - 0.5, ba, b1 - 0.5]).transpose(0, 1)
+    return b, b_error
 
 
-class _VARIABLE_SECOND_ORDER(_VariableSubclass):
-    """
-    Variable-sampling 2nd-order method (adaptive Heun variant).
-
-    For 2nd-order methods, the b weights happen to be independent of the
-    quadrature point positions, so this simply returns the fixed adaptive
-    Heun tableau b values regardless of the input c.
-
-    Attributes:
-        order: Convergence order (2).
-        error_exponent: Error-estimate exponent (2; see ``MethodClass``).
-        n_tableau_c: Number of quadrature points per step (2).
-    """
-
-    order = 2
-    error_exponent = 2  # same estimate as adaptive Heun: embedded Euler
-    n_tableau_c = 2
-
-    def __init__(self, device: str | torch.device | None = None) -> None:
-        """Initialize the 2nd-order variable method using adaptive Heun's tableau."""
-        super().__init__(device)
-        # Clone instead of aliasing the canonical RK singleton: ``to_dtype``
-        # below mutates the tableau in place, so an alias would corrupt the
-        # global ``_ADAPTIVE_HEUN`` (the same hazard Phase 4 fixed for the
-        # uniform side via MethodClass.clone()).
-        self.tableau = _ADAPTIVE_HEUN.tableau.clone()
-
-    def to_device(self, device: str | torch.device) -> None:
-        """Move tableau tensors to the specified device."""
-        self.tableau.to_device(device)
-
-    def to_dtype(self, dtype: torch.dtype) -> None:
-        """Convert tableau tensors to the specified dtype."""
-        self.tableau.to_dtype(dtype)
-
-    def tableau_b(self, _c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Return b weights for the given quadrature positions.
-
-        For 2nd-order, the weights are constant regardless of c positions.
-
-        Args:
-            c: Normalized quadrature positions within each step.
-                Shape: [N, C, T] where values are in [0, 1].
-
-        Returns:
-            Tuple of (b, b_error) tensors. Shape: [1, C].
-        """
-        b = self.tableau.b
-        b_error = self.tableau.b_error
-        return b, b_error
+# Interpolatory 3-node rule (exactness 2; 3 at a = 1/2), error estimate against
+# the trapezoidal rule (exact through degree 1).
+_INTERPOLATORY_3 = VariableMethodClass(
+    order=3,
+    error_exponent=3,
+    c=torch.linspace(0.0, 1.0, 3, dtype=torch.float64),
+    weight_function=_interpolatory3_weights,
+)
 
 
-class _Interpolatory3Variable(_VariableSubclass):
-    """
-    Variable-sampling 3rd-order method (generic Sanderse-Veldman).
-
-    Computes tableau b weights dynamically based on the actual positions
-    of the quadrature points within each step. This is the key difference
-    from uniform methods: the same set of evaluations at different positions
-    can be correctly weighted.
-
-    The method uses the generic 3rd-order formula from Sanderse and Veldman,
-    where the b weights are functions of the middle node position 'a':
-
-        b0(a) = 1/2 - 1/(6a)
-        ba(a) = 1/(6a(1-a))
-        b1(a) = (2-3a)/(6(1-a))
-
-    The error is estimated by comparing against a reference set of weights
-    (b_delta = [0.5, 0.0, 0.5], the trapezoidal rule).
-
-    Attributes:
-        order: Convergence order (3).
-        error_exponent: Error-estimate exponent (3; see ``MethodClass``).
-        n_tableau_c: Number of quadrature points per step (3).
-        b_delta: Reference weights for error estimation. Shape: [1, 3].
-    """
-
-    order = 3
-    error_exponent = 3  # estimate against the trapezoidal rule, exact degree 1
-    n_tableau_c = 3
-
-    def __init__(self, device: str | torch.device | None = None) -> None:
-        """Initialize the 3rd-order variable method with Sanderse-Veldman weights."""
-        super().__init__(device)
-        # Reference weights (trapezoidal rule) used for error estimation
-        self.b_delta = torch.tensor(
-            [[0.5, 0.0, 0.5]], dtype=torch.float64, device=self.device
-        )
-
-    def to_device(self, device: str | torch.device) -> None:
-        """Move tensors to the specified device."""
-        self.b_delta = self.b_delta.to(device)
-
-    def to_dtype(self, dtype: torch.dtype) -> None:
-        """Convert tensors to the specified dtype."""
-        self.b_delta = self.b_delta.to(dtype)
-
-    def _b0(self, a: torch.Tensor) -> torch.Tensor:
-        """Weight for the left endpoint (c=0). Shape follows input a."""
-        return 0.5 - 1.0 / (6 * a)
-
-    def _ba(self, a: torch.Tensor) -> torch.Tensor:
-        """Weight for the interior point (c=a). Shape follows input a."""
-        return 1.0 / (6 * a * (1 - a))
-
-    def _b1(self, a: torch.Tensor) -> torch.Tensor:
-        """Weight for the right endpoint (c=1). Shape follows input a."""
-        return (2.0 - 3 * a) / (6 * (1.0 - a))
-
-    def tableau_b(self, c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Compute b weights dynamically from actual quadrature positions.
-
-        Uses the generic 3rd-order Sanderse-Veldman formula. The middle
-        node position 'a' (where 0 < a < 1) determines all three weights.
-
-        Butcher tableau (degree P-1 embedded pair):
-
-            c |      b
-            ------------------
-            0 | 1/2 - 1/(6a)
-            a | 1/(6a(1-a))
-            1 | (2-3a)/(6(1-a))
-
-        Args:
-            c: Normalized quadrature positions within each step. The middle
-                node position a = c[:,1,0] determines the weights.
-                Shape: [N, C, T] where C=3, values in [0, 1].
-
-        Returns:
-            Tuple of (b, b_error) where:
-                - b: Primary method weights. Shape: [N, C].
-                - b_error: Difference from reference weights for error
-                  estimation. Shape: [N, C].
-        """
-        # Extract the middle node position 'a' for each step
-        a = c[:, 1, 0]
-        # Compute the three b weights as functions of 'a'
-        b = torch.stack([self._b0(a), self._ba(a), self._b1(a)]).transpose(0, 1)
-        # Error is the difference between the computed weights and the
-        # reference trapezoidal rule weights
-        b_error = b - self.b_delta
-
-        return b, b_error
-
-
-# Registry of variable-sampling methods, keyed by name.
-# These are classes (not instances) since they need per-device initialization.
-INTERPOLATORY_METHODS = {
-    "adaptive_heun": _VARIABLE_SECOND_ORDER,
-    "interpolatory3_variable": _Interpolatory3Variable,
+# Registry of the variable-sampling solver, keyed by name: rules that are
+# valid at the node positions that solver produces. Instances, cloned per
+# solver by ``_get_method``. ``adaptive_heun`` is the uniform heun object
+# (see the module docstring).
+INTERPOLATORY_METHODS: dict[str, MethodClass] = {
+    "adaptive_heun": _ADAPTIVE_HEUN,
+    "interpolatory3_variable": _INTERPOLATORY_3,
 }

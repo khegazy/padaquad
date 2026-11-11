@@ -17,8 +17,8 @@ Regenerate is required:
   * at every Phase 5 file-split commit, to verify bit-equivalence;
   * any time a method's adaptive controller is intentionally changed.
 
-Variable-sampling cases are excluded because the variable solver is
-currently non-functional (see ``test_variable_integration.py``).
+Only uniform-sampling methods are pinned here; variable-sampling results
+are checked for accuracy in ``test_variable_integration.py``.
 
 Phase 0 of the quadrature alignment plan.
 """
@@ -57,9 +57,7 @@ TOLERANCES = {
 }
 
 
-def _case_key(
-    method: str, integrand: str, tol_label: str, take_gradient: bool
-) -> str:
+def _case_key(method: str, integrand: str, tol_label: str, take_gradient: bool) -> str:
     """Stable key for a snapshot case in the JSON data file.
 
     ``take_gradient`` is part of the key: the accepted-panel re-check runs only

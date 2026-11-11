@@ -88,8 +88,8 @@ def _uniform_quadrature(method, d: int) -> float:
 
     For a unit panel, the rule is ``sum(b_i * c_i**d)``: no h scaling.
     """
-    c = method.tableau.c.to(torch.float64).flatten()
-    b = method.tableau.b.to(torch.float64).flatten()
+    c = method.tableau.c.to(torch.float64)
+    b = method.tableau.b.to(torch.float64)
     return torch.sum(b * c**d).item()
 
 
@@ -147,7 +147,9 @@ def _variable_quadrature(method, c_normalized: torch.Tensor, d: int) -> float:
     """
     c = c_normalized.to(torch.float64).view(1, -1, 1)
     b, _ = method.tableau_b(c)
-    return (b[0] * c_normalized.to(torch.float64) ** d).sum().item()
+    # Weights are [C] (constant rule) or [N, C]; take panel 0's weight vector.
+    b = b.reshape(-1, c.shape[1])[0]
+    return (b * c_normalized.to(torch.float64) ** d).sum().item()
 
 
 class TestVariableHeunExactness:

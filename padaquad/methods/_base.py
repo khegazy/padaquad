@@ -38,9 +38,9 @@ class _Tableau:
             c[-1]=1 is the step end. Shape: [C] where C is the number of
             quadrature points per step.
         b: Weights for the primary (higher-order) integral estimate.
-            Shape: [C] for uniform methods, [1, C] for some methods.
+            Shape: [C], like c.
         b_error: Difference between primary and embedded method weights.
-            The error estimate is h * sum(b_error * f(t)). Shape: same as b.
+            The error estimate is h * sum(b_error * f(t)). Shape: [C].
     """
 
     c: torch.Tensor

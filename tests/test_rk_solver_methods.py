@@ -134,7 +134,7 @@ class TestVariableGetTableauB:
     """Tests for VariableAdaptiveQuadrature._get_tableau_b."""
 
     def test_shape_adaptive_heun(self):
-        """adaptive_heun variable: b shape [1, 2, 1] (constant, broadcast over N)."""
+        """adaptive_heun variable: b shape [2, 1] (constant, broadcast over N)."""
         solver = make_variable_solver_for_unit_test("adaptive_heun")
         t = torch.tensor(
             [
@@ -147,9 +147,9 @@ class TestVariableGetTableauB:
             dtype=torch.float64,
         )
         b, b_error = solver._get_tableau_b(t)
-        # 2nd-order: weights are constant, returned as [1, C, 1]
-        assert b.shape == (1, 2, 1)
-        assert b_error.shape == (1, 2, 1)
+        # 2nd-order: weights are constant, returned as [C, 1]
+        assert b.shape == (2, 1)
+        assert b_error.shape == (2, 1)
 
     def test_normalizes_to_unit(self):
         """generic3: mesh=[2,3,4] normalizes to c=[0, 0.5, 1] → Simpson weights."""

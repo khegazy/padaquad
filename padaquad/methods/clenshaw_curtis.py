@@ -21,13 +21,14 @@ Clenshaw-Curtis?); Waldvogel 2006 BIT (Fast computation of CC weights).
 
 from __future__ import annotations
 
-import numpy as np
+import math
+
 import torch
 
 from ._base import MethodClass, _Tableau
 
 
-def _clenshaw_curtis_weights_unit(n: int) -> np.ndarray:
+def _clenshaw_curtis_weights_unit(n: int) -> list[float]:
     """Compute Clenshaw-Curtis weights on (-1, 1) for n+1 Chebyshev nodes.
 
     Nodes are x_k = cos(k * pi / n) for k = 0..n; the rule integrates
@@ -35,21 +36,26 @@ def _clenshaw_curtis_weights_unit(n: int) -> np.ndarray:
 
     Returns weights of length n+1, indexed as the nodes (i.e. weight at
     cos(k*pi/n) is at position k).
+
+    Computed with Python floats and ``math.cos`` (the C library cosine), in
+    this loop order. Do not vectorize the sum over j: reordering the additions
+    changes the weights in the last bits, and ``torch.cos`` differs from the C
+    library cosine by one unit in the last place on some arguments.
     """
     if n == 0:
-        return np.array([2.0])
+        return [2.0]
     # Trefethen 2008 / Waldvogel 2006 cosine-series formula.
-    c_aux = np.zeros(n + 1)
+    c_aux = [0.0] * (n + 1)
     c_aux[0] = 2.0
     for k in range(2, n + 1, 2):
         c_aux[k] = 2.0 / (1.0 - k * k)
-    w = np.zeros(n + 1)
-    pi_n = np.pi / n
+    w = [0.0] * (n + 1)
+    pi_n = math.pi / n
     for k in range(n + 1):
         s = c_aux[0] / 2  # j=0 term, halved
         for j in range(1, n):
-            s += c_aux[j] * np.cos(j * k * pi_n)
-        s += c_aux[n] * np.cos(k * np.pi) / 2  # j=n term, halved
+            s += c_aux[j] * math.cos(j * k * pi_n)
+        s += c_aux[n] * math.cos(k * math.pi) / 2  # j=n term, halved
         w[k] = (2.0 / n) * s
     # Halve the endpoint weights (boundary correction)
     w[0] /= 2.0
@@ -74,29 +80,24 @@ def _build_clenshaw_curtis_tableau(n: int) -> _Tableau:
 
     # CC_(n/2) nodes coincide with CC_n nodes at indices 0, 2, 4, ..., n.
     # Build the extended CC_(n/2) weights on the CC_n grid.
-    w_cc_low_extended = np.zeros(n + 1)
+    w_cc_low_extended = [0.0] * (n + 1)
     w_cc_low_extended[0::2] = w_cc_low
 
     # Map (-1, 1) -> [0, 1]. The natural CC indexing has x_0 = +1,
     # x_n = -1 (descending), so to get c[0] = 0 and c[-1] = 1 we
     # reverse the index: c[k] = (cos((n-k)*pi/n) + 1) / 2.
-    nodes_unit = np.array(
-        [(np.cos((n - k) * np.pi / n) + 1.0) / 2.0 for k in range(n + 1)],
-        dtype=np.float64,
-    )
+    nodes_unit = [(math.cos((n - k) * math.pi / n) + 1.0) / 2.0 for k in range(n + 1)]
     # Force exact endpoint values to avoid sub-eps drift.
     nodes_unit[0] = 0.0
     nodes_unit[-1] = 1.0
 
     # Reverse the weight arrays to match the reversed node order.
-    b_high = (w_cc_high[::-1] / 2.0).astype(np.float64)
-    b_low_ext = (w_cc_low_extended[::-1] / 2.0).astype(np.float64)
-    b_error = b_high - b_low_ext
-
+    b_high = torch.tensor(w_cc_high[::-1], dtype=torch.float64) / 2.0
+    b_low_ext = torch.tensor(w_cc_low_extended[::-1], dtype=torch.float64) / 2.0
     return _Tableau(
-        c=torch.from_numpy(nodes_unit).to(torch.float64),
-        b=torch.from_numpy(b_high).to(torch.float64),
-        b_error=torch.from_numpy(b_error).to(torch.float64),
+        c=torch.tensor(nodes_unit, dtype=torch.float64),
+        b=b_high,
+        b_error=b_high - b_low_ext,
     )
 
 

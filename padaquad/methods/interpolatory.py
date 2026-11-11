@@ -112,7 +112,7 @@ class _VARIABLE_SECOND_ORDER(_VariableSubclass):
                 Shape: [N, C, T] where values are in [0, 1].
 
         Returns:
-            Tuple of (b, b_error) tensors. Shape: [1, C].
+            Tuple of (b, b_error) tensors. Shape: [C].
         """
         b = self.tableau.b
         b_error = self.tableau.b_error

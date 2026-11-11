@@ -13,7 +13,6 @@ tests/test_exactness.py validate the values.
 
 from __future__ import annotations
 
-import numpy as np
 import torch
 
 from ._base import MethodClass, _Tableau
@@ -58,9 +57,14 @@ def _build_gauss_kronrod_tableau(
         G_extended has 0 at K-only nodes — the standard error
         indicator for an embedded G-K pair).
     """
-    xgk_half = np.array(xgk_half_with_zero, dtype=np.float64)  # [n+1]
-    wgk_half = np.array(wgk_half_with_zero, dtype=np.float64)  # [n+1]
-    wg_g = np.array(wg_at_g_pos, dtype=np.float64)
+    # Every tensor is created as float64 explicitly: a tensor built from Python
+    # floats without dtype= is float32, which would silently round the weights.
+    f64 = torch.float64
+    xgk_half = torch.tensor(xgk_half_with_zero, dtype=f64)  # [n+1]
+    wgk_half = torch.tensor(wgk_half_with_zero, dtype=f64)  # [n+1]
+    wg_g = torch.tensor(wg_at_g_pos, dtype=f64)
+    zero = torch.zeros(1, dtype=f64)
+    one = torch.ones(1, dtype=f64)
 
     # Build full K_{2n+1} arrays in (-1, 1), ascending order:
     #   [-x_n, ..., -x_1, 0, x_1, ..., x_n]
@@ -68,23 +72,26 @@ def _build_gauss_kronrod_tableau(
     # (largest first); reversed, it is in ascending order.
     pos_x = xgk_half[:-1]  # descending magnitudes
     pos_w = wgk_half[:-1]
-    center_w = wgk_half[-1]
+    center_w = wgk_half[-1:]
 
     # Negative side (ascending nodes from most negative): -pos_x in original
     # order is [-largest, -second_largest, ..., -smallest], which is exactly
     # ascending from most negative to least negative.
-    xgk_full = np.concatenate([-pos_x, [0.0], pos_x[::-1]])
-    wgk_full = np.concatenate([pos_w, [center_w], pos_w[::-1]])
+    xgk_full = torch.cat([-pos_x, zero, pos_x.flip(0)])
+    wgk_full = torch.cat([pos_w, center_w, pos_w.flip(0)])
 
     # Build G_n weights extended to the K_{2n+1} grid (zero at K-only
     # nodes). For even n, G_n has no center node (wg_at_center = 0).
     # For odd n (G7, G15, ...), the center node IS a G_n node and
     # wg_at_center is its non-zero weight.
-    wg_extended_pos_half = np.zeros_like(pos_w)
-    for i, gi in enumerate(g_pos_indices_in_half):
-        wg_extended_pos_half[gi] = wg_g[i]
-    wg_extended_full = np.concatenate(
-        [wg_extended_pos_half, [wg_at_center], wg_extended_pos_half[::-1]]
+    wg_extended_pos_half = torch.zeros_like(pos_w)
+    wg_extended_pos_half[g_pos_indices_in_half] = wg_g
+    wg_extended_full = torch.cat(
+        [
+            wg_extended_pos_half,
+            torch.tensor([wg_at_center], dtype=f64),
+            wg_extended_pos_half.flip(0),
+        ]
     )
 
     # Map (-1, 1) -> [0, 1]: c = (x + 1) / 2, w = w / 2 (Jacobian).
@@ -100,16 +107,10 @@ def _build_gauss_kronrod_tableau(
     # zero-weight nodes at 0 and 1; they're evaluated but contribute
     # nothing to the integral or error estimate. The cost is 2 wasted
     # f evaluations per panel — negligible for an N+2 = 23-node rule.
-    c_padded = np.concatenate([[0.0], c_unit, [1.0]])
-    b_padded = np.concatenate([[0.0], b_unit, [0.0]])
-    b_g_padded = np.concatenate([[0.0], b_g_unit, [0.0]])
-    b_error = b_padded - b_g_padded
-
-    return _Tableau(
-        c=torch.from_numpy(c_padded).to(torch.float64),
-        b=torch.from_numpy(b_padded).to(torch.float64),
-        b_error=torch.from_numpy(b_error).to(torch.float64),
-    )
+    c_padded = torch.cat([zero, c_unit, one])
+    b_padded = torch.cat([zero, b_unit, zero])
+    b_g_padded = torch.cat([zero, b_g_unit, zero])
+    return _Tableau(c=c_padded, b=b_padded, b_error=b_padded - b_g_padded)
 
 
 # G10-K21 (Gauss-Kronrod 21-point). K21 polynomial exactness = 31.

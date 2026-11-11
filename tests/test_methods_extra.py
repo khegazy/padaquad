@@ -28,12 +28,12 @@ class TestVariableSecondOrderTableauB:
         assert torch.allclose(b, expected_b)
 
     def test_shape(self):
-        """Output shapes are [1, C] for C=2."""
+        """Output shapes are [C] for C=2, the stored tableau shape."""
         method = _VARIABLE_SECOND_ORDER()
         c = torch.rand(5, 2, 1)
         b, b_error = method.tableau_b(c)
-        assert b.shape == (1, 2)
-        assert b_error.shape == (1, 2)
+        assert b.shape == (2,)
+        assert b_error.shape == (2,)
 
     def test_ignores_c_values(self):
         """Different c values produce identical b outputs."""

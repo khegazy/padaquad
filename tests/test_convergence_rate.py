@@ -71,8 +71,8 @@ def _fixed_panel_uniform(method, f, a: float, b: float, N: int) -> float:
     b64 = torch.tensor(b, dtype=torch.float64)
     h = (b64 - a64) / N
     barriers = a64 + h * torch.arange(N + 1, dtype=torch.float64)
-    c = method.tableau.c.to(torch.float64).flatten()
-    weights = method.tableau.b.to(torch.float64).flatten()
+    c = method.tableau.c.to(torch.float64)
+    weights = method.tableau.b.to(torch.float64)
     # Nodes: [N, C], panel i node j is barriers[i] + h*c[j]
     nodes = barriers[:-1, None] + h * c[None, :]
     y = f(nodes.flatten()).view(N, len(c))

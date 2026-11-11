@@ -30,8 +30,8 @@ _ADAPTIVE_HEUN = MethodClass(
     error_exponent=2,  # embedded Euler, exact degree 0
     tableau=_Tableau(
         c=torch.tensor([0.0, 1.0], dtype=torch.float64),
-        b=torch.tensor([[0.5, 0.5]], dtype=torch.float64),
-        b_error=torch.tensor([[0.5, -0.5]], dtype=torch.float64),
+        b=torch.tensor([0.5, 0.5], dtype=torch.float64),
+        b_error=torch.tensor([0.5, -0.5], dtype=torch.float64),
     ),
 )
 

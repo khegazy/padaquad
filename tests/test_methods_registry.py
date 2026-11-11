@@ -188,15 +188,12 @@ def test_uniform_methods_have_canonical_first_and_last_nodes():
     """
     for name, method in UNIFORM_METHODS.items():
         c = method.tableau.c
-        # Some methods have c shape [C], others [1, C]. Flatten to
-        # 1-D for the boundary check.
-        c_flat = c.flatten()
-        assert float(c_flat[0]) == 0.0, (
-            f"{name}: c[0] = {float(c_flat[0])}, expected 0.0 "
+        assert float(c[0]) == 0.0, (
+            f"{name}: c[0] = {float(c[0])}, expected 0.0 "
             f"(solver assumes step starts at c[0])"
         )
-        assert float(c_flat[-1]) == 1.0, (
-            f"{name}: c[-1] = {float(c_flat[-1])}, expected 1.0 "
+        assert float(c[-1]) == 1.0, (
+            f"{name}: c[-1] = {float(c[-1])}, expected 1.0 "
             f"(solver assumes step ends at c[-1])"
         )
 
@@ -208,8 +205,7 @@ def test_uniform_methods_b_weights_sum_to_one():
     exactness or method order.
     """
     for name, method in UNIFORM_METHODS.items():
-        b = method.tableau.b.flatten()
-        b_sum = float(b.sum())
+        b_sum = float(method.tableau.b.sum())
         assert abs(b_sum - 1.0) < 1e-12, (
             f"{name}: sum(b) = {b_sum}, expected 1.0 "
             f"(broken weights produce wrong magnitude regardless of order)"

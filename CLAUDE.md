@@ -101,7 +101,10 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 **Snapshot tests** are the regression net for internal refactors: the
 file `tests/test_snapshots_data.json` pins `integral`, `integral_error`,
 and `n_optimal_mesh` for every (method × integrand × tolerance) cell.
-Regenerate with `TPD_REGENERATE_SNAPSHOTS=1 pytest tests/test_snapshots.py`.
+`n_optimal_mesh` is checked only where the stored error estimate is above
+float64 rounding level (|error| > 10·eps·|I|); below it, last-bit differences
+between CPUs change the mesh-merge decisions and the count varies between CI
+runners. Regenerate with `TPD_REGENERATE_SNAPSHOTS=1 pytest tests/test_snapshots.py`.
 
 ## Architecture
 

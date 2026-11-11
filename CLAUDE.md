@@ -9,7 +9,7 @@ with code in this repository.
 quadrature**: it computes definite integrals
 $\int_a^b f(t)\,dt$ for a known integrand $f$ by evaluating many
 quadrature panels in parallel batches on GPU, with full autograd through
-the integration loop. v0.2.0 (Alpha), Python 3.10+.
+the integration loop. v0.2.0 (Alpha), Python 3.11+.
 
 **Critical distinction.** The integrand `f` depends only on `t` (and
 optional extra args), NOT on accumulated state `y`. This independence

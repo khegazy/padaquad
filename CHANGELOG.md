@@ -39,6 +39,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Removed
 
+- **Support for Python 3.10.** padaquad now requires Python 3.11 or newer (`requires-python = ">=3.11"`), and CI tests Python 3.11 and 3.12. numpy 2.2.6 is the last numpy release that installs on Python 3.10, and its type stubs give `np.ndarray` no default type arguments, so the CI type check (`disallow_any_generics`) failed on it. The numpy used in CI (`tests/requirements.txt`) moves from 2.2.6 to 2.4.6, the newest release that supports Python 3.11.
 - **`integrate(reuse_mesh=...)` and the `previous_f_id` attribute.** Use `same_f=True`. Migration: with `reuse_mesh=True` an explicit `mesh` won over the cached one; with `same_f=True` the stored mesh and `max_batch` replace the caller's. `same_f` takes `reuse_mesh`'s position, so a positional `reuse_mesh` argument now sets `same_f`.
 - **The `device_type` and `device_ids` solver attributes.** Use `solver.device` (a `torch.device`) instead.
 - **`_get_num_tableau_c()`** on both solvers. It recomputed `solver.C`; use `solver.C`.

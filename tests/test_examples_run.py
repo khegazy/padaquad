@@ -96,3 +96,23 @@ def test_gradient_of_integral_runs_and_assertions_pass():
             f"gradient_of_integral.py output missing marker {marker!r}; "
             f"stdout=\n{out.stdout[:500]}"
         )
+
+
+VERIFICATION_DIR = EXAMPLES_DIR / "verification"
+
+
+def test_verification_scripts_pass():
+    """Every script in ``examples/verification/`` exits 0 and prints no
+    ``[FAIL]``. Each script exits 1 itself when one of its checks fails."""
+    scripts = sorted(VERIFICATION_DIR.glob("*.py"))
+    assert {s.name for s in scripts} >= {
+        "polynomial_degree.py",
+        "integral_accuracy.py",
+    }, f"missing verification scripts in {VERIFICATION_DIR}"
+    for script in scripts:
+        out = _run(script)
+        assert out.returncode == 0, (
+            f"{script.name} exited {out.returncode}; stdout=\n{out.stdout}\n"
+            f"stderr=\n{out.stderr}"
+        )
+        assert "[FAIL]" not in out.stdout, f"{script.name}: stdout=\n{out.stdout}"

@@ -182,11 +182,11 @@ for epoch in range(N_epochs):
 
 The library ships thirteen quadrature rules across three families:
 
-| Family | Methods | Polynomial exactness | Notes |
+| Family | Methods | Degree | Notes |
 |---|---|---|---|
-| Gauss-Kronrod | `gk7`, `gk15`, `gk21`, `gk31` | 10 / 22 / 31 / 46 | Embedded G_n / K_(2n+1) pair, the canonical adaptive-quadrature workhorse since 1965 (Laurie 1997). `gk21` is the default. `gk7` (G3-K7, 9 evaluation slots) fills the low-node end. |
-| Clenshaw-Curtis | `cc5`, `cc9`, `cc17`, `cc33`, `cc65` | 4 / 8 / 16 / 32 / 64 | Chebyshev nodes, **nested** by doubling. Excellent on analytic integrands (Trefethen 2008). |
-| Runge-Kutta | `adaptive_heun`, `fehlberg2`, `bosh3`, `dopri5` | 1 / 1 / 2 / 4 | Embedded RK pairs from the ODE-solver literature. |
+| Gauss-Kronrod | `gk7`, `gk15`, `gk21`, `gk31` | 11 / 23 / 31 / 47 | Embedded G_n / K_(2n+1) pair, the canonical adaptive-quadrature workhorse since 1965 (Laurie 1997). `gk21` is the default. `gk7` (G3-K7, 9 evaluation slots) fills the low-node end. |
+| Clenshaw-Curtis | `cc5`, `cc9`, `cc17`, `cc33`, `cc65` | 5 / 9 / 17 / 33 / 65 | Chebyshev nodes, **nested** by doubling. Excellent on analytic integrands (Trefethen 2008). |
+| Runge-Kutta | `adaptive_heun`, `fehlberg2`, `bosh3`, `dopri5` | 1 / 1 / 2 / 4 | Embedded RK pairs from the ODE-solver literature. `fehlberg2`'s error estimate ignores curvature and can be far too small (see `examples/verification/integral_accuracy.py`). |
 
 Plus two variable-node methods (`adaptive_heun` and
 `interpolatory3_variable`) that re-weight existing evaluations on mesh
@@ -198,6 +198,22 @@ the RK rules and the headline `gk15`/`cc17`: useful when the adaptive
 controller refines aggressively and a high-node rule would waste
 evaluations on smooth regions. The RK methods are kept for
 backwards-compatibility and as baselines.
+
+A method's *degree* is the highest polynomial degree it integrates exactly;
+`UNIFORM_METHODS["gk21"].degree` gives it, and `order` is `degree + 1`.
+
+### Check the accuracy yourself
+
+Two scripts in [`examples/verification/`](examples/verification/) check the
+claims above on your machine, and the test suite runs them:
+
+- `polynomial_degree.py` measures every method's degree from its stored nodes
+  and weights, and checks that its error estimate has the strength the solver
+  assumes. You can do the same for one method with
+  `UNIFORM_METHODS["gk21"].measure_degree()`.
+- `integral_accuracy.py` integrates functions with known integrals using every
+  method at several tolerances, and checks each actual error against what the
+  tolerance allows.
 
 ## Use cases
 

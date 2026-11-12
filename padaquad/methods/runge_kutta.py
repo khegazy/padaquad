@@ -27,7 +27,10 @@ from ._base import UniformMethodClass, _Tableau
 # Adaptive Heun: 2nd-order method with 2 evaluations per step (endpoints only)
 _ADAPTIVE_HEUN = UniformMethodClass(
     degree=1,  # trapezoidal rule
-    error_exponent=2,  # embedded Euler, exact degree 0
+    # The error weights subtract the right-endpoint rectangle rule [0, 1]
+    # (degree 0), not Euler's method [1, 0]: the estimate has the size of
+    # trapezoid minus Euler, h |f(1) - f(0)| / 2, with the opposite sign.
+    error_exponent=2,
     tableau=_Tableau(
         c=torch.tensor([0.0, 1.0], dtype=torch.float64),
         b=torch.tensor([0.5, 0.5], dtype=torch.float64),

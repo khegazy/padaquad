@@ -98,6 +98,7 @@ def path_b_integrate_the_gradient() -> float:
 
 
 def main() -> None:
+    """Compute the gradient both ways and check they agree with the exact value."""
     theta = torch.tensor(1.7, dtype=torch.float64, requires_grad=True)
 
     grad_a = path_a_backprop_through_integral(theta)

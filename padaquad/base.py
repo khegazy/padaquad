@@ -167,8 +167,9 @@ class SolverBase(ABC, DistributedEnvironment):
             If True, writes the time each part of the integration takes to
             the file ``padaquad_speed.log``.
         dtype : torch.dtype
-            torch.float64 or torch.float32. torch.float16 raises ``ValueError``:
-            its rounding error (about 1e-3) exceeds typical tolerances.
+            Either torch.float64 or torch.float32. torch.float16 raises
+            ``ValueError``: its rounding error (about 1e-3) exceeds typical
+            tolerances.
         device : str or torch.device or None
             'cpu', 'cuda', an indexed 'cuda:N', or a torch.device; None picks
             CUDA when it is available.

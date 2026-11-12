@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 @dataclass(kw_only=True)
 class IntegrationResult:
-    """
+    r"""
     Result of an integration: the integral, its error estimate, the mesh and diagnostics.
 
     Every field is required and passed by keyword (``kw_only=True``), except
@@ -156,6 +156,11 @@ class IntegrationResult:
 
         Equal to ``100 * n_start_steps_split / n_start_steps``; ``None`` in the
         per-batch result passed to ``loss_fxn``, where the counts are ``None``.
+
+        Returns
+        -------
+        float or None
+            The percentage, from 0 to 100, or None.
         """
         if self.n_start_steps is None or self.n_start_steps_split is None:
             return None

@@ -25,7 +25,7 @@ OUTPUT = ROOT / "docs" / "reference" / "generated" / "performance_table.md"
 
 
 def render() -> str:
-    """The results table as Markdown, from the committed results file."""
+    """Render the results table as Markdown from the committed results file."""
     spec = importlib.util.spec_from_file_location("torchdiffeq_comparison", BENCHMARK)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {BENCHMARK}")

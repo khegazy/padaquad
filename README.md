@@ -114,7 +114,7 @@ the nodes of many subintervals in one call, on a CPU or a GPU.
 ## Differentiable integration
 <!-- include-start: autodiff -->
 
-Every step of the integration is differentiable, so you can take
+Every operation of the integration is differentiable, so you can take
 gradients of the result with respect to anything the integrand depends
 on. There are two equivalent ways to compute
 $\nabla_\theta \int f_\theta(t)\,dt$:
@@ -193,11 +193,11 @@ for epoch in range(N_epochs):
 
 ## Available methods
 
-The library ships thirteen quadrature rules across three families:
+The library ships thirteen quadrature methods across three families:
 
 | Family | Methods | Degree | Notes |
 |---|---|---|---|
-| Gauss-Kronrod | `gk7`, `gk15`, `gk21`, `gk31` | 11 / 23 / 31 / 47 | Embedded G_n / K_(2n+1) pair: the error estimate is the difference between the Kronrod and the Gauss rule, as in QUADPACK (Gonnet 2012, Sec. 2.4). `gk21` is the default. `gk7` (G3-K7, 9 evaluation slots) fills the low-node end. |
+| Gauss-Kronrod | `gk7`, `gk15`, `gk21`, `gk31` | 11 / 23 / 31 / 47 | Embedded G_n / K_(2n+1) pair: the error estimate is the difference between the Kronrod and the Gauss method, as in QUADPACK (Gonnet 2012, Sec. 2.4). `gk21` is the default. `gk7` (G3-K7, 9 evaluation slots) fills the low-node end. |
 | Clenshaw-Curtis | `cc5`, `cc9`, `cc17`, `cc33`, `cc65` | 5 / 9 / 17 / 33 / 65 | Chebyshev nodes, **nested** by doubling. Excellent on analytic integrands (Trefethen 2008). |
 | Runge-Kutta | `adaptive_heun`, `fehlberg2`, `bosh3`, `dopri5` | 1 / 1 / 2 / 4 | Embedded RK pairs from the ODE-solver literature. `fehlberg2`'s error estimate ignores curvature and can be far too small (see `examples/verification/integral_accuracy.py`). |
 
@@ -210,8 +210,8 @@ its middle node at the center, where it is Simpson's rule.
 
 For smooth integrands at moderate-to-high accuracy, prefer `gk21` or
 `cc33`. The low-node methods (`gk7`, `cc5`, `cc9`) fill the gap between
-the RK rules and the headline `gk15`/`cc17`: useful when the adaptive
-controller refines aggressively and a high-node rule would waste
+the Runge-Kutta methods and the headline `gk15`/`cc17`: useful when the adaptive
+controller refines aggressively and a high-node method would waste
 evaluations on smooth regions. The RK methods are kept for
 backwards-compatibility and as baselines.
 
@@ -317,7 +317,7 @@ the same text. In short:
 | Library | Adaptive subdivision | Differentiable | Parallel | Best for |
 |---|---|---|---|---|
 | `scipy.integrate.quad` | ✓ | ✗ | ✗ | classical one-shot smooth quadrature |
-| `torchquad` | ✗ | ✓ | ✓ | fixed-grid rules and Monte Carlo (including VEGAS), also in several dimensions |
+| `torchquad` | ✗ | ✓ | ✓ | fixed-grid methods and Monte Carlo (including VEGAS), also in several dimensions |
 | `torchdiffeq` | adaptive step size | ✓ | ✗ | true state-coupled ODEs $\dot y = f(t, y)$ |
 | **padaquad** | ✓ | ✓ | ✓ | path integrals, learned-integrand integration, PINN-style residuals |
 

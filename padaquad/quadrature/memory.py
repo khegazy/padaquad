@@ -41,7 +41,7 @@ _GRADIENT_MEMORY_SAFETY_FACTOR = 2.1
 
 def _is_out_of_memory(e: BaseException) -> bool:
     """
-    True if e signals that an allocation did not fit in memory.
+    Return True if e signals that an allocation did not fit in memory.
 
     Covers a GPU out-of-memory error, a refused PyTorch CPU allocation (a plain
     RuntimeError naming DefaultCPUAllocator), a failed cudaMalloc or
@@ -50,6 +50,16 @@ def _is_out_of_memory(e: BaseException) -> bool:
     cuSOLVER, cuSPARSE and cuFFT equivalents; cuDNN 9's
     CUDNN_STATUS_INTERNAL_ERROR_*_ALLOCATION_FAILED), and Python's MemoryError
     (raised by numpy). The strings were checked in torch 2.8's libraries.
+
+    Parameters
+    ----------
+    e : BaseException
+        The exception raised by an allocation or by a call of the integrand.
+
+    Returns
+    -------
+    bool
+        True if ``e`` is one of the out-of-memory errors listed above.
     """
     return isinstance(e, (torch.OutOfMemoryError, MemoryError)) or any(
         s in str(e)
@@ -419,16 +429,25 @@ class _MemoryManagement:
         Returns
         -------
         tuple[Callable[[], None], Callable[[], int], float]
-            reset: Starts a new peak measurement (a no-op for the last method).
-            read: Memory in bytes, as described above.
-            E: GB to add to every M, the most the reading can be too low.
+            The functions ``reset`` (starts a new peak measurement; a no-op for
+            the last method) and ``read`` (memory in bytes, as described above),
+            and E, the GB to add to every M (the most the reading can be low).
         """
         if self.device.type == "cuda":
 
             def reset_cuda() -> None:
+                """Set the device's peak of allocated memory to its current value."""
                 torch.cuda.reset_peak_memory_stats(self.device)
 
             def read_cuda() -> int:
+                """
+                Read the device's peak of allocated memory.
+
+                Returns
+                -------
+                int
+                    The peak in bytes since the last reset.
+                """
                 return torch.cuda.max_memory_allocated(self.device)
 
             return reset_cuda, read_cuda, 0.0
@@ -440,17 +459,34 @@ class _MemoryManagement:
         except OSError:
 
             def no_reset() -> None:
-                pass
+                """Do nothing: no resettable peak exists on this system."""
 
             def read_rss() -> int:
+                """
+                Read the process's current resident memory.
+
+                Returns
+                -------
+                int
+                    The resident memory in bytes.
+                """
                 return psutil.Process().memory_info().rss
 
             return no_reset, read_rss, 0.0
 
         def reset_linux() -> None:
+            """Reset the process's peak resident memory, VmHWM, to its current value."""
             clear_refs.write_text("5")
 
         def read_vmhwm() -> int:
+            """
+            Read the process's peak resident memory, VmHWM.
+
+            Returns
+            -------
+            int
+                The peak in bytes since the last reset.
+            """
             # The line reads "VmHWM:   14336 kB", in KiB.
             status = Path("/proc/self/status").read_text()
             return int(status.split("VmHWM:")[1].split()[0]) * 1024

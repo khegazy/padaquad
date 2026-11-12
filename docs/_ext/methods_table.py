@@ -73,7 +73,7 @@ def methods_table_rows() -> list[dict[str, Any]]:
 
 
 def render_methods_table() -> str:
-    """The table as MyST Markdown, citing each method's sources."""
+    """Render the table as MyST Markdown, citing each method's sources."""
     lines = [
         "| " + " | ".join(title for _, title in COLUMNS) + " |",
         "|" + "---|" * len(COLUMNS),

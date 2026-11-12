@@ -114,7 +114,7 @@ def t_squared(t: torch.Tensor, _y: torch.Tensor | None = None) -> torch.Tensor:
     Returns
     -------
     torch.Tensor
-        t squared. Shape: [N, T].
+        The square of t. Shape: [N, T].
     """
     return t**2
 
@@ -306,7 +306,23 @@ def damped_sine_solution(
     _w = 2 * torch.pi * w
 
     def numerator(t: torch.Tensor, _w: float, a: float) -> torch.Tensor:
-        """Evaluate exp(-a t) (a sin(_w t) + _w cos(_w t)), the antiderivative's numerator."""
+        """
+        Evaluate exp(-a t) (a sin(_w t) + _w cos(_w t)), the antiderivative's numerator.
+
+        Parameters
+        ----------
+        t : torch.Tensor
+            A bound of the integral, with one element (T = 1).
+        _w : float
+            Angular frequency, 2 pi w.
+        a : float
+            Decay rate.
+
+        Returns
+        -------
+        torch.Tensor
+            The numerator at t. Shape: [1].
+        """
         t = torch.tensor([t])
         return torch.exp(-a * t) * (a * torch.sin(_w * t) + _w * torch.cos(_w * t))
 
@@ -326,7 +342,7 @@ _WS_MIN_FINAL = torch.tensor([-1.166, 1.477])
 
 
 def wolf_schlegel(t: torch.Tensor, _y: torch.Tensor | None = None) -> torch.Tensor:
-    """
+    r"""
     Quartic potential of two coordinates, evaluated along a straight path.
 
     The path runs from :math:`(x, y) = (1.133, -1.486)` at t = 0 to

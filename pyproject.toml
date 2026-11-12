@@ -73,11 +73,12 @@ exclude = ["**/__pycache__"]
 
 [tool.pytest.ini_options]
 minversion = "6.0"
-addopts = ["-p no:warnings", "--import-mode=importlib"]
+# --doctest-modules runs the Examples sections of the docstrings in padaquad/.
+addopts = ["-p no:warnings", "--import-mode=importlib", "--doctest-modules"]
 xfail_strict = true
 log_cli_level = "warn"
 pythonpath = "padaquad"
-testpaths = ["tests"]
+testpaths = ["tests", "padaquad"]
 markers = [
   "tier1: must-have correctness tests for the split integration paths",
   "tier2: high-value edge-case and shape-variation tests",
@@ -103,6 +104,7 @@ exclude = ["examples/pode/**"]
 [tool.ruff.lint]
 select = [
   "A",      # flake8-builtins
+  "D",      # pydocstyle (NumPy convention, see pydocstyle.convention below)
   "ARG",    # flake8-unused-arguments
   "ASYNC",  # flake8-async
   "B",      # flake8-bugbear
@@ -163,7 +165,9 @@ required-imports = ["from __future__ import annotations"]
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]
 "tests/**" = ["ANN", "ARG", "D", "E402", "PTH", "S101"]
-"examples/**" = ["T201"]
+# Gallery scripts open with a title and underline, the format sphinx-gallery
+# needs, which the summary-line rules D205/D400/D415 do not allow.
+"examples/**" = ["T201", "D205", "D400", "D415"]
 "docs/conf.py" = ["INP001", "ERA001"]
 "docs/_ext/**" = ["INP001"]
 
@@ -188,3 +192,14 @@ disallow_any_generics = true
 no_implicit_optional = true
 warn_redundant_casts = true
 warn_unused_ignores = true
+
+[tool.numpydoc_validation]
+# Every numpydoc check except these three: a "See Also" section (SA01), an
+# Examples section (EX01; required only for the main public objects, which have
+# one) and an extended summary (ES01) are not required.
+checks = ["all", "SA01", "EX01", "ES01"]
+# These classes document their constructor options in __init__'s docstring
+# (checked on its own), so the class docstrings have no Parameters section.
+exclude = [
+  '\.(SolverBase|AdaptiveQuadrature|DistributedEnvironment|MethodClass|UniformMethodClass|VariableMethodClass|UniformAdaptiveQuadrature|VariableAdaptiveQuadrature)$',
+]

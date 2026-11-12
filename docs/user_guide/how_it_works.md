@@ -34,7 +34,7 @@ later call with `same_f=True` starts from. Pairs of neighbouring subintervals
 whose combined error is small are merged, so that a mesh finer than needed
 shrinks, and subintervals that failed are split.
 
-The rule that decides whether a pair is merged is padaquad's own derivation.
+The test that decides whether a pair is merged is padaquad's own derivation.
 Let two neighbouring subintervals of width $h$ have error estimates $e_1$ and
 $e_2$ and tolerance $\tau$, and let
 
@@ -56,7 +56,7 @@ when that prediction is below `remove_cut` (default 0.1):
 
 $$
 S < \frac{\texttt{remove\_cut}}{2^{k-1}} .
-$$ (merge-rule)
+$$ (merge-condition)
 
 The merged subinterval is not evaluated again; its contribution and error
 estimate are the sums of the pair's. In cumulative mode

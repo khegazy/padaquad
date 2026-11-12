@@ -65,13 +65,25 @@ class _Tableau:
         (``MethodClass.clone()``) if you want to leave the original tensors
         at their pre-conversion precision (which is irreversibly lossy when
         going to lower-precision dtypes).
+
+        Parameters
+        ----------
+        dtype : torch.dtype
+            The dtype to convert ``c``, ``b`` and ``b_error`` to.
         """
         self.c = self.c.to(dtype)
         self.b = self.b.to(dtype)
         self.b_error = self.b_error.to(dtype)
 
     def to_device(self, device: str | torch.device) -> None:
-        """Move all tableau tensors to the specified device."""
+        """
+        Move all tableau tensors to the specified device.
+
+        Parameters
+        ----------
+        device : str or torch.device
+            The device to move ``c``, ``b`` and ``b_error`` to.
+        """
         self.c = self.c.to(device)
         self.b = self.b.to(device)
         self.b_error = self.b_error.to(device)
@@ -138,6 +150,15 @@ class MethodClass(ABC):
         """
         Initialize with the method's degree, error exponent and sources.
 
+        Parameters
+        ----------
+        degree : int
+            Highest polynomial degree the method integrates exactly, >= 0.
+        error_exponent : int
+            The power k of the error estimate's :math:`h^k` scaling, >= 2.
+        references : tuple of str
+            Keys of ``docs/references.bib`` for the method's sources. Default: ().
+
         Raises
         ------
         ValueError
@@ -168,12 +189,17 @@ class MethodClass(ABC):
 
     @property
     def order(self) -> int:
-        """
+        r"""
         Order of the method, ``degree + 1``.
 
         On a smooth integrand the total error of the method applied on
         subintervals of width h falls like :math:`h^{\\text{order}}`; a method of
         degree n has order n + 1 (Gonnet 2012, Sec. 1 :cite:p:`gonnet2012`).
+
+        Returns
+        -------
+        int
+            The degree plus one.
         """
         return self.degree + 1
 
@@ -196,7 +222,7 @@ class MethodClass(ABC):
     @abstractmethod
     def weights(self, nodes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Weights for the integral and for its error estimate on each subinterval.
+        Return the weights for the integral and its error estimate on each subinterval.
 
         A subinterval of width h with integrand values y_i at its nodes
         contributes ``h * sum_i(b_i * y_i)`` to the integral and
@@ -215,15 +241,36 @@ class MethodClass(ABC):
 
     @abstractmethod
     def to_dtype(self, dtype: torch.dtype) -> None:
-        """Convert the method's tensors to ``dtype`` in place."""
+        """
+        Convert the method's tensors to ``dtype`` in place.
+
+        Parameters
+        ----------
+        dtype : torch.dtype
+            The dtype to convert to.
+        """
 
     @abstractmethod
     def to_device(self, device: str | torch.device) -> None:
-        """Move the method's tensors to ``device`` in place."""
+        """
+        Move the method's tensors to ``device`` in place.
+
+        Parameters
+        ----------
+        device : str or torch.device
+            The device to move to.
+        """
 
     @property
     def n_nodes(self) -> int:
-        """Number of nodes per subinterval (C)."""
+        """
+        Number of nodes per subinterval (C).
+
+        Returns
+        -------
+        int
+            The length of ``node_fractions()``.
+        """
         return len(self.node_fractions())
 
     def _check_node_fractions(self, c: torch.Tensor | None = None) -> None:
@@ -259,7 +306,7 @@ class MethodClass(ABC):
     def measure_degree(
         self, nodes: torch.Tensor | None = None, tol: float = 1e-12
     ) -> DegreeMeasurement:
-        """
+        r"""
         Measure the polynomial degree of the method and of its embedded method.
 
         Integrates the Legendre polynomials :math:`P_k(2t - 1)`,
@@ -381,6 +428,11 @@ class MethodClass(ABC):
         Each solver works on its own copy of the registry's float64 method, so
         dtype or device changes on one solver never reach the registry or
         another solver (lowering the dtype loses precision).
+
+        Returns
+        -------
+        Self
+            The copy, of the same class as ``self``.
         """
         return copy.deepcopy(self)
 
@@ -410,6 +462,17 @@ class UniformMethodClass(MethodClass):
         """
         Initialize with the method's degree, error exponent and tableau.
 
+        Parameters
+        ----------
+        degree : int
+            Highest polynomial degree the method integrates exactly, >= 0.
+        error_exponent : int
+            The power k of the error estimate's :math:`h^k` scaling, >= 2.
+        tableau : _Tableau
+            The node fractions ``c``, weights ``b`` and error weights ``b_error``.
+        references : tuple of str
+            Keys of ``docs/references.bib`` for the method's sources. Default: ().
+
         Raises
         ------
         ValueError
@@ -422,12 +485,19 @@ class UniformMethodClass(MethodClass):
         self._check_node_fractions()
 
     def node_fractions(self) -> torch.Tensor:
-        """The tableau's node fractions ``c``. Shape: [C]."""
+        """
+        Return the tableau's node fractions ``c``.
+
+        Returns
+        -------
+        torch.Tensor
+            The node fractions. Shape: [C].
+        """
         return self.tableau.c
 
     def weights(self, nodes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        The tableau's weights, the same for every subinterval.
+        Return the tableau's weights, the same for every subinterval.
 
         Parameters
         ----------
@@ -449,11 +519,25 @@ class UniformMethodClass(MethodClass):
         )
 
     def to_dtype(self, dtype: torch.dtype) -> None:
-        """Convert the tableau to ``dtype``."""
+        """
+        Convert the tableau to ``dtype``.
+
+        Parameters
+        ----------
+        dtype : torch.dtype
+            The dtype to convert to.
+        """
         self.tableau.to_dtype(dtype)
 
     def to_device(self, device: str | torch.device) -> None:
-        """Move the tableau to ``device``."""
+        """
+        Move the tableau to ``device``.
+
+        Parameters
+        ----------
+        device : str or torch.device
+            The device to move to.
+        """
         self.tableau.to_device(device)
 
 
@@ -495,6 +579,21 @@ class VariableMethodClass(MethodClass):
         """
         Initialize with the degree, error exponent, node fractions and weight function.
 
+        Parameters
+        ----------
+        degree : int
+            Highest polynomial degree the method integrates exactly at general
+            node positions, >= 0.
+        error_exponent : int
+            The power k of the error estimate's :math:`h^k` scaling, >= 2.
+        c : torch.Tensor
+            Node fractions of a new subinterval. Shape: [C].
+        weight_function : callable
+            Module-level function mapping nodes rescaled to [0, 1], shape
+            [N, C, T], to ``(b, b_error)``, each of shape [N, C].
+        references : tuple of str
+            Keys of ``docs/references.bib`` for the method's sources. Default: ().
+
         Raises
         ------
         ValueError
@@ -508,12 +607,19 @@ class VariableMethodClass(MethodClass):
         self._check_node_fractions()
 
     def node_fractions(self) -> torch.Tensor:
-        """The node fractions ``c`` of a new subinterval. Shape: [C]."""
+        """
+        Return the node fractions ``c`` of a new subinterval.
+
+        Returns
+        -------
+        torch.Tensor
+            The node fractions. Shape: [C].
+        """
         return self.c
 
     def weights(self, nodes: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Weights computed from each subinterval's actual node positions.
+        Compute the weights from each subinterval's actual node positions.
 
         Rescales each subinterval's nodes to [0, 1] (shift so the first node is
         0, divide by the subinterval's width) and applies ``weight_function``
@@ -548,9 +654,23 @@ class VariableMethodClass(MethodClass):
         return b.unsqueeze(-1), b_error.unsqueeze(-1)
 
     def to_dtype(self, dtype: torch.dtype) -> None:
-        """Convert the node fractions to ``dtype``."""
+        """
+        Convert the node fractions to ``dtype``.
+
+        Parameters
+        ----------
+        dtype : torch.dtype
+            The dtype to convert to.
+        """
         self.c = self.c.to(dtype)
 
     def to_device(self, device: str | torch.device) -> None:
-        """Move the node fractions to ``device``."""
+        """
+        Move the node fractions to ``device``.
+
+        Parameters
+        ----------
+        device : str or torch.device
+            The device to move to.
+        """
         self.c = self.c.to(device)

@@ -345,7 +345,19 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
     @classmethod
     def _check_error_norm(cls, error_norm: object) -> None:
-        """Validate the ``error_norm`` selector (a known string or a callable)."""
+        """
+        Validate the ``error_norm`` selector (a known string or a callable).
+
+        Parameters
+        ----------
+        error_norm : object
+            The value to check.
+
+        Raises
+        ------
+        ValueError
+            If ``error_norm`` is neither callable nor in ``_VALID_ERROR_NORMS``.
+        """
         if callable(error_norm):
             return
         if error_norm not in cls._VALID_ERROR_NORMS:
@@ -356,7 +368,19 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
     @staticmethod
     def _check_mesh_failure_tolerance(mesh_failure_tolerance: float) -> None:
-        """Validate that ``mesh_failure_tolerance`` is a fraction in [0, 1]."""
+        """
+        Validate that ``mesh_failure_tolerance`` is a fraction in [0, 1].
+
+        Parameters
+        ----------
+        mesh_failure_tolerance : float
+            The value to check.
+
+        Raises
+        ------
+        ValueError
+            If the value is outside [0, 1].
+        """
         if not (0.0 <= mesh_failure_tolerance <= 1.0):
             raise ValueError(
                 "mesh_failure_tolerance must be in [0, 1], got "
@@ -370,6 +394,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         The type check also catches a float such as 0.1 meant for the removed
         ``max_path_change``, which would otherwise act as a cap.
+
+        Parameters
+        ----------
+        max_adaptive_splits : object
+            The value to check.
 
         Raises
         ------
@@ -1660,6 +1689,50 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         torch.Tensor,
         _SplitState,
     ]:
+        """
+        Evaluate the integrand at the nodes of the next unevaluated subintervals.
+
+        Chooses the batch size with ``get_max_batch`` (raised to 1 with a warning
+        if it is 0, capped at the number of evaluations left) and dispatches to
+        ``_evaluate_f_on_full_nodes`` when ``take_gradient`` is True, else to
+        ``_evaluate_f_on_split_residual_nodes`` when ``conserve_memory`` is True,
+        else to ``_evaluate_f_on_split_nodes``.
+
+        Parameters
+        ----------
+        f : callable
+            The integrand.
+        f_args : tuple
+            Extra arguments passed to ``f`` after the nodes.
+        mesh : torch.Tensor
+            The current mesh. Shape: [M, T].
+        mesh_trackers : torch.Tensor
+            Boolean, shape [M]: True at the left mesh point of every subinterval
+            that still needs evaluation.
+        take_gradient : bool
+            If True, evaluate whole subintervals with one call of ``f`` per batch.
+        conserve_memory : bool
+            If True (and ``take_gradient`` is False), evaluate about one batch and
+            carry a partly evaluated subinterval to the next call.
+        force_max_batch : int or None
+            Batch size that takes precedence over the memory estimate; None uses
+            the estimate.
+        total_mem_usage : float
+            Fraction of the device's memory that may be in use.
+        split_node_state : _SplitState
+            The partly evaluated subinterval carried from the previous call; all
+            None when nothing is carried.
+
+        Returns
+        -------
+        tuple
+            ``(nodes, f_evals, tracked, step_idxs, split_node_state)``: the nodes
+            [N, C, T] and integrand values [N, C, D] of the N evaluated
+            subintervals, their detached tracked variables (each [N, C, ...]) or
+            None, the indices of their left mesh points [N], ascending, and the
+            state carried to the next call (all None unless ``conserve_memory``
+            is True).
+        """
         # Determine how many f evaluations fit in one batch based on memory
         max_batch = self.get_max_batch(total_mem_usage, force_max_batch)
         # integrate() runs the memory benchmark whenever no max_batch is
@@ -1732,6 +1805,34 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         torch.Tensor,
         _SplitState,
     ]:
+        """
+        Evaluate the integrand on the first max_mesh_steps subintervals in one call.
+
+        Used when ``take_gradient`` is True. No out-of-memory retry is made.
+
+        Parameters
+        ----------
+        f : callable
+            The integrand.
+        f_args : tuple
+            Extra arguments passed to ``f`` after the nodes.
+        mesh : torch.Tensor
+            The current mesh. Shape: [M, T].
+        step_idxs : torch.Tensor
+            Indices of the left mesh points of the subintervals that need
+            evaluation, ascending. Shape: [K].
+        max_mesh_steps : int
+            Largest number of subintervals to evaluate, at least 1.
+
+        Returns
+        -------
+        tuple
+            ``(nodes, f_evals, tracked, step_idxs, split_node_state)``: the nodes
+            [N, C, T] and integrand values [N, C, D] of the N evaluated
+            subintervals, their detached tracked variables (each [N, C, ...]) or
+            None, the indices of their left mesh points [N], ascending, and the
+            state carried to the next call (all None).
+        """
         assert max_mesh_steps >= 1, (
             "Not enough free memory to run 1 integration steps for take_gradient=True. Set take_gradient=False if the gradient of the integral is not needed and consider increasing total_mem_usage"
         )
@@ -1779,13 +1880,31 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         overshoot as the residual. On an out-of-memory error the failed batch
         is retried with a smaller max_batch, cached in _oom_max_batch.
 
+        Parameters
+        ----------
+        f : callable
+            The integrand.
+        f_args : tuple
+            Extra arguments passed to ``f`` after the nodes.
+        nodes_flat : torch.Tensor
+            The nodes to evaluate, in order. Shape: [K, T].
+        num_nodes_to_eval : int
+            Batches run until at least this many nodes are evaluated.
+        max_batch : int
+            Largest number of nodes per call of ``f``.
+
         Returns
         -------
         tuple[list[torch.Tensor], list[list[torch.Tensor]] | None, int]
-            f_evals: per-batch integrand outputs, each [batch, D].
-            tracked_lists: tracked_lists[k] is the per-batch list of the k-th
-                tracked variable, or None when f emits no tracked variables.
-            num_nodes_evaluated: nodes evaluated (>= num_nodes_to_eval).
+            The per-batch integrand values ``f_evals``, each [batch, D]; the
+            per-batch lists of tracked variables (entry k for the k-th tracked
+            variable), or None when ``f`` returns none; and the number of nodes
+            evaluated (at least num_nodes_to_eval).
+
+        Raises
+        ------
+        torch.OutOfMemoryError
+            If one node does not fit in memory (max_batch is already 1).
         """
         f_evals: list[torch.Tensor] = []
         tracked_lists: list[list[torch.Tensor]] | None = None
@@ -1861,6 +1980,34 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         torch.Tensor,
         _SplitState,
     ]:
+        """
+        Evaluate the integrand on all the given subintervals, max_batch nodes per call.
+
+        Used when ``take_gradient`` and ``conserve_memory`` are both False.
+
+        Parameters
+        ----------
+        f : callable
+            The integrand.
+        f_args : tuple
+            Extra arguments passed to ``f`` after the nodes.
+        mesh : torch.Tensor
+            The current mesh. Shape: [M, T].
+        step_idxs : torch.Tensor
+            Indices of the left mesh points of the subintervals that need
+            evaluation, ascending. Shape: [K].
+        max_batch : int
+            Largest number of nodes per call of ``f``, at least 1.
+
+        Returns
+        -------
+        tuple
+            ``(nodes, f_evals, tracked, step_idxs, split_node_state)``: the nodes
+            [N, C, T] and integrand values [N, C, D] of the N evaluated
+            subintervals, their detached tracked variables (each [N, C, ...]) or
+            None, the indices of their left mesh points [N], ascending, and the
+            state carried to the next call (all None).
+        """
         # A zero budget is unsatisfiable here and would divide-by-zero below
         # (the % max_batch layout math). Callers route through
         # _evaluate_f_on_mesh, which rescues max_batch=0 -> 1 before dispatch;
@@ -1916,6 +2063,45 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         torch.Tensor,
         _SplitState,
     ]:
+        """
+        Evaluate about one batch of nodes, carrying a partly evaluated subinterval.
+
+        Used when ``conserve_memory`` is True. The remaining nodes of the
+        subinterval carried in ``split_node_state`` (if any) are evaluated
+        first, then max_mesh_steps whole subintervals. When the last batch ends
+        inside one more subinterval, that subinterval is not returned: its
+        evaluated nodes, values, tracked variables and left mesh point become
+        the returned carried state.
+
+        Parameters
+        ----------
+        f : callable
+            The integrand.
+        f_args : tuple
+            Extra arguments passed to ``f`` after the nodes.
+        mesh : torch.Tensor
+            The current mesh. Shape: [M, T].
+        step_idxs : torch.Tensor
+            Indices of the left mesh points of the subintervals that need
+            evaluation, ascending. Shape: [K].
+        max_batch : int
+            Largest number of nodes per call of ``f``, at least 1.
+        max_mesh_steps : int
+            Number of whole subintervals to evaluate (max_batch // C); 0 is
+            raised to 1.
+        split_node_state : _SplitState
+            The partly evaluated subinterval carried from the previous call; all
+            None when nothing is carried.
+
+        Returns
+        -------
+        tuple
+            ``(nodes, f_evals, tracked, step_idxs, split_node_state)``: the nodes
+            [N, C, T] and integrand values [N, C, D] of the N evaluated
+            subintervals, their detached tracked variables (each [N, C, ...]) or
+            None, the indices of their left mesh points [N], ascending, and the
+            state carried to the next call (all None when nothing is carried).
+        """
         # A zero budget is unsatisfiable here and would divide-by-zero below
         # (the % max_batch layout math). Callers route through
         # _evaluate_f_on_mesh, which rescues max_batch=0 -> 1 before dispatch;
@@ -2150,7 +2336,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             and error are the pair's sums. Shapes: [N-R, C, T], [N-R, D],
             [N-R, D] for R merged pairs.
         """
-
         if len(error_ratios_2steps) == 0:
             return nodes, mesh_quadratures, mesh_quadrature_errors
         # Merge cutoff S < remove_cut / 2^(k-1), k = error_exponent; the
@@ -2322,7 +2507,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         torch.Tensor
             Modified mask with no adjacent True values. Shape: [N].
         """
-
         # Iterative form of what was a tail recursion: each pass un-flags the
         # second element of an adjacent True pair and rebuilds the mask, looping
         # until no adjacent pair remains. The recursive version overflowed
@@ -2353,6 +2537,28 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_init: torch.Tensor | None,
         mesh_final: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Resolve the integration bounds of a call in the solver's dtype and device.
+
+        With a mesh, the bounds are its first and last points; a given
+        ``mesh_init`` or ``mesh_final`` must match them. Without one, a missing
+        bound falls back to the constructor's value.
+
+        Parameters
+        ----------
+        mesh : torch.Tensor or None
+            The caller's mesh. Shape: [M, T].
+        mesh_init : torch.Tensor or None
+            The caller's lower bound. Shape: [T].
+        mesh_final : torch.Tensor or None
+            The caller's upper bound. Shape: [T].
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            ``(mesh_init, mesh_final)``, each of shape [T], with
+            ``mesh_init < mesh_final`` asserted.
+        """
         if mesh is not None:
             assert len(mesh.shape) == 2
             mesh = mesh.to(self.dtype).to(self.device)
@@ -2391,6 +2597,38 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         random_initial_mesh: bool,
         N_init_steps: int,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[tuple[float, ...], int]]:
+        """
+        Build the starting mesh of an integration.
+
+        In order of precedence: the stored ``mesh_previous`` when ``same_f`` is
+        True (restricted to [mesh_init, mesh_final], with both bounds added if
+        missing), the caller's mesh, or a fresh mesh of about N_init_steps
+        points: sqrt(N_init_steps) equal segments, each holding
+        sqrt(N_init_steps) + 1 mesh points, placed at random or evenly.
+
+        Parameters
+        ----------
+        mesh : torch.Tensor or None
+            The caller's mesh. Shape: [M, T].
+        mesh_init : torch.Tensor
+            Lower bound. Shape: [T].
+        mesh_final : torch.Tensor
+            Upper bound. Shape: [T].
+        same_f : bool
+            If True and a mesh is stored, start from ``mesh_previous``.
+        random_initial_mesh : bool
+            If True, place the mesh points inside each segment at random;
+            otherwise evenly.
+        N_init_steps : int
+            Approximate number of mesh points of a fresh mesh.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, dict[tuple[float, ...], int]]
+            The mesh [M, T]; ``mesh_trackers`` [M], True at every mesh point
+            but the last (every subinterval needs evaluation); and the
+            ``{tuple(mesh point): index}`` map of ``_get_mesh_indices``.
+        """
         if same_f and self.mesh_previous is not None:
             # The stored mesh replaces the caller's mesh.
             # Filter cached barriers to within the new [mesh_init, mesh_final]
@@ -2492,6 +2730,20 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         return mesh, mesh_trackers, mesh_indices
 
     def _get_mesh_indices(self, mesh: torch.Tensor) -> dict[tuple[float, ...], int]:
+        """
+        Map each mesh point to its position in the mesh.
+
+        Parameters
+        ----------
+        mesh : torch.Tensor
+            The ordered mesh. Shape: [M, T].
+
+        Returns
+        -------
+        dict[tuple[float, ...], int]
+            ``{tuple(mesh point): index}``, keyed by coordinates so a
+            subinterval's position can be found from its left mesh point.
+        """
         # Map each barrier to its position in the ordered mesh. Keyed on the
         # full barrier coordinate as a hashable tuple (not the tensor object,
         # which hashes by identity and so cannot be looked up by value) so the
@@ -2554,7 +2806,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
     def _round_floor(self, mesh_quadratures: torch.Tensor) -> torch.Tensor:
         """
-        Rounding floor of each element of each subinterval's contribution.
+        Compute the rounding floor of each element of each subinterval's contribution.
 
         The floor is ``50 * eps * abs(s_k)``, with ``eps`` the machine epsilon
         of the solver's dtype and ``s_k`` the subinterval's signed contribution
@@ -2848,7 +3100,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
     @property
     def _is_failure_fraction(self) -> bool:
-        """True when ``error_norm`` is the per-component ``"failure_fraction"``."""
+        """
+        Whether ``error_norm`` is the per-component ``"failure_fraction"``.
+
+        Returns
+        -------
+        bool
+            True for ``"failure_fraction"``, False for a norm or a callable.
+        """
         return (not callable(self.error_norm)) and self.error_norm == "failure_fraction"
 
     def _accept_reject_masks(
@@ -3126,6 +3385,19 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             result_device = self.device
 
         def target(key: str) -> str | torch.device:
+            """
+            Return the device a record field is kept on.
+
+            Parameters
+            ----------
+            key : str
+                The record field's name.
+
+            Returns
+            -------
+            str or torch.device
+                The integration device or ``result_device``.
+            """
             # Resident keys (read back in the loop) and the integration-output
             # scalars stay on the integration device; everything else goes to
             # result_device.
@@ -3137,6 +3409,21 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             return result_device
 
         def place(value: torch.Tensor, key: str) -> torch.Tensor:
+            """
+            Move a record field to its device, detached if take_gradient is True.
+
+            Parameters
+            ----------
+            value : torch.Tensor
+                The field's new values.
+            key : str
+                The record field's name.
+
+            Returns
+            -------
+            torch.Tensor
+                The value on the device ``target(key)`` gives.
+            """
             # take_gradient=True does per-batch backward *before* recording, so
             # the graph is no longer needed and is detached. take_gradient=False
             # retains the full graph for a single backward through the returned
@@ -3307,6 +3594,23 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         return record
 
     def _flatten_output(self, panel_array: torch.Tensor) -> torch.Tensor:
+        """
+        Join per-subinterval values into one sequence, dropping shared endpoints.
+
+        Keeps all C entries of the first subinterval and drops the first entry
+        of every later one, which repeats the previous subinterval's last entry
+        (node fractions start at 0 and end at 1).
+
+        Parameters
+        ----------
+        panel_array : torch.Tensor
+            Values per subinterval and node, in mesh order. Shape: [N, C, ...].
+
+        Returns
+        -------
+        torch.Tensor
+            The joined values. Shape: [N * (C - 1) + 1, ...].
+        """
         return torch.concatenate(
             [
                 panel_array[0],

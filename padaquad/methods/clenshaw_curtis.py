@@ -1,4 +1,4 @@
-"""
+r"""
 Clenshaw-Curtis methods: cc5, cc9, cc17, cc33 and cc65.
 
 The Clenshaw-Curtis method CC_n integrates the polynomial that interpolates
@@ -52,13 +52,22 @@ def _clenshaw_curtis_weights_unit(n: int) -> list[float]:
     k = 0 and k = n, where a_j = 2 / (1 - j^2) for even j, 0 for odd j, and
     sum'' halves the j = 0 and j = n terms.
 
-    Returns weights of length n+1, indexed as the nodes (i.e. weight at
-    cos(k*pi/n) is at position k).
-
     Computed with Python floats and ``math.cos`` (the C library cosine), in
     this loop order. Do not vectorize the sum over j: reordering the additions
     changes the weights in the last bits, and ``torch.cos`` differs from the C
     library cosine by one unit in the last place on some arguments.
+
+    Parameters
+    ----------
+    n : int
+        Number of Chebyshev intervals; the method has n + 1 nodes. n = 0
+        returns the single weight 2.
+
+    Returns
+    -------
+    list of float
+        Weights of length n + 1, indexed as the nodes: the weight at
+        cos(k * pi / n) is at position k.
     """
     if n == 0:
         return [2.0]
@@ -90,6 +99,18 @@ def _build_clenshaw_curtis_tableau(n: int) -> _Tableau:
     of CC_(n/2) are every other node of CC_n, so the CC_(n/2) weights extended
     to the CC_n nodes are the CC_(n/2) weight at shared nodes and 0 at the
     nodes only CC_n has.
+
+    Parameters
+    ----------
+    n : int
+        Number of Chebyshev intervals of CC_n, even and >= 2; the method has
+        n + 1 nodes.
+
+    Returns
+    -------
+    _Tableau
+        Float64 node fractions ``c`` (increasing from 0 to 1), weights ``b``
+        of CC_n and error weights ``b_error`` = CC_n minus CC_(n/2) weights.
     """
     assert n >= 2, "CC error pair requires n >= 2"
     assert n % 2 == 0, "CC error pair requires even n for the doubling embed"

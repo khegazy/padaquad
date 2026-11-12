@@ -26,3 +26,9 @@ repos:
     rev: 1.16.0
     hooks:
       - id: blacken-docs
+
+  - repo: https://github.com/numpy/numpydoc
+    rev: v1.11.0
+    hooks:
+      - id: numpydoc-validation
+        files: ^padaquad/

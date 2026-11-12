@@ -64,12 +64,13 @@ class CountingIntegrand:
         self.points = 0
 
     def __call__(self, t: torch.Tensor) -> torch.Tensor:
+        """Evaluate f at t and add the number of points to the count."""
         self.points += t.shape[0]
         return self.f(t)
 
 
 def neural_network_integrand(device: str) -> Callable[..., torch.Tensor]:
-    """A small fixed-weight network t -> R: the expensive-integrand case.
+    """Build a small fixed-weight network t -> R: the expensive-integrand case.
 
     Two hidden layers of 64 tanh units, weights drawn with seed 0, float64.
     """
@@ -154,6 +155,7 @@ def run_once(solver: str, f: CountingIntegrand, tol: float, device: str) -> floa
 
 
 def synchronize(device: str) -> None:
+    """Wait for queued GPU work on ``device``, so a timer measures it."""
     if device.startswith("cuda"):
         torch.cuda.synchronize(device)
 
@@ -189,8 +191,7 @@ def measure(
 
 
 def cpu_model() -> str:
-    """The CPU's model name (macOS sysctl or Linux /proc/cpuinfo), else the
-    architecture."""
+    """Return the CPU model (macOS sysctl or Linux /proc/cpuinfo), else the architecture."""
     if platform.system() == "Darwin":
         out = subprocess.run(
             ["sysctl", "-n", "machdep.cpu.brand_string"],
@@ -278,6 +279,7 @@ def render_markdown(results: dict[str, Any]) -> str:
 
 
 def main() -> None:
+    """Run every case, write the JSON results and print the table."""
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     parser.add_argument("--device", default="cpu", help="'cpu' or 'cuda[:N]'")
     parser.add_argument("--repeats", type=int, default=7)

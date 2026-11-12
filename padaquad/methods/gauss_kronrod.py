@@ -7,10 +7,23 @@ to degree 3n+1 for even n and 3n+2 for odd n (gk7, gk15, gk21, gk31:
 11, 23, 31, 47); the pair's error indicator is K_{2n+1} - G_n. The degrees
 are measured from the stored tables by tests/test_exactness.py.
 
-Nodes / weights tabulated to ~30 decimal digits, sourced from QUADPACK
-(Piessens et al. 1983) and Laurie 1997 (Math. Comp. 66 #219). Truncated
-to float64 precision below. Polynomial-exactness tests in
-tests/test_exactness.py validate the values.
+Where the digits come from:
+
+- gk15, gk21, gk31: the QUADPACK routines dqk15.f, dqk21.f and dqk31.f on
+  Netlib (https://www.netlib.org/quadpack/, revision 830518), whose comments
+  say the values were "evaluated with 80 decimal digit arithmetic by
+  L. W. Fullerton, Bell Labs, Nov. 1981" (Piessens, de Doncker-Kapenga,
+  Ueberhuber and Kahaner, QUADPACK, Springer 1983). Every digit of the 33-digit
+  values below matches those files (compared by script on 2026-11-12).
+- gk7: QUADPACK has no 7-point routine. The 30-digit values below agree with
+  an 80-digit computation of the Kronrod extension of the 3-point Gauss rule
+  (the roots of the Stieltjes polynomial) to all printed digits. Patterson
+  1968 (Math. Comp. 22(104):847-856) tabulates this rule; its table was not
+  available to check.
+
+Python keeps float64 precision when it reads these numbers. The degree of every
+table is checked in tests/test_exactness.py, and the Gauss parts agree with
+numpy's Gauss-Legendre rule in tests/test_tableau.py.
 """
 
 from __future__ import annotations
@@ -116,8 +129,8 @@ def _build_gauss_kronrod_tableau(
 
 
 # G10-K21 (Gauss-Kronrod 21-point). K21 degree = 3n+1 = 31 (n = 10, even).
-# Source: QUADPACK / Laurie 1997. Positive half-axis nodes followed by
-# the center node 0.0.
+# Source: Netlib QUADPACK dqk21.f (xgk, wgk, wg). Positive half-axis nodes
+# followed by the center node 0.0.
 _GK21_XGK_HALF = [
     0.995657163025808080735527280689003,
     0.973906528517171720077964012084452,
@@ -134,7 +147,7 @@ _GK21_XGK_HALF = [
 _GK21_WGK_HALF = [
     0.011694638867371874278064396062192,
     0.032558162307964727478818972459390,
-    0.054755896574351996031381300244582,
+    0.054755896574351996031381300244580,
     0.075039674810919952767043140916190,
     0.093125454583697605535065465083366,
     0.109387158802297641899210590325805,
@@ -171,11 +184,11 @@ _GAUSS_KRONROD_21 = UniformMethodClass(
 
 # G3-K7 (Gauss-Kronrod 7-point). K7 degree = 3n+2 = 11 (n = 3, odd).
 # G3 (odd n=3) has a center node — note wg_at_center below.
-# Source: Patterson 1968 Math. Comp. 22 #104 Table 1.
+# Computed to 80 digits (see the module docstring); tabulated in Patterson 1968.
 _GK7_XGK_HALF = [
     0.960491268708020283423507092629,
     0.774596669241483377035853079956,  # G3 node = sqrt(3/5)
-    0.434243749346802558002071502345,
+    0.434243749346802558002071502845,
     0.0,  # center, also a G3 node
 ]
 _GK7_WGK_HALF = [
@@ -205,6 +218,7 @@ _GAUSS_KRONROD_7 = UniformMethodClass(
 
 # G7-K15 (Gauss-Kronrod 15-point). K15 degree = 3n+2 = 23 (n = 7, odd).
 # G7 (odd n=7) has a center node — note wg_at_center below.
+# Source: Netlib QUADPACK dqk15.f (xgk, wgk, wg).
 _GK15_XGK_HALF = [
     0.991455371120812639206854697526329,
     0.949107912342758524526189684047851,  # G7 node
@@ -250,6 +264,7 @@ _GAUSS_KRONROD_15 = UniformMethodClass(
 
 # G15-K31 (Gauss-Kronrod 31-point). K31 degree = 3n+2 = 47 (n = 15, odd).
 # G15 (odd n=15) has a center node.
+# Source: Netlib QUADPACK dqk31.f (xgk, wgk, wg).
 _GK31_XGK_HALF = [
     0.998002298693397060285172840152271,
     0.987992518020485428489565718586613,  # G15 node

@@ -21,7 +21,8 @@ pairs CC_n with CC_(n/2): b_error = CC_n_weights - CC_(n/2)_extended,
 where the extension places 0 at CC_n-only nodes.
 
 Reference: Trefethen 2008 SIAM Review (Is Gauss quadrature better than
-Clenshaw-Curtis?); Waldvogel 2006 BIT (Fast computation of CC weights).
+Clenshaw-Curtis?); Waldvogel 2006 BIT (Fast construction of the Fejer and
+Clenshaw-Curtis quadrature rules).
 """
 
 from __future__ import annotations

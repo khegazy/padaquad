@@ -1,8 +1,9 @@
-# Docs
-.cache/
-docs/reference/*
+# Docs (Sphinx build output and generated pages)
+docs/_build/
+docs/reference/generated/
+docs/auto_examples/
+docs/sg_execution_times.rst
 *doctrees*
-/site
 
 # Python ignores
 __pycache__/
@@ -80,3 +81,7 @@ venv.bak/
 
 # Misc
 *txt
+
+# Exceptions: documentation sources and requirement files are tracked
+!docs/_static/**
+!requirements*.txt

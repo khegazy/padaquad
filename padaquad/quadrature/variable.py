@@ -1,16 +1,16 @@
 """
 Variable-sampling adaptive quadrature: ``VariableAdaptiveQuadrature``.
 
-In variable sampling, quadrature points within each step can sit at
-arbitrary positions; the b weights are recomputed dynamically from the
-actual node positions by the method's ``weights(nodes)``.
+In variable sampling, the weights ``b`` of each subinterval are computed from
+the actual node positions by the method's ``weights(nodes)``, so nodes need not
+sit at fixed fractions of the subinterval.
 
-This flexibility is what enables the variable solver's main
-optimization: when an existing step is split into two sub-steps, the
-old evaluation points end up at non-standard fractional positions
-within the new sub-steps. The variable formula re-weights them
-correctly so the old f-evaluations are reused, avoiding the redundant
-recomputation that the uniform solver pays.
+That would let a split reuse the integrand values already computed: the old
+nodes keep their positions in the two halves and are re-weighted. This class's
+split method implements that reuse, but ``AdaptiveQuadrature.integrate`` does
+not call it. The integration loop places the nodes of every subinterval, split
+or not, at the method's node fractions and evaluates the integrand there, as
+for uniform sampling.
 
 This class holds the variable-specific overrides of the abstract methods
 declared in ``AdaptiveQuadrature``; everything else, including node
@@ -34,25 +34,40 @@ if TYPE_CHECKING:
 
 class VariableAdaptiveQuadrature(AdaptiveQuadrature):
     """
-    Parallel adaptive solver for rules whose weights depend on node positions.
+    Adaptive quadrature solver for methods whose weights depend on node positions.
 
-    In variable sampling, quadrature points within each step can be at
-    arbitrary positions (not fixed by the tableau). The b weights are
-    computed dynamically from the actual positions of the points by the
-    method's ``weights(nodes)``.
+    The method computes the weights of each subinterval from where its nodes
+    actually are, instead of using fixed numbers. The integration itself runs
+    as in ``UniformAdaptiveQuadrature``: the nodes of every subinterval are
+    placed at the method's node fractions, and when a subinterval fails the
+    tolerance, it is split in half and the integrand is evaluated at fresh
+    nodes in both halves.
 
-    This flexibility is especially useful during adaptive refinement: when
-    a step is split, the existing evaluation points from the original step
-    can be reused in the sub-steps (they just end up at different fractional
-    positions within the new, smaller steps). This avoids redundant function
-    evaluations.
+    The method is one of ``VARIABLE_METHODS``: 'adaptive_heun' or
+    'interpolatory3_variable'. The constructor takes the options of
+    ``AdaptiveQuadrature``, all as keyword arguments.
 
-    When merging two steps, the combined points are subsampled at evenly
-    spaced indices to fit C points, and the b weights are recomputed for
-    their new fractional positions.
+    Examples
+    --------
+    Integrate ``exp(t)`` from 0 to 1; the exact value is ``e - 1``:
 
-    Supported methods: every name in ``VARIABLE_METHODS``
-    ('adaptive_heun', 'interpolatory3_variable').
+    >>> import torch
+    >>> from padaquad import VariableAdaptiveQuadrature
+    >>> _ = torch.manual_seed(0)
+    >>> solver = VariableAdaptiveQuadrature(
+    ...     method="interpolatory3_variable",
+    ...     atol=1e-8,
+    ...     rtol=1e-8,
+    ...     device="cpu",
+    ...     max_batch=10_000,
+    ... )
+    >>> result = solver.integrate(
+    ...     torch.exp,
+    ...     mesh_init=torch.tensor([0.0], dtype=torch.float64),
+    ...     mesh_final=torch.tensor([1.0], dtype=torch.float64),
+    ... )
+    >>> print(round(float(result.integral), 6))
+    1.718282
     """
 
     sampling_type = steps.ADAPTIVE_VARIABLE
@@ -66,29 +81,36 @@ class VariableAdaptiveQuadrature(AdaptiveQuadrature):
         f_args: tuple[Any, ...] = (),
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Split failed steps and reuse existing evaluations where possible.
+        Split failed subintervals, reusing their existing integrand values.
 
-        Unlike the uniform solver which discards old evaluations, the variable
-        solver can reuse them. New evaluation points are placed at the midpoints
-        between each pair of consecutive existing points. The original and new
-        points are then interleaved and reshaped into two sub-steps of C points
-        each.
+        Unlike the uniform solver, which discards old values, this keeps them.
+        New nodes are placed midway between each pair of neighboring old
+        nodes, so only C - 1 new integrand values are computed per split. The
+        old and new nodes (2C - 1 in all) are interleaved, the middle one is
+        duplicated as the shared endpoint, and the 2C entries are reshaped
+        into two halves of C nodes each.
 
-        For a step with C=3 points [p0, p1, p2], this creates midpoints
-        [m01, m12] and interleaves them: [p0, m01, p1, m12, p2, p2]. The
-        duplicate at position C acts as the shared boundary point. This is
-        then reshaped into two sub-steps: [p0, m01, p1] and [m12, p2, p2].
+        For a subinterval with C=3 nodes [p0, p1, p2], this creates midpoints
+        [m01, m12] and the array [p0, m01, p1, p1, m12, p2], reshaped into the
+        halves [p0, m01, p1] and [p1, m12, p2]. The split point is the middle
+        node, which is the subinterval's midpoint when the node fractions are
+        symmetric about 1/2.
+
+        ``integrate`` does not call this method: its loop evaluates both halves
+        of a split subinterval at fresh nodes from ``_compute_nodes``. Only the
+        unit tests call it. When D differs from T, ``nodes_new`` comes out with
+        shape [2*R, C, D], because it is allocated with last dimension D.
 
         Parameters
         ----------
         f : Callable[..., Any]
-            The integrand function f(t). Takes [N, T], returns [N, D].
+            The integrand f(t). Takes [N, T], returns [N, D].
         idxs_add : torch.Tensor
-            Indices of steps that need splitting. Shape: [R].
+            Indices of the subintervals to split. Shape: [R].
         y : torch.Tensor
-            Current integrand evaluations, reused in sub-steps. Shape: [N, C, D].
+            Current integrand values, reused in the halves. Shape: [N, C, D].
         nodes : torch.Tensor
-            Current quadrature point positions. Shape: [N, C, T].
+            Current node positions. Shape: [N, C, T].
         f_args : tuple[Any, ...]
             Extra arguments passed to f.
 
@@ -96,10 +118,10 @@ class VariableAdaptiveQuadrature(AdaptiveQuadrature):
         -------
         tuple[torch.Tensor, torch.Tensor]
             Tuple of (y_add_combined, nodes_new) where:
-                - y_add_combined: Integrand values for the new sub-steps,
-                    interleaving old and new evaluations. Shape: [2*R, C, D].
-                - nodes_new: Quadrature point positions for the new sub-steps.
-                    Shape: [2*R, C, T].
+                - y_add_combined: Integrand values for the new halves,
+                    interleaving old and new values. Shape: [2*R, C, D].
+                - nodes_new: Node positions of the new halves.
+                    Shape: [2*R, C, T] when D = T (see above).
         """
         # Compute midpoints between each pair of consecutive quadrature points
         nodes_mid = (nodes[idxs_add, 1:] + nodes[idxs_add, :-1]) / 2  # [n_add, C-1, 1]
@@ -145,25 +167,24 @@ class VariableAdaptiveQuadrature(AdaptiveQuadrature):
         remove_idxs: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Merge pairs of consecutive over-resolved steps into single larger steps.
+        Merge pairs of neighboring over-resolved subintervals into one each.
 
-        For variable sampling, merging concatenates the quadrature points from
-        both steps (C + C-1 = 2C-1 points, since the shared boundary is not
-        duplicated from the second step), then subsamples every other point to
-        get back to C points. Because the points are now at non-standard
-        fractional positions within the merged step, the variable method's
-        ``weights(nodes)`` will recompute appropriate weights on the next evaluation.
+        For variable sampling, merging concatenates the nodes of both
+        subintervals (C + C-1 = 2C-1 nodes, since the shared endpoint is not
+        taken twice), then keeps every other node to get back to C nodes. The
+        merged subinterval is not evaluated: its contribution and error are
+        the sums of the pair's, and only its endpoints enter the optimal mesh.
 
         Parameters
         ----------
         nodes : torch.Tensor
-            Quadrature point positions for all steps. Shape: [N, C, T].
+            Node positions of all subintervals. Shape: [N, C, T].
         mesh_quadratures : torch.Tensor
-            Integral contribution of each step. Shape: [N, D].
+            Integral contribution of each subinterval. Shape: [N, D].
         mesh_quadrature_errors : torch.Tensor
-            Error estimate of each step. Shape: [N, D].
+            Error estimate of each subinterval. Shape: [N, D].
         remove_idxs : torch.Tensor
-            Indices of the first step in each pair to merge.
+            Index of the first subinterval of each pair to merge.
             The pair (remove_idxs[i], remove_idxs[i]+1) is merged.
             Shape: [R].
 
@@ -171,7 +192,7 @@ class VariableAdaptiveQuadrature(AdaptiveQuadrature):
         -------
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
             Tuple of (nodes_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned)
-            with the merged steps replacing the original pairs. Each has
+            with the merged subintervals replacing the original pairs. Each has
             N-R entries along the first dimension.
         """
         if len(remove_idxs) == 0 or len(nodes) == 1:

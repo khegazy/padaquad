@@ -1,20 +1,19 @@
 """
 Uniform-sampling adaptive quadrature: ``UniformAdaptiveQuadrature``.
 
-In uniform sampling, quadrature points within each step are placed at
-fixed fractional positions defined by the method's tableau.c values
-(e.g. dopri5 always uses ``c = [0, 1/5, 3/10, 4/5, 8/9, 1, 1]``). The
-b weights are also constant.
+In uniform sampling, the nodes of every subinterval sit at the method's fixed
+node fractions, the tableau's ``c`` values (dopri5 always uses
+``c = [0, 1/5, 3/10, 4/5, 8/9, 1, 1]``), and the weights ``b`` are constants.
 
-When the adaptive controller splits a step, the new sub-steps get
-fresh evaluations at the standard c positions; the old evaluations
-are discarded. When merging two steps, a new combined step is built
-spanning ``[A.start, B.end]`` and re-evaluated at the standard c
-positions.
+When a subinterval is split, both halves are evaluated at fresh nodes at the
+``c`` positions; the old integrand values are discarded. When the optimal mesh
+merges two neighboring subintervals A and B, the merged subinterval spans
+``[A.start, B.end]`` with nodes at the ``c`` positions; it is not evaluated, and
+its contribution and error are the sums of A's and B's.
 
 This class holds the uniform-specific overrides of the abstract methods
-declared in ``AdaptiveQuadrature``; everything else, including the
-integral computation, is shared.
+declared in ``AdaptiveQuadrature``; everything else, including node placement
+and the integral computation, is shared.
 """
 
 from __future__ import annotations
@@ -34,18 +33,35 @@ if TYPE_CHECKING:
 
 class UniformAdaptiveQuadrature(AdaptiveQuadrature):
     """
-    Parallel adaptive solver for rules with fixed node fractions and weights.
+    Adaptive quadrature solver for methods with fixed node fractions and weights.
 
-    In uniform sampling, quadrature points within each step are placed at
-    fixed fractional positions defined by the tableau's c values. For example,
-    dopri5 always evaluates at c = [0, 1/5, 3/10, 4/5, 8/9, 1, 1] of each
-    step's width. The b weights are also fixed constants.
+    The nodes of every subinterval sit at the method's fixed node fractions,
+    so the weights are fixed numbers. For example, dopri5 always evaluates the
+    integrand at the fractions ``[0, 1/5, 3/10, 4/5, 8/9, 1, 1]`` of each
+    subinterval's width. When a subinterval fails the tolerance, it is split in
+    half and the integrand is evaluated at fresh nodes in both halves.
 
-    This is the simpler and more common solver variant. When a step is split,
-    the new sub-steps get fresh evaluations at the standard c positions.
+    The method is one of ``UNIFORM_METHODS``: the Runge-Kutta, Gauss-Kronrod
+    and Clenshaw-Curtis methods, with ``gk21`` the default. The constructor
+    takes the options of ``AdaptiveQuadrature``, all as keyword arguments.
 
-    Supported methods: every name in ``UNIFORM_METHODS`` (Runge-Kutta,
-    Gauss-Kronrod and Clenshaw-Curtis rules).
+    Examples
+    --------
+    Integrate ``cos(t)`` from 0 to 1; the exact value is ``sin(1)``:
+
+    >>> import torch
+    >>> from padaquad import UniformAdaptiveQuadrature
+    >>> _ = torch.manual_seed(0)
+    >>> solver = UniformAdaptiveQuadrature(
+    ...     method="gk21", atol=1e-10, rtol=1e-10, device="cpu", max_batch=10_000
+    ... )
+    >>> result = solver.integrate(
+    ...     torch.cos,
+    ...     mesh_init=torch.tensor([0.0], dtype=torch.float64),
+    ...     mesh_final=torch.tensor([1.0], dtype=torch.float64),
+    ... )
+    >>> print(round(float(result.integral), 6))
+    0.841471
     """
 
     sampling_type = steps.ADAPTIVE_UNIFORM
@@ -59,24 +75,28 @@ class UniformAdaptiveQuadrature(AdaptiveQuadrature):
         f_args: tuple[Any, ...] = (),
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Split failed steps at their midpoints and evaluate the integrand.
+        Split failed subintervals at their midpoints and evaluate the integrand.
 
-        Each step that failed the error check is divided into two sub-steps
-        at its midpoint. Fresh quadrature points are placed in each sub-step
-        using the tableau's c values, and the integrand is evaluated at all
-        new points.
+        Each subinterval that failed the error check is divided into two halves
+        at its midpoint (the mean of its first and last node, which are its
+        endpoints). Fresh nodes are placed in each half at the tableau's ``c``
+        values, and the integrand is evaluated at all 2C new nodes.
+
+        ``integrate`` does not call this method: its loop inserts the midpoint
+        into the mesh and evaluates the new subintervals through
+        ``_compute_nodes``, which gives the same nodes. Only the tests call it.
 
         Parameters
         ----------
         f : Callable[..., Any]
-            The integrand function f(t). Takes [N, T], returns [N, D].
+            The integrand f(t). Takes [N, T], returns [N, D].
         idxs_add : torch.Tensor
-            Indices of steps that need splitting. Shape: [R].
+            Indices of the subintervals to split. Shape: [R].
         _y : torch.Tensor
-            Current integrand evaluations (unused here, present for
-            interface compatibility with the variable solver). Shape: [N, C, D].
+            Current integrand values (unused here, present for interface
+            compatibility with the variable solver). Shape: [N, C, D].
         nodes : torch.Tensor
-            Current quadrature point positions. Shape: [N, C, T].
+            Current node positions. Shape: [N, C, T].
         f_args : tuple[Any, ...]
             Extra arguments passed to f.
 
@@ -84,9 +104,9 @@ class UniformAdaptiveQuadrature(AdaptiveQuadrature):
         -------
         tuple[torch.Tensor, torch.Tensor]
             Tuple of (y_add, nodes_new) where:
-                - y_add: Integrand values at new quadrature points.
-                    Shape: [2*R, C, D] (two sub-steps per split step).
-                - nodes_new: New quadrature point positions.
+                - y_add: Integrand values at the new nodes.
+                    Shape: [2*R, C, D] (two halves per split subinterval).
+                - nodes_new: The new node positions.
                     Shape: [2*R, C, T].
         """
         T = nodes.shape[-1]
@@ -113,23 +133,23 @@ class UniformAdaptiveQuadrature(AdaptiveQuadrature):
         remove_idxs: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Merge pairs of consecutive over-resolved steps into single larger steps.
+        Merge pairs of neighboring over-resolved subintervals into one each.
 
-        For uniform sampling, merging replaces two consecutive steps [A, B]
-        with a single step spanning [A.start, B.end]. New quadrature points
-        are placed at the standard tableau c positions within the merged step.
-        The integral contributions and errors of both steps are summed.
+        For uniform sampling, merging replaces two neighboring subintervals
+        A and B with one subinterval spanning ``[A.start, B.end]``, with new
+        nodes at the tableau's ``c`` positions. The merged subinterval is not
+        evaluated: its contribution and error are the sums of A's and B's.
 
         Parameters
         ----------
         nodes : torch.Tensor
-            Quadrature point positions for all steps. Shape: [N, C, T].
+            Node positions of all subintervals. Shape: [N, C, T].
         mesh_quadratures : torch.Tensor
-            Integral contribution of each step. Shape: [N, D].
+            Integral contribution of each subinterval. Shape: [N, D].
         mesh_quadrature_errors : torch.Tensor
-            Error estimate of each step. Shape: [N, D].
+            Error estimate of each subinterval. Shape: [N, D].
         remove_idxs : torch.Tensor
-            Indices of the first step in each pair to merge.
+            Index of the first subinterval of each pair to merge.
             The pair (remove_idxs[i], remove_idxs[i]+1) is merged.
             Shape: [R].
 
@@ -137,7 +157,7 @@ class UniformAdaptiveQuadrature(AdaptiveQuadrature):
         -------
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
             Tuple of (nodes_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned)
-            with the merged steps replacing the original pairs. Each has
+            with the merged subintervals replacing the original pairs. Each has
             N-R entries along the first dimension.
         """
         if len(remove_idxs) == 0 or len(nodes) == 1:

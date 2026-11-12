@@ -85,7 +85,9 @@ class DistributedEnvironment:
     Handles both single-process and multi-process (distributed) execution.
     In single-process mode, sets sensible defaults (rank=0, world_size=1).
     In distributed mode, initializes a PyTorch process group using environment
-    variables (RANK, LOCAL_RANK, WORLD_SIZE) or SLURM equivalents.
+    variables (RANK, LOCAL_RANK, WORLD_SIZE). The SLURM path (``is_slurm``)
+    currently raises ``ValueError`` in a multi-task job; see
+    ``init_slurm_environment``.
 
     This class is the root of the solver class hierarchy. All solvers inherit
     from it to get device management, even when not running distributed.
@@ -154,8 +156,9 @@ class DistributedEnvironment:
             Port on the master node. Required (along with
             master_addr) for distributed mode if not set via environment.
         is_slurm : bool
-            If True, reads rank/world_size from SLURM environment
-            variables instead of standard PyTorch distributed variables.
+            If True, detects a distributed run from SLURM_NTASKS instead of
+            RANK. A multi-task SLURM job then raises ``ValueError``, because
+            ``init_slurm_environment`` cannot yet resolve the master node.
         """
         self.is_slurm = is_slurm
         self.backend = backend.lower()
@@ -183,6 +186,17 @@ class DistributedEnvironment:
         -------
         bool
             True if running in distributed mode, False otherwise.
+
+        Raises
+        ------
+        RuntimeError
+            If distributed mode is detected but ``torch.distributed`` is not
+            available.
+        AssertionError
+            If the 'nccl', 'mpi' or 'gloo' backend is requested but not
+            available.
+        SyntaxWarning
+            If the backend is not one of those three (raised, not warned).
         """
         if self.is_slurm:
             self.is_distributed = int(os.environ["SLURM_NTASKS"]) > 1

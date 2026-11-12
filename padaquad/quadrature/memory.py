@@ -9,9 +9,9 @@ depends on the memory one evaluation uses. This module holds:
   (``_setup_memory_checks``), queries free memory on the solver's device, and
   turns both into the batch size (``get_max_batch`` -> ``_get_max_f_evals`` =
   usable memory / c), recomputed at every evaluation from live memory.
-- ``_is_out_of_memory``: recognizes every form an out-of-memory error takes
-  (GPU, CPU allocator, CUDA libraries, numpy), used by the batch loop in
-  ``base.py`` and by the benchmark.
+- ``_is_out_of_memory``: recognizes the out-of-memory errors of the GPU, the
+  PyTorch CPU allocator, the CUDA libraries and numpy, used by the batch loop
+  in ``base.py`` and by the benchmark.
 """
 
 from __future__ import annotations
@@ -83,21 +83,33 @@ class _MemoryManagement:
         total_mem_usage: float | None = None,
         default_max_batch: int | None = None,
     ) -> int | None:
-        """Resolve the per-batch evaluation cap without re-benchmarking memory.
+        """
+        Return the largest number of integrand evaluations per batch.
 
-        Precedence: an explicit ``default_max_batch`` (e.g. the per-call
-        ``max_batch``), then the construction-time ``init_max_batch``, then the
-        dynamically computed budget from a prior memory benchmark
-        (``f_unit_mem_size``) and the memory free now, using
-        ``total_mem_usage`` (default: the solver's own). The result is clamped
-        by any ``_oom_max_batch`` discovered after an out-of-memory event; the
-        cap is cleared only at the start of the next ``integrate()`` call, so
-        it is still applied here when a call returns.
+        Does not run the memory benchmark. The first available of these is
+        used: ``default_max_batch``, the ``max_batch`` given at construction,
+        and the number of evaluations that fit in the memory free now, at the
+        cost per evaluation the last benchmark measured. After an out-of-memory
+        error, the result is capped at the reduced batch size chosen then,
+        until the next ``integrate`` call starts.
 
-        Tests and example loops use this to capture ``max_batch`` after a first
-        run (where the memory benchmark ran once) and pass it back to later
-        solvers/calls, or use ``integrate(..., same_f=True)``, so the
-        slow benchmark is skipped. See also ``previous_max_batch``.
+        Passing the result as ``max_batch`` to a later call or solver skips
+        the slow benchmark. See :ref:`ug-memory`.
+
+        Parameters
+        ----------
+        total_mem_usage : float or None
+            Fraction of the device's total memory that may be in use; the rest
+            is kept free. None uses the value given at construction.
+        default_max_batch : int or None
+            A batch size that takes precedence over the other sources. None
+            (default) skips it.
+
+        Returns
+        -------
+        int or None
+            The batch size, or None when no source is available (no
+            ``max_batch`` given and no benchmark run yet).
         """
         if total_mem_usage is None:
             total_mem_usage = self.init_total_mem_usage
@@ -552,7 +564,8 @@ class _MemoryManagement:
         Compute the maximum number of integrand evaluations that fit in memory.
 
         Divides usable memory by the per-evaluation memory cost (measured by
-        _setup_memory_checks). A small epsilon (1e-12) prevents division by zero.
+        _setup_memory_checks). A small epsilon (1e-12 GB) prevents division by
+        zero.
 
         Parameters
         ----------
@@ -563,6 +576,11 @@ class _MemoryManagement:
         -------
         int
             Maximum number of evaluations (integer).
+
+        Raises
+        ------
+        RuntimeError
+            If the memory benchmark has not run (``f_unit_mem_size`` is None).
         """
         if self.f_unit_mem_size is None:
             raise RuntimeError(

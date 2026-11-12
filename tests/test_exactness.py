@@ -13,10 +13,10 @@ and check, for every method:
    ``degree`` up to the rounding of the stored values. This uses mpmath's own
    Legendre polynomials, so it also checks the float64 measurement.
 
-The measurement integrates Legendre polynomials, not powers of t. A power
-t^(d+1) is almost entirely made of lower-degree polynomials, so a method's
-error on it is tiny (about 3e-17 for gk31, below float64 rounding) and the
-power test reports false degrees. The Legendre errors one degree past each
+The measurement integrates Legendre polynomials, not powers. A power
+(2t - 1)^(d+1) is almost entirely made of lower-degree polynomials, so a
+method's error on it is tiny (about 3e-17 for gk31, below float64 rounding) and
+the power test reports false degrees; powers of t itself are worse. The Legendre errors one degree past each
 method's degree are all at least 4e-6.
 
 ``examples/verification/polynomial_degree.py`` runs the same measurement for

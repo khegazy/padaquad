@@ -74,16 +74,18 @@ for label, method in methods.items():
     )
 
 # %%
-# Part 2: why the test uses Legendre polynomials and not powers of t
-# ------------------------------------------------------------------
+# Part 2: why the test uses Legendre polynomials and not powers
+# -------------------------------------------------------------
 #
-# A simpler test would integrate the powers t^0, t^1, t^2, ... instead. That
-# test fails for the high-degree methods, and this part shows why.
+# A simpler test would integrate the powers x^0, x^1, x^2, ... of x = 2t - 1
+# (the subinterval [0, 1] mapped to [-1, 1]) instead. That test fails for the
+# high-degree methods, and this part shows why.
 #
-# A high power of t looks almost exactly like a combination of lower powers,
-# which the method integrates perfectly. Only a small fraction of t^k is new at
+# A high power of x looks almost exactly like a combination of lower powers,
+# which the method integrates perfectly. Only a small fraction of x^k is new at
 # degree k: the fraction (k!)^2 2^k / (2k)!, about 4e-14 for k = 48. So the
-# method's error on t^(degree + 1) is its Legendre miss times that fraction.
+# method's error on x^(degree + 1) is its Legendre miss times that fraction.
+# (Powers of t itself are worse: there the fraction is (k!)^2 / (2k)!.)
 # When that product is below float64 rounding (about 1e-16), the power test
 # cannot see the miss and reports a degree that is too high.
 #

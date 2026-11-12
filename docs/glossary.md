@@ -97,8 +97,10 @@ uniform sampling
   integrand at fresh nodes in both halves.
 
 variable sampling
-: The weights are computed from where the nodes actually are, so a split can
-  reuse the integrand values already computed and evaluate only the new nodes.
+: The weights are computed from where the nodes actually are, rather than
+  stored as fixed numbers. The integration loop currently places every
+  subinterval's nodes at the method's node fractions and, like uniform
+  sampling, evaluates fresh nodes in both halves of a split.
 
 shape letters
 : `N` is a number of subintervals (or points), `C` the number of nodes per

@@ -326,14 +326,19 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
     points at standard `c` positions in the new sub-panels.
   - *Merging*: re-interpolates C nodes at standard `c` positions
     spanning `[A.start, B.end]`.
-- **Variable** (`quadrature/variable.py`): nodes at arbitrary positions.
-  Weights computed from each panel's actual nodes by `method.weights(nodes)`
+- **Variable** (`quadrature/variable.py`): weights computed from each
+  panel's actual nodes by `method.weights(nodes)`
   (`VariableMethodClass.weight_function`; for `interpolatory3_variable`
   the Sanderse-Veldman weights, `_interpolatory3_weights`).
-  - *Splitting*: reuses existing evaluations by inserting new midpoints
-    between each pair of consecutive points and interleaving old + new
-    into a 2C-length array, reshaped into two C-point sub-panels.
-    Avoids redundant `f` calls.
+  - *Splitting*: the integration loop does NOT reuse evaluations. Like the
+    uniform solver it inserts the midpoint into the mesh and places fresh
+    nodes in both halves with `_compute_nodes`, at the node fractions, so
+    `interpolatory3_variable` always runs as Simpson's rule (a = 1/2).
+    `_evaluate_adaptive_nodes`, which would interleave old and new nodes into
+    two C-point halves, exists and is unit-tested but is never called by
+    `integrate()` (checked 2026-11-12: 0 calls on a run with 2495
+    subintervals). It also allocates its node array with last dimension D
+    instead of T (latent; wrong shape only when D != T).
   - *Merging*: concatenates points from both panels (C + C-1 = 2C-1,
     shared boundary not duplicated), then subsamples every other point
     to get C. `method.weights(nodes)` recomputes the right weights for

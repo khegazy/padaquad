@@ -351,7 +351,7 @@ def wolf_schlegel(t: torch.Tensor, _y: torch.Tensor | None = None) -> torch.Tens
 
     .. math::
 
-        V(x, y) = 10\\,(x^4 + y^4 - 2x^2 - 4y^2 + xy + 0.2x + 0.1y).
+        V(x, y) = 10\,(x^4 + y^4 - 2x^2 - 4y^2 + xy + 0.2x + 0.1y).
 
     The integral over t from 0 to 1 is the average of V along the path. The
     integrand has one output (D = 1). No exact integral is provided.

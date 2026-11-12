@@ -120,3 +120,24 @@ def test_page_vocabulary(page: Path) -> None:
     }
     found = {label: hits for label, hits in found.items() if hits}
     assert not found, f"{page.relative_to(ROOT)}: {found}"
+
+
+def _all_docstrings() -> dict[str, str]:
+    """Every module, class and function docstring in padaquad/."""
+    import ast  # noqa: PLC0415
+
+    docs = {}
+    for path in sorted((ROOT / "padaquad").rglob("*.py")):
+        for node in ast.walk(ast.parse(path.read_text())):
+            if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef)):
+                doc = ast.get_docstring(node, clean=False)
+                if doc:
+                    docs[f"{path.relative_to(ROOT)}:{getattr(node, 'lineno', 1)}"] = doc
+    return docs
+
+
+def test_docstring_math_uses_single_backslashes() -> None:
+    """A doubled backslash in a docstring's value renders as a line break in
+    MathJax; LaTeX commands need one backslash (use a raw docstring)."""
+    doubled = [where for where, doc in _all_docstrings().items() if "\\\\" in doc]
+    assert not doubled, f"docstrings with a doubled backslash: {doubled}"

@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
-from padaquad.base import DEFAULT_METHOD, SolverBase, steps
+from padaquad.base import DEFAULT_METHODS, SolverBase, steps
 from padaquad.distributed import DistributedEnvironment, _resolve_device
 from padaquad.methods import _get_method
 from padaquad.quadrature.memory import _is_out_of_memory, _MemoryManagement
@@ -185,7 +185,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         self,
         *,
         f: Callable[..., Any] | None = None,
-        method: str = DEFAULT_METHOD,
+        method: str | None = None,
         atol: float = 1e-5,
         rtol: float = 1e-5,
         mesh_init: torch.Tensor | None = None,
@@ -214,15 +214,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         f : Callable or None
             The integrand, used by ``integrate`` calls that pass none. It takes
             points of shape [N, T] and returns values of shape [N, D]
-            (:ref:`ug-shapes`). Default None.
-        method : str
+            (see :ref:`the user guide <ug-shapes>`). Default None.
+        method : str or None
             Name of the quadrature method, a key of ``UNIFORM_METHODS`` (uniform
             solver) or ``VARIABLE_METHODS`` (variable solver); case does not
-            matter. Default ``"gk21"``.
+            matter. None (default) means ``"gk21"`` (uniform) or
+            ``"interpolatory3_variable"`` (variable).
         atol : float
             Absolute tolerance. A subinterval is accepted when its error
             estimate is below ``max(atol, rtol * |I|)``, with ``I`` the integral
-            (:ref:`ug-error-control`). Default 1e-5.
+            (see :ref:`the user guide <ug-error-control>`). Default 1e-5.
         rtol : float
             Relative tolerance; see ``atol``. Default 1e-5.
         mesh_init : torch.Tensor or None
@@ -234,11 +235,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         remove_cut : float
             Largest predicted error ratio of a subinterval made by merging two
             neighbors when the optimal mesh is built; must be below 1. Lower
-            values merge less. Default 0.1 (:ref:`ug-optimal-mesh`).
+            values merge less. Default 0.1 (see :ref:`the user guide <ug-optimal-mesh>`).
         max_batch : int or None
             Default for the largest number of integrand evaluations per call of
             ``f``. None (default) sets the batch size from the free memory,
-            measured by a memory benchmark (:ref:`ug-memory`).
+            measured by a memory benchmark (see :ref:`the user guide <ug-memory>`).
         total_mem_usage : float
             Fraction of the device's total memory, in (0, 1], that batches may
             fill: the batch size leaves ``(1 - total_mem_usage)`` of it free.
@@ -246,15 +247,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         max_adaptive_splits : int or None
             Default cap on how many times a subinterval may have been halved
             since the starting mesh; at the cap it is accepted even if it fails
-            the tolerance. None (default) means no cap (:ref:`ug-convergence`).
+            the tolerance. None (default) means no cap (see :ref:`the user guide <ug-convergence>`).
         use_absolute_error_ratio : bool
             If True (default), the relative tolerance uses the whole integral;
             if False, the running integral from ``mesh_init`` through each
-            subinterval (:ref:`ug-error-reference`).
+            subinterval (see :ref:`the user guide <ug-error-reference>`).
         error_norm : str or Callable
             How the error of a vector-valued integrand becomes one accept-or-split
             decision: ``"2"`` (default), ``"max"``, ``"rms"``,
-            ``"failure_fraction"`` or a callable norm (:ref:`ug-error-norm`).
+            ``"failure_fraction"`` or a callable norm (see :ref:`the user guide <ug-error-norm>`).
         mesh_failure_tolerance : float
             With ``error_norm="failure_fraction"``, the fraction of output
             components, in [0, 1], that may fail while a subinterval is still
@@ -293,7 +294,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         if not remove_cut < 1.0:
             raise ValueError(f"remove_cut must be below 1, got {remove_cut!r}")
         super().__init__(
-            method=method,
+            method=DEFAULT_METHODS[self.sampling_type] if method is None else method,
             atol=atol,
             rtol=rtol,
             y0=y0,
@@ -638,7 +639,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh : torch.Tensor or None
             Starting mesh, shape [M, T], increasing; its first and last points
             are the integration bounds. None builds a fresh starting mesh
-            (:ref:`ug-mesh`). Replaced by the stored mesh under ``same_f``.
+            (see :ref:`the user guide <ug-mesh>`). Replaced by the stored mesh under ``same_f``.
         mesh_init : torch.Tensor or None
             Lower integration bound, shape [T]. If ``mesh`` is given, it must
             equal the mesh's first point. None uses ``mesh[0]`` or the
@@ -650,54 +651,54 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         same_f : bool
             True when f is the same integrand as in the previous call, or
             changed only slightly: start from the stored mesh and ``max_batch``
-            and skip the memory benchmark. Default False (:ref:`ug-same-f`).
+            and skip the memory benchmark. Default False (see :ref:`the user guide <ug-same-f>`).
         random_initial_mesh : bool
             If True (default), the points of a fresh starting mesh are placed at
             random, so the mesh does not line up with evenly spaced features of
-            f; if False, they are evenly spaced (:ref:`ug-mesh`).
+            f; if False, they are evenly spaced (see :ref:`the user guide <ug-mesh>`).
         N_init_steps : int
             Approximate number of subintervals of a fresh starting mesh. The
-            default 13 gives 11 subintervals (:ref:`ug-mesh`).
+            default 13 gives 11 subintervals (see :ref:`the user guide <ug-mesh>`).
         f_args : tuple
             Extra positional arguments passed to f; tensors are moved to the
             solver's device. Default ``()``.
         take_gradient : bool
             If True (default), backpropagate each batch's loss right after it,
             so the whole autograd graph is never held; if False, keep the graph
-            so the returned integral can be differentiated (:ref:`ug-autodiff`).
+            so the returned integral can be differentiated (see :ref:`the user guide <ug-autodiff>`).
         total_mem_usage : float or None
             Fraction of the device's total memory, in (0, 1], that batches may
-            fill. Used only when no ``max_batch`` is set (:ref:`ug-memory`).
+            fill. Used only when no ``max_batch`` is set (see :ref:`the user guide <ug-memory>`).
         loss_fxn : Callable or None
             Maps one batch's ``IntegrationResult`` to a scalar loss, which
             ``take_gradient=True`` backpropagates; ``result.loss`` is the sum
-            over batches. None uses the integral (:ref:`ug-autodiff`).
+            over batches. None uses the integral (see :ref:`the user guide <ug-autodiff>`).
         max_batch : int or None
             Largest number of integrand evaluations per call of f. If this and
             the constructor's value are None, the memory benchmark sets it
-            (:ref:`ug-memory`). Replaced by the stored value under ``same_f``.
+            (see :ref:`the user guide <ug-memory>`). Replaced by the stored value under ``same_f``.
         max_adaptive_splits : int or None
             Cap on how many times a subinterval may have been halved since the
             starting mesh; at the cap it is accepted even if it fails the
-            tolerance (:ref:`ug-convergence`).
+            tolerance (see :ref:`the user guide <ug-convergence>`).
         error_norm : str, Callable or None
             How the error of a vector-valued integrand becomes one
-            accept-or-split decision (:ref:`ug-error-norm`).
+            accept-or-split decision (see :ref:`the user guide <ug-error-norm>`).
         error_integral_reference : float, torch.Tensor or None
             A value close to the integral, used in place of the running integral
             in the relative tolerance ``rtol * |reference|``. Only with
-            ``use_absolute_error_ratio=True`` (:ref:`ug-error-reference`).
+            ``use_absolute_error_ratio=True`` (see :ref:`the user guide <ug-error-reference>`).
         mesh_failure_tolerance : float or None
             With ``error_norm="failure_fraction"``, the fraction of output
             components that may fail while a subinterval is still accepted
-            (:ref:`ug-error-norm`).
+            (see :ref:`the user guide <ug-error-norm>`).
         error_on_nonfinite : bool or None
             If True, raise ``ValueError`` when f returns NaN or Inf; if False,
             accept those subintervals and let the value reach the result.
         conserve_memory : bool
             With ``take_gradient=False``, evaluate one batch of ``max_batch``
             points per pass instead of every waiting subinterval at once: less
-            memory, more passes. Default False (:ref:`ug-memory`).
+            memory, more passes. Default False (see :ref:`the user guide <ug-memory>`).
         result_device : str, torch.device or None
             Device of the per-subinterval arrays of the result (default
             ``"cpu"``); None keeps them on the solver's device. The integral and
@@ -708,7 +709,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         IntegrationResult
             The integral (plus ``y0``), its error estimate, whether it
             ``converged``, the optimal mesh, the nodes and integrand values of
-            every subinterval, and split statistics (:ref:`ug-convergence`).
+            every subinterval, and split statistics (see :ref:`the user guide <ug-convergence>`).
         """
         # Set dtype based on input
         self.set_dtype_by_input(mesh=mesh, mesh_init=mesh_init, mesh_final=mesh_final)

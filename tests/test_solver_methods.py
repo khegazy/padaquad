@@ -315,3 +315,22 @@ class TestIntegrateRouting:
     def test_unknown_option_raises(self):
         with pytest.raises(TypeError, match="bogus"):
             integrate(torch.cos, **_BASE, bogus=1)
+
+
+class TestDefaultMethod:
+    """``method=None`` means the sampling type's default method."""
+
+    def test_uniform_default_is_gk21(self):
+        assert UniformAdaptiveQuadrature(device="cpu").method_name == "gk21"
+        assert adaptive_quadrature("uniform", device="cpu").method_name == "gk21"
+
+    def test_variable_default_is_interpolatory3(self):
+        """``gk21`` is not a variable method; the variable solver used to raise
+        ``ValueError: Unknown method 'gk21'`` without an explicit method."""
+        expected = "interpolatory3_variable"
+        assert VariableAdaptiveQuadrature(device="cpu").method_name == expected
+        assert adaptive_quadrature("variable", device="cpu").method_name == expected
+
+    def test_integrate_variable_without_method(self):
+        result = integrate(torch.cos, sampling="variable", **_BASE)
+        assert float(result.integral) == pytest.approx(0.8414709848, abs=1e-6)

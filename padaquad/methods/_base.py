@@ -137,7 +137,7 @@ class MethodClass(ABC):
         The power k such that the error estimate on a subinterval of width h
         shrinks like :math:`h^k`: k = d + 2, with d the degree of the embedded
         method. Sets the merge cutoff of the optimal mesh
-        (:ref:`ug-optimal-mesh`).
+        (see :ref:`the user guide <ug-optimal-mesh>`).
     references : tuple of str
         Keys of ``docs/references.bib`` for the sources of the method's
         nodes, weights and error weights; the documentation's methods table
@@ -193,7 +193,7 @@ class MethodClass(ABC):
         Order of the method, ``degree + 1``.
 
         On a smooth integrand the total error of the method applied on
-        subintervals of width h falls like :math:`h^{\\text{order}}`; a method of
+        subintervals of width h falls like :math:`h^{\text{order}}`; a method of
         degree n has order n + 1 (Gonnet 2012, Sec. 1 :cite:p:`gonnet2012`).
 
         Returns
@@ -328,7 +328,7 @@ class MethodClass(ABC):
 
         The search stops at k = 2C because no method with C nodes is exact at
         degree 2C (derivation): the polynomial
-        :math:`(t - c_1)^2 \\cdots (t - c_C)^2` has degree 2C and is zero at
+        :math:`(t - c_1)^2 \cdots (t - c_C)^2` has degree 2C and is zero at
         every node, so the method gives 0 for it, but its integral is positive.
 
         Parameters

@@ -3,8 +3,8 @@ Base class and sampling modes shared by the padaquad solvers.
 
 - ``steps``: the enum of sampling modes, and ``get_sampling_type``, which turns a
   name such as ``"uniform"`` into a ``steps`` member.
-- ``DEFAULT_SAMPLING_TYPE`` and ``DEFAULT_METHOD``: the sampling mode and the
-  method used when the caller names none.
+- ``DEFAULT_SAMPLING_TYPE`` and ``DEFAULT_METHODS``: the sampling mode, and the
+  method of each sampling mode, used when the caller names none.
 - ``SolverBase``: the abstract base class of the solvers. It keeps the dtype,
   the device, the construction-time defaults and the warm-start mesh, and
   declares the ``integrate()`` / ``_calculate_integral()`` interface that the
@@ -53,8 +53,12 @@ class steps(Enum):
 # Sampling type used when the caller gives none (adaptive_quadrature, integrate).
 DEFAULT_SAMPLING_TYPE = "uniform"
 
-# Default quadrature method of the solvers and of ``padaquad.integrate()``.
-DEFAULT_METHOD = "gk21"
+# Default quadrature method of each sampling mode, used by the solvers,
+# ``adaptive_quadrature()`` and ``padaquad.integrate()`` when ``method`` is None.
+DEFAULT_METHODS = {
+    steps.ADAPTIVE_UNIFORM: "gk21",
+    steps.ADAPTIVE_VARIABLE: "interpolatory3_variable",
+}
 
 
 def get_sampling_type(sampling_type: str) -> steps:

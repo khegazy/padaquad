@@ -2,7 +2,7 @@ r"""
 Clenshaw-Curtis methods: cc5, cc9, cc17, cc33 and cc65.
 
 The Clenshaw-Curtis method CC_n integrates the polynomial that interpolates
-``f`` at the n + 1 Chebyshev points :math:`x_k = \\cos(k\\pi/n)`,
+``f`` at the n + 1 Chebyshev points :math:`x_k = \cos(k\pi/n)`,
 k = 0, ..., n, on [-1, 1] (Trefethen 2008, Eq. (2.3), p. 70
 :cite:p:`trefethen2008`). Because it integrates the interpolating polynomial,
 it is exact for every polynomial of degree n (Trefethen 2008, Sec. 2, p. 69).

@@ -74,10 +74,10 @@ class IntegrationResult:
         detached, with shape ``[P, ...]``. See :ref:`ug-tracked-variables`.
     mesh_quadratures : torch.Tensor
         Each subinterval's contribution to the integral,
-        :math:`h \\sum_i b_i y_i`. Shape ``[N, D]``.
+        :math:`h \sum_i b_i y_i`. Shape ``[N, D]``.
     mesh_quadrature_errors : torch.Tensor
         Absolute value of each subinterval's error estimate,
-        :math:`|h \\sum_i b^{\\text{error}}_i y_i|`. Shape ``[N, D]``.
+        :math:`|h \sum_i b^{\text{error}}_i y_i|`. Shape ``[N, D]``.
     error_ratios : torch.Tensor
         Each subinterval's error ratio when it was accepted, against the
         tolerance of that moment (with ``error_norm="failure_fraction"``,

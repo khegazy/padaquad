@@ -12,7 +12,7 @@ from __future__ import annotations
 import inspect
 from typing import TYPE_CHECKING, Any
 
-from .base import DEFAULT_METHOD, DEFAULT_SAMPLING_TYPE, get_sampling_type, steps
+from .base import DEFAULT_SAMPLING_TYPE, get_sampling_type, steps
 from .quadrature import (
     AdaptiveQuadrature,
     UniformAdaptiveQuadrature,
@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 
 def adaptive_quadrature(
     sampling_type: str | steps = DEFAULT_SAMPLING_TYPE,
-    method: str = DEFAULT_METHOD,
+    method: str | None = None,
     **options: Any,
 ) -> UniformAdaptiveQuadrature | VariableAdaptiveQuadrature:
     """
@@ -44,9 +44,10 @@ def adaptive_quadrature(
         ``"uniform"`` (fixed node fractions) or ``"variable"`` (weights
         computed from the node positions); ``"adaptive_uniform"``,
         ``"adaptive_variable"`` and the ``steps`` values are also accepted.
-    method : str
+    method : str or None
         Name of the method, a key of ``UNIFORM_METHODS`` (uniform sampling) or
-        ``VARIABLE_METHODS`` (variable sampling). Default: ``"gk21"``.
+        ``VARIABLE_METHODS`` (variable sampling). None (default) means
+        ``"gk21"`` (uniform) or ``"interpolatory3_variable"`` (variable).
     **options : Any
         Keyword arguments of the solver's constructor (for example ``atol``,
         ``rtol``, ``f``, ``mesh_init``, ``mesh_final``, ``max_batch``,
@@ -109,7 +110,7 @@ _CALL_OPTIONS = frozenset(
 
 def integrate(
     f: Callable[..., Any],
-    method: str = DEFAULT_METHOD,
+    method: str | None = None,
     sampling: str | steps = DEFAULT_SAMPLING_TYPE,
     **options: Any,
 ) -> IntegrationResult:
@@ -137,9 +138,10 @@ def integrate(
         The integrand. Takes points of shape ``[N, T]`` and returns values of
         shape ``[N, D]``, or a pair ``(values, tracked_variables)``; see
         :ref:`ug-shapes` and :ref:`ug-tracked-variables`.
-    method : str
+    method : str or None
         Name of the method, a key of ``UNIFORM_METHODS`` (uniform sampling) or
-        ``VARIABLE_METHODS`` (variable sampling). Default: ``"gk21"``.
+        ``VARIABLE_METHODS`` (variable sampling). None (default) means
+        ``"gk21"`` (uniform) or ``"interpolatory3_variable"`` (variable).
     sampling : str or steps
         ``"uniform"`` (fixed node fractions, the default) or ``"variable"``
         (weights computed from the node positions), or any other sampling

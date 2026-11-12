@@ -201,8 +201,7 @@ class SolverBase(ABC, DistributedEnvironment):
         # Stored time barriers from the last integration for warm-starting.
         # Used only when integrate(..., same_f=True) is passed;
         # otherwise ignored. They are the *optimal* mesh of the last call that
-        # returned (post-prune-and-refine), or its partly refined mesh after a
-        # max_path_change early exit.
+        # returned (post-prune-and-refine).
         self.mesh_previous: torch.Tensor | None = None
 
         self._set_dtype(dtype)

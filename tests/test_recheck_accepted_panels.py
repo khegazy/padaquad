@@ -75,50 +75,17 @@ def _run(solver, f, take_gradient, mesh_final=T_FINAL, **kwargs):
     )
 
 
-def _panel_ratios(solver, result):
-    """Per-panel error ratio against the FINAL integral.
-
-    Uses the solver's own error logic (including the round-off floor), so a
-    ratio < 1 means the panel is within the final tolerance.
-    """
-    ratios, _, _ = solver._compute_error_ratios(
-        mesh_quadrature_errors=result.mesh_quadrature_errors,
-        mesh_quadratures=result.mesh_quadratures,
-        integral=result.integral,
-    )
-    return ratios
-
-
-def _all_panels_pass(solver, result):
-    """Per-panel keep mask against the FINAL integral, scheme-agnostic.
-
-    Uses the solver's own accept/reject logic (norm family OR failure_fraction,
-    absolute OR cumulative), so ``keep.all()`` is the feature's contract: at
-    convergence every recorded panel is accepted against the final tolerance.
-    """
-    ratios, _, per_dim = solver._compute_error_ratios(
-        mesh_quadrature_errors=result.mesh_quadrature_errors,
-        mesh_quadratures=result.mesh_quadratures,
-        integral=result.integral,
-    )
-    keep, _ = solver._accept_reject_masks(ratios, per_dim)
-    return keep
-
-
 def test_recheck_enforces_final_tolerance_on_all_panels():
     """With the re-check on, every recorded panel satisfies the final tolerance.
 
     This is the feature's contract: at convergence no accepted panel may violate
-    the tolerance computed against the final integral.
+    the tolerance computed against the final integral, which is what
+    ``result.converged`` reports.
     """
     solver = _solver()
     torch.manual_seed(0)
     result = _run(solver, _cancelling, take_gradient=False)
-    ratios = _panel_ratios(solver, result)
-    assert torch.all(ratios < 1.0 + 1e-9), (
-        f"re-check should leave every panel within the final tolerance; "
-        f"max ratio = {float(ratios.max())}"
-    )
+    assert result.converged is True
 
 
 def test_without_recheck_some_panel_violates_final_tolerance():
@@ -126,16 +93,13 @@ def test_without_recheck_some_panel_violates_final_tolerance():
 
     With the denominator drifting down as the integral cancels, at least one
     early-accepted panel violates the tolerance computed against the final
-    integral -- the situation the re-check exists to fix.
+    integral -- the situation the re-check exists to fix -- and the result
+    reports it with ``converged=False``.
     """
     solver = _solver()
     torch.manual_seed(0)
     result = _run(solver, _cancelling, take_gradient=True)
-    ratios = _panel_ratios(solver, result)
-    assert torch.any(ratios >= 1.0), (
-        f"expected at least one panel to violate the final tolerance without the "
-        f"re-check; max ratio = {float(ratios.max())}"
-    )
+    assert result.converged is False
 
 
 def test_integral_consistency_and_accuracy():
@@ -181,8 +145,7 @@ def test_recheck_skipped_with_fixed_reference_still_valid():
     result = _run(
         solver, _cancelling, take_gradient=False, error_integral_reference=0.0
     )
-    ratios = _panel_ratios(solver, result)
-    assert torch.all(ratios < 1.0 + 1e-9)
+    assert result.converged is True
     assert torch.isfinite(result.integral).all()
     assert abs(float(result.integral.reshape(-1)[0])) < 1e-5
 
@@ -215,7 +178,7 @@ def test_recheck_vector_integrand():
     result = _run(solver, _vector_cancelling, take_gradient=False)
     assert result.integral.shape == (2,)
     assert torch.all(torch.isfinite(result.integral))
-    assert torch.all(_all_panels_pass(solver, result))
+    assert result.converged is True
     assert torch.allclose(result.integral.cpu(), _vector_truth(), atol=1e-5, rtol=1e-4)
 
 
@@ -234,7 +197,7 @@ def test_recheck_failure_fraction_mode(mesh_failure_tolerance):
     result = _run(solver, _vector_cancelling, take_gradient=False)
     assert result.integral.shape == (2,)
     assert torch.all(torch.isfinite(result.integral))
-    assert torch.all(_all_panels_pass(solver, result))
+    assert result.converged is True
     # Loose accuracy: with a 50% failure tolerance a component may be coarser.
     assert torch.allclose(result.integral.cpu(), _vector_truth(), atol=1e-2, rtol=1e-2)
 
@@ -246,7 +209,7 @@ def test_recheck_error_norm_max_rms(error_norm):
     torch.manual_seed(0)
     result = _run(solver, _vector_cancelling, take_gradient=False)
     assert torch.all(torch.isfinite(result.integral))
-    assert torch.all(_all_panels_pass(solver, result))
+    assert result.converged is True
     assert torch.allclose(result.integral.cpu(), _vector_truth(), atol=1e-4, rtol=1e-3)
 
 
@@ -337,7 +300,7 @@ def test_recheck_cumulative_mode():
     result = _run(solver, _cancelling, take_gradient=False)
     assert torch.all(torch.isfinite(result.integral))
     assert abs(float(result.integral.reshape(-1)[0])) < 1e-4
-    assert torch.all(_all_panels_pass(solver, result))
+    assert result.converged is True
 
 
 def test_recheck_respects_split_cap():
@@ -384,7 +347,7 @@ def test_recheck_actually_resplits_accepted_panels():
         "not engage on the cancelling integrand"
     )
     # The mechanism fired AND the end state is still within tolerance.
-    assert torch.all(_all_panels_pass(solver, result))
+    assert result.converged is True
 
 
 def test_recheck_determinism():

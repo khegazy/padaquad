@@ -31,17 +31,20 @@ class IntegrationResult:
     the optimized mesh for potential warm-start reuse.
 
     Construct it with keyword arguments only (``kw_only=True``). Every field is
-    required except ``mesh_optimal``, ``tracked_variables``, ``loss`` and
-    ``converged``. The first three may be ``None`` as described below;
-    ``gradient_taken`` and ``converged`` are ``bool``, ``tracked_variables`` is
-    a tuple of tensors, and every other field is a tensor.
+    required except ``mesh_optimal``, ``tracked_variables``, ``loss``,
+    ``converged``, ``n_start_steps``, ``n_start_steps_split`` and
+    ``max_split_depth``, which may be ``None`` as described below.
+    ``gradient_taken`` and ``converged`` are ``bool``, the three split counts
+    are ``int``, ``tracked_variables`` is a tuple of tensors, and every other
+    field is a tensor.
 
     ``integrate()`` also builds one result per batch and passes it to
     ``loss_fxn``. That result covers only the batch's accepted steps:
     ``integral`` is their contribution without ``y0``, ``y0`` is zero,
-    ``mesh_optimal`` and ``loss`` are ``None``, and ``nodes``, ``y`` and
-    ``tracked_variables`` keep one row per step (shapes [N, C, T], [N, C, D]
-    and [N, C, *var_dims]) instead of the flattened shapes below.
+    ``mesh_optimal``, ``loss``, ``converged`` and the three split counts are
+    ``None``, and ``nodes``, ``y`` and ``tracked_variables`` keep one row per
+    step (shapes [N, C, T], [N, C, D] and [N, C, *var_dims]) instead of the
+    flattened shapes below.
 
     Attributes:
         integral: The computed integral value. Shape: [D].
@@ -73,20 +76,39 @@ class IntegrationResult:
             integral (h * sum(b_i * y_i) per step). Shape: [N, D].
         mesh_quadrature_errors: Per-step error estimates from the difference
             between the primary and embedded methods. Shape: [N, D].
-        error_ratios: Per-step error ratios (error / tolerance). Values
-            > 1 indicate the step did not meet accuracy requirements.
+        error_ratios: Per-step error ratios (error / tolerance) at the time
+            each step was accepted, judged against the running integral of
+            that moment. Values >= 1 mean the step did not meet the tolerance
+            then. ``converged`` judges the steps again against the final
+            integral, so it can be ``False`` while every entry here is < 1.
             Shape: [N].
         loss: Loss value computed by the loss function (defaults to
-            the integral itself). Shape: scalar or [D]. ``None`` when the
-            run stopped early on ``max_path_change`` and in the per-batch
-            result before ``loss_fxn`` is applied.
+            the integral itself). Shape: scalar or [D]. ``None`` only in the
+            per-batch result before ``loss_fxn`` is applied.
         gradient_taken: Whether per-batch backpropagation was performed
             during this integration run.
         y0: Initial integral accumulator value used. Shape: [D].
-        converged: Whether the adaptive refinement met the tolerance
-            criterion. ``True`` for normal completion, ``False`` if the
-            integrator hit ``max_path_change`` and exited with a
-            partially-refined mesh.
+        converged: Whether every accepted step meets the error tolerance when
+            judged against the final integral (the reference
+            ``mesh_optimal`` is built with). ``False`` when
+            ``max_adaptive_splits`` stopped the refinement of a failing step,
+            when a step's error is NaN/Inf, or when a step accepted against
+            the running integral fails against the final one (with
+            ``take_gradient=True`` accepted steps are never re-checked). A
+            warning with the size of the error is logged when ``False``.
+            ``None`` in the per-batch result.
+        n_start_steps: Number of steps in the starting mesh (the caller's
+            ``mesh``, the mesh stored by ``same_f=True``, or a freshly
+            generated one). ``None`` in the per-batch result.
+        n_start_steps_split: Number of starting-mesh steps that were split at
+            least once during integration, including splits made by the
+            re-check of accepted steps. Splits made afterwards to build
+            ``mesh_optimal`` are not counted, so with
+            ``max_adaptive_splits=0`` this is 0 even when steps failed; read
+            ``converged`` then. ``None`` in the per-batch result.
+        max_split_depth: Largest number of times any one step was halved
+            (0 when no step was split; at most ``max_adaptive_splits``).
+            ``None`` in the per-batch result.
     """
 
     integral: torch.Tensor
@@ -104,7 +126,22 @@ class IntegrationResult:
     mesh_optimal: torch.Tensor | None = None
     tracked_variables: tuple[torch.Tensor, ...] | None = None
     loss: torch.Tensor | None = None
-    converged: bool = True
+    converged: bool | None = None
+    n_start_steps: int | None = None
+    n_start_steps_split: int | None = None
+    max_split_depth: int | None = None
+
+    @property
+    def percent_start_steps_split(self) -> float | None:
+        """
+        Percentage of starting-mesh steps that were split at least once.
+
+        ``100 * n_start_steps_split / n_start_steps``; ``None`` in the
+        per-batch result, where the counts are ``None``.
+        """
+        if self.n_start_steps is None or self.n_start_steps_split is None:
+            return None
+        return 100.0 * self.n_start_steps_split / self.n_start_steps
 
 
 @dataclass

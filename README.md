@@ -252,7 +252,7 @@ padaquad.adaptive_quadrature(
     sampling_type, method="gk21", atol=1e-5, rtol=1e-5,
     mesh_init=None, mesh_final=None, f=None,
     remove_cut=0.1, max_batch=None, total_mem_usage=0.9,
-    max_path_change=None, use_absolute_error_ratio=True,
+    max_adaptive_splits=None, use_absolute_error_ratio=True,
     device=None, **kwargs,
 ) -> UniformAdaptiveQuadrature | VariableAdaptiveQuadrature
 
@@ -285,16 +285,25 @@ except where noted.
 - `tracked_variables` — extra outputs of the integrand at `nodes`, a tuple
   of tensors, or `None` when the integrand returns none.
 - `mesh_quadratures`, `mesh_quadrature_errors`, `error_ratios` — per-step diagnostics.
-- `loss` (`None` after a `max_path_change` early exit), `gradient_taken`
-  (`bool`), `y0` — training-loop diagnostics.
-- `converged: bool` — `True` for normal completion; `False` only when
-  `max_path_change` triggers an early exit on a user-provided mesh or on
-  the stored mesh used by `same_f=True`.
+- `loss`, `gradient_taken` (`bool`), `y0` — training-loop diagnostics.
+- `converged: bool` — `True` when every accepted step meets the tolerance
+  judged against the final integral. `False` when `max_adaptive_splits`
+  stopped the refinement of a failing step, when a step's error is NaN/Inf,
+  or when a step accepted against the running integral fails against the
+  final one (with `take_gradient=True` accepted steps are not re-checked).
+  A warning reporting the size of the error is logged when `False`.
+- `n_start_steps`, `n_start_steps_split` (`int`) — steps in the starting
+  mesh, and how many of them were split at least once;
+  `percent_start_steps_split` (property) is the second as a percentage of
+  the first. Splits made to build `mesh_optimal` are not counted.
+- `max_split_depth` (`int`) — the largest number of times any one step was
+  halved.
 
 The per-batch result that `loss_fxn` receives covers only that batch's
 accepted steps: `integral` is their contribution without `y0`, `y0` is
-zero, `mesh_optimal` and `loss` are `None`, and `nodes`, `y` and
-`tracked_variables` keep one row per step (`[N, C, T]`, `[N, C, D]`).
+zero, `mesh_optimal`, `loss`, `converged` and the split counts are `None`,
+and `nodes`, `y` and `tracked_variables` keep one row per step
+(`[N, C, T]`, `[N, C, D]`).
 
 ## How it works
 
@@ -333,8 +342,9 @@ zero, `mesh_optimal` and `loss` are `None`, and `nodes`, `y` and
    method's error estimate scales as $h^k$. This is what
    `same_f=True` starts from on the next call. Each call merges
    at most one level, so an over-resolved stored mesh shrinks over
-   repeated calls. An early `max_path_change` exit instead stores the
-   mesh it stopped on with its failing steps split.
+   repeated calls. A call that did not converge (for example under
+   `max_adaptive_splits`) stores its `mesh_optimal` too, which splits the
+   failing steps, so repeated `same_f=True` calls refine further.
 
 ## Comparisons
 

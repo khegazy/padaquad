@@ -212,9 +212,9 @@ class TestGetOptimalTStepBarriers:
 
 def _warm_start_passes(solver, f) -> bool:
     """Re-integrate f from the solver's stored mesh; True when no starting step
-    fails. The solver must have ``max_path_change`` tiny, so one failing
-    starting step stops the call with ``converged=False``."""
-    return solver.integrate(f=f, same_f=True, take_gradient=False).converged
+    fails, i.e. none of the stored mesh's steps had to be split."""
+    out = solver.integrate(f=f, same_f=True, take_gradient=False)
+    return out.n_start_steps_split == 0
 
 
 @pytest.mark.parametrize("method", UNIFORM_METHOD_NAMES)
@@ -225,14 +225,11 @@ def _warm_start_passes(solver, f) -> bool:
 def test_optimal_mesh_passes_when_reevaluated(method, integrand, atol, rtol):
     """Re-integrating the same integrand from its own mesh_optimal fails no
     step: merged steps are predicted to stay below tolerance. With the old cut
-    (summed ratio < remove_cut) 7-22 % of these steps failed. max_path_change
-    (tiny) turns any failing starting step into converged=False."""
+    (summed ratio < remove_cut) 7-22 % of these steps failed."""
     if (atol, rtol) == (1e-9, 1e-9) and method in ("adaptive_heun", "fehlberg2"):
         pytest.skip("1e5+ panels at this tolerance; covered at the loose one")
     f = integrand_dict[integrand][0]
-    solver = make_uniform_solver(
-        method, atol=atol, rtol=rtol, device="cpu", max_path_change=1e-12
-    )
+    solver = make_uniform_solver(method, atol=atol, rtol=rtol, device="cpu")
     torch.manual_seed(0)
     solver.integrate(f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False)
     assert _warm_start_passes(solver, f)
@@ -257,7 +254,6 @@ def test_optimal_mesh_passes_when_reevaluated_cumulative(method, f, atol, rtol):
         atol=atol,
         rtol=rtol,
         device="cpu",
-        max_path_change=1e-12,
         use_absolute_error_ratio=False,
     )
     torch.manual_seed(0)
@@ -303,14 +299,13 @@ def test_repeated_warm_starts_prune_to_a_fixed_point(method):
     stays within tolerance of the exact value."""
     f, solution, _ = integrand_dict["damped_sine"]
     exact = solution(T_INIT, T_FINAL)
-    solver = make_uniform_solver(
-        method, atol=1e-9, rtol=1e-7, device="cpu", max_path_change=1e-12
-    )
+    solver = make_uniform_solver(method, atol=1e-9, rtol=1e-7, device="cpu")
     mesh = torch.linspace(0.0, 1.0, 129, dtype=torch.float64).unsqueeze(-1)
     out = solver.integrate(f=f, mesh=mesh, take_gradient=False)
     sizes = [len(mesh) - 1, len(out.mesh_optimal) - 1]
     for _ in range(8):
         out = solver.integrate(f=f, same_f=True, take_gradient=False)
+        assert out.n_start_steps_split == 0
         assert out.converged is True
         assert torch.allclose(out.integral.cpu(), exact, atol=1e-9, rtol=1e-6)
         sizes.append(len(out.mesh_optimal) - 1)

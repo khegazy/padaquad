@@ -1,47 +1,42 @@
 """
-Parallel adaptive-stepsize integration solvers.
+Adaptive quadrature engine that evaluates many subintervals in parallel.
 
-This module contains the core parallel integration engine. Unlike traditional
-sequential integrators that must evaluate one step at a time (because each step
-depends on the previous result), this solver evaluates many integration steps
-simultaneously in a batch. This is possible because the integrand f(x) depends
-only on x, not on accumulated state -- each step's contribution to the integral
-is independent and can be computed in parallel.
+An ODE solver must advance one step at a time, because each step depends on
+the previous result. Here the integrand ``f(t)`` depends only on the
+integration variable ``t``, so the contribution of every subinterval is
+independent of the others, and many subintervals are evaluated together in
+one batch.
 
-The integration domain [mesh_init, mesh_final] is divided by "barriers" into steps.
-Within each step, C quadrature points are placed (per the rule's node fractions). The
-solver adaptively refines this mesh: steps with too much error are split into
-smaller steps; consecutive steps with very little error are merged.
+The mesh divides ``[mesh_init, mesh_final]`` into subintervals, and the
+method places C nodes in each one. A subinterval whose error estimate exceeds
+the tolerance is split in half and both halves are evaluated again. After the
+integral has converged, neighboring subintervals with very small errors are
+merged to build the optimal mesh, which a later call can start from.
 
 Key concepts:
 
-- **mesh**: Boundary points dividing [mesh_init, mesh_final] into steps.
-  Shape: [M, T] where M is the number of barriers. Step i spans from
-  barrier[i] to barrier[i+1].
+- **mesh**: the mesh points, shape [M, T]. Subinterval i runs from mesh
+  point i to mesh point i + 1.
+- **mesh_trackers**: boolean array of length M. True means the subinterval
+  that starts at that mesh point still has to be evaluated (or evaluated
+  again after a split).
+- **Batching**: when the subintervals do not fit in memory at once, they are
+  evaluated in batches. The batch size comes from a measurement of the
+  memory one evaluation of ``f`` uses (see ``memory.py``).
 
-- **mesh_trackers**: Boolean array of length M. True means the step starting
-  at that barrier still needs to be evaluated (or re-evaluated after splitting).
+Classes:
 
-- **Batching**: When there are more steps than fit in GPU memory, the solver
-  processes them in batches. Batch size is determined dynamically by measuring
-  the memory footprint of the integrand function (see ``memory.py``).
+- ``AdaptiveQuadrature`` (here): the abstract base class with the
+  integration loop, the splitting and merging of subintervals, and the error
+  ratios. Memory management (the memory benchmark, the batch size and the
+  recognition of out-of-memory errors) comes from a mixin in ``memory.py``.
+- ``UniformAdaptiveQuadrature`` (``uniform.py``): the solver for methods whose
+  nodes sit at fixed fractions of each subinterval.
+- ``VariableAdaptiveQuadrature`` (``variable.py``): the solver for methods
+  whose weights are computed from where the nodes actually are.
 
-Class hierarchy (defined here):
-
-- ``AdaptiveQuadrature``: Abstract base with the main integrate()
-  loop, adaptive step management, and error computation. Memory management
-  (the memory benchmark, the batch-size budget, out-of-memory recognition)
-  comes from the ``_MemoryManagement`` mixin in ``memory.py``.
-
-- ``UniformAdaptiveQuadrature`` (``uniform.py``): concrete solver for rules
-  with fixed node fractions (quadrature points at constant fractional
-  positions).
-
-- ``VariableAdaptiveQuadrature`` (``variable.py``): concrete solver for rules
-  whose weights depend on the node positions.
-
-The quadrature rule itself is a ``MethodClass`` (``padaquad/methods``); the
-engine reaches it only through ``node_fractions()`` and ``weights()``.
+The quadrature method is a ``MethodClass`` (``padaquad/methods``); the engine
+uses it only through ``node_fractions()`` and ``weights()``.
 """
 
 from __future__ import annotations
@@ -90,43 +85,32 @@ def _RK_integral(
     y0: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """
-    Compute the Runge-Kutta weighted sum for a batch of integration steps.
+    Apply the method's weights to a batch of subintervals and sum the results.
 
-    This is the core numerical operation: for each step, multiply the integrand
-    evaluations by the tableau b weights, sum over the C quadrature points
-    within the step, and multiply by the step size h. Then sum all step
-    contributions to get the total integral.
-
-    The formula per step i is:
-        RK_step_i = h_i * sum_j(b_j * y_ij)
-
-    And the total integral is:
-        integral = y0 + sum_i(RK_step_i)
+    For every subinterval i, the integrand values are multiplied by the
+    weights, summed over the C nodes and multiplied by the width ``h_i``:
+    ``R_i = h_i * sum_j(b_ij * y_ij)``, and ``integral = y0 + sum_i(R_i)``.
+    The function is used for every method, not only the Runge-Kutta ones.
 
     Parameters
     ----------
     t : torch.Tensor
-        Time points for each step. The step size h is computed as
-        t[:,-1] - t[:,0] (last minus first point in each step).
-        Shape: [N, C, T].
+        Nodes of each subinterval. The width is ``t[:, -1] - t[:, 0]``,
+        because every method's first and last node are the subinterval's
+        endpoints. Shape: [N, C, T].
     y : torch.Tensor
-        Integrand evaluations at the time points in t.
-        Shape: [N, C, D].
+        Integrand values at the nodes. Shape: [N, C, D].
     tableau_b : torch.Tensor
-        Weights for combining evaluations within each step, from
-        ``MethodClass.weights``. Shape: [N, C, 1].
+        Weights of each node, from ``MethodClass.weights``. Shape: [N, C, 1].
     y0 : torch.Tensor
-        Starting accumulator value. Shape: [D].
+        Value added to the total. Shape: [D].
 
     Returns
     -------
     tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        Tuple of:
-            - integral: Total integral value (y0 + sum of all step contributions).
-              Shape: [D].
-            - RK_steps: Per-step contributions to the integral. Each entry is
-              h_i * sum(b_j * y_ij). Shape: [N, D].
-            - h: Step sizes (t_last - t_first) for each step. Shape: [N, T].
+        Tuple ``(integral, RK_steps, h)``: the total ``y0`` plus all
+        contributions [D], the contribution of each subinterval [N, D], and
+        the width of each subinterval [N, T].
     """
     # Step size: difference between last and first time point in each step
     h = t[:, -1] - t[:, 0]
@@ -150,47 +134,44 @@ _DISTRIBUTED_OPTIONS = frozenset(
 
 class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     """
-    Base class for parallel adaptive-stepsize numerical integration.
+    Base class of the adaptive solvers, which integrate f in parallel batches.
 
-    Implements the main integration loop that:
-    1. Initializes a mesh of quadrature step barriers across the integration domain.
-    2. Evaluates the integrand at quadrature points within each step (in batches).
-    3. Computes integral contributions and error estimates per step with the
-       method's quadrature weights.
-    4. Adaptively refines the mesh: splits high-error steps, merges low-error pairs.
-    5. Repeats until all steps meet the error tolerance.
-    6. Computes an optimal mesh for potential reuse.
+    The integration loop:
 
-    Subclasses must set ``sampling_type`` (it selects the method registry)
-    and implement:
-        - ``_evaluate_adaptive_nodes(...)``: Evaluate integrand at refined points.
-        - ``_merge_excess_nodes(...)``: Merge consecutive low-error steps.
+    1. Builds a starting mesh on ``[mesh_init, mesh_final]``.
+    2. Evaluates the integrand at the nodes of many subintervals at once.
+    3. Computes each subinterval's contribution and error estimate with the
+       method's weights.
+    4. Accepts the subintervals whose error ratio is below 1 and splits the
+       others in half.
+    5. Repeats steps 2 to 4 until every subinterval is accepted.
+    6. Builds the optimal mesh, which a later call with ``same_f=True`` starts
+       from.
+
+    Subclasses set ``sampling_type`` and define how a split subinterval gets
+    its nodes and how two neighboring subintervals are merged.
 
     Attributes
     ----------
-    remove_cut
-        Largest predicted error ratio of a merged step pair in the
-        optimal mesh (default 0.1).
-    max_batch
-        Maximum number of integrand evaluations per batch. If None,
-        determined dynamically from available memory.
-    total_mem_usage
-        Fraction of total memory to use (0 < value <= 1).
-    use_absolute_error_ratio
-        If True, uses the total integral for error
-        normalization. If False, uses cumulative integral up to each step.
-    error_norm
-        Vector-error reduction / acceptance scheme (one of "2",
-        "max", "rms", "failure_fraction", or a callable). See __init__.
-    mesh_failure_tolerance
-        Fraction of output elements allowed to fail when
-        error_norm == "failure_fraction".
     method : MethodClass
-        The quadrature rule, a ``MethodClass`` (set by
-        ``_set_solver_dtype``).
+        The quadrature method.
     C : int
-        Number of quadrature points per integration step (set by
-        ``_set_solver_dtype``).
+        Number of nodes per subinterval.
+    remove_cut : float
+        Largest predicted error ratio of a subinterval made by merging two
+        neighbors when the optimal mesh is built.
+    init_max_batch : int or None
+        The constructor's ``max_batch``.
+    init_total_mem_usage : float
+        The constructor's ``total_mem_usage``.
+    use_absolute_error_ratio : bool
+        True to judge the relative tolerance against the whole integral,
+        False to judge it against the running integral.
+    error_norm : str or Callable
+        The ``error_norm`` in use: the one given to the current or last
+        ``integrate`` call, or else the constructor's.
+    mesh_failure_tolerance : float
+        The ``mesh_failure_tolerance`` in use, chosen the same way.
     """
 
     #: Sampling mode of the concrete solver; selects the method registry.
@@ -224,115 +205,84 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         **distributed_options: Any,
     ) -> None:
         """
-        Initialize the parallel adaptive solver.
+        Create a solver and store the defaults that ``integrate`` falls back on.
 
-        Every argument is keyword-only, and this signature names every option
-        of the solver (``SolverBase`` takes them from here).
+        Every argument is keyword-only.
 
         Parameters
         ----------
-        f : Callable[..., Any] | None
-            The integrand f(t) -> Tensor, used by ``integrate()`` calls that
-            pass no ``f``. Takes points of shape [N, T] and returns values
-            of shape [N, D].
+        f : Callable or None
+            The integrand, used by ``integrate`` calls that pass none. It takes
+            points of shape [N, T] and returns values of shape [N, D]
+            (:ref:`ug-shapes`). Default None.
         method : str
-            Name of the quadrature method, a key of ``UNIFORM_METHODS``
-            (uniform solver) or ``VARIABLE_METHODS`` (variable solver).
-            Converted to lowercase. Default: ``DEFAULT_METHOD`` ("gk21").
+            Name of the quadrature method, a key of ``UNIFORM_METHODS`` (uniform
+            solver) or ``VARIABLE_METHODS`` (variable solver); case does not
+            matter. Default ``"gk21"``.
         atol : float
-            Absolute error tolerance. A step is accepted when its
-            estimated error is below max(atol, rtol*|integral|)
-            (atol + rtol*|integral| for ``error_norm="failure_fraction"``).
+            Absolute tolerance. A subinterval is accepted when its error
+            estimate is below ``max(atol, rtol * |I|)``, with ``I`` the integral
+            (:ref:`ug-error-control`). Default 1e-5.
         rtol : float
-            Relative error tolerance; see ``atol``.
-        mesh_init : torch.Tensor | None
-            Default lower integration bound. Shape: [T].
-        mesh_final : torch.Tensor | None
-            Default upper integration bound. Shape: [T].
-        y0 : torch.Tensor | None
-            Default additive offset of the returned integral. Shape: [D].
+            Relative tolerance; see ``atol``. Default 1e-5.
+        mesh_init : torch.Tensor or None
+            Default lower integration bound, shape [T]. None means 0.
+        mesh_final : torch.Tensor or None
+            Default upper integration bound, shape [T]. None means 1.
+        y0 : torch.Tensor or None
+            Default value added to the returned integral, shape [D]. None means 0.
         remove_cut : float
-            Largest predicted error ratio of a merged step pair when
-            the optimal mesh is built. A pair is merged only if the merged
-            step's error ratio, predicted from the two steps' errors, is
-            below this value (see ``_prune_excess_mesh``). Must be < 1.
-            Lower values keep more steps (more conservative). Default: 0.1.
-        max_batch : int | None
-            Maximum number of integrand evaluations per batch. If None,
-            batch size is determined dynamically based on available memory.
+            Largest predicted error ratio of a subinterval made by merging two
+            neighbors when the optimal mesh is built; must be below 1. Lower
+            values merge less. Default 0.1 (:ref:`ug-optimal-mesh`).
+        max_batch : int or None
+            Default for the largest number of integrand evaluations per call of
+            ``f``. None (default) sets the batch size from the free memory,
+            measured by a memory benchmark (:ref:`ug-memory`).
         total_mem_usage : float
-            Fraction of total device memory the solver may use
-            for batched evaluations (0 < value <= 1). Default: 0.9.
-        max_adaptive_splits : int | None
-            Maximum number of times a panel may be split
-            during adaptive refinement. A panel that has been split this
-            many times is accepted even if it still fails the error
-            tolerance, instead of being split further; ``converged`` is
-            then usually ``False`` (such a step can still meet the
-            tolerance against the final integral). A non-negative integer
-            (``int`` or a numpy integer); if None (default), refinement is
-            uncapped. Can be overridden per call
-            via ``integrate(max_adaptive_splits=...)``.
+            Fraction of the device's total memory, in (0, 1], that batches may
+            fill: the batch size leaves ``(1 - total_mem_usage)`` of it free.
+            Used only when no ``max_batch`` is set. Default 0.9.
+        max_adaptive_splits : int or None
+            Default cap on how many times a subinterval may have been halved
+            since the starting mesh; at the cap it is accepted even if it fails
+            the tolerance. None (default) means no cap (:ref:`ug-convergence`).
         use_absolute_error_ratio : bool
-            If True, error ratios use the total
-            (converging) integral value. If False, uses cumulative sum up
-            to each step. Default: True.
-        error_norm : str | Callable[[torch.Tensor], torch.Tensor]
-            Selects how a vector-valued (D > 1) per-step error is
-            reduced to a single accept/reject decision. One of:
-
-              - ``"2"`` (default, matches ``scipy.integrate.quad_vec``):
-                L2 norm ``sqrt(sum(e**2))`` of the error vector, compared
-                against ``max(atol, rtol * L2(integral))``
-                (reduce-then-compare).
-              - ``"max"``: L-infinity norm ``max(|e|)`` (reduce-then-compare).
-              - ``"rms"``: root-mean-square ``sqrt(mean(e**2))``
-                (reduce-then-compare; padaquad's historical reduction).
-              - a callable ``norm(x)`` that reduces the last (D) axis of a
-                ``[..., D]`` tensor to ``[...]`` (reduce-then-compare).
-              - ``"failure_fraction"``: per-component control. Each output
-                element is compared against its own tolerance
-                ``atol + rtol * |integral_d|``; a panel is accepted when the
-                fraction of failing elements is ``<= mesh_failure_tolerance``.
-
-            For D == 1 the norm family reduces to
-            ``|e| / max(atol, rtol*|I|)`` and ``"failure_fraction"`` to
-            ``|e| / (atol + rtol*|I|)``.
+            If True (default), the relative tolerance uses the whole integral;
+            if False, the running integral from ``mesh_init`` through each
+            subinterval (:ref:`ug-error-reference`).
+        error_norm : str or Callable
+            How the error of a vector-valued integrand becomes one accept-or-split
+            decision: ``"2"`` (default), ``"max"``, ``"rms"``,
+            ``"failure_fraction"`` or a callable norm (:ref:`ug-error-norm`).
         mesh_failure_tolerance : float
-            Used only when ``error_norm ==
-            "failure_fraction"``. Fraction in ``[0, 1]`` of output elements
-            that may exceed tolerance while a panel is still accepted.
-            Default 0.0 (every element must pass). Can be overridden per
-            call via ``integrate(mesh_failure_tolerance=...)``.
+            With ``error_norm="failure_fraction"``, the fraction of output
+            components, in [0, 1], that may fail while a subinterval is still
+            accepted. Default 0.0 (every component must pass).
         error_on_nonfinite : bool
-            If True (default), raise a ValueError naming the
-            offending ``t`` when the integrand returns NaN/Inf. If False,
-            such panels are accepted and the non-finite value propagates
-            into the result (the run never hangs in either case). Can be
-            overridden per call via ``integrate(error_on_nonfinite=...)``.
+            If True (default), raise ``ValueError`` naming the points where
+            ``f`` returned NaN or Inf. If False, accept those subintervals and
+            let the non-finite value reach the result.
         dtype : torch.dtype
-            Floating-point precision, torch.float64 (default) or
-            torch.float32; torch.float16 is refused. ``integrate()``
-            switches to the dtype of the bounds it is given.
-        device : str | torch.device | None
-            'cpu', 'cuda', an indexed 'cuda:N', or a torch.device;
-            None auto-detects (CUDA if available).
+            ``torch.float64`` (default) or ``torch.float32``; ``torch.float16``
+            is refused. ``integrate`` switches to the dtype of the mesh or the
+            bounds it is given.
+        device : str, torch.device or None
+            ``"cpu"``, ``"cuda"``, ``"cuda:N"`` or a ``torch.device``. None
+            (default) picks CUDA if it is available, else the CPU.
         output_speed_info : bool
-            If True, logs the time of each sub-operation to
-            the file ``padaquad_speed.log``.
+            If True, log the time of each stage of the loop to the file
+            ``padaquad_speed.log``. Default False.
         **distributed_options : Any
-            Multi-GPU options of
-            ``DistributedEnvironment`` (backend, master_addr, master_port,
-            is_slurm); for multi-process runs only.
+            Options for multi-process (multi-GPU) runs only.
 
         Raises
         ------
         TypeError
-            If an argument is passed by position, or a keyword is
-            not an option of the solver.
+            If an argument is passed by position, or a keyword is not an option
+            of the solver.
         ValueError
-            If ``remove_cut`` is not below 1, or another option is
-            invalid.
+            If ``remove_cut`` is not below 1, or another option is invalid.
         """
         unknown = set(distributed_options) - _DISTRIBUTED_OPTIONS
         if unknown:
@@ -449,17 +399,17 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
     def _set_solver_dtype(self, dtype: torch.dtype) -> None:
         """
-        Build the quadrature rule at ``dtype`` on the solver's device.
+        Build the quadrature method at ``dtype`` on the solver's device.
 
         Called from ``SolverBase._set_dtype``, which runs at the end of
-        ``SolverBase.__init__`` (the rule's first build) and on every later
-        dtype change. ``_get_method`` clones the named rule from the registry
-        of this solver's ``sampling_type``.
+        ``SolverBase.__init__`` (the method's first build) and on every later
+        dtype change. ``_get_method`` clones the named method from the registry of this
+        solver's ``sampling_type``.
 
         Parameters
         ----------
         dtype : torch.dtype
-            Floating-point dtype for the rule's tensors.
+            Floating-point dtype for the method's tensors.
 
         Raises
         ------
@@ -475,25 +425,25 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         self, mesh_left: torch.Tensor, mesh_right: torch.Tensor
     ) -> torch.Tensor:
         """
-        Place the C quadrature points of each step between its barriers.
+        Place the C nodes of each subinterval between its two mesh points.
 
-        Node i of a step is ``mesh_left + c_i * (mesh_right - mesh_left)``, with
-        c the rule's ``node_fractions()``: the tableau fractions for a uniform
-        rule, the rule's own ``c`` for a ``VariableMethodClass`` rule (evenly
-        spaced for ``interpolatory3_variable``). For example, with
-        c = [0, 0.5, 1], points are placed at the start, midpoint, and end.
+        Node i of a subinterval is ``mesh_left + c_i * (mesh_right - mesh_left)``,
+        with c the method's ``node_fractions()``: the tableau fractions for a
+        uniform method, the method's own ``c`` for a ``VariableMethodClass``
+        method (evenly spaced for ``interpolatory3_variable``). For example,
+        with c = [0, 0.5, 1] the nodes are the start, the midpoint and the end.
 
         Parameters
         ----------
         mesh_left : torch.Tensor
-            Left barrier of each step. Shape: [N, T].
+            Left mesh point of each subinterval. Shape: [N, T].
         mesh_right : torch.Tensor
-            Right barrier of each step. Shape: [N, T].
+            Right mesh point of each subinterval. Shape: [N, T].
 
         Returns
         -------
         torch.Tensor
-            Quadrature point positions. Shape: [N, C, T].
+            Node positions. Shape: [N, C, T].
         """
         dt = (mesh_right - mesh_left).unsqueeze(1)
         return mesh_left.unsqueeze(1) + self.method.node_fractions().unsqueeze(-1) * dt
@@ -502,29 +452,29 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         self, t: torch.Tensor, y: torch.Tensor, y0: torch.Tensor
     ) -> MethodOutput:
         """
-        Compute the integral and error estimate for a batch of steps.
+        Compute the integral and the error estimate for a batch of subintervals.
 
-        Runs the weighted sum twice: with the rule's weights b for the
+        Runs the weighted sum twice: with the method's weights b for the
         integral, and with b_error for the error estimate (b_error is the
-        difference between the primary and the embedded lower-order rule). The
-        error estimates are detached from the autograd graph: they only drive
-        the accept/split decisions, so no gradient flows through them and the
-        graph they would hold is not kept.
+        difference between the weights of the method and of its embedded
+        lower-degree method). The error estimates are detached from the
+        autograd graph: they only drive the accept-or-split decisions, so no
+        gradient flows through them and the graph they would hold is not kept.
 
         Parameters
         ----------
         t : torch.Tensor
-            Quadrature points of each step. Shape: [N, C, T].
+            Nodes of each subinterval. Shape: [N, C, T].
         y : torch.Tensor
-            Integrand evaluations at the points. Shape: [N, C, D].
+            Integrand values at the nodes. Shape: [N, C, D].
         y0 : torch.Tensor
-            Starting accumulator value. Shape: [D].
+            Value added to the integral. Shape: [D].
 
         Returns
         -------
         MethodOutput
-            MethodOutput with the integral, error estimate, per-step
-            contributions, per-step errors, and step sizes.
+            The integral, its error estimate, and the contribution, error
+            estimate and width of each subinterval.
         """
         b, b_error = self.method.weights(t)
         integral, mesh_quadratures, h = _RK_integral(t, y, b, y0=y0)
@@ -551,32 +501,30 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         f_args: tuple[Any, ...] = (),
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Evaluate the integrand at new points created by splitting failed steps.
+        Evaluate the integrand at the nodes of the halves of split subintervals.
 
-        When steps fail the error tolerance, they are split into two smaller
-        steps. This method evaluates the integrand at the new quadrature points
-        needed for the smaller steps. The implementation differs between uniform
-        and variable solvers.
+        A subinterval that fails the tolerance is split into two halves. This
+        method evaluates the integrand at the nodes the halves need. Uniform
+        and variable sampling do this differently.
 
         Parameters
         ----------
         f : Callable[..., Any]
-            The integrand function.
+            The integrand.
         idxs_add : torch.Tensor
-            Indices of steps that need to be split. Shape: [n_add].
+            Indices of the subintervals to split. Shape: [n_add].
         y : torch.Tensor
-            Current integrand evaluations for all steps. Shape: [N, C, D].
+            Integrand values of all subintervals. Shape: [N, C, D].
         nodes : torch.Tensor
-            Current quadrature point positions for all steps.
-            Shape: [N, C, T].
+            Nodes of all subintervals. Shape: [N, C, T].
         f_args : tuple[Any, ...]
             Extra arguments passed to f.
 
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor]
-            Tuple of (y_new, nodes_new): integrand evaluations and quadrature
-            point positions for the replacement (split) steps.
+            Tuple ``(y_new, nodes_new)``: the integrand values and the nodes of
+            the halves that replace the split subintervals.
         """
 
     @abstractmethod
@@ -588,27 +536,27 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         remove_idxs: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Merge each pair of consecutive steps (remove_idxs[i], remove_idxs[i]+1)
-        into one step spanning both.
+        Merge each pair of neighboring subintervals into one subinterval.
+
+        Pair i is subintervals ``remove_idxs[i]`` and ``remove_idxs[i] + 1``.
 
         Parameters
         ----------
         nodes : torch.Tensor
-            Quadrature point positions of all steps. Shape: [N, C, T].
+            Nodes of all subintervals. Shape: [N, C, T].
         mesh_quadratures : torch.Tensor
-            Integral contribution of each step. Shape: [N, D].
+            Integral contribution of each subinterval. Shape: [N, D].
         mesh_quadrature_errors : torch.Tensor
-            Error estimate of each step. Shape: [N, D].
+            Error estimate of each subinterval. Shape: [N, D].
         remove_idxs : torch.Tensor
-            Index of the first step of each pair to merge.
-            Shape: [R].
+            Index of the first subinterval of each pair to merge. Shape: [R].
 
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-            Tuple of (nodes, mesh_quadratures, mesh_quadrature_errors) with
-            each merged pair replaced by one step (N - R steps); a merged
-            step's contribution and error are the sums over the pair.
+            Tuple ``(nodes, mesh_quadratures, mesh_quadrature_errors)`` with
+            each merged pair replaced by one subinterval (N - R in all); a
+            merged subinterval's contribution and error are the pair's sums.
         """
 
     # -------------------------------------------------------------------------------- #
@@ -639,150 +587,99 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         result_device: str | torch.device | None = "cpu",
     ) -> IntegrationResult:
         """
-        Perform parallel adaptive numerical integration of f.
+        Integrate f over [mesh_init, mesh_final] with adaptive subintervals.
 
-        This is the main integration loop. It divides [mesh_init, mesh_final] into
-        steps using barrier points, evaluates the integrand in parallel batches,
-        and adaptively refines the mesh until all steps meet the error tolerance.
+        The integrand is called as ``f(t, *f_args)`` with points ``t`` of shape
+        [N, T] and must return values of shape [N, D], or a 2-tuple of those
+        values and the tracked variables (:ref:`ug-shapes`,
+        :ref:`ug-tracked-variables`). The loop evaluates many subintervals in
+        one batch, accepts those whose error ratio is below 1 and splits the
+        others in half, until every subinterval is accepted. It then builds
+        the optimal mesh, which a later call with ``same_f=True`` starts from.
 
-        The algorithm:
-        1. Initialize barriers (random mesh or user-provided).
-        2. While unevaluated steps remain:
-           a. Select a batch of steps that fits in memory.
-           b. Place C quadrature points in each step.
-           c. Evaluate the integrand at all points in parallel.
-           d. Compute integral contributions and error estimates via RK.
-           e. Accept steps with error_ratio < 1; split the rest.
-           f. Record accepted results.
-        3. Optimize the final mesh (prune over-resolved + refine under-resolved).
-        4. Return the integral, error, and diagnostics.
+        Every argument left as None falls back to the constructor's value.
 
         Parameters
         ----------
-        f : Callable[..., Any] | None
-            The integrand f(t). Takes shape [N, T], returns [N, D].
-            If None, uses the function from construction.
-        y0 : torch.Tensor | None
-            Initial integral accumulator value. Shape: [D].
-        mesh : torch.Tensor | None
-            Optional initial step barriers. If provided, these are the
-            starting mesh. If None, a random mesh is generated. Replaced by
-            the stored mesh when ``same_f=True`` and one is stored.
-            Shape: [N, T].
-        mesh_init : torch.Tensor | None
-            Lower integration bound. Shape: [T].
-        mesh_final : torch.Tensor | None
-            Upper integration bound. Shape: [T].
-        N_init_steps : int
-            Approximate number of initial steps when mesh is None.
-            The actual count is ~sqrt(N_init_steps) segments with
-            ~sqrt(N_init_steps)+1 random sub-barriers each.
-        f_args : tuple[Any, ...]
-            Extra arguments passed to f.
-        take_gradient : bool
-            If True, calls loss.backward() after each batch
-            to compute gradients through the integration.
-        total_mem_usage : float | None
-            Fraction of memory to use for batching. Overrides
-            the value from construction if provided.
-        loss_fxn : Callable[[IntegrationResult], torch.Tensor] | None
-            Custom loss function. Takes an IntegrationResult, returns a
-            scalar tensor. If None, uses the integral value itself.
-        max_batch : int | None
-            Maximum evaluations per batch. Overrides dynamic memory
-            calculation if provided. Replaced by the stored value when
-            ``same_f=True`` and one is stored.
-        max_adaptive_splits : int | None
-            Maximum number of times a panel may be split
-            during adaptive refinement; a panel split this many times is
-            accepted even if it still fails the tolerance. If None
-            (default), falls back to the value from construction (also
-            None ⇒ uncapped). When both are set, this per-call value takes
-            priority.
-        error_norm : str | Callable[[torch.Tensor], torch.Tensor] | None
-            Vector-error reduction / acceptance scheme (see
-            __init__). If None (default), falls back to the value from
-            construction. When set, this per-call value takes priority.
-        error_integral_reference : float | torch.Tensor | None
-            Reference value for the relative-tolerance
-            denominator in absolute error mode
-            (``use_absolute_error_ratio=True``), where a panel's tolerance is
-            ``max(atol, rtol * |reference|)`` (``atol + rtol * |reference|``
-            for ``"failure_fraction"``). By default the reference is the
-            *running* integral, which is incomplete during the early batches
-            (it has not yet accumulated contributions from regions evaluated
-            later). When much of the integral's mass lies at later times,
-            that early denominator is too small and the controller
-            over-refines early panels. Passing a value close to the true
-            total integral here fixes the denominator from the first batch.
-            Accepts a Python float or a tensor (coerced to the solver
-            dtype/device). Has no effect in cumulative mode
-            (``use_absolute_error_ratio=False``), which normalizes by the
-            cumulative sum instead. If None (default), the running integral
-            is used.
-        mesh_failure_tolerance : float | None
-            Fraction of output elements allowed to fail
-            when ``error_norm == "failure_fraction"`` (see __init__). If
-            None (default), falls back to the value from construction. When
-            set, this per-call value takes priority.
-        error_on_nonfinite : bool | None
-            If True, raise a ValueError naming the offending
-            ``t`` when the integrand returns NaN/Inf; if False, accept those
-            panels and let the non-finite value propagate into the result.
-            If None (default), falls back to the value from construction
-            (which defaults to True). When both are set, this per-call value
-            takes priority.
-        random_initial_mesh : bool
-            When True (default), the fresh initial
-            mesh is built with random sub-barrier offsets within each
-            top-level segment. Randomness is essential here, not
-            cosmetic: when the integrand has features at uniformly-
-            spaced positions (e.g. zeros of ``sin(2*pi*k*t)``,
-            polynomial extrema), an evenly-spaced mesh can align
-            with those features in a way the adaptive controller
-            cannot recover from. Random offsets break this
-            alignment. Set to False only for debugging or for
-            integrands you have separately verified to be safe
-            against uniform-mesh aliasing; reproducibility is
-            better achieved via ``torch.manual_seed`` before the
-            call.
+        f : Callable or None
+            The integrand. None uses the integrand given to the constructor.
+        y0 : torch.Tensor or None
+            Value added to the returned integral, shape [D]. None uses the
+            constructor's ``y0`` (0 by default).
+        mesh : torch.Tensor or None
+            Starting mesh, shape [M, T], increasing; its first and last points
+            are the integration bounds. None builds a fresh starting mesh
+            (:ref:`ug-mesh`). Replaced by the stored mesh under ``same_f``.
+        mesh_init : torch.Tensor or None
+            Lower integration bound, shape [T]. If ``mesh`` is given, it must
+            equal the mesh's first point. None uses ``mesh[0]`` or the
+            constructor's value.
+        mesh_final : torch.Tensor or None
+            Upper integration bound, shape [T]. If ``mesh`` is given, it must
+            equal the mesh's last point. None uses ``mesh[-1]`` or the
+            constructor's value.
         same_f : bool
-            Set True when f is the same integrand as in the
-            previous call, or changes only slightly (e.g. between
-            training-loop iterations). The solver then starts from the mesh
-            and ``max_batch`` stored by the last call that returned on this
-            solver (converged or not), in place of the caller's ``mesh`` and ``max_batch``, and skips
-            the memory benchmark. The integration bounds still come from
-            the caller's arguments; the stored mesh is filtered and padded
-            to them. If nothing is stored yet (first call), the caller's
-            values or the defaults are used, so the flag can be passed from
-            the first iteration. Default False: the caller's values are
-            used (the stored values are still updated). The stored mesh is
-            the previous ``mesh_optimal`` (pruned and refined). The stored ``max_batch`` is a
-            fixed number computed when that call returned, whatever its
-            integrand or ``take_gradient`` setting: a value learned with
-            ``take_gradient=False`` has no backpropagation memory margin
-            and can be below the step size C, so pass
-            ``same_f=False`` on a call that switches
-            ``take_gradient``. For a batch size that follows live free
-            memory, pass ``max_batch=solver.get_max_batch()`` instead.
-        result_device : str | torch.device | None
-            Device the per-step output records (nodes, y, ...)
-            are moved to (default 'cpu'). An index-less 'cuda' means the
-            solver's GPU; None keeps them on the solver's device.
+            True when f is the same integrand as in the previous call, or
+            changed only slightly: start from the stored mesh and ``max_batch``
+            and skip the memory benchmark. Default False (:ref:`ug-same-f`).
+        random_initial_mesh : bool
+            If True (default), the points of a fresh starting mesh are placed at
+            random, so the mesh does not line up with evenly spaced features of
+            f; if False, they are evenly spaced (:ref:`ug-mesh`).
+        N_init_steps : int
+            Approximate number of subintervals of a fresh starting mesh. The
+            default 13 gives 11 subintervals (:ref:`ug-mesh`).
+        f_args : tuple
+            Extra positional arguments passed to f; tensors are moved to the
+            solver's device. Default ``()``.
+        take_gradient : bool
+            If True (default), backpropagate each batch's loss right after it,
+            so the whole autograd graph is never held; if False, keep the graph
+            so the returned integral can be differentiated (:ref:`ug-autodiff`).
+        total_mem_usage : float or None
+            Fraction of the device's total memory, in (0, 1], that batches may
+            fill. Used only when no ``max_batch`` is set (:ref:`ug-memory`).
+        loss_fxn : Callable or None
+            Maps one batch's ``IntegrationResult`` to a scalar loss, which
+            ``take_gradient=True`` backpropagates; ``result.loss`` is the sum
+            over batches. None uses the integral (:ref:`ug-autodiff`).
+        max_batch : int or None
+            Largest number of integrand evaluations per call of f. If this and
+            the constructor's value are None, the memory benchmark sets it
+            (:ref:`ug-memory`). Replaced by the stored value under ``same_f``.
+        max_adaptive_splits : int or None
+            Cap on how many times a subinterval may have been halved since the
+            starting mesh; at the cap it is accepted even if it fails the
+            tolerance (:ref:`ug-convergence`).
+        error_norm : str, Callable or None
+            How the error of a vector-valued integrand becomes one
+            accept-or-split decision (:ref:`ug-error-norm`).
+        error_integral_reference : float, torch.Tensor or None
+            A value close to the integral, used in place of the running integral
+            in the relative tolerance ``rtol * |reference|``. Only with
+            ``use_absolute_error_ratio=True`` (:ref:`ug-error-reference`).
+        mesh_failure_tolerance : float or None
+            With ``error_norm="failure_fraction"``, the fraction of output
+            components that may fail while a subinterval is still accepted
+            (:ref:`ug-error-norm`).
+        error_on_nonfinite : bool or None
+            If True, raise ``ValueError`` when f returns NaN or Inf; if False,
+            accept those subintervals and let the value reach the result.
+        conserve_memory : bool
+            With ``take_gradient=False``, evaluate one batch of ``max_batch``
+            points per pass instead of every waiting subinterval at once: less
+            memory, more passes. Default False (:ref:`ug-memory`).
+        result_device : str, torch.device or None
+            Device of the per-subinterval arrays of the result (default
+            ``"cpu"``); None keeps them on the solver's device. The integral and
+            ``mesh_optimal`` stay on the solver's device.
 
         Returns
         -------
         IntegrationResult
-            IntegrationResult with the computed integral, error estimates, the
-            optimized mesh (mesh_optimal), per-step nodes, and diagnostics.
-
-        Notes
-        -----
-        If mesh is provided, the solver uses these as initial barriers.
-        Steps may be split or merged, but the bounds [mesh[0], mesh[-1]]
-        are preserved. If mesh is None and no stored mesh is used, a
-        random initial mesh is generated in [mesh_init, mesh_final].
+            The integral (plus ``y0``), its error estimate, whether it
+            ``converged``, the optimal mesh, the nodes and integrand values of
+            every subinterval, and split statistics (:ref:`ug-convergence`).
         """
         # Set dtype based on input
         self.set_dtype_by_input(mesh=mesh, mesh_init=mesh_init, mesh_final=mesh_final)
@@ -1269,33 +1166,32 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         integral: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Judge every recorded (accepted) step against a given tolerance reference.
+        Judge every recorded (accepted) subinterval against a given reference.
 
-        One definition of "a recorded step fails", used by the in-loop re-check
-        of accepted steps (Step 4b of ``integrate``) and by the final
-        ``converged`` check. Uses the same error ratios and accept rule as a
-        freshly evaluated batch (``_compute_error_ratios``,
+        The one definition of "a recorded subinterval fails", used by the
+        in-loop re-check of accepted subintervals (Step 4b of ``integrate``)
+        and by the final ``converged`` check. It uses the same error ratios and
+        accept rule as a freshly evaluated batch (``_compute_error_ratios``,
         ``_accept_reject_masks``).
 
         Parameters
         ----------
         record : dict[str, torch.Tensor]
-            The running record, mesh-ordered, with
-            ``mesh_quadratures`` and ``mesh_quadrature_errors`` [N, D] on
-            the integration device.
+            The running record, in mesh order, with ``mesh_quadratures`` and
+            ``mesh_quadrature_errors`` [N, D] on the integration device.
         cum_mesh_quadratures : torch.Tensor
-            Running integral through each recorded step
-            [N, D] (used in cumulative mode only).
+            Running integral through each recorded subinterval [N, D] (used in
+            cumulative mode only).
         integral : torch.Tensor
             Reference integral [D] for the absolute-mode tolerance.
 
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-            Tuple ``(error_ratios, reject_mask, nonfinite_mask)``: the per-step
-            ratio [N], and the split and non-finite masks [N] of
-            ``_accept_reject_masks`` (non-finite steps count as accepted
-            there).
+            Tuple ``(error_ratios, reject_mask, nonfinite_mask)``: the error
+            ratio of each subinterval [N], and the split and non-finite masks
+            [N] of ``_accept_reject_masks`` (which accepts non-finite
+            subintervals).
         """
         error_ratios, _, error_ratios_per_dim = self._compute_error_ratios(
             mesh_quadrature_errors=record["mesh_quadrature_errors"].detach(),
@@ -1322,34 +1218,35 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Log how far a returned integral is from meeting the tolerance.
 
         Called by ``integrate`` when the final error check fails. The sizes
-        reported are the method's embedded error estimates (the difference
-        between the rule and its lower-order companion), not the true error.
-        For D > 1 they are reported for one output component: the one whose
-        failing steps' summed error is largest relative to its |integral|.
+        reported are error estimates (the difference between the method and
+        its embedded lower-degree method), not the true error. For D > 1 they
+        are reported for one output component: the one whose failing
+        subintervals' summed error is largest relative to the absolute value
+        of its integral.
 
         Parameters
         ----------
         record : dict[str, torch.Tensor]
             The sorted record on the integration device.
         final_ratios : torch.Tensor
-            Per-step error ratio from the final check [N]
-            (error / tolerance for the norm family; fraction of failing
-            output elements for ``"failure_fraction"``).
+            Error ratio of each subinterval from the final check [N] (error
+            over tolerance for the norm family; fraction of failing output
+            components for ``"failure_fraction"``).
         final_fails : torch.Tensor
-            Steps that fail the final check, including
-            non-finite ones [N].
+            Subintervals that fail the final check, including the non-finite
+            ones [N].
         nonfinite : torch.Tensor
-            Steps whose error ratio is NaN/Inf [N] (a NaN/Inf
-            error estimate, or a NaN/Inf tolerance from the integral).
+            Subintervals whose error ratio is NaN or Inf [N] (a non-finite
+            error estimate, or a non-finite tolerance from the integral).
         max_adaptive_splits : int | None
             The split cap used by the call, or None.
         take_gradient : bool
-            Whether the call took per-batch gradients (then
-            accepted steps were not re-checked).
+            Whether the call backpropagated per batch (then accepted
+            subintervals were not re-checked).
         reference_pinned : bool
-            Whether a fixed ``error_integral_reference`` set
-            the absolute-mode tolerance (then accepted steps were not
-            re-checked, and the loop judged steps against that reference).
+            Whether a fixed ``error_integral_reference`` set the absolute-mode
+            tolerance (then accepted subintervals were not re-checked, and the
+            loop judged them against that reference).
         """
         finite_fails = final_fails & ~nonfinite
         # Per-component sums of |per-step error estimate| [D], over the finite
@@ -1446,100 +1343,99 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         torch.Tensor | None,
     ]:
         """
-        Accept accurate steps and split inaccurate ones.
+        Accept the accurate subintervals of a batch and split the others in half.
 
-        This is the core adaptive refinement operation. For each evaluated step:
-        - If error_ratio < 1.0: ACCEPT the step. Mark it as done in mesh_trackers.
-          Keep its integral contribution.
-        - If error_ratio >= 1.0: REJECT the step. Insert a new midpoint barrier
-          between its start and end, splitting it into two smaller steps. These
-          new steps will be evaluated in the next iteration.
-        - If error_ratio is non-finite (NaN/Inf): ACCEPT the step. Splitting
-          cannot reduce a non-finite error (the integrand is singular at a
-          node), so such steps are accepted rather than split forever. The
-          non-finite value propagates into the recorded integral.
+        For each evaluated subinterval, with the masks from
+        ``_accept_reject_masks`` (or, when they are not given, from the error
+        ratio alone):
 
-        The midpoint barrier is placed at the average of the two neighboring
-        barriers: mesh_new = (mesh_left + mesh_right) / 2.
+        - error ratio below 1: accept. Its tracker is set False and its
+          contribution is kept.
+        - error ratio 1 or above: split. A new mesh point is inserted at the
+          midpoint ``(mesh_left + mesh_right) / 2``, and both halves are
+          evaluated in a later pass.
+        - non-finite error ratio (NaN or Inf): accept. Splitting cannot be
+          relied on to remove a non-finite value, so splitting until it is
+          gone might never end. The non-finite value reaches the recorded
+          integral.
 
-        When ``split_counts`` and ``max_adaptive_splits`` are provided, a step
-        whose split count has already reached ``max_adaptive_splits`` is
-        accepted even if its error_ratio >= 1.0 (it is not split further). Each
-        split increments the count: both children of a depth-N step are depth
-        N+1.
+        When ``split_counts`` and ``max_adaptive_splits`` are given, a
+        subinterval whose split count has reached ``max_adaptive_splits`` is
+        accepted even if its error ratio is 1 or above. Both halves of a
+        subinterval with split count n get split count n + 1.
 
         Parameters
         ----------
         method_output : MethodOutput | None
-            RK results from the current batch (may be None when
-            called during post-convergence optimization). If present, rejected
-            steps are removed from it.
+            Integral and error output of the current batch (None in the
+            optimal-mesh pass). If given, the split subintervals are removed
+            from it.
         error_ratios : torch.Tensor
-            Per-step error ratios. Shape: [N_batch].
+            Error ratio of each subinterval. Shape: [N_batch].
         y_step_eval : torch.Tensor | None
-            Integrand evaluations for current batch. Shape: [N_batch, C, D].
+            Integrand values of the batch. Shape: [N_batch, C, D].
         nodes : torch.Tensor | None
-            Quadrature points for current batch. Shape: [N_batch, C, T].
+            Nodes of the batch. Shape: [N_batch, C, T].
         mesh : torch.Tensor
-            All barrier positions. Shape: [M, T].
+            All mesh points. Shape: [M, T].
         mesh_idxs : torch.Tensor
-            Indices into mesh for the steps
-            in the current batch. Shape: [N_batch].
+            Mesh index of the left end of each subinterval of the batch.
+            Shape: [N_batch].
         mesh_trackers : torch.Tensor
-            Boolean array tracking which steps need evaluation.
+            True for the subintervals that still have to be evaluated.
             Shape: [M].
         tracked_step_eval : tuple[torch.Tensor, ...] | None
-            Optional tuple of tracked-variable tensors for
-            the current batch, each shape [N_batch, C, *var_dims]. Filtered
-            to accepted steps alongside y_step_eval. None when the integrand
-            emits no tracked variables.
+            Tracked variables of the batch, each of shape
+            [N_batch, C, ...]. Filtered to the accepted subintervals like
+            ``y_step_eval``. None when the integrand returns none.
         split_counts : torch.Tensor | None
-            Optional per-panel split-count array aligned with
-            mesh. Shape: [M]. None disables depth tracking (the
-            post-convergence caller passes None).
+            Split count of the subinterval starting at each mesh point.
+            Shape: [M]. None disables split counting (the optimal-mesh pass
+            passes None).
         max_adaptive_splits : int | None
-            Optional cap on the per-panel split count.
-            Panels at or above this count are accepted instead of split.
-            None disables the cap.
+            Cap on the split count; a subinterval at or above it is accepted
+            instead of split. None disables the cap.
         keep_mask : torch.Tensor | None
-            Optional precomputed accept mask (True = accept), shape
-            [N_batch], from ``_accept_reject_masks``. When provided together
-            with ``remove_mask`` the scheme-aware decision is used as-is;
-            when omitted the legacy ``error_ratios < 1.0`` rule is applied
-            (kept for direct/unit callers).
+            Accept mask (True = accept) from ``_accept_reject_masks``, shape
+            [N_batch]. When it and ``remove_mask`` are given they are used
+            as they are; otherwise the masks come from ``error_ratios < 1``
+            with non-finite ratios accepted (for direct callers and tests).
         remove_mask : torch.Tensor | None
-            Optional precomputed reject (split) mask, the
-            complement of ``keep_mask``.
+            Split mask, the complement of ``keep_mask``.
         extra_split_idxs : torch.Tensor | None
-            Optional extra mesh positions to bisect in the
-            same update, in addition to the batch's rejected steps. Used by
-            the accepted-panel re-check to split already-recorded panels
-            that failed the tolerance after the running integral drifted.
-            Must be ascending and disjoint from ``mesh_idxs[remove_mask]``.
-            Their barriers are re-activated (tracker set True) so both
-            children are re-evaluated. ``None`` ⇒ behaviour identical to
-            before (batch-only split).
+            Further mesh indices to split in the same update, besides the
+            batch's rejected subintervals: recorded subintervals that failed
+            the re-check after the running integral changed. Must be
+            ascending and disjoint from ``mesh_idxs[remove_mask]``. Their
+            trackers are set True so both halves are evaluated. None splits
+            only the batch's rejected subintervals.
 
         Returns
         -------
         tuple[MethodOutput | None, torch.Tensor | None, tuple[torch.Tensor, ...] | None, torch.Tensor | None, torch.Tensor, torch.Tensor, dict[tuple[float, ...], int], torch.Tensor, torch.Tensor | None]
-            Tuple of (method_output, y_step_eval, tracked_step_eval, nodes,
-            mesh_new, mesh_trackers_new, error_ratios_kept, split_counts_new):
-                - method_output: Updated with rejected steps removed.
-                - y_step_eval: Kept evaluations only.
-                - tracked_step_eval: Kept tracked variables only (or None).
-                - nodes: Kept quadrature points only.
-                - mesh_new: Barriers with new midpoints inserted.
-                - mesh_trackers_new: Updated tracker with new steps marked True.
-                - error_ratios_kept: Error ratios for accepted steps only.
-                - split_counts_new: Per-panel split counts for mesh_new, with
-                  split children incremented (or None if split_counts is None).
+            Tuple ``(method_output, y_step_eval, tracked_step_eval, nodes,
+            mesh_new, mesh_trackers_new, mesh_indices_new, error_ratios_kept,
+            split_counts_new)``:
+
+            - method_output: with the split subintervals removed.
+            - y_step_eval: integrand values of the accepted subintervals.
+            - tracked_step_eval: their tracked variables (or None).
+            - nodes: their nodes.
+            - mesh_new: the mesh with the midpoints inserted.
+            - mesh_trackers_new: the trackers, True for the new halves.
+            - mesh_indices_new: ``{tuple(mesh point): index}`` for mesh_new
+              (``_get_mesh_indices``).
+            - error_ratios_kept: error ratios of the accepted subintervals.
+            - split_counts_new: split counts for mesh_new, with both halves
+              of every split subinterval incremented (or None if
+              ``split_counts`` is None).
         """
         if keep_mask is None or remove_mask is None:
             # Legacy/direct-call path: derive the masks from a scalar error
-            # ratio. Non-finite error ratios (NaN/Inf) cannot be reduced by
-            # splitting: the integrand returned NaN/Inf at a node, and a midpoint
-            # split reuses the same boundary node, so the value regenerates.
+            # ratio. Splitting cannot be relied on to remove a non-finite error
+            # ratio (NaN/Inf): a NaN/Inf at a mesh point comes back as an
+            # endpoint of a half, and a NaN/Inf running integral makes every
+            # tolerance non-finite.
             # Accept such panels unconditionally so the main loop always
             # terminates -- with the default uncapped max_adaptive_splits,
             # routing them to the split branch would refine forever (and a +Inf
@@ -1653,10 +1549,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Normalize the integrand's output into (integrand, tracked_variables).
 
         The integrand ``f`` may return either:
-        - a bare integrand tensor (existing contract) -> tracked is None, or
-        - a 2-tuple ``(integrand, tracked_variables)`` where
-          ``tracked_variables`` is a tuple of tensors, a single tensor (wrapped
-          into a 1-tuple), or ``None`` (an empty tuple is treated as ``None``).
+
+        - the integrand values alone; tracked is then None, or
+        - a 2-tuple (or 2-element list) ``(integrand, tracked_variables)``,
+          where ``tracked_variables`` is a tuple of tensors, a single tensor
+          (wrapped into a 1-tuple), or None (an empty tuple counts as None).
 
         Parameters
         ----------
@@ -1686,33 +1583,32 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         Raise a located ``ValueError`` if an integrand batch is non-finite.
 
-        A NaN/Inf integrand value poisons the panel's error ratio. Detecting it
-        at the source (rather than letting it silently propagate into a NaN
-        result, or stall the adaptive loop) gives the user an actionable error
-        naming the offending ``t``. Gated on ``self.error_on_nonfinite`` (set
-        from the ``integrate(error_on_nonfinite=...)`` argument).
+        A NaN or Inf integrand value makes the subinterval's error ratio
+        non-finite. Detecting it where it arises, instead of letting it reach a
+        NaN result, gives the user an error that names the offending ``t``.
+        Runs only when ``self.error_on_nonfinite`` is True (set from the
+        ``integrate(error_on_nonfinite=...)`` argument or the constructor).
 
         Parameters
         ----------
         integrand : torch.Tensor
-            The integrand tensor for this batch (shape ``[B, D]``,
-            with ``B = N*C`` for full nodes or the slice size for split
-            nodes). May also be a bare Python scalar if ``f`` returns a
-            number, in which case finiteness is checked with
-            ``math.isfinite`` and no node localization is reported.
+            The integrand values of this batch, shape ``[B, D]`` (``B = N*C``
+            for whole subintervals, or the batch size when a batch holds part
+            of the nodes). May also be a Python number if ``f`` returns one;
+            it is then checked with ``math.isfinite`` and no ``t`` is reported.
         nodes_flat : torch.Tensor
-            The flattened node coordinates fed to ``f`` for this
-            batch. Shape ``[B, T]``. Used only to report offending ``t``.
+            The nodes passed to ``f`` for this batch. Shape ``[B, T]``. Used
+            only to report the offending ``t``.
         max_report : int
-            Maximum number of offending ``t`` values to list.
+            Largest number of offending ``t`` values to list.
 
         Raises
         ------
         ValueError
-            If ``self.error_on_nonfinite`` and any value is
-            non-finite. When ``self.error_on_nonfinite`` is False this is a
-            no-op; the always-on ``_adaptively_increase_mesh`` guard keeps
-            the run alive instead.
+            If ``self.error_on_nonfinite`` is True and any value is NaN or
+            Inf. When it is False this check does nothing, and
+            ``_accept_reject_masks`` accepts the non-finite subintervals so
+            the loop still ends.
         """
         if not self.error_on_nonfinite:
             return
@@ -1877,11 +1773,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         Evaluate f on nodes_flat in batches of at most max_batch nodes.
 
-        Shared by both split handlers. Batches run until at least
-        num_nodes_to_eval nodes are evaluated; the last batch may run past it,
-        and _evaluate_f_on_split_residual_nodes keeps that overshoot as the
-        residual. On an out-of-memory error the failed batch is retried with a
-        smaller max_batch, cached in _oom_max_batch.
+        Used by both evaluation paths of ``take_gradient=False``. Batches run
+        until at least num_nodes_to_eval nodes are evaluated; the last batch
+        may run past it, and _evaluate_f_on_split_residual_nodes keeps that
+        overshoot as the residual. On an out-of-memory error the failed batch
+        is retried with a smaller max_batch, cached in _oom_max_batch.
 
         Returns
         -------
@@ -2202,49 +2098,64 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         error_ratios_2steps: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Merge pairs of neighboring steps whose merged step is predicted to pass.
+        Merge pairs of neighboring subintervals whose union is predicted to pass.
 
-        Pair i (steps i and i+1) is merged when its summed error ratio
-        ``error_ratios_2steps[i] < remove_cut / 2^(error_exponent - 1)``, i.e.
-        when the merged step's predicted error ratio is below ``remove_cut``
-        (derivation in the comment below). Of several adjacent qualifying
-        pairs, ``_rec_remove`` keeps every other one, so no step is merged
-        twice; one call merges at most one level. The merge itself is
-        ``_merge_excess_nodes`` (uniform or variable sampling).
+        Pair i (subintervals i and i + 1) is merged when its summed error ratio
+        ``S = error_ratios_2steps[i]`` satisfies
+        ``S < remove_cut / 2**(k - 1)``, with ``k = method.error_exponent``
+        (padaquad's own derivation):
+
+        1. Two neighboring subintervals of width h have error ratios that sum
+           to S, so each has a ratio of about S / 2.
+        2. The error estimate scales as ``h**k``, so the merged subinterval of
+           width 2h has an error about ``2**k`` times that of one half, and an
+           error ratio of about ``2**k * S / 2 = 2**(k - 1) * S``.
+        3. Requiring that predicted ratio to be below ``remove_cut`` gives the
+           cutoff.
+
+        The scaling ``h**k`` with ``k = d + 2``, for an error estimate whose
+        less accurate method has degree d, is a derivation, not a cited
+        result: that method integrates the degree-d Taylor polynomial of f
+        exactly, so its error comes from the ``h**(d + 1)`` term integrated
+        over a width h. :cite:p:`gonnet2012` shows this for Simpson's rule
+        (Eqs. (4) and (5), Sec. 2.1) and, in footnote 20, treats the error
+        estimate of an embedded pair as that of the lower-degree method. The
+        prediction holds only when the subintervals are small enough for the
+        leading Taylor term to dominate. When the error estimate is at
+        rounding level (high k, tight tolerance, float32) it does not shrink
+        as ``h**k``, so pairs rarely reach the cut.
+
+        Of several adjacent qualifying pairs, ``_rec_remove`` keeps every other
+        one, so no subinterval is merged twice; one call merges at most one
+        level. The merge itself is ``_merge_excess_nodes`` (uniform or variable
+        sampling).
 
         Parameters
         ----------
         nodes : torch.Tensor
-            Per-step quadrature point positions. Shape: [N, C, T].
+            Nodes of each subinterval. Shape: [N, C, T].
         mesh_quadratures : torch.Tensor
-            Per-step integral contributions. Shape: [N, D].
+            Integral contribution of each subinterval. Shape: [N, D].
         mesh_quadrature_errors : torch.Tensor
-            Per-step error estimates. Shape: [N, D].
+            Error estimate of each subinterval. Shape: [N, D].
         error_ratios_2steps : torch.Tensor
-            Summed error ratio of each pair of neighboring
-            steps, indexed by the pair's first step. Shape: [N-1].
+            Summed error ratio of each pair of neighboring subintervals,
+            indexed by the pair's first subinterval. Shape: [N-1].
 
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
             Tuple ``(nodes, mesh_quadratures, mesh_quadrature_errors)`` with
-            each merged pair replaced by one step whose contribution and error
-            are the pair's sums. Shapes: [N-R, C, T], [N-R, D], [N-R, D] for R
-            merged pairs.
+            each merged pair replaced by one subinterval whose contribution
+            and error are the pair's sums. Shapes: [N-R, C, T], [N-R, D],
+            [N-R, D] for R merged pairs.
         """
 
         if len(error_ratios_2steps) == 0:
             return nodes, mesh_quadratures, mesh_quadrature_errors
-        # Merge cutoff. error_ratios_2steps is the SUM of the two steps' error
-        # ratios, S = (e_i + e_{i+1}) / tol; the merged step is never evaluated.
-        # With e(h) ~ C F h^k for a step of width h (k = error_exponent, from the
-        # Taylor remainder of the estimate's less accurate rule), each half has
-        # ratio ~ S/2, so the merged step has ratio ~ 2^k S/2 = 2^(k-1) S.
-        # Requiring that predicted ratio to stay below remove_cut gives
-        # S < remove_cut / 2^(k-1). Assumes steps small enough that the leading
-        # Taylor term dominates; on coarse steps the growth can be larger. When
-        # the estimate is round-off (high k, tight tolerance, float32) it does
-        # not grow as h^k, so the cut is conservative and pairs rarely merge.
+        # Merge cutoff S < remove_cut / 2^(k-1), k = error_exponent; the
+        # derivation (padaquad's own) is in the docstring. The merged
+        # subinterval is never evaluated.
         merge_cut = self.remove_cut / 2 ** (self.method.error_exponent - 1)
         # Since error ratios encompasses 2 RK steps each neighboring element shares
         # a step, we cannot remove that same step twice and therefore remove the
@@ -2267,13 +2178,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Temporarily run integration-device-bound operations on ``device``.
 
         ``_get_optimal_mesh`` (and the subclass node helpers it calls) allocate
-        on ``self.device`` and read the method tableau, which lives on
-        ``self.device``. To evaluate the optimal-mesh computation on
-        ``result_device`` -- so the large per-step record tensors never have to
-        be copied back to the integration device -- this context manager swaps
-        ``self.device`` and moves the method tableau to ``device`` for the
-        duration of the block, restoring both on exit. A no-op when ``device``
-        already equals ``self.device``.
+        on ``self.device`` and read the method's tensors, which live on
+        ``self.device``. To run the optimal-mesh computation on
+        ``result_device``, so the large per-subinterval record tensors never
+        have to be copied back to the integration device, this context manager
+        sets ``self.device`` to ``device`` and moves the method's tensors there
+        for the duration of the block, restoring both on exit. It does nothing
+        when ``device`` already equals ``self.device``.
 
         Parameters
         ----------
@@ -2301,49 +2212,47 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Compute an optimized mesh from the converged integration results.
+        Build the optimal mesh from the results of the integration loop.
 
-        After the integration loop converges, this method produces a refined
-        mesh that can be reused for subsequent integrations of the same function.
-        It does two things:
-        1. Prunes: merges consecutive step pairs whose merged step is
-           predicted to have an error ratio below remove_cut
+        The optimal mesh is the starting mesh of a later call with
+        ``same_f=True``. It is built in two stages:
+
+        1. Merge: pairs of neighboring subintervals whose merged subinterval is
+           predicted to have an error ratio below ``remove_cut`` are merged
            (``_prune_excess_mesh``).
-        2. Adds: inserts midpoints for steps whose error ratio against the
-           final integral is still >= 1. A merged step carries the pair's
-           summed error, so its ratio is the pair's (below the merge cutoff,
-           < 1) unless the rounding floor sets the tolerance (see
-           ``_error_ratios_norm``): this does not split a merged step, and it
-           is not a check of the merge prediction. Steps fail here only when
-           no re-check ran against the final integral (``take_gradient=True``,
-           or a fixed ``error_integral_reference``) or when
-           ``max_adaptive_splits`` stopped their refinement.
+        2. Split: subintervals whose error ratio against the final integral is
+           still 1 or above get a midpoint. A merged subinterval carries the
+           pair's summed error, so its ratio is the pair's (below the merge
+           cutoff, so below 1) unless the rounding floor sets the tolerance
+           (see ``_error_ratios_norm``): this stage does not split a merged
+           subinterval, and it does not check the merge prediction.
+           Subintervals fail here only when no re-check ran against the final
+           integral (``take_gradient=True``, or a fixed
+           ``error_integral_reference``) or when ``max_adaptive_splits``
+           stopped their refinement.
 
-        This produces a mesh tailored to the difficulty of the integrand at
-        different positions along the integration domain.
-
-        All inputs must share a device; the returned mesh lands on that same
-        device. (The caller runs this on ``result_device`` via
-        ``_integration_on_device`` and moves the result back to the integration
-        device afterward.)
+        All inputs must share a device, and the returned mesh is on that
+        device. (The caller runs this on ``result_device`` through
+        ``_integration_on_device`` and moves the result back to the
+        integration device.)
 
         Parameters
         ----------
         nodes : torch.Tensor
-            Per-step quadrature point positions. Shape: [N, C, T].
+            Nodes of each subinterval. Shape: [N, C, T].
         mesh_quadratures : torch.Tensor
-            Per-step integral contributions. Shape: [N, D].
+            Integral contribution of each subinterval. Shape: [N, D].
         mesh_quadrature_errors : torch.Tensor
-            Per-step error estimates. Shape: [N, D].
+            Error estimate of each subinterval. Shape: [N, D].
         integral : torch.Tensor
-            Converged total integral estimate. Shape: [D].
+            The final integral. Shape: [D].
         mesh : torch.Tensor
-            Current barrier positions. Shape: [M, T].
+            The mesh at the end of the loop. Shape: [M, T].
 
         Returns
         -------
         torch.Tensor
-            Optimized barrier positions. Shape: [M_opt, T].
+            The optimal mesh. Shape: [M_opt, T].
         """
         # Prune steps with excess accuracy (over-resolved regions)
         _, error_ratios_2steps, _ = self._compute_error_ratios(
@@ -2395,17 +2304,18 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         Ensure no two adjacent True values exist in a boolean mask.
 
-        When merging step pairs, two adjacent steps cannot both be merged
-        (they share a boundary). Conflicts are resolved left to right: the
-        first flagged entry of a run is kept and its neighbor un-flagged, so a
-        run of Trues alternates (TTT -> TFT, TTTT -> TFTF).
+        Entry i flags the pair of subintervals i and i + 1. Two adjacent
+        flagged pairs share a subinterval, so both cannot be merged. Conflicts
+        are resolved from left to right: the first flagged entry of a run is
+        kept and its neighbor unflagged, so a run of Trues alternates
+        (TTT -> TFT, TTTT -> TFTF).
 
         Example: [True, True, False, True] -> [True, False, False, True]
 
         Parameters
         ----------
         mask : torch.Tensor
-            Boolean mask where True = flagged for removal. Shape: [N].
+            Boolean mask, True for a pair flagged for merging. Shape: [N].
 
         Returns
         -------
@@ -2601,17 +2511,21 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         error_norm: str | Callable[[torch.Tensor], torch.Tensor] | None = None,
     ) -> torch.Tensor:
         """
-        Reduce the last (output dimension D) axis of ``x`` to one scalar per
-        step using the configured ``error_norm``.
+        Reduce the last (output, D) axis of ``x`` with the configured norm.
 
-        Mirrors the ``norm`` argument of ``scipy.integrate.quad_vec``:
+        The ``"2"`` and ``"max"`` options are the two named norms of the
+        ``norm`` argument of ``scipy.integrate.quad_vec``
+        :cite:p:`scipy_quadvec` (v1.18.1, line 115 and lines 288-295):
 
-          - ``"2"``   → L2 norm ``sqrt(sum(x**2))``     (scipy ``np.linalg.norm``)
-          - ``"max"`` → L-infinity norm ``max(|x|)``    (scipy ``_max_norm``)
-          - ``"rms"`` → root-mean-square ``sqrt(mean(x**2))`` (padaquad legacy)
-          - callable  → ``error_norm(x)`` reducing the last axis
+        - ``"2"``: the Euclidean norm ``sqrt(sum(x**2))`` (scipy uses
+          ``np.linalg.norm``).
+        - ``"max"``: the largest absolute value ``max(abs(x))`` (scipy's
+          ``_max_norm``).
+        - ``"rms"``: the root-mean-square ``sqrt(mean(x**2))``; scipy has no
+          such option.
+        - a callable: ``error_norm(x)``, which must reduce the last axis.
 
-        For 1D integrands every option equals ``torch.abs(x)``.
+        For D = 1 every string option equals ``torch.abs(x)``.
 
         Parameters
         ----------
@@ -2640,28 +2554,39 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
     def _round_floor(self, mesh_quadratures: torch.Tensor) -> torch.Tensor:
         """
-        Machine-precision floor on the per-element error estimate.
+        Rounding floor of each element of each subinterval's contribution.
 
-        Modeled on ``scipy.integrate.quad_vec``'s rounding guard: it keeps the
-        controller from splitting a panel forever chasing an error that is
-        already at/below floating-point round-off. scipy uses
-        ``round_err = norm(50*eps*h*s_k_abs)`` with ``h*s_k_abs`` the panel's
-        quadrature of ``|f|``, and raises the error estimate to it
-        (``_quadrature_gk`` in ``scipy/integrate/_quad_vec.py``, scipy 1.17).
-        Here the floor is ``50*eps*|s_k|`` with ``s_k`` the panel's signed
-        contribution (``mesh_quadratures``), smaller than scipy's on panels
-        where f changes sign, and the error-ratio helpers use it as a lower
-        bound on the tolerance.
+        The floor is ``50 * eps * abs(s_k)``, with ``eps`` the machine epsilon
+        of the solver's dtype and ``s_k`` the subinterval's signed contribution
+        (``mesh_quadratures``). The error-ratio helpers use it as a lower bound
+        on the tolerance, so a subinterval whose error is already at rounding
+        level is accepted instead of being split forever.
+
+        It is modeled on the rounding error of ``scipy.integrate.quad_vec``
+        :cite:p:`scipy_quadvec` (``_quadrature_gk``, v1.18.1 lines 539-543),
+        which differs in three ways:
+
+        - scipy computes ``round_err = norm(50 * eps * h * s_k_abs)``, with
+          ``h * s_k_abs`` the subinterval's quadrature of ``abs(f)``; padaquad
+          uses the absolute value of the signed contribution, which is smaller
+          where f changes sign.
+        - scipy raises the error estimate to the floor,
+          ``err = max(err, round_err)``, and only when ``round_err`` exceeds the
+          smallest positive double; padaquad raises the tolerance instead and
+          has no such underflow guard.
+        - scipy first rescales the error estimate as QUADPACK does,
+          ``resasc * min(1, (200 * err / resasc)**1.5)`` (:cite:p:`quadpack_netlib`,
+          dqk21.f lines 177-178); padaquad does not.
 
         Parameters
         ----------
         mesh_quadratures : torch.Tensor
-            Per-step integral contributions. Shape: [N, D].
+            Contribution of each subinterval. Shape: [N, D].
 
         Returns
         -------
         torch.Tensor
-            Per-element rounding floor. Shape: [N, D].
+            Rounding floor of each element. Shape: [N, D].
         """
         eps = torch.finfo(self.dtype).eps
         return 50.0 * eps * torch.abs(mesh_quadratures)
@@ -2674,47 +2599,47 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         integral: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """
-        Compute per-step error ratios, dispatching on ``self.error_norm``.
+        Compute the error ratio of each subinterval, choosing by ``self.error_norm``.
 
-        The error estimate is the difference between the order-p method and the
-        embedded order-(p-1) method. How the D output dimensions are turned into
-        a single accept/reject quantity depends on the scheme:
+        The error estimate is the difference between the results of the method
+        and of its embedded lower-degree method. How the D output components
+        become one accept-or-split quantity depends on the scheme:
 
-          - Norm family (``"2"``/``"max"``/``"rms"``/callable): scipy-style
-            reduce-then-compare, in ``_error_ratios_norm``.
-          - ``"failure_fraction"``: per-component comparison, in
-            ``_error_ratios_failure_fraction``.
+        - Norm family (``"2"``, ``"max"``, ``"rms"`` or a callable): reduce the
+          error vector with the norm, then compare it to one tolerance, in
+          ``_error_ratios_norm``.
+        - ``"failure_fraction"``: compare each component to its own tolerance,
+          in ``_error_ratios_failure_fraction``.
 
-        The absolute-vs-cumulative-mode axis (``use_absolute_error_ratio``) is
-        orthogonal and handled inside each family helper (it only changes the
-        tolerance denominator).
+        Absolute versus cumulative mode (``use_absolute_error_ratio``) only
+        changes the tolerance and is handled inside each of the two helpers.
 
         Parameters
         ----------
-        mesh_quadrature_errors : Tensor
-            Per-step error estimates. [N, D].
-        mesh_quadratures : Tensor
-            Per-step integral contributions (``s_k``),
-            used for the rounding floor and (in cumulative mode) the
-            cumulative sum. [N, D]. May be None.
-        cum_mesh_quadratures : Tensor
-            Pre-computed cumulative sum [N, D]
+        mesh_quadrature_errors : torch.Tensor
+            Error estimate of each subinterval. [N, D].
+        mesh_quadratures : torch.Tensor or None
+            Contribution of each subinterval (``s_k``), used for the rounding
+            floor and, in cumulative mode, the running integral. [N, D].
+        cum_mesh_quadratures : torch.Tensor or None
+            Precomputed running integral through each subinterval [N, D]
             (cumulative mode only).
-        integral : Tensor
-            Current total integral estimate [D]
-            (absolute mode only; required there).
+        integral : torch.Tensor or None
+            Current total integral [D] (absolute mode only; required there).
 
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
             Tuple ``(error_ratios, error_ratios_2steps, error_ratios_per_dim)``:
-                - error_ratios: per-step accept/reject quantity [N] (reduced
-                  ratio for the norm family; failure fraction for
-                  ``"failure_fraction"``).
-                - error_ratios_2steps: per-pair merge/prune indicator [N-1].
-                - error_ratios_per_dim: per-element ratio [N, D] for
-                  ``"failure_fraction"`` (so non-finite panels can be detected),
-                  else None.
+
+            - error_ratios: accept-or-split quantity of each subinterval [N]
+              (the reduced ratio for the norm family; the failure fraction for
+              ``"failure_fraction"``).
+            - error_ratios_2steps: merge indicator of each pair of neighbors
+              [N-1].
+            - error_ratios_per_dim: ratio of each element [N, D] for
+              ``"failure_fraction"`` (so non-finite subintervals can be
+              found), else None.
 
         Raises
         ------
@@ -2742,44 +2667,50 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         integral: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, None]:
         """
-        Norm family (reduce-then-compare), matching ``scipy.integrate.quad_vec``.
+        Error ratios of the norm family: reduce the error vector, then compare.
 
-        The error vector is reduced to a scalar with ``self.error_norm`` and
-        compared to a single tolerance built from the *same* norm of the
-        integral::
+        The error vector is reduced to a number with the configured norm R and
+        compared to one tolerance built from the same norm of the integral::
 
-            error_ratio[k] = R(|e[k]|) / max(atol, rtol * R(I))      (absolute)
-            error_ratio[k] = R(|e[k]|) / max(atol, rtol * R(cum[k])) (cumulative)
+            absolute:   error_ratio[k] = R(abs(e[k])) / max(atol, rtol * R(I))
+            cumulative: error_ratio[k] = R(abs(e[k])) / max(atol, rtol * R(abs(cum[k])))
 
-        where ``R`` is the configured norm and ``cum[k]`` the running integral
-        through step k (as ``scipy.integrate.quad_vec``, which uses
-        ``max(epsabs, epsrel*norm(I))``). A panel is accepted when
-        ``error_ratio < 1`` (see ``_accept_reject_masks``).
+        where ``cum[k]`` is the running integral through subinterval k. A
+        subinterval is accepted when ``error_ratio < 1`` (see
+        ``_accept_reject_masks``).
 
-        The pair ratio ``error_ratio_2steps[k] = R(|e[k]| + |e[k+1]|) /
-        tol_2steps[k]`` (used only to merge steps, ``_prune_excess_mesh``)
-        uses the tolerance the merged step would get: the same ``tol`` in
-        absolute mode, step k+1's (the merged step's right end) in cumulative
-        mode. Its rounding floor is ``R(floor[k]) + R(floor[k+1])``, at least
-        the merged step's own floor (equal when both contributions have the
-        same sign).
+        Relation to ``scipy.integrate.quad_vec`` :cite:p:`scipy_quadvec`
+        (v1.18.1): the tolerance ``max(epsabs, epsrel * norm(I))`` is the same
+        (lines 373 and 409), but the acceptance rule differs. quad_vec stops
+        when the sum of the errors of all subintervals is below ``tol / 8``
+        (line 410). padaquad accepts or splits each subinterval by its own
+        error ratio.
 
-        The rounding floor enters as a *lower bound on the tolerance*
-        (``effective_tol = max(tol, R(round_floor))``), not as an inflation of
-        the error. This realizes scipy's "stop once rounding-limited" behavior:
-        a panel whose error is already at/below round-off has ``error_ratio <=
-        ~1`` and is accepted instead of being split forever -- important when
-        the requested tolerance is below what the working dtype can resolve.
+        The pair ratio ``error_ratio_2steps[k] = R(abs(e[k]) + abs(e[k+1])) /
+        tol_2steps[k]`` (used only to merge subintervals, in
+        ``_prune_excess_mesh``) uses the tolerance the merged subinterval
+        would get: the same ``tol`` in absolute mode, subinterval k+1's (the
+        merged subinterval's right end) in cumulative mode. Its rounding floor
+        is ``R(floor[k]) + R(floor[k+1])``, at least the merged subinterval's
+        own floor (equal when both contributions have the same sign).
+
+        The rounding floor (``_round_floor``) is a lower bound on the
+        tolerance, ``effective_tol = max(tol, R(floor))``; the error itself is
+        not raised. A subinterval whose error is at or below rounding level
+        then has an error ratio of about 1 or less and is accepted instead of
+        being split forever, which matters when the requested tolerance is
+        below what the dtype can resolve.
 
         Parameters
         ----------
         abs_err : torch.Tensor
-            Absolute per-step error estimates. Shape: [N, D].
+            Absolute error estimate of each subinterval. Shape: [N, D].
         mesh_quadratures : torch.Tensor | None
-            Per-step integral contributions (for the rounding floor). Shape:
+            Contribution of each subinterval (for the rounding floor). Shape:
             [N, D].
         cum_mesh_quadratures : torch.Tensor | None
-            Running integral through each step (cumulative mode). Shape: [N, D].
+            Running integral through each subinterval (cumulative mode).
+            Shape: [N, D].
         integral : torch.Tensor | None
             Total integral (absolute mode). Shape: [D].
 
@@ -2836,35 +2767,38 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         integral: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Per-component family: each output element keeps its own relative
-        tolerance, and a panel's accept/reject quantity is the *fraction* of
-        elements whose ratio exceeds 1::
+        Error ratios of ``"failure_fraction"``: the fraction of failing components.
 
-            r[k, d] = |e[k, d]| / (atol + rtol * |I[d]|)        (absolute)
-            r[k, d] = |e[k, d]| / (atol + rtol * |cum[k, d]|)   (cumulative)
-            failure_fraction[k] = mean_d( r[k, d] >= 1 )
+        Each output component has its own tolerance, and a subinterval's
+        accept-or-split quantity is the fraction of components whose ratio is
+        1 or above::
 
-        A panel is accepted when ``failure_fraction <= mesh_failure_tolerance``
-        (applied in ``_accept_reject_masks``). The raw per-element ratio is also
-        returned so non-finite (NaN/Inf) panels can be detected downstream.
-        The pair ratio (used only to merge steps) is the max over elements of
-        ``(|e[k, d]| + |e[k+1, d]|) / tol_2steps[k, d]``, with the merged
-        step's tolerance as in ``_error_ratios_norm``.
+            r[k, d] = abs(e[k, d]) / (atol + rtol * abs(I[d]))        (absolute)
+            r[k, d] = abs(e[k, d]) / (atol + rtol * abs(cum[k, d]))   (cumulative)
+            failure_fraction[k] = mean over d of (r[k, d] >= 1)
 
-        The rounding floor enters per element as a lower bound on the tolerance
-        (``effective_tol = max(tol, round_floor)``), so an element whose error is
-        already at/below round-off does not count as a failure and the panel is
-        not split chasing sub-precision accuracy.
+        A non-finite ratio does not count as failing here. A subinterval is
+        accepted when ``failure_fraction <= mesh_failure_tolerance`` (in
+        ``_accept_reject_masks``). The ratio of each element is also returned,
+        so non-finite (NaN or Inf) subintervals can be found later. The pair
+        ratio (used only to merge subintervals) is the largest over components
+        of ``(abs(e[k, d]) + abs(e[k+1, d])) / tol_2steps[k, d]``, with the
+        merged subinterval's tolerance as in ``_error_ratios_norm``.
+
+        The rounding floor is a lower bound on each component's tolerance,
+        ``effective_tol = max(tol, floor)``, so a component whose error is at
+        or below rounding level does not count as failing.
 
         Parameters
         ----------
         abs_err : torch.Tensor
-            Absolute per-step error estimates. Shape: [N, D].
+            Absolute error estimate of each subinterval. Shape: [N, D].
         mesh_quadratures : torch.Tensor | None
-            Per-step integral contributions (for the rounding floor). Shape:
+            Contribution of each subinterval (for the rounding floor). Shape:
             [N, D].
         cum_mesh_quadratures : torch.Tensor | None
-            Running integral through each step (cumulative mode). Shape: [N, D].
+            Running integral through each subinterval (cumulative mode).
+            Shape: [N, D].
         integral : torch.Tensor | None
             Total integral (absolute mode). Shape: [D].
 
@@ -2921,33 +2855,35 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         self, error_ratios: torch.Tensor, error_ratios_per_dim: torch.Tensor | None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
-        Turn per-step error quantities into accept (keep) / reject (split) masks.
+        Turn the error ratios into accept (keep) and split (remove) masks.
 
-        Both families accept a panel whose error is non-finite (NaN/Inf): a
-        midpoint split reuses the boundary node, so it can never reduce a
-        non-finite value, and routing it to the split branch would loop forever.
+        Both families accept a subinterval whose error ratio is non-finite (NaN
+        or Inf). Splitting cannot be relied on to remove a non-finite value (a
+        NaN or Inf at a mesh point comes back as an endpoint of a half, and a
+        non-finite running integral makes every tolerance non-finite), so
+        splitting until it is gone might never end.
 
-          - ``"failure_fraction"``: keep when the failure fraction is
-            ``<= mesh_failure_tolerance`` (plus a float-noise epsilon), or when
-            any element of the panel is non-finite.
-          - Norm family: keep when ``error_ratios < 1`` or ``error_ratios`` is
-            non-finite.
+        - ``"failure_fraction"``: keep when the failure fraction is at most
+          ``mesh_failure_tolerance`` (plus ``8 * eps`` for rounding), or when
+          any component of the subinterval is non-finite.
+        - Norm family: keep when ``error_ratios < 1`` or when it is
+          non-finite.
 
         Parameters
         ----------
         error_ratios : torch.Tensor
-            Per-step accept/reject quantity. Shape: [N].
+            Accept-or-split quantity of each subinterval. Shape: [N].
         error_ratios_per_dim : torch.Tensor | None
-            Per-element ratio [N, D] for the failure
-            family (used for the non-finite check), else None.
+            Ratio of each element [N, D] for ``"failure_fraction"`` (used for
+            the non-finite check), else None.
 
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-            Tuple ``(keep_mask, remove_mask, nonfinite_mask)``, each boolean
-            shape [N]. ``nonfinite_mask`` marks the panels kept only because
-            their error is non-finite (the final ``converged`` check counts
-            them as failing).
+            Tuple ``(keep_mask, remove_mask, nonfinite_mask)``, each boolean of
+            shape [N]. ``nonfinite_mask`` marks the non-finite subintervals,
+            which are kept (the final ``converged`` check counts them as
+            failing).
         """
         if self._is_failure_fraction:
             if error_ratios_per_dim is None:
@@ -3013,8 +2949,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Returns
         -------
         dict[str, torch.Tensor]
-            ``{record key: tensor}`` for the scalar keys, the per-step keys and
-            one key per tracked variable.
+            ``{record key: tensor}`` for the scalar keys, the per-subinterval
+            keys and one key per tracked variable.
         """
         assert results.loss is not None, "loss must be set before recording"
         fields: dict[str, torch.Tensor] = {
@@ -3029,28 +2965,28 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         self, barriers: torch.Tensor, mesh_indices: dict[tuple[float, ...], int]
     ) -> torch.Tensor:
         """
-        Look up the mesh-order index of each panel from its left barrier.
+        Look up the mesh index of each subinterval from its left mesh point.
 
-        A panel's left barrier is ``nodes[:, 0, :]`` -- the first quadrature
-        node, which equals the left mesh barrier bit-for-bit because every
-        rule's ``node_fractions()`` start at 0 (so ``mesh_left + 0*(...) ==
-        mesh_left`` exactly). ``mesh_indices`` maps each barrier (keyed on its
-        full coordinate tuple) to its position in the ordered mesh, so this
-        gives a robust total order for any time dimensionality T -- no single
-        coordinate is compared.
+        A subinterval's left mesh point is ``nodes[:, 0, :]``, its first node,
+        which equals the mesh point bit for bit because every method's
+        ``node_fractions()`` start at 0 (so ``mesh_left + 0 * (...) ==
+        mesh_left`` exactly). ``mesh_indices`` maps each mesh point (keyed on
+        its full coordinate tuple) to its index in the ordered mesh, so this
+        gives an order for any number of coordinates T without comparing
+        coordinates.
 
         Parameters
         ----------
         barriers : torch.Tensor
-            Per-panel left barriers. Shape: [N, T].
+            Left mesh point of each subinterval. Shape: [N, T].
         mesh_indices : dict[tuple[float, ...], int]
-            ``{tuple(barrier): position}`` from
-            ``_get_mesh_indices`` for the current mesh.
+            ``{tuple(mesh point): index}`` from ``_get_mesh_indices`` for the
+            current mesh.
 
         Returns
         -------
         torch.Tensor
-            Per-panel mesh positions. Shape: [N], dtype long.
+            Mesh index of each subinterval. Shape: [N], dtype long.
         """
         # Build keys from a SINGLE device->host transfer of the whole [N, T]
         # block (barriers.tolist()), then look each up in pure Python. Avoids
@@ -3068,10 +3004,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Compute merged-array positions from two mesh-order arrays.
 
         Given the mesh-order indices of the existing record entries and of the
-        new entries, return where each goes in the combined, mesh-ordered
-        array. The mesh indices are globally unique integers, so the merge is a
-        rank computation -- no coordinate comparison is involved. Replaces the
-        coordinate-based binary-search placement used previously.
+        new entries, return where each goes in the combined array in mesh
+        order. The mesh indices are distinct integers, so the merge is a rank
+        computation, with no comparison of coordinates.
 
         Parameters
         ----------
@@ -3101,7 +3036,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         result_idxs: torch.Tensor,
     ) -> torch.Tensor:
         """
-        Merge new results into an existing record at pre-computed sorted positions.
+        Merge new results into an existing record at precomputed positions.
 
         Creates a new tensor large enough for both, places existing entries at
         record_idxs and new entries at result_idxs.
@@ -3148,36 +3083,37 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         result_device: str | torch.device | None = None,
     ) -> dict[str, torch.Tensor]:
         """
-        Add a batch of accepted step results to the running record.
+        Add the accepted subintervals of a batch to the running record.
 
-        On the first batch, initializes the record dict. On subsequent batches,
-        inserts new results in mesh order and accumulates the integral and loss.
+        On the first batch this creates the record. On later batches it
+        inserts the new results in mesh order and adds to the integral, its
+        error and the loss.
 
-        Each recorded field is placed on its target device: the keys in
-        ``_DEVICE_RESIDENT_KEYS`` stay on the integration device (they are read
-        back during the loop), and all other fields -- including the large
-        ``nodes``/``y``/``tracked_variables`` -- are moved to ``result_device``
-        so they do not accumulate on the GPU. When ``take_gradient`` is True the
-        per-batch ``loss.backward()`` has already run, so tensors are detached
-        before placing; when False the autograd graph is retained so the
-        returned integral stays differentiable (the device move is itself a
-        differentiable op).
+        Each field is placed on its device: the keys in
+        ``_DEVICE_RESIDENT_KEYS`` and ``_RESULT_INTEGRATION_KEYS`` stay on the
+        integration device (the first are read back during the loop), and all
+        other fields, including the large ``nodes``, ``y`` and tracked
+        variables, are moved to ``result_device`` so they do not accumulate on
+        the GPU. When ``take_gradient`` is True the per-batch
+        ``loss.backward()`` has already run, so tensors are detached first;
+        when False the autograd graph is kept so the returned integral stays
+        differentiable (the device move is itself differentiable).
 
         Parameters
         ----------
         record : dict[str, torch.Tensor]
-            Running record dict. Empty dict {} on the first call.
+            Running record. An empty dict on the first call.
         take_gradient : bool
-            If True, per-batch backward already ran and tensors
-            are detached before recording; if False the graph is retained.
+            If True, the per-batch backward already ran and tensors are
+            detached before recording; if False the graph is kept.
         results : IntegrationResult
-            IntegrationResult from the current accepted batch.
+            Results of the accepted subintervals of the current batch.
         mesh_indices : dict[tuple[float, ...], int]
-            ``{tuple(barrier): position}`` for the current mesh,
-            used to place new steps in mesh order (robust for any T).
+            ``{tuple(mesh point): index}`` for the current mesh, used to place
+            the new subintervals in mesh order (for any T).
         result_device : str | torch.device | None
-            Device for the large/output record tensors. ``None``
-            keeps everything on the integration device (no move).
+            Device for the large output tensors. None keeps everything on the
+            integration device.
 
         Returns
         -------
@@ -3253,25 +3189,26 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_indices: dict[tuple[float, ...], int],
     ) -> dict[str, torch.Tensor]:
         """
-        Sort all per-step entries in the record by mesh order.
+        Sort the per-subinterval entries of the record by mesh order and check it.
 
-        The integration loop may process batches in any order, so the record
-        needs to be sorted before final output. Ordering is by each panel's
-        position in the mesh (its left barrier looked up in ``mesh_indices``),
-        which is robust for any time dimensionality T. Scalar values (integral,
-        loss) are not reordered since they are cumulative sums.
+        ``_record_results`` already inserts every batch in mesh order, so on
+        the record ``integrate`` builds the sort leaves the order unchanged;
+        this is a safeguard before the final output. The order is each
+        subinterval's index in the mesh (its left mesh point looked up in
+        ``mesh_indices``), which works for any number of coordinates T. The
+        accumulated scalars (integral, its error, loss) are not reordered.
 
         Parameters
         ----------
         record : dict[str, torch.Tensor]
-            Record dict with per-step tensors.
+            Record with per-subinterval tensors.
         mesh_indices : dict[tuple[float, ...], int]
-            ``{tuple(barrier): position}`` for the final mesh.
+            ``{tuple(mesh point): index}`` for the final mesh.
 
         Returns
         -------
         dict[str, torch.Tensor]
-            Record with per-step tensors sorted by mesh position.
+            The record with its per-subinterval tensors in mesh order.
         """
         sorted_idxs = torch.argsort(
             self._mesh_order(record["nodes"][:, 0, :], mesh_indices), dim=0
@@ -3304,38 +3241,39 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         loss_fxn: Callable[[IntegrationResult], torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         """
-        Drop recorded panels that failed the accepted-panel re-check.
+        Remove from the record the subintervals that failed the re-check.
 
-        Their barriers were just bisected in the mesh (their children will be
-        re-evaluated as fresh panels), so the stale entries must leave the
-        record. Per-step fields are filtered by ``record_keep_mask`` and the
-        cumulative scalar accumulators are rebuilt:
+        They were just split in the mesh (their halves will be evaluated as
+        new subintervals), so their entries must leave the record. The
+        per-subinterval fields are filtered by ``record_keep_mask`` and the
+        accumulated scalars are updated:
 
-        - ``integral`` is rebuilt exactly: it equals the sum of the per-step
-          ``mesh_quadratures``, so subtracting the removed panels' contribution
-          is exact.
-        - ``integral_error`` is a signed accumulated sum but the stored per-step
-          errors are abs (kept abs so the optimal-mesh/merge path is unchanged),
-          so the removed panels' *abs* errors are subtracted -- a bounded
-          approximation of a diagnostic field.
-        - ``loss`` for the default loss equals the integral, so it tracks the
-          rebuilt integral; a custom ``loss_fxn`` is left as-is (its per-batch
-          sum is already an approximation, and the re-check only runs with
-          ``take_gradient=False`` so no per-batch backward depends on it).
+        - ``integral`` is updated exactly: it is the sum of the
+          ``mesh_quadratures``, so subtracting the removed contributions is
+          exact.
+        - ``integral_error`` is a sum of signed errors, but the recorded
+          per-subinterval errors are absolute values, so the removed absolute
+          errors are subtracted; the result is an approximation of this
+          diagnostic field.
+        - ``loss`` with the default loss equals the integral, so it is set to
+          the updated integral; a custom ``loss_fxn`` is left unchanged (its
+          per-batch sum is already an approximation, and the re-check only
+          runs with ``take_gradient=False``, so no per-batch backward depends
+          on it).
 
         Parameters
         ----------
         record : dict[str, torch.Tensor]
-            Running record dict (per-step fields in mesh order).
+            Running record (per-subinterval fields in mesh order).
         record_keep_mask : torch.Tensor
-            Boolean mask over recorded panels; True = keep.
+            Boolean mask over the recorded subintervals; True keeps one.
         loss_fxn : Callable[[IntegrationResult], torch.Tensor]
             The active loss function (to detect the default loss).
 
         Returns
         -------
         dict[str, torch.Tensor]
-            The record with the failed panels removed.
+            The record without the failed subintervals.
         """
         removed = ~record_keep_mask
         # mesh_quadratures / mesh_quadrature_errors are device-resident, as are

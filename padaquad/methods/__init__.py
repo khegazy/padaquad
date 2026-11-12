@@ -1,45 +1,39 @@
 """
-Quadrature method definitions, organized by family.
+Quadrature methods and the two registries the solvers choose them from.
 
-Each family lives in its own submodule:
+``UNIFORM_METHODS`` maps each method name of the uniform-sampling solver to a
+``UniformMethodClass`` instance with fixed node fractions and weights:
 
-  - ``runge_kutta``: classical embedded RK pairs (adaptive_heun,
-    fehlberg2, bosh3, dopri5).
-  - ``gauss_kronrod``: Gauss-Kronrod pairs (gk7, gk15, gk21, gk31).
-  - ``clenshaw_curtis``: Chebyshev-node nested rules (cc5, cc9, cc17,
-    cc33, cc65).
-  - ``interpolatory``: rules with weights computed from the actual node
-    positions (the variable-sampling registry).
+- Runge-Kutta pairs: ``adaptive_heun``, ``fehlberg2``, ``bosh3``, ``dopri5``
+  (module ``runge_kutta``).
+- Gauss-Kronrod pairs: ``gk7``, ``gk15``, ``gk21`` (the default), ``gk31``
+  (module ``gauss_kronrod``).
+- Clenshaw-Curtis methods: ``cc5``, ``cc9``, ``cc17``, ``cc33``, ``cc65``
+  (module ``clenshaw_curtis``).
 
-This ``__init__`` aggregates all family registries into the two
-top-level dicts the solver consumes — ``UNIFORM_METHODS`` for
-fixed-node methods and ``VARIABLE_METHODS`` for variable-node methods —
-and exposes the ``_get_method`` factory used by the parallel solver.
-Every registry value is an instance of one of the two generic classes in
-``_base.py``: ``UniformMethodClass`` or ``VariableMethodClass``.
+``VARIABLE_METHODS`` maps each method name of the variable-sampling solver to
+a ``MethodClass`` instance whose weights may depend on the node positions:
+``adaptive_heun`` (the same object as in ``UNIFORM_METHODS``) and
+``interpolatory3_variable`` (module ``interpolatory``).
 
-Each method is specified by:
+The stored instances use float64 on the CPU. Each solver works on its own copy,
+converted to the solver's dtype and device, so the registries are never
+modified. Read a method's ``degree``, ``order`` and ``n_nodes``, or measure its
+degree with ``measure_degree()``.
 
-- **c** (nodes): Fractional positions within a fresh step where the
-  integrand is evaluated (``node_fractions()``). ``c[0] = 0`` is the step
-  start, ``c[-1] = 1`` is the step end.
-- **b** (weights): Weights for combining evaluations into the integral
-  estimate. The integral over one step is ``h * sum(b_i * f(t_i))``.
-- **b_error**: Difference between the primary and embedded-method
-  weights. The error estimate is ``h * sum(b_error_i * f(t_i))``.
+Each method is defined by three arrays of length C (the number of nodes per
+subinterval):
 
-There are two families of methods:
+- ``c``, the node fractions: node i of a subinterval [l, r] is at
+  ``l + c_i * (r - l)``, with ``c[0] = 0`` and ``c[-1] = 1``.
+- ``b``, the weights: the method's result on a subinterval of width h is
+  ``h * sum_i(b_i * f(t_i))``.
+- ``b_error``, the error weights: ``b`` minus the weights of a lower-degree
+  embedded method on the same nodes. The error estimate is
+  ``h * sum_i(b_error_i * f(t_i))``.
 
-**Uniform methods** (``UNIFORM_METHODS``): The tableau ``c`` values are
-fixed constants. Quadrature points within each step are always at the
-same fractional positions regardless of step size. Simple and efficient.
-
-**Variable methods** (``VARIABLE_METHODS``): The ``b`` weights are
-recomputed dynamically based on the actual positions of the quadrature
-points (``adaptive_heun``, whose two nodes are the step ends, keeps its
-fixed weights and is the uniform object itself). This allows quadrature
-points to be at arbitrary positions within each step, which is useful
-when refining the mesh by inserting new points between existing ones.
+For a variable method, ``b`` and ``b_error`` are computed for each subinterval
+from its node positions.
 """
 
 from __future__ import annotations
@@ -65,8 +59,8 @@ if TYPE_CHECKING:
 
     import torch
 
-# Aggregate registries. Keys are user-facing method names; values are
-# float64 CPU ``MethodClass`` instances that ``_get_method`` clones per solver.
+# Registries (described in the module docstring). Keys are method names; values
+# are float64 CPU ``MethodClass`` instances that ``_get_method`` clones per solver.
 UNIFORM_METHODS: dict[str, UniformMethodClass] = {
     **RK_METHODS,
     **GK_METHODS,
@@ -84,12 +78,11 @@ def _get_method(
     """
     Retrieve and initialize an integration method by name and sampling type.
 
-    Each solver gets its OWN copy of the method. Both registries hold
-    canonical instances at float64, and we ``clone()`` them here so that
-    downstream dtype/device mutations stay isolated to one solver instance.
-    Without this cloning, two solvers running concurrently — or sequentially
-    with different dtypes — would corrupt each other's values (most notably,
-    lower-precision conversions of the canonical instance are irreversible).
+    Each solver gets its own copy of the method: both registries hold float64
+    instances, which are cloned here so that dtype and device changes stay
+    with one solver. Without the copy, two solvers would change each other's
+    weights, and converting the shared instance to float32 would lose
+    precision for every later solver.
 
     Parameters
     ----------

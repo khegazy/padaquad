@@ -397,7 +397,7 @@ class TestFailureFraction:
         failure_fraction, _, per_dim = solver._compute_error_ratios(
             mesh_quadrature_errors=mesh_quadrature_errors, integral=integral
         )
-        keep, remove = solver._accept_reject_masks(failure_fraction, per_dim)
+        keep, remove, _ = solver._accept_reject_masks(failure_fraction, per_dim)
         assert keep.tolist() == [False, True]
         assert remove.tolist() == [True, False]
 
@@ -409,7 +409,7 @@ class TestFailureFraction:
         failure_fraction, _, per_dim = solver._compute_error_ratios(
             mesh_quadrature_errors=mesh_quadrature_errors, integral=integral
         )
-        keep, _ = solver._accept_reject_masks(failure_fraction, per_dim)
+        keep, _, _ = solver._accept_reject_masks(failure_fraction, per_dim)
         assert keep.tolist() == [True]
 
     def test_mask_nonfinite_panel_accepted(self):
@@ -420,7 +420,7 @@ class TestFailureFraction:
         failure_fraction, _, per_dim = solver._compute_error_ratios(
             mesh_quadrature_errors=mesh_quadrature_errors, integral=integral
         )
-        keep, _ = solver._accept_reject_masks(failure_fraction, per_dim)
+        keep, _, _ = solver._accept_reject_masks(failure_fraction, per_dim)
         assert keep.tolist() == [True]
 
 
@@ -430,12 +430,12 @@ class TestAcceptRejectMasksNorm:
     def test_threshold(self):
         solver = make_solver_for_unit_test()  # default error_norm == "2"
         error_ratios = torch.tensor([0.5, 1.0, 2.0])
-        keep, remove = solver._accept_reject_masks(error_ratios, None)
+        keep, remove, _ = solver._accept_reject_masks(error_ratios, None)
         assert keep.tolist() == [True, False, False]
         assert remove.tolist() == [False, True, True]
 
     def test_nonfinite_kept(self):
         solver = make_solver_for_unit_test()
         error_ratios = torch.tensor([float("inf"), float("nan"), 0.1])
-        keep, _ = solver._accept_reject_masks(error_ratios, None)
+        keep, _, _ = solver._accept_reject_masks(error_ratios, None)
         assert keep.tolist() == [True, True, True]

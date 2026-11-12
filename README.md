@@ -287,9 +287,10 @@ except where noted.
 - `mesh_quadratures`, `mesh_quadrature_errors`, `error_ratios` — per-step diagnostics.
 - `loss`, `gradient_taken` (`bool`), `y0` — training-loop diagnostics.
 - `converged: bool` — `True` when every accepted step meets the tolerance
-  judged against the final integral. `False` when `max_adaptive_splits`
-  stopped the refinement of a failing step, when a step's error is NaN/Inf,
-  or when a step accepted against the running integral fails against the
+  judged against the final integral (in cumulative mode, the final running
+  integral through the step). Usually `False` when `max_adaptive_splits`
+  stopped the refinement of a failing step; `False` when a step's error
+  ratio is NaN/Inf, or when a step accepted against the running integral fails against the
   final one (with `take_gradient=True` accepted steps are not re-checked).
   A warning reporting the size of the error is logged when `False`.
 - `n_start_steps`, `n_start_steps_split` (`int`) — steps in the starting
@@ -344,7 +345,9 @@ and `nodes`, `y` and `tracked_variables` keep one row per step
    at most one level, so an over-resolved stored mesh shrinks over
    repeated calls. A call that did not converge (for example under
    `max_adaptive_splits`) stores its `mesh_optimal` too, which splits the
-   failing steps, so repeated `same_f=True` calls refine further.
+   failing steps, so repeated `same_f=True` calls refine further. (In
+   cumulative mode a failing step can instead be merged with a right
+   neighbour whose running integral, and so tolerance, is much larger.)
 
 ## Comparisons
 

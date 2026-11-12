@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import math
 
+import numpy as np
 import pytest
 import torch
 from tests._helpers import (
@@ -198,6 +199,16 @@ def test_invalid_per_call_max_adaptive_splits_raises(value, error):
         )
 
 
+def test_numpy_integer_max_adaptive_splits_is_accepted():
+    out = _gk21_solver(max_batch=BIG_BATCH).integrate(
+        f=_narrow_peak,
+        mesh=_MESH20,
+        take_gradient=False,
+        max_adaptive_splits=np.int64(1),
+    )
+    assert out.max_split_depth == 1
+
+
 # ---------------------------------------------------------------------------
 # A non-converged call, then warm starts (replaces the early-exit tests)
 # ---------------------------------------------------------------------------
@@ -243,6 +254,67 @@ def test_capped_call_then_warm_starts_converge():
 # ---------------------------------------------------------------------------
 # converged in the different error modes
 # ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("seed", [0, 1])
+@pytest.mark.parametrize("cap", [None, 0], ids=["uncapped", "cap0"])
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+@pytest.mark.parametrize("absolute", [True, False], ids=["absolute", "cumulative"])
+def test_converged_matches_a_hand_computed_tolerance_check(
+    absolute, take_gradient, cap, seed
+):
+    """An independent oracle for converged (D = 1, "2" norm): every step's
+    |error| is below max(atol, rtol*|reference|, 50*eps*|step integral|), with
+    reference the final integral without y0 (absolute mode) or the final
+    running integral through the step (cumulative mode). Several batches, so
+    the running integral drifts."""
+    atol, rtol = 1e-12, 1e-6
+    solver = adaptive_quadrature(
+        sampling_type=steps.ADAPTIVE_UNIFORM,
+        method="dopri5",
+        atol=atol,
+        rtol=rtol,
+        device="cpu",
+        use_absolute_error_ratio=absolute,
+    )
+    torch.manual_seed(seed)
+    out = solver.integrate(
+        f=lambda t: torch.sin(2 * math.pi * t),
+        mesh_init=T_INIT,
+        mesh_final=T_FINAL,
+        y0=torch.tensor([5.0], dtype=torch.float64),
+        take_gradient=take_gradient,
+        conserve_memory=True,
+        max_batch=8 * solver.C,
+        max_adaptive_splits=cap,
+    )
+    q = out.mesh_quadratures[:, 0]
+    err = out.mesh_quadrature_errors[:, 0]
+    if absolute:
+        reference = torch.abs(out.integral - out.y0)
+    else:
+        reference = torch.abs(torch.cumsum(q, 0))
+    tol = torch.maximum(
+        torch.clamp(rtol * reference, min=atol),
+        50.0 * torch.finfo(torch.float64).eps * torch.abs(q),
+    )
+    assert out.converged is bool((err / tol < 1).all())
+
+
+def test_y0_does_not_loosen_the_converged_tolerance():
+    """The tolerance is on the integral of f, not on y0 + integral: a large y0
+    would make rtol*|y0 + I| ~ 1 and pass every step."""
+    solver = make_uniform_solver(
+        "bosh3", atol=1e-14, rtol=1e-6, device="cpu", max_batch=BIG_BATCH
+    )
+    out = solver.integrate(
+        f=lambda t, *_: torch.sin(30 * t),
+        mesh=torch.linspace(0.0, 1.0, 3, dtype=torch.float64).unsqueeze(-1),
+        y0=torch.tensor([1e6], dtype=torch.float64),
+        take_gradient=False,
+        max_adaptive_splits=1,
+    )
+    assert out.converged is False
 
 
 def test_cumulative_mode_recheck_uses_the_running_integral():
@@ -299,6 +371,35 @@ def test_failure_fraction_converged_follows_the_accept_rule(
     assert out.converged is converged
 
 
+@pytest.mark.parametrize("absolute", [True, False], ids=["absolute", "cumulative"])
+def test_failure_fraction_nan_component_is_not_converged(absolute):
+    """A NaN in one output component of one step: the failure fraction itself
+    stays finite (NaN > 1 is False), so only the per-element non-finite check
+    makes converged False, also with mesh_failure_tolerance = 0.5."""
+    solver = adaptive_quadrature(
+        sampling_type=steps.ADAPTIVE_UNIFORM,
+        method="bosh3",
+        atol=1e-9,
+        rtol=1e-9,
+        device="cpu",
+        error_norm="failure_fraction",
+        mesh_failure_tolerance=0.5,
+        use_absolute_error_ratio=absolute,
+        max_batch=BIG_BATCH,
+    )
+    out = solver.integrate(
+        f=lambda t: torch.cat(
+            [torch.ones_like(t), torch.where(t > 0.9, torch.nan, torch.ones_like(t))],
+            dim=-1,
+        ),
+        mesh=torch.linspace(0.0, 1.0, 5, dtype=torch.float64).unsqueeze(-1),
+        take_gradient=False,
+        error_on_nonfinite=False,
+    )
+    assert torch.isnan(out.integral[1])
+    assert out.converged is False
+
+
 def test_float32_smooth_integral_converges():
     out = integrate(
         f=torch.sin,
@@ -340,26 +441,115 @@ def test_converged_uses_the_final_integral_not_the_given_reference():
 # ---------------------------------------------------------------------------
 
 
-def test_warning_reports_the_size_of_the_error(caplog):
+def _warning_messages(caplog):
+    return [r.getMessage() for r in caplog.records if "did not converge" in r.message]
+
+
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_warning_reports_the_size_of_the_error(caplog, take_gradient):
+    """D = 1, cap 0, two steps that both fail. The numbers in the message are
+    recomputed here: the worst ratio |e| / max(atol, rtol*|I|), the summed
+    |error estimate| and |I|. The take_gradient=False remedy is offered only
+    when the call took gradients."""
+    atol = rtol = 1e-12
     solver = make_uniform_solver(
-        "bosh3", atol=1e-12, rtol=1e-12, device="cpu", max_batch=BIG_BATCH
+        "bosh3", atol=atol, rtol=rtol, device="cpu", max_batch=BIG_BATCH
     )
     mesh = torch.linspace(0.0, 1.0, 3, dtype=torch.float64).unsqueeze(-1)
     with caplog.at_level(logging.WARNING, logger="padaquad.quadrature.base"):
         out = solver.integrate(
             f=lambda t, *_: torch.sin(30 * t),
             mesh=mesh,
+            take_gradient=take_gradient,
+            max_adaptive_splits=0,
+        )
+    assert out.converged is False
+    messages = _warning_messages(caplog)
+    assert len(messages) == 1
+    message = messages[0]
+    abs_integral = float(torch.abs(out.integral))
+    err = out.mesh_quadrature_errors[:, 0]
+    worst = float(err.max()) / max(atol, rtol * abs_integral)
+    assert "2 of 2 accepted steps (100.0%)" in message
+    assert f"Largest error ratio among the finite failing steps: {worst:.3g}" in message
+    assert f"summed |error estimate| is {float(err.sum()):.3g}," in message
+    assert f"|integral| = {abs_integral:.3g} (" in message
+    assert "raise max_adaptive_splits" in message
+    assert ("take_gradient=False" in message) is take_gradient
+
+
+def test_warning_separates_failing_from_all_steps(caplog):
+    """Two steps with atol = 0.01: the first fails (error ~0.018), the second
+    passes (error ~0.0037). The failing sum counts the first step only; the
+    total counts both."""
+    solver = make_uniform_solver(
+        "bosh3", atol=1e-2, rtol=0.0, device="cpu", max_batch=BIG_BATCH
+    )
+    with caplog.at_level(logging.WARNING, logger="padaquad.quadrature.base"):
+        out = solver.integrate(
+            f=lambda t, *_: torch.where(
+                t < 0.5, torch.sin(30 * t), 0.1 * torch.sin(5 * t)
+            ),
+            mesh=torch.linspace(0.0, 1.0, 3, dtype=torch.float64).unsqueeze(-1),
+            take_gradient=False,
+            max_adaptive_splits=0,
+        )
+    err = out.mesh_quadrature_errors[:, 0]
+    assert float(err[0]) > 1e-2 > float(err[1]) > 1e-3
+    assert out.converged is False
+    (message,) = _warning_messages(caplog)
+    assert "1 of 2 accepted steps (50.0%)" in message
+    assert (
+        f"summed |error estimate| is {float(err[0]):.3g}, of "
+        f"{float(err.sum()):.3g} summed over all finite steps"
+    ) in message
+
+
+def test_warning_reports_one_output_component(caplog):
+    """D = 2 with very different scales: the error, total error and |integral|
+    in the message all belong to component 0, the one whose failing error is
+    largest relative to its integral (not the largest of each across
+    components)."""
+    solver = make_uniform_solver(
+        "bosh3", atol=1e-12, rtol=1e-12, device="cpu", max_batch=BIG_BATCH
+    )
+    with caplog.at_level(logging.WARNING, logger="padaquad.quadrature.base"):
+        out = solver.integrate(
+            f=lambda t, *_: torch.cat(
+                [torch.sin(30 * t), 1000.0 + 1e-3 * torch.sin(5 * t)], dim=-1
+            ),
+            mesh=torch.linspace(0.0, 1.0, 3, dtype=torch.float64).unsqueeze(-1),
             take_gradient=False,
             max_adaptive_splits=0,
         )
     assert out.converged is False
-    messages = [
-        r.getMessage() for r in caplog.records if "did not converge" in r.message
-    ]
-    assert len(messages) == 1
-    assert "2 of 2 accepted steps (100.0%)" in messages[0]
-    assert "Largest error ratio" in messages[0]
-    assert "raise max_adaptive_splits" in messages[0]
+    (message,) = _warning_messages(caplog)
+    err0 = float(out.mesh_quadrature_errors[:, 0].sum())
+    assert "output component 0 of 2" in message
+    assert f"summed |error estimate| is {err0:.3g}," in message
+    assert f"|integral| = {float(torch.abs(out.integral[0])):.3g} (" in message
+
+
+def test_warning_with_a_pinned_reference_suggests_the_reference(caplog):
+    """With a fixed error_integral_reference the re-check is off, so
+    take_gradient=False is no remedy; the message points at the reference."""
+    solver = make_uniform_solver(
+        "bosh3", atol=1e-9, rtol=1e-6, device="cpu", max_batch=BIG_BATCH
+    )
+    torch.manual_seed(0)
+    with caplog.at_level(logging.WARNING, logger="padaquad.quadrature.base"):
+        out = solver.integrate(
+            f=lambda t, *_: torch.sin(2 * math.pi * t),
+            mesh_init=T_INIT,
+            mesh_final=T_FINAL,
+            take_gradient=True,
+            error_integral_reference=100.0,
+        )
+    assert out.converged is False
+    (message,) = _warning_messages(caplog)
+    assert "error_integral_reference" in message
+    assert "take_gradient=False" not in message
+    assert "max_adaptive_splits" not in message
 
 
 def test_no_warning_when_converged(caplog):

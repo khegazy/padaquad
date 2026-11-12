@@ -89,10 +89,11 @@ class IntegrationResult:
             during this integration run.
         y0: Initial integral accumulator value used. Shape: [D].
         converged: Whether every accepted step meets the error tolerance when
-            judged against the final integral (the reference
-            ``mesh_optimal`` is built with). ``False`` when
-            ``max_adaptive_splits`` stopped the refinement of a failing step,
-            when a step's error is NaN/Inf, or when a step accepted against
+            judged against the final integral (in cumulative mode, the final
+            running integral through the step; the reference ``mesh_optimal``
+            is built with). Usually ``False`` when ``max_adaptive_splits``
+            stopped the refinement of a failing step; ``False`` when a step's
+            error ratio is NaN/Inf, or when a step accepted against
             the running integral fails against the final one (with
             ``take_gradient=True`` accepted steps are never re-checked). A
             warning with the size of the error is logged when ``False``.

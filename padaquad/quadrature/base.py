@@ -49,6 +49,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import math
+import numbers
 import time
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -204,9 +205,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             max_adaptive_splits: Maximum number of times a panel may be split
                 during adaptive refinement. A panel that has been split this
                 many times is accepted even if it still fails the error
-                tolerance, instead of being split further; the call then
-                returns ``converged=False``. A non-negative ``int``; if None
-                (default), refinement is uncapped. Can be overridden per call
+                tolerance, instead of being split further; ``converged`` is
+                then usually ``False`` (such a step can still meet the
+                tolerance against the final integral). A non-negative integer
+                (``int`` or a numpy integer); if None (default), refinement is
+                uncapped. Can be overridden per call
                 via ``integrate(max_adaptive_splits=...)``.
             use_absolute_error_ratio: If True, error ratios use the total
                 (converging) integral value. If False, uses cumulative sum up
@@ -308,23 +311,24 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     @staticmethod
     def _check_max_adaptive_splits(max_adaptive_splits: object) -> None:
         """
-        Validate that ``max_adaptive_splits`` is None or a non-negative int.
+        Validate that ``max_adaptive_splits`` is None or a non-negative integer.
 
         The type check also catches a float passed by position: before
         ``max_path_change`` was removed, the 4th positional constructor argument
         was that fraction, and a float such as 0.1 would otherwise act as a cap.
 
         Raises:
-            TypeError: If the value is not None and not an int (bool rejected).
-            ValueError: If the value is a negative int.
+            TypeError: If the value is not None and not an integer
+                (``numbers.Integral``, so numpy integers pass; bool rejected).
+            ValueError: If the value is negative.
         """
         if max_adaptive_splits is None:
             return
         if isinstance(max_adaptive_splits, bool) or not isinstance(
-            max_adaptive_splits, int
+            max_adaptive_splits, numbers.Integral
         ):
             raise TypeError(
-                "max_adaptive_splits must be None or an int, got "
+                "max_adaptive_splits must be None or an integer, got "
                 f"{type(max_adaptive_splits).__name__} {max_adaptive_splits!r}"
             )
         if max_adaptive_splits < 0:
@@ -667,6 +671,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 error_integral_reference = torch.tensor(error_integral_reference)
             error_integral_reference = error_integral_reference.to(self.device)
             error_integral_reference = error_integral_reference.to(self.dtype)
+        # A fixed reference sets every absolute-mode tolerance, so the in-loop
+        # tolerance does not drift and accepted steps are not re-checked.
+        reference_pinned = (
+            self.use_absolute_error_ratio and error_integral_reference is not None
+        )
 
         # Get variables or populate with default values, send to correct device
         f, mesh_init, mesh_final, y0 = self._check_variables(
@@ -812,7 +821,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     integral=reference_integral,
                 )
             )
-            keep_mask, remove_mask = self._accept_reject_masks(
+            keep_mask, remove_mask, _ = self._accept_reject_masks(
                 error_ratios, error_ratios_per_dim
             )
             if self.speed_logger:
@@ -836,12 +845,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # panel cannot double-count gradients. Skipped when a fixed
             # error_integral_reference pins the denominator (no drift).
             recheck_active = (
-                not take_gradient
-                and len(record) > 0
-                and not (
-                    self.use_absolute_error_ratio
-                    and error_integral_reference is not None
-                )
+                not take_gradient and len(record) > 0 and not reference_pinned
             )
             extra_split_idxs: torch.Tensor | None = None
             record_keep_mask: torch.Tensor | None = None
@@ -855,7 +859,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 # batch's steps to its left: the merged record+batch cumsum,
                 # restricted to the recorded positions (a cumsum over the record
                 # alone would leave the batch out).
-                _, _, rec_remove = self._record_error_check(
+                _, rec_remove, _ = self._record_error_check(
                     record,
                     torch.cumsum(all_mesh_quadratures.detach(), 0)[idxs_keep],
                     reference_integral,
@@ -993,28 +997,34 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         max_split_depth = int(step_split_counts.max())
 
         # Final error check: does the returned integral meet the tolerance?
-        # Every recorded step is judged again against the final integral, the
-        # reference _get_optimal_mesh also uses, so converged agrees with the
-        # mesh_optimal built below. A step can fail here although it passed
-        # when accepted: it was judged against the running integral (and with
-        # take_gradient=True nothing re-checks it), or max_adaptive_splits
-        # stopped its refinement. A non-finite error never meets a tolerance;
-        # _accept_reject_masks accepts it only because splitting cannot reduce
-        # it. Runs here, before the record is moved to result_device, so all
-        # inputs are on the integration device.
-        final_ratios, final_per_dim, final_fails = self._record_error_check(
+        # Every recorded step is judged again against the final integral (in
+        # cumulative mode, the final running integral through the step), the
+        # reference _get_optimal_mesh below also uses. A step can fail here
+        # although it passed when accepted, because it was judged against the
+        # running integral and, with take_gradient=True, nothing re-checked it.
+        # A step accepted at max_adaptive_splits usually fails, but can pass.
+        # A non-finite error ratio never meets a tolerance; _accept_reject_masks
+        # accepts it only because splitting cannot reduce it. In absolute mode
+        # mesh_optimal splits every finite failing step; in cumulative mode
+        # _prune_excess_mesh can merge one with a right neighbour whose running
+        # integral, and so its tolerance, is much larger. Runs before the record
+        # is moved to result_device, so all inputs are on the integration device.
+        final_ratios, final_fails, nonfinite = self._record_error_check(
             record,
             torch.cumsum(record["mesh_quadratures"].detach(), 0),
             record["integral"].detach(),
         )
-        nonfinite = ~torch.isfinite(final_ratios)
-        if final_per_dim is not None:
-            nonfinite = nonfinite | (~torch.isfinite(final_per_dim)).any(dim=-1)
         final_fails = final_fails | nonfinite
         converged = not bool(final_fails.any())
         if not converged:
             self._warn_not_converged(
-                record, final_ratios, final_fails, nonfinite, max_adaptive_splits
+                record,
+                final_ratios,
+                final_fails,
+                nonfinite,
+                max_adaptive_splits,
+                take_gradient,
+                reference_pinned,
             )
 
         # Prune over-resolved steps and refine under-resolved ones. This re-derives
@@ -1097,7 +1107,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         record: dict[str, torch.Tensor],
         cum_mesh_quadratures: torch.Tensor,
         integral: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Judge every recorded (accepted) step against a given tolerance reference.
 
@@ -1116,9 +1126,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             integral: Reference integral [D] for the absolute-mode tolerance.
 
         Returns:
-            Tuple ``(error_ratios, error_ratios_per_dim, reject_mask)``: the
-            per-step ratio [N], the per-element ratio [N, D] for
-            ``"failure_fraction"`` (else None), and the split mask [N] of
+            Tuple ``(error_ratios, reject_mask, nonfinite_mask)``: the per-step
+            ratio [N], and the split and non-finite masks [N] of
             ``_accept_reject_masks`` (non-finite steps count as accepted
             there).
         """
@@ -1128,8 +1137,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             cum_mesh_quadratures=cum_mesh_quadratures,
             integral=integral,
         )
-        _, reject_mask = self._accept_reject_masks(error_ratios, error_ratios_per_dim)
-        return error_ratios, error_ratios_per_dim, reject_mask
+        _, reject_mask, nonfinite_mask = self._accept_reject_masks(
+            error_ratios, error_ratios_per_dim
+        )
+        return error_ratios, reject_mask, nonfinite_mask
 
     def _warn_not_converged(
         self,
@@ -1138,6 +1149,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         final_fails: torch.Tensor,
         nonfinite: torch.Tensor,
         max_adaptive_splits: int | None,
+        take_gradient: bool,
+        reference_pinned: bool,
     ) -> None:
         """
         Log how far a returned integral is from meeting the tolerance.
@@ -1145,61 +1158,87 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Called by ``integrate`` when the final error check fails. The sizes
         reported are the method's embedded error estimates (the difference
         between the rule and its lower-order companion), not the true error.
+        For D > 1 they are reported for one output component: the one whose
+        failing steps' summed error is largest relative to its |integral|.
 
         Args:
             record: The sorted record on the integration device.
-            final_ratios: Per-step error ratio against the final integral [N]
+            final_ratios: Per-step error ratio from the final check [N]
                 (error / tolerance for the norm family; fraction of failing
                 output elements for ``"failure_fraction"``).
             final_fails: Steps that fail the final check, including
                 non-finite ones [N].
-            nonfinite: Steps whose error ratio is NaN/Inf [N].
+            nonfinite: Steps whose error ratio is NaN/Inf [N] (a NaN/Inf
+                error estimate, or a NaN/Inf tolerance from the integral).
             max_adaptive_splits: The split cap used by the call, or None.
+            take_gradient: Whether the call took per-batch gradients (then
+                accepted steps were not re-checked).
+            reference_pinned: Whether a fixed ``error_integral_reference`` set
+                the absolute-mode tolerance (then accepted steps were not
+                re-checked, and the loop judged steps against that reference).
         """
         finite_fails = final_fails & ~nonfinite
-        is_fraction = (not callable(self.error_norm)) and (
-            self.error_norm == "failure_fraction"
-        )
-        ratio_meaning = (
-            "fraction of output elements over tolerance"
-            if is_fraction
-            else "error / tolerance"
-        )
-        # Sums of |per-step error estimate| (largest output component), over the
-        # failing steps and over all steps. Absolute values, unlike
+        # Per-component sums of |per-step error estimate| [D], over the finite
+        # failing steps and over all finite steps. Absolute values, unlike
         # integral_error, whose signed per-step errors can cancel.
         abs_errors = torch.abs(record["mesh_quadrature_errors"])
-        all_error = float(abs_errors[~nonfinite].sum(0).max())
+        fail_error = abs_errors[finite_fails].sum(0)
+        all_error = abs_errors[~nonfinite].sum(0)
+        abs_integral = torch.abs(record["integral"])
+        relative = torch.where(
+            fail_error > 0, fail_error / abs_integral, torch.zeros_like(fail_error)
+        )
+        comp = int(torch.argmax(relative))
         if bool(finite_fails.any()):
             worst = float(final_ratios[finite_fails].max())
-            fail_error = float(abs_errors[finite_fails].sum(0).max())
+            fail_value = float(fail_error[comp])
         else:
-            worst = fail_error = float("nan")
-        remedy = (
-            "raise max_adaptive_splits, " if max_adaptive_splits is not None else ""
+            worst = fail_value = float("nan")
+        component = (
+            f" (output component {comp} of {len(abs_integral)})"
+            if len(abs_integral) > 1
+            else ""
         )
+        remedies = []
+        if max_adaptive_splits is not None:
+            remedies.append("raise max_adaptive_splits")
+        if take_gradient and not reference_pinned:
+            remedies.append(
+                "pass take_gradient=False (accepted steps are then re-checked)"
+            )
+        if reference_pinned:
+            remedies.append(
+                "use an error_integral_reference no larger than |integral| "
+                "(converged is judged against the final integral)"
+            )
+        remedies.append("call again with same_f=True to start from mesh_optimal")
         logger.warning(
             "The integral did not converge: %d of %d accepted steps (%.1f%%) do "
-            "not meet the tolerance (atol=%.3g, rtol=%.3g) when judged against "
-            "the final integral, %d of them with a non-finite error. Largest "
-            "error ratio among the finite failing steps: %.3g (%s). Their summed "
-            "|error estimate| is %.3g, of %.3g summed over all finite steps, for "
-            "|integral| = %.3g (largest output component; estimates, not the "
-            "true error). To refine further: %spass take_gradient=False "
-            "(accepted steps are then re-checked), or call again with "
-            "same_f=True to start from mesh_optimal.",
+            "not meet the tolerance (atol=%.3g, rtol=%.3g) judged against %s. "
+            "Failing steps with a non-finite error ratio (a NaN/Inf error "
+            "estimate or tolerance): %d. Largest error ratio among the finite "
+            "failing steps: "
+            "%.3g (%s). Their summed |error estimate| is %.3g, of %.3g summed "
+            "over all finite steps, for |integral| = %.3g%s (estimates, not the "
+            "true error). To refine further: %s.",
             int(final_fails.sum()),
             len(final_fails),
             100.0 * float(final_fails.float().mean()),
             float(self.atol),
             float(self.rtol),
+            "the final integral"
+            if self.use_absolute_error_ratio
+            else "the final running integral through each step",
             int((final_fails & nonfinite).sum()),
             worst,
-            ratio_meaning,
-            fail_error,
-            all_error,
-            float(torch.abs(record["integral"]).max()),
-            remedy,
+            "fraction of output elements over tolerance"
+            if self._is_failure_fraction
+            else "error / tolerance",
+            fail_value,
+            float(all_error[comp]),
+            float(abs_integral[comp]),
+            component,
+            "; ".join(remedies),
         )
 
     # -------------------------------------------------------------------------------- #
@@ -2113,7 +2152,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 integral=integral.detach(),
             )
         )
-        keep_mask, remove_mask = self._accept_reject_masks(
+        keep_mask, remove_mask, _ = self._accept_reject_masks(
             error_ratios, error_ratios_per_dim
         )
         adaptive_step = self._adaptively_increase_mesh(
@@ -2446,7 +2485,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         if self.use_absolute_error_ratio and integral is None:
             raise ValueError("Must give integral when use_absolute_error_ratio=True")
         abs_err = torch.abs(mesh_quadrature_errors)
-        if (not callable(self.error_norm)) and self.error_norm == "failure_fraction":
+        if self._is_failure_fraction:
             return self._error_ratios_failure_fraction(
                 abs_err, mesh_quadratures, cum_mesh_quadratures, integral
             )
@@ -2602,9 +2641,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         error_ratio_2steps = torch.amax(ratio_2steps, dim=-1)  # [N-1]
         return failure_fraction, error_ratio_2steps, ratio
 
+    @property
+    def _is_failure_fraction(self) -> bool:
+        """True when ``error_norm`` is the per-component ``"failure_fraction"``."""
+        return (not callable(self.error_norm)) and self.error_norm == "failure_fraction"
+
     def _accept_reject_masks(
         self, error_ratios: torch.Tensor, error_ratios_per_dim: torch.Tensor | None
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Turn per-step error quantities into accept (keep) / reject (split) masks.
 
@@ -2624,22 +2668,25 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 family (used for the non-finite check), else None.
 
         Returns:
-            Tuple ``(keep_mask, remove_mask)``, each boolean shape [N].
+            Tuple ``(keep_mask, remove_mask, nonfinite_mask)``, each boolean
+            shape [N]. ``nonfinite_mask`` marks the panels kept only because
+            their error is non-finite (the final ``converged`` check counts
+            them as failing).
         """
-        if (not callable(self.error_norm)) and self.error_norm == "failure_fraction":
+        if self._is_failure_fraction:
             if error_ratios_per_dim is None:
                 raise ValueError(
                     'error_norm="failure_fraction" needs the per-element ratios '
                     "returned by _compute_error_ratios"
                 )
-            panel_nonfinite = (~torch.isfinite(error_ratios_per_dim)).any(dim=-1)
+            nonfinite_mask = (~torch.isfinite(error_ratios_per_dim)).any(dim=-1)
             eps_frac = 8.0 * torch.finfo(self.dtype).eps
-            keep_mask = (
-                error_ratios <= self.mesh_failure_tolerance + eps_frac
-            ) | panel_nonfinite
+            passes = error_ratios <= self.mesh_failure_tolerance + eps_frac
         else:
-            keep_mask = (error_ratios < 1.0) | ~torch.isfinite(error_ratios)
-        return keep_mask, ~keep_mask
+            nonfinite_mask = ~torch.isfinite(error_ratios)
+            passes = error_ratios < 1.0
+        keep_mask = passes | nonfinite_mask
+        return keep_mask, ~keep_mask, nonfinite_mask
 
     # -------------------------------------------------------------------------------- #
     #                                    RECORDING                                     #

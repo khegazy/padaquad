@@ -288,7 +288,7 @@ class TestAcceptRejectMasksNorm:
         """error_ratio < 1 keeps; exactly 1.0 splits."""
         s = _solver(dtype, error_norm="2")
         ratios = torch.tensor([0.999, 1.0, 1.001], dtype=dtype)
-        keep, remove = s._accept_reject_masks(ratios, None)
+        keep, remove, _ = s._accept_reject_masks(ratios, None)
         assert keep.tolist() == [True, False, False]
         assert remove.tolist() == [False, True, True]
 
@@ -297,13 +297,13 @@ class TestAcceptRejectMasksNorm:
         ratios = torch.tensor(
             [float("inf"), float("-inf"), float("nan"), 0.5], dtype=dtype
         )
-        keep, _ = s._accept_reject_masks(ratios, None)
+        keep, _, _ = s._accept_reject_masks(ratios, None)
         assert keep.tolist() == [True, True, True, True]
 
     def test_masks_are_bool_and_complementary(self, dtype):
         s = _solver(dtype, error_norm="max")
         ratios = torch.tensor([0.5, 2.0, float("nan")], dtype=dtype)
-        keep, remove = s._accept_reject_masks(ratios, None)
+        keep, remove, _ = s._accept_reject_masks(ratios, None)
         assert keep.dtype == torch.bool
         assert remove.dtype == torch.bool
         assert torch.equal(remove, ~keep)
@@ -315,7 +315,7 @@ class TestAcceptRejectMasksNorm:
         never the failure-fraction branch (which would dereference per_dim)."""
         s = _solver(dtype, error_norm=lambda x: torch.sqrt((x**2).sum(dim=-1)))
         ratios = torch.tensor([0.5, 1.5], dtype=dtype)
-        keep, _ = s._accept_reject_masks(ratios, None)  # per_dim None must be ok
+        keep, _, _ = s._accept_reject_masks(ratios, None)  # per_dim None must be ok
         assert keep.tolist() == [True, False]
 
 
@@ -345,7 +345,7 @@ class TestAcceptRejectMasksFailure:
         frac, _, per_dim = s._compute_error_ratios(
             mesh_quadrature_errors=e, integral=integral
         )
-        keep, remove = s._accept_reject_masks(frac, per_dim)
+        keep, remove, _ = s._accept_reject_masks(frac, per_dim)
         assert keep.tolist() == [True, False, False]
         assert remove.tolist() == [False, True, True]
 
@@ -359,7 +359,7 @@ class TestAcceptRejectMasksFailure:
         frac, _, per_dim = s._compute_error_ratios(
             mesh_quadrature_errors=e, integral=integral
         )
-        keep, _ = s._accept_reject_masks(frac, per_dim)
+        keep, _, _ = s._accept_reject_masks(frac, per_dim)
         assert keep.tolist() == [True]
 
     def test_half_tolerance_D2(self, dtype):
@@ -370,7 +370,7 @@ class TestAcceptRejectMasksFailure:
         frac, _, per_dim = s._compute_error_ratios(
             mesh_quadrature_errors=e, integral=integral
         )
-        keep, _ = s._accept_reject_masks(frac, per_dim)
+        keep, _, _ = s._accept_reject_masks(frac, per_dim)
         assert keep.tolist() == [True, True, False]
 
     def test_nonfinite_panel_always_kept(self, dtype):
@@ -383,7 +383,7 @@ class TestAcceptRejectMasksFailure:
             mesh_quadrature_errors=e, integral=integral
         )
         # Two finite elements fail -> fraction 2/3 > mft, but the NaN forces keep.
-        keep, _ = s._accept_reject_masks(frac, per_dim)
+        keep, _, _ = s._accept_reject_masks(frac, per_dim)
         assert keep.tolist() == [True]
 
     def test_masks_complementary(self, dtype):
@@ -393,6 +393,6 @@ class TestAcceptRejectMasksFailure:
         frac, _, per_dim = s._compute_error_ratios(
             mesh_quadrature_errors=e, integral=integral
         )
-        keep, remove = s._accept_reject_masks(frac, per_dim)
+        keep, remove, _ = s._accept_reject_masks(frac, per_dim)
         assert keep.dtype == torch.bool
         assert torch.equal(remove, ~keep)

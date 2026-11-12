@@ -188,6 +188,26 @@ def measure(
     }
 
 
+def cpu_model() -> str:
+    """The CPU's model name (macOS sysctl or Linux /proc/cpuinfo), else the
+    architecture."""
+    if platform.system() == "Darwin":
+        out = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True,
+            text=True,
+            check=False,
+        ).stdout.strip()
+        if out:
+            return out
+    cpuinfo = Path("/proc/cpuinfo")
+    if cpuinfo.exists():
+        for line in cpuinfo.read_text().splitlines():
+            if line.startswith("model name"):
+                return line.split(":", 1)[1].strip()
+    return platform.machine()
+
+
 def metadata(device: str) -> dict[str, Any]:
     """Hardware, library versions, git commit and date of the run."""
     root = Path(__file__).resolve().parents[2]
@@ -207,7 +227,7 @@ def metadata(device: str) -> dict[str, Any]:
         "device_name": (
             torch.cuda.get_device_name(device)
             if device.startswith("cuda")
-            else platform.processor() or platform.machine()
+            else cpu_model()
         ),
         "cpu_count": os.cpu_count(),
         "torch_threads": torch.get_num_threads(),

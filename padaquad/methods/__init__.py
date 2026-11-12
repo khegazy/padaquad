@@ -91,20 +91,29 @@ def _get_method(
     with different dtypes — would corrupt each other's values (most notably,
     lower-precision conversions of the canonical instance are irreversible).
 
-    Args:
-        sampling_type: Whether to use uniform or variable sampling.
-        method_name: Name of the method (e.g. 'dopri5',
-            'interpolatory3_variable').
-        device: Device to place the method's tensors on.
-        dtype: Floating-point dtype for the method's tensors.
+    Parameters
+    ----------
+    sampling_type : steps
+        Whether to use uniform or variable sampling.
+    method_name : str
+        Name of the method (e.g. 'dopri5',
+        'interpolatory3_variable').
+    device : str | torch.device
+        Device to place the method's tensors on.
+    dtype : torch.dtype
+        Floating-point dtype for the method's tensors.
 
-    Returns:
+    Returns
+    -------
+    MethodClass
         An initialized method object with tensors on the correct
         device/dtype, independent of any other solver instance.
 
-    Raises:
-        ValueError: If ``method_name`` is not in the registry of
-            ``sampling_type``.
+    Raises
+    ------
+    ValueError
+        If ``method_name`` is not in the registry of
+        ``sampling_type``.
     """
     registry: Mapping[str, MethodClass] = (
         UNIFORM_METHODS if sampling_type == steps.ADAPTIVE_UNIFORM else VARIABLE_METHODS

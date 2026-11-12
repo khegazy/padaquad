@@ -38,21 +38,30 @@ def adaptive_quadrature(
     option is a keyword argument of the solver constructor
     (``AdaptiveQuadrature.__init__``).
 
-    Args:
-        sampling_type: A ``steps`` value or a name ('uniform',
-            'adaptive_uniform', 'variable', 'adaptive_variable'). Default:
-            ``DEFAULT_SAMPLING_TYPE`` ('uniform').
-        method: Name of the quadrature method. Default: ``DEFAULT_METHOD``
-            ('gk21').
-        **options: Keyword options of the solver constructor (atol, rtol, f,
-            mesh_init, max_batch, device, ...).
+    Parameters
+    ----------
+    sampling_type : str | steps
+        A ``steps`` value or a name ('uniform',
+        'adaptive_uniform', 'variable', 'adaptive_variable'). Default:
+        ``DEFAULT_SAMPLING_TYPE`` ('uniform').
+    method : str
+        Name of the quadrature method. Default: ``DEFAULT_METHOD``
+        ('gk21').
+    **options : Any
+        Keyword options of the solver constructor (atol, rtol, f,
+        mesh_init, max_batch, device, ...).
 
-    Returns:
+    Returns
+    -------
+    UniformAdaptiveQuadrature | VariableAdaptiveQuadrature
         The solver.
 
-    Raises:
-        ValueError: If sampling_type is not a recognized adaptive sampling type.
-        TypeError: If an option is not an option of the solver.
+    Raises
+    ------
+    ValueError
+        If sampling_type is not a recognized adaptive sampling type.
+    TypeError
+        If an option is not an option of the solver.
     """
     if isinstance(sampling_type, str):
         sampling_type = get_sampling_type(sampling_type)
@@ -109,27 +118,37 @@ def integrate(
         )
         print(round(float(result.integral), 6))  # 2.0
 
-    Args:
-        f: The integrand. Takes points of shape [N, T] and returns values of
-            shape [N, D], or a 2-tuple ``(values, tracked_variables)`` (see
-            ``AdaptiveQuadrature.integrate``).
-        method: Name of the quadrature method, a key of ``UNIFORM_METHODS``
-            (uniform sampling) or ``VARIABLE_METHODS`` (variable sampling).
-            Default: ``DEFAULT_METHOD`` ('gk21').
-        sampling: 'uniform' (fixed node positions) or 'variable' (weights
-            computed from the actual node positions), or any sampling type
-            ``adaptive_quadrature`` accepts. Default: 'uniform'.
-        **options: Keyword options of ``AdaptiveQuadrature.integrate`` and of
-            ``AdaptiveQuadrature.__init__``.
+    Parameters
+    ----------
+    f : Callable[..., Any]
+        The integrand. Takes points of shape [N, T] and returns values of
+        shape [N, D], or a 2-tuple ``(values, tracked_variables)`` (see
+        ``AdaptiveQuadrature.integrate``).
+    method : str
+        Name of the quadrature method, a key of ``UNIFORM_METHODS``
+        (uniform sampling) or ``VARIABLE_METHODS`` (variable sampling).
+        Default: ``DEFAULT_METHOD`` ('gk21').
+    sampling : str | steps
+        'uniform' (fixed node positions) or 'variable' (weights
+        computed from the actual node positions), or any sampling type
+        ``adaptive_quadrature`` accepts. Default: 'uniform'.
+    **options : Any
+        Keyword options of ``AdaptiveQuadrature.integrate`` and of
+        ``AdaptiveQuadrature.__init__``.
 
-    Returns:
+    Returns
+    -------
+    IntegrationResult
         IntegrationResult with the integral, its error estimate, the mesh and
         diagnostics.
 
-    Raises:
-        ValueError: If sampling is not a supported sampling type, or method is
-            not a method of that sampling type.
-        TypeError: If an option is neither a call nor a constructor option.
+    Raises
+    ------
+    ValueError
+        If sampling is not a supported sampling type, or method is
+        not a method of that sampling type.
+    TypeError
+        If an option is neither a call nor a constructor option.
     """
     call = {name: value for name, value in options.items() if name in _CALL_OPTIONS}
     construct = {

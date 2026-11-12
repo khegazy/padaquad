@@ -47,26 +47,34 @@ def _build_gauss_kronrod_tableau(
     entry of ``xgk_half_with_zero``). The full K_{2n+1} arrays are built
     by mirroring the positive-half about 0.
 
-    Args:
-        xgk_half_with_zero: K_{2n+1} node positions in (-1, 1), positive
-            half (descending magnitude) followed by the center 0.0.
-            Length n + 1. For K21 this has 11 entries: 10 positive +
-            center.
-        wgk_half_with_zero: K_{2n+1} weights at the corresponding nodes.
-            Length n + 1.
-        wg_at_g_pos: G_n weights at the G_n positive-half nodes.
-            Length n // 2 (Kronrod's theorem: G_n has n nodes symmetric
-            about 0; for even n there are n // 2 distinct positive
-            magnitudes; for odd n there are (n - 1) // 2 distinct
-            positive magnitudes plus the center).
-        g_pos_indices_in_half: indices into the positive half of
-            ``xgk_half_with_zero`` where G_n nodes coincide with K
-            extension nodes. Length matches ``wg_at_g_pos``.
-        wg_at_center: G_n weight at the center node 0.0. Use 0.0 if
-            G_n has no center node (even n: G10, G14, ...). Use the
-            published center weight for odd n: G7, G15, ...
+    Parameters
+    ----------
+    xgk_half_with_zero : list[float]
+        K_{2n+1} node positions in (-1, 1), positive
+        half (descending magnitude) followed by the center 0.0.
+        Length n + 1. For K21 this has 11 entries: 10 positive +
+        center.
+    wgk_half_with_zero : list[float]
+        K_{2n+1} weights at the corresponding nodes.
+        Length n + 1.
+    wg_at_g_pos : list[float]
+        G_n weights at the G_n positive-half nodes.
+        Length n // 2 (Kronrod's theorem: G_n has n nodes symmetric
+        about 0; for even n there are n // 2 distinct positive
+        magnitudes; for odd n there are (n - 1) // 2 distinct
+        positive magnitudes plus the center).
+    g_pos_indices_in_half : list[int]
+        indices into the positive half of
+        ``xgk_half_with_zero`` where G_n nodes coincide with K
+        extension nodes. Length matches ``wg_at_g_pos``.
+    wg_at_center : float
+        G_n weight at the center node 0.0. Use 0.0 if
+        G_n has no center node (even n: G10, G14, ...). Use the
+        published center weight for odd n: G7, G15, ...
 
-    Returns:
+    Returns
+    -------
+    _Tableau
         _Tableau with c (K nodes mapped to [0, 1]), b (K weights, the
         high-order estimate), and b_error (K - G_extended, where
         G_extended has 0 at K-only nodes — the standard error

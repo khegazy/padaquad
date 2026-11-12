@@ -121,7 +121,9 @@ class _MemoryManagement:
         """
         Query available and total CPU (system) memory in GB.
 
-        Returns:
+        Returns
+        -------
+        tuple[float, float]
             Tuple of (free_gb, total_gb).
         """
         mem = psutil.virtual_memory()
@@ -137,7 +139,9 @@ class _MemoryManagement:
         memory (reserved but not allocated). This gives a more accurate
         picture of how much memory is truly available for new allocations.
 
-        Returns:
+        Returns
+        -------
+        tuple[float, float]
             Tuple of (free_gb, total_gb).
         """
         mem_info = torch.cuda.mem_get_info(self.device)
@@ -161,7 +165,9 @@ class _MemoryManagement:
         Dispatches to _get_cuda_memory() or _get_cpu_memory() based on
         self.device.type.
 
-        Returns:
+        Returns
+        -------
+        tuple[float, float]
             Tuple of (free_gb, total_gb).
         """
         if self.device.type == "cuda":
@@ -228,17 +234,26 @@ class _MemoryManagement:
         at WARNING level, so they are silent if the application configures
         logging above WARNING.
 
-        Args:
-            f: The integrand function to benchmark.
-            node_test: A sample node point for benchmarking. Shape: [T] or [1, T].
-            take_gradient: Whether the integration will backpropagate per batch.
-            total_mem_usage: Fraction of total memory allowed (0 < value <= 1).
-            f_args: Extra arguments passed to f.
+        Parameters
+        ----------
+        f : Callable[..., Any]
+            The integrand function to benchmark.
+        node_test : torch.Tensor
+            A sample node point for benchmarking. Shape: [T] or [1, T].
+        take_gradient : bool
+            Whether the integration will backpropagate per batch.
+        total_mem_usage : float
+            Fraction of total memory allowed (0 < value <= 1).
+        f_args : tuple[Any, ...]
+            Extra arguments passed to f.
 
-        Raises:
-            torch.OutOfMemoryError: A single evaluation of f does not fit.
-            RuntimeError: The measurement failed for another reason; pass
-                ``max_batch`` to skip it.
+        Raises
+        ------
+        torch.OutOfMemoryError
+            A single evaluation of f does not fit.
+        RuntimeError
+            The measurement failed for another reason; pass
+            ``max_batch`` to skip it.
         """
         logger.warning(
             "PadaQuad is measuring how much memory one integrand (f) evaluation "
@@ -389,7 +404,9 @@ class _MemoryManagement:
           reading). Memory that f frees before returning, such as the
           intermediates of a Jacobian, is missed, so c can be too low.
 
-        Returns:
+        Returns
+        -------
+        tuple[Callable[[], None], Callable[[], int], float]
             reset: Starts a new peak measurement (a no-op for the last method).
             read: Memory in bytes, as described above.
             E: GB to add to every M, the most the reading can be too low.
@@ -443,22 +460,33 @@ class _MemoryManagement:
         """
         Call f once on N copies of node_test; return the memory and time it took.
 
-        Args:
-            f, f_args: The integrand and its extra arguments.
-            node_test: One node as a [1, T] row on ``self.device``.
-            N: Number of points in this call.
-            reset_peak, read_memory: The measurement method from
-                ``_peak_memory_reader``.
-            total_mem_usage: Only quoted in the single-evaluation error.
+        Parameters
+        ----------
+        f, f_args : Callable[..., Any], tuple[Any, ...]
+            The integrand and its extra arguments.
+        node_test : torch.Tensor
+            One node as a [1, T] row on ``self.device``.
+        N : int
+            Number of points in this call.
+        reset_peak, read_memory : Callable[[], None], Callable[[], int]
+            The measurement method from
+            ``_peak_memory_reader``.
+        total_mem_usage : float
+            Only quoted in the single-evaluation error.
 
-        Returns:
+        Returns
+        -------
+        tuple[float, float] | None
             (M, seconds): the memory the call used (GB) and its wall time, or
             None if the call ran out of memory (N > 1).
 
-        Raises:
-            torch.OutOfMemoryError: N = 1 ran out of memory, so a single
-                evaluation of f does not fit.
-            Exception: any other error from f propagates unchanged.
+        Raises
+        ------
+        torch.OutOfMemoryError
+            N = 1 ran out of memory, so a single
+            evaluation of f does not fit.
+        Exception
+            any other error from f propagates unchanged.
         """
         # Read "before" first, then build the input: the N-point input tile is
         # memory the integration also needs per point, so it is counted in M.
@@ -505,10 +533,14 @@ class _MemoryManagement:
         Reserves a buffer of (1 - total_mem_usage) * total_memory to avoid
         out-of-memory errors from other system/PyTorch allocations.
 
-        Args:
-            total_mem_usage: Fraction of total memory allowed (0 < value <= 1).
+        Parameters
+        ----------
+        total_mem_usage : float
+            Fraction of total memory allowed (0 < value <= 1).
 
-        Returns:
+        Returns
+        -------
+        float
             Usable memory in GB (non-negative).
         """
         free, total = self._get_memory()
@@ -522,10 +554,14 @@ class _MemoryManagement:
         Divides usable memory by the per-evaluation memory cost (measured by
         _setup_memory_checks). A small epsilon (1e-12) prevents division by zero.
 
-        Args:
-            total_mem_usage: Fraction of total memory allowed.
+        Parameters
+        ----------
+        total_mem_usage : float
+            Fraction of total memory allowed.
 
-        Returns:
+        Returns
+        -------
+        int
             Maximum number of evaluations (integer).
         """
         if self.f_unit_mem_size is None:

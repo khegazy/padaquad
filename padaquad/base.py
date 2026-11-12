@@ -60,15 +60,21 @@ def get_sampling_type(sampling_type: str) -> steps:
     Accepts both short names ('uniform', 'variable') and full names
     ('adaptive_uniform', 'adaptive_variable'), in any letter case.
 
-    Args:
-        sampling_type: One of 'fixed', 'uniform', 'adaptive_uniform',
-            'variable', or 'adaptive_variable'.
+    Parameters
+    ----------
+    sampling_type : str
+        One of 'fixed', 'uniform', 'adaptive_uniform',
+        'variable', or 'adaptive_variable'.
 
-    Returns:
+    Returns
+    -------
+    steps
         The corresponding ``steps`` enum value.
 
-    Raises:
-        ValueError: If sampling_type is not a recognized name.
+    Raises
+    ------
+    ValueError
+        If sampling_type is not a recognized name.
     """
     types = {
         "fixed": steps.FIXED,
@@ -138,33 +144,45 @@ class SolverBase(ABC, DistributedEnvironment):
         Every argument is required and keyword-only: the defaults live once, in
         ``AdaptiveQuadrature.__init__``, the constructor users call.
 
-        Args:
-            method: Name of the RK integration method (e.g. 'dopri5', 'bosh3').
-                Converted to lowercase.
-            atol: Absolute error tolerance for adaptive step control. Steps with
-                error below max(atol, rtol*|integral|) are accepted
-                (atol + rtol*|integral| for ``error_norm="failure_fraction"``).
-            rtol: Relative error tolerance for adaptive step control.
-            y0: Initial value of the integral (accumulator starting point).
-                Shape: [D].
-            f: The integrand function f(t) -> Tensor. Takes time points
-                of shape [N, T] and returns evaluations of shape [N, D].
-                Can also be provided at integrate() call time.
-            mesh_init: Lower bound of integration. Shape: [T].
-            mesh_final: Upper bound of integration. Shape: [T].
-            output_speed_info: If True, logs timing information for each
-                sub-operation during integration to a dedicated file
-                ``padaquad_speed.log``.
-            dtype: Floating point precision for all computations. Supported:
-                torch.float64 (default, academic-grade), torch.float32 (fast
-                on GPU). torch.float16 is refused: its ~1e-3 precision floor
-                sits above typical adaptive tolerances and cannot support
-                meaningful error control.
-            device: 'cpu', 'cuda', an indexed 'cuda:N', or a torch.device;
-                None auto-detects. Resolved by DistributedEnvironment.
-            **distributed_options: Multi-GPU options forwarded to
-                DistributedEnvironment (backend, master_addr, master_port,
-                is_slurm).
+        Parameters
+        ----------
+        method : str
+            Name of the RK integration method (e.g. 'dopri5', 'bosh3').
+            Converted to lowercase.
+        atol : float
+            Absolute error tolerance for adaptive step control. Steps with
+            error below max(atol, rtol*|integral|) are accepted
+            (atol + rtol*|integral| for ``error_norm="failure_fraction"``).
+        rtol : float
+            Relative error tolerance for adaptive step control.
+        y0 : torch.Tensor | None
+            Initial value of the integral (accumulator starting point).
+            Shape: [D].
+        f : Callable[..., Any] | None
+            The integrand function f(t) -> Tensor. Takes time points
+            of shape [N, T] and returns evaluations of shape [N, D].
+            Can also be provided at integrate() call time.
+        mesh_init : torch.Tensor | None
+            Lower bound of integration. Shape: [T].
+        mesh_final : torch.Tensor | None
+            Upper bound of integration. Shape: [T].
+        output_speed_info : bool
+            If True, logs timing information for each
+            sub-operation during integration to a dedicated file
+            ``padaquad_speed.log``.
+        dtype : torch.dtype
+            Floating point precision for all computations. Supported:
+            torch.float64 (default, academic-grade), torch.float32 (fast
+            on GPU). torch.float16 is refused: its ~1e-3 precision floor
+            sits above typical adaptive tolerances and cannot support
+            meaningful error control.
+        device : str | torch.device | None
+            'cpu', 'cuda', an indexed 'cuda:N', or a torch.device;
+            None auto-detects. Resolved by DistributedEnvironment.
+        **distributed_options : Any
+            Multi-GPU options forwarded to
+            DistributedEnvironment (backend, master_addr, master_port,
+            is_slurm).
         """
         super().__init__(device=device, **distributed_options)
 
@@ -223,8 +241,10 @@ class SolverBase(ABC, DistributedEnvironment):
         its first call at the end of ``__init__``. Subclasses must implement
         this to build or convert their own tensors (e.g., RK tableaux).
 
-        Args:
-            dtype: The new dtype to convert to.
+        Parameters
+        ----------
+        dtype : torch.dtype
+            The new dtype to convert to.
         """
 
     @abstractmethod
@@ -242,14 +262,20 @@ class SolverBase(ABC, DistributedEnvironment):
         the specific RK quadrature rule to produce integral contributions
         and error estimates for each step.
 
-        Args:
-            t: Time points for each step, with C quadrature points per step.
-                Shape: [N, C, T] where N=steps, C=quadrature points, T=time dims.
-            y: Integrand evaluations at the time points in t.
-                Shape: [N, C, D] where D=output dimensionality of the integrand.
-            y0: Starting value for the integral accumulator. Shape: [D].
+        Parameters
+        ----------
+        t : torch.Tensor
+            Time points for each step, with C quadrature points per step.
+            Shape: [N, C, T] where N=steps, C=quadrature points, T=time dims.
+        y : torch.Tensor
+            Integrand evaluations at the time points in t.
+            Shape: [N, C, D] where D=output dimensionality of the integrand.
+        y0 : torch.Tensor
+            Starting value for the integral accumulator. Shape: [D].
 
-        Returns:
+        Returns
+        -------
+        MethodOutput
             MethodOutput containing the integral, error, per-step contributions,
             per-step errors, and step sizes.
         """
@@ -279,16 +305,25 @@ class SolverBase(ABC, DistributedEnvironment):
         ODE solving). This independence between steps is what enables
         parallel evaluation.
 
-        Args:
-            f: The integrand. Takes time points of shape [N, T] and returns
-                values of shape [N, D]. None uses the construction-time f.
-            y0: Additive offset of the returned integral. Shape: [D].
-            mesh: Optional starting mesh of step barriers. Shape: [M, T].
-            mesh_init: Lower integration bound. Shape: [T].
-            mesh_final: Upper integration bound. Shape: [T].
-            f_args: Extra arguments passed to f after the time tensor.
+        Parameters
+        ----------
+        f : Callable[..., Any] | None
+            The integrand. Takes time points of shape [N, T] and returns
+            values of shape [N, D]. None uses the construction-time f.
+        y0 : torch.Tensor | None
+            Additive offset of the returned integral. Shape: [D].
+        mesh : torch.Tensor | None
+            Optional starting mesh of step barriers. Shape: [M, T].
+        mesh_init : torch.Tensor | None
+            Lower integration bound. Shape: [T].
+        mesh_final : torch.Tensor | None
+            Upper integration bound. Shape: [T].
+        f_args : tuple[Any, ...]
+            Extra arguments passed to f after the time tensor.
 
-        Returns:
+        Returns
+        -------
+        IntegrationResult
             IntegrationResult containing the computed integral, error
             estimates, mesh, and diagnostics.
         """
@@ -316,11 +351,15 @@ class SolverBase(ABC, DistributedEnvironment):
         any user-relevant tolerance. Use float32 (still fast on GPU)
         or float64 (academic-grade precision) instead.
 
-        Args:
-            dtype: Target dtype. Must be float64 or float32.
+        Parameters
+        ----------
+        dtype : torch.dtype
+            Target dtype. Must be float64 or float32.
 
-        Raises:
-            ValueError: If dtype is float16 or any unsupported type.
+        Raises
+        ------
+        ValueError
+            If dtype is float16 or any unsupported type.
         """
         if hasattr(self, "dtype") and dtype == self.dtype:
             return
@@ -373,10 +412,14 @@ class SolverBase(ABC, DistributedEnvironment):
         non-None tensor's dtype is used. This allows the solver to
         automatically match the precision of user-provided inputs.
 
-        Args:
-            mesh: Optional mesh-of-barriers tensor.
-            mesh_init: Optional lower integration bound tensor.
-            mesh_final: Optional upper integration bound tensor.
+        Parameters
+        ----------
+        mesh : torch.Tensor | None
+            Optional mesh-of-barriers tensor.
+        mesh_init : torch.Tensor | None
+            Optional lower integration bound tensor.
+        mesh_final : torch.Tensor | None
+            Optional upper integration bound tensor.
         """
         if mesh is not None:
             self._set_dtype(mesh.dtype)
@@ -399,18 +442,27 @@ class SolverBase(ABC, DistributedEnvironment):
         construction time. Tensor arguments are cast to the solver's dtype
         and moved to the solver's device.
 
-        Args:
-            f: Integrand function, or None to use self.init_f.
-            mesh_init: Lower integration bound, or None to use self.init_mesh_init.
-            mesh_final: Upper integration bound, or None to use self.init_mesh_final.
-            y0: Initial integral value, or None to use self.init_y0.
+        Parameters
+        ----------
+        f : Callable[..., Any] | None
+            Integrand function, or None to use self.init_f.
+        mesh_init : torch.Tensor | None
+            Lower integration bound, or None to use self.init_mesh_init.
+        mesh_final : torch.Tensor | None
+            Upper integration bound, or None to use self.init_mesh_final.
+        y0 : torch.Tensor | None
+            Initial integral value, or None to use self.init_y0.
 
-        Returns:
+        Returns
+        -------
+        tuple[Callable[..., Any], torch.Tensor, torch.Tensor, torch.Tensor]
             Tuple of (f, mesh_init, mesh_final, y0) with defaults filled
             in and tensors on the correct device/dtype.
 
-        Raises:
-            ValueError: If no integrand was given here or at construction.
+        Raises
+        ------
+        ValueError
+            If no integrand was given here or at construction.
         """
         f = self.init_f if f is None else f
         if f is None:
@@ -445,10 +497,14 @@ class SolverBase(ABC, DistributedEnvironment):
         replaced at integrate() call time to compute a custom loss for
         gradient-based optimization.
 
-        Args:
-            result: The current IntegrationResult from this batch.
+        Parameters
+        ----------
+        result : IntegrationResult
+            The current IntegrationResult from this batch.
 
-        Returns:
+        Returns
+        -------
+        torch.Tensor
             Loss tensor for backpropagation. Shape: same as result.integral.
         """
         return result.integral

@@ -40,11 +40,15 @@ def _interpolatory3_weights(c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     [1/2, 0, 1/2] on the end nodes (exact through degree 1), written out per
     node so no constant tensor is built (or copied to the GPU) per call.
 
-    Args:
-        c: Normalized node positions; the middle node is a = c[:, 1, 0].
-            Shape: [N, 3, T].
+    Parameters
+    ----------
+    c : torch.Tensor
+        Normalized node positions; the middle node is a = c[:, 1, 0].
+        Shape: [N, 3, T].
 
-    Returns:
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
         Tuple (b, b_error), each of shape [N, 3], in the dtype and on the
         device of ``c``.
     """

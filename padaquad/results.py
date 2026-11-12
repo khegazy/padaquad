@@ -46,70 +46,90 @@ class IntegrationResult:
     step (shapes [N, C, T], [N, C, D] and [N, C, *var_dims]) instead of the
     flattened shapes below.
 
-    Attributes:
-        integral: The computed integral value. Shape: [D].
-        integral_error: Estimated total error (sum of per-step errors)
-            using the embedded lower-order method. Shape: [D].
-        mesh_optimal: Optimized step-barrier mesh for warm-start reuse
-            in subsequent integration calls with the same integrand (pass
-            ``same_f=True``).
-            Shape: [M, T]. ``None`` in the per-batch result passed to
-            ``loss_fxn`` during integration (no optimal mesh exists yet);
-            always a tensor on a result returned by ``integrate()``.
-        mesh_init: Lower integration bound used. Shape: [T].
-        mesh_final: Upper integration bound used. Shape: [T].
-        nodes: Quadrature node positions flattened across panels into a
-            single ascending sequence. Consecutive panels share one boundary
-            point, which is deduplicated, so for N panels of C nodes each the
-            length is ``C + (N - 1) * (C - 1)``. Shape: [P, T].
-        h: Step sizes (right - left) for each integration step.
-            Shape: [N, T].
-        y: Integrand evaluations at each node, flattened to match ``nodes``.
-            Shape: [P, D].
-        tracked_variables: Optional extra quantities emitted by the
-            integrand alongside the integrand value. These are evaluated at
-            every node but NOT integrated; they are returned at the accepted
-            nodes. A tuple of detached tensors, each shaped [P, *var_dims]
-            and flattened to align with ``nodes``/``y``. ``None`` when the
-            integrand returns only the integrand value (no tracked variables).
-        mesh_quadratures: Weighted contribution of each step to the total
-            integral (h * sum(b_i * y_i) per step). Shape: [N, D].
-        mesh_quadrature_errors: Per-step error estimates from the difference
-            between the primary and embedded methods. Shape: [N, D].
-        error_ratios: Per-step error ratios (error / tolerance) at the time
-            each step was accepted, judged against the running integral of
-            that moment. Values >= 1 mean the step did not meet the tolerance
-            then. ``converged`` judges the steps again against the final
-            integral, so it can be ``False`` while every entry here is < 1.
-            Shape: [N].
-        loss: Loss value computed by the loss function (defaults to
-            the integral itself). Shape: scalar or [D]. ``None`` only in the
-            per-batch result before ``loss_fxn`` is applied.
-        gradient_taken: Whether per-batch backpropagation was performed
-            during this integration run.
-        y0: Initial integral accumulator value used. Shape: [D].
-        converged: Whether every accepted step meets the error tolerance when
-            judged against the final integral (in cumulative mode, the final
-            running integral through the step; the reference ``mesh_optimal``
-            is built with). Usually ``False`` when ``max_adaptive_splits``
-            stopped the refinement of a failing step; ``False`` when a step's
-            error ratio is NaN/Inf, or when a step accepted against
-            the running integral fails against the final one (with
-            ``take_gradient=True`` accepted steps are never re-checked). A
-            warning with the size of the error is logged when ``False``.
-            ``None`` in the per-batch result.
-        n_start_steps: Number of steps in the starting mesh (the caller's
-            ``mesh``, the mesh stored by ``same_f=True``, or a freshly
-            generated one). ``None`` in the per-batch result.
-        n_start_steps_split: Number of starting-mesh steps that were split at
-            least once during integration, including splits made by the
-            re-check of accepted steps. Splits made afterwards to build
-            ``mesh_optimal`` are not counted, so with
-            ``max_adaptive_splits=0`` this is 0 even when steps failed; read
-            ``converged`` then. ``None`` in the per-batch result.
-        max_split_depth: Largest number of times any one step was halved
-            (0 when no step was split; at most ``max_adaptive_splits``).
-            ``None`` in the per-batch result.
+    Attributes
+    ----------
+    integral : torch.Tensor
+        The computed integral value. Shape: [D].
+    integral_error : torch.Tensor
+        Estimated total error (sum of per-step errors)
+        using the embedded lower-order method. Shape: [D].
+    mesh_optimal : torch.Tensor | None
+        Optimized step-barrier mesh for warm-start reuse
+        in subsequent integration calls with the same integrand (pass
+        ``same_f=True``).
+        Shape: [M, T]. ``None`` in the per-batch result passed to
+        ``loss_fxn`` during integration (no optimal mesh exists yet);
+        always a tensor on a result returned by ``integrate()``.
+    mesh_init : torch.Tensor
+        Lower integration bound used. Shape: [T].
+    mesh_final : torch.Tensor
+        Upper integration bound used. Shape: [T].
+    nodes : torch.Tensor
+        Quadrature node positions flattened across panels into a
+        single ascending sequence. Consecutive panels share one boundary
+        point, which is deduplicated, so for N panels of C nodes each the
+        length is ``C + (N - 1) * (C - 1)``. Shape: [P, T].
+    h : torch.Tensor
+        Step sizes (right - left) for each integration step.
+        Shape: [N, T].
+    y : torch.Tensor
+        Integrand evaluations at each node, flattened to match ``nodes``.
+        Shape: [P, D].
+    tracked_variables : tuple[torch.Tensor, ...] | None
+        Optional extra quantities emitted by the
+        integrand alongside the integrand value. These are evaluated at
+        every node but NOT integrated; they are returned at the accepted
+        nodes. A tuple of detached tensors, each shaped [P, *var_dims]
+        and flattened to align with ``nodes``/``y``. ``None`` when the
+        integrand returns only the integrand value (no tracked variables).
+    mesh_quadratures : torch.Tensor
+        Weighted contribution of each step to the total
+        integral (h * sum(b_i * y_i) per step). Shape: [N, D].
+    mesh_quadrature_errors : torch.Tensor
+        Per-step error estimates from the difference
+        between the primary and embedded methods. Shape: [N, D].
+    error_ratios : torch.Tensor
+        Per-step error ratios (error / tolerance) at the time
+        each step was accepted, judged against the running integral of
+        that moment. Values >= 1 mean the step did not meet the tolerance
+        then. ``converged`` judges the steps again against the final
+        integral, so it can be ``False`` while every entry here is < 1.
+        Shape: [N].
+    loss : torch.Tensor | None
+        Loss value computed by the loss function (defaults to
+        the integral itself). Shape: scalar or [D]. ``None`` only in the
+        per-batch result before ``loss_fxn`` is applied.
+    gradient_taken : bool
+        Whether per-batch backpropagation was performed
+        during this integration run.
+    y0 : torch.Tensor
+        Initial integral accumulator value used. Shape: [D].
+    converged : bool | None
+        Whether every accepted step meets the error tolerance when
+        judged against the final integral (in cumulative mode, the final
+        running integral through the step; the reference ``mesh_optimal``
+        is built with). Usually ``False`` when ``max_adaptive_splits``
+        stopped the refinement of a failing step; ``False`` when a step's
+        error ratio is NaN/Inf, or when a step accepted against
+        the running integral fails against the final one (with
+        ``take_gradient=True`` accepted steps are never re-checked). A
+        warning with the size of the error is logged when ``False``.
+        ``None`` in the per-batch result.
+    n_start_steps : int | None
+        Number of steps in the starting mesh (the caller's
+        ``mesh``, the mesh stored by ``same_f=True``, or a freshly
+        generated one). ``None`` in the per-batch result.
+    n_start_steps_split : int | None
+        Number of starting-mesh steps that were split at
+        least once during integration, including splits made by the
+        re-check of accepted steps. Splits made afterwards to build
+        ``mesh_optimal`` are not counted, so with
+        ``max_adaptive_splits=0`` this is 0 even when steps failed; read
+        ``converged`` then. ``None`` in the per-batch result.
+    max_split_depth : int | None
+        Largest number of times any one step was halved
+        (0 when no step was split; at most ``max_adaptive_splits``).
+        ``None`` in the per-batch result.
     """
 
     integral: torch.Tensor
@@ -156,16 +176,22 @@ class MethodOutput:
     ``IntegrationResult`` for consistency between the internal
     batch-level output and the user-facing run-level output.
 
-    Attributes:
-        integral: Total integral contribution from this batch of steps
-            (sum of mesh_quadratures). Shape: [D].
-        integral_error: Total error estimate from this batch (sum of
-            mesh_quadrature_errors). Shape: [D].
-        mesh_quadratures: Per-step integral contributions. Each entry is
-            h_i * sum(b_j * y_ij) for step i. Shape: [N, D].
-        mesh_quadrature_errors: Per-step error estimates from the difference between
-            order-p and order-(p-1) methods. Shape: [N, D].
-        h: Step sizes (mesh_right - mesh_left) for each step. Shape: [N, T].
+    Attributes
+    ----------
+    integral : torch.Tensor
+        Total integral contribution from this batch of steps
+        (sum of mesh_quadratures). Shape: [D].
+    integral_error : torch.Tensor
+        Total error estimate from this batch (sum of
+        mesh_quadrature_errors). Shape: [D].
+    mesh_quadratures : torch.Tensor
+        Per-step integral contributions. Each entry is
+        h_i * sum(b_j * y_ij) for step i. Shape: [N, D].
+    mesh_quadrature_errors : torch.Tensor
+        Per-step error estimates from the difference between
+        order-p and order-(p-1) methods. Shape: [N, D].
+    h : torch.Tensor
+        Step sizes (mesh_right - mesh_left) for each step. Shape: [N, T].
     """
 
     integral: torch.Tensor

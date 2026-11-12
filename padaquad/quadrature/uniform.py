@@ -66,15 +66,23 @@ class UniformAdaptiveQuadrature(AdaptiveQuadrature):
         using the tableau's c values, and the integrand is evaluated at all
         new points.
 
-        Args:
-            f: The integrand function f(t). Takes [N, T], returns [N, D].
-            idxs_add: Indices of steps that need splitting. Shape: [R].
-            _y: Current integrand evaluations (unused here, present for
-                interface compatibility with the variable solver). Shape: [N, C, D].
-            nodes: Current quadrature point positions. Shape: [N, C, T].
-            f_args: Extra arguments passed to f.
+        Parameters
+        ----------
+        f : Callable[..., Any]
+            The integrand function f(t). Takes [N, T], returns [N, D].
+        idxs_add : torch.Tensor
+            Indices of steps that need splitting. Shape: [R].
+        _y : torch.Tensor
+            Current integrand evaluations (unused here, present for
+            interface compatibility with the variable solver). Shape: [N, C, D].
+        nodes : torch.Tensor
+            Current quadrature point positions. Shape: [N, C, T].
+        f_args : tuple[Any, ...]
+            Extra arguments passed to f.
 
-        Returns:
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
             Tuple of (y_add, nodes_new) where:
                 - y_add: Integrand values at new quadrature points.
                     Shape: [2*R, C, D] (two sub-steps per split step).
@@ -112,15 +120,22 @@ class UniformAdaptiveQuadrature(AdaptiveQuadrature):
         are placed at the standard tableau c positions within the merged step.
         The integral contributions and errors of both steps are summed.
 
-        Args:
-            nodes: Quadrature point positions for all steps. Shape: [N, C, T].
-            mesh_quadratures: Integral contribution of each step. Shape: [N, D].
-            mesh_quadrature_errors: Error estimate of each step. Shape: [N, D].
-            remove_idxs: Indices of the first step in each pair to merge.
-                The pair (remove_idxs[i], remove_idxs[i]+1) is merged.
-                Shape: [R].
+        Parameters
+        ----------
+        nodes : torch.Tensor
+            Quadrature point positions for all steps. Shape: [N, C, T].
+        mesh_quadratures : torch.Tensor
+            Integral contribution of each step. Shape: [N, D].
+        mesh_quadrature_errors : torch.Tensor
+            Error estimate of each step. Shape: [N, D].
+        remove_idxs : torch.Tensor
+            Indices of the first step in each pair to merge.
+            The pair (remove_idxs[i], remove_idxs[i]+1) is merged.
+            Shape: [R].
 
-        Returns:
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
             Tuple of (nodes_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned)
             with the merged steps replacing the original pairs. Each has
             N-R entries along the first dimension.

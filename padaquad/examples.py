@@ -20,11 +20,16 @@ def identity(_t: torch.Tensor, _y: torch.Tensor | None = None) -> int:
 
     Analytical integral: mesh_final - mesh_init.
 
-    Args:
-        t: Time points at which to evaluate the integrand. Shape: [N, T].
-        y: Unused. Present for interface compatibility.
+    Parameters
+    ----------
+    t
+        Time points at which to evaluate the integrand. Shape: [N, T].
+    y
+        Unused. Present for interface compatibility.
 
-    Returns:
+    Returns
+    -------
+    int
         The constant value 1.
     """
     return 1
@@ -36,11 +41,16 @@ def identity_solution(
     """
     Analytical solution for the integral of 1 from mesh_init to mesh_final.
 
-    Args:
-        mesh_init: Lower integration bound. Shape: [T].
-        mesh_final: Upper integration bound. Shape: [T].
+    Parameters
+    ----------
+    mesh_init : torch.Tensor
+        Lower integration bound. Shape: [T].
+    mesh_final : torch.Tensor
+        Upper integration bound. Shape: [T].
 
-    Returns:
+    Returns
+    -------
+    torch.Tensor
         Exact integral value. Shape: [T].
     """
     return mesh_final - mesh_init
@@ -52,11 +62,16 @@ def t(t: torch.Tensor, _y: torch.Tensor | None = None) -> torch.Tensor:
 
     Analytical integral: (mesh_final^2 - mesh_init^2) / 2.
 
-    Args:
-        t: Time points at which to evaluate the integrand. Shape: [N, T].
-        y: Unused. Present for interface compatibility.
+    Parameters
+    ----------
+    t : torch.Tensor
+        Time points at which to evaluate the integrand. Shape: [N, T].
+    y
+        Unused. Present for interface compatibility.
 
-    Returns:
+    Returns
+    -------
+    torch.Tensor
         The input t unchanged. Shape: [N, T].
     """
     return t
@@ -66,11 +81,16 @@ def t_solution(mesh_init: torch.Tensor, mesh_final: torch.Tensor) -> torch.Tenso
     """
     Analytical solution for the integral of t from mesh_init to mesh_final.
 
-    Args:
-        mesh_init: Lower integration bound. Shape: [T].
-        mesh_final: Upper integration bound. Shape: [T].
+    Parameters
+    ----------
+    mesh_init : torch.Tensor
+        Lower integration bound. Shape: [T].
+    mesh_final : torch.Tensor
+        Upper integration bound. Shape: [T].
 
-    Returns:
+    Returns
+    -------
+    torch.Tensor
         Exact integral value. Shape: [T].
     """
     return 0.5 * (mesh_final**2 - mesh_init**2)
@@ -82,11 +102,16 @@ def t_squared(t: torch.Tensor, _y: torch.Tensor | None = None) -> torch.Tensor:
 
     Analytical integral: (mesh_final^3 - mesh_init^3) / 3.
 
-    Args:
-        t: Time points at which to evaluate the integrand. Shape: [N, T].
-        y: Unused. Present for interface compatibility.
+    Parameters
+    ----------
+    t : torch.Tensor
+        Time points at which to evaluate the integrand. Shape: [N, T].
+    y
+        Unused. Present for interface compatibility.
 
-    Returns:
+    Returns
+    -------
+    torch.Tensor
         t squared. Shape: [N, T].
     """
     return t**2
@@ -98,11 +123,16 @@ def t_squared_solution(
     """
     Analytical solution for the integral of t^2 from mesh_init to mesh_final.
 
-    Args:
-        mesh_init: Lower integration bound. Shape: [T].
-        mesh_final: Upper integration bound. Shape: [T].
+    Parameters
+    ----------
+    mesh_init : torch.Tensor
+        Lower integration bound. Shape: [T].
+    mesh_final : torch.Tensor
+        Upper integration bound. Shape: [T].
 
-    Returns:
+    Returns
+    -------
+    torch.Tensor
         Exact integral value. Shape: [T].
     """
     return (mesh_final**3 - mesh_init**3) / 3.0
@@ -117,12 +147,18 @@ def sine_squared(
     Tests the integrator's ability to handle rapid oscillations. Higher w
     values create more oscillations, requiring finer step sizes.
 
-    Args:
-        t: Time points at which to evaluate the integrand. Shape: [N, T].
-        w: Frequency parameter controlling oscillation rate.
-        y: Unused. Present for interface compatibility.
+    Parameters
+    ----------
+    t : torch.Tensor
+        Time points at which to evaluate the integrand. Shape: [N, T].
+    w : float
+        Frequency parameter controlling oscillation rate.
+    y
+        Unused. Present for interface compatibility.
 
-    Returns:
+    Returns
+    -------
+    torch.Tensor
         sin^2(2*pi*w*t) evaluated at each time point. Shape: [N, T].
     """
     return torch.sin(t * w * 2 * torch.pi) ** 2
@@ -136,12 +172,18 @@ def sine_squared_solution(
 
     Uses the identity sin^2(x) = (1 - cos(2x))/2 to derive the closed form.
 
-    Args:
-        mesh_init: Lower integration bound. Shape: [T].
-        mesh_final: Upper integration bound. Shape: [T].
-        w: Frequency parameter (must match the integrand).
+    Parameters
+    ----------
+    mesh_init : torch.Tensor
+        Lower integration bound. Shape: [T].
+    mesh_final : torch.Tensor
+        Upper integration bound. Shape: [T].
+    w : float
+        Frequency parameter (must match the integrand).
 
-    Returns:
+    Returns
+    -------
+    torch.Tensor
         Exact integral value. Shape: [T].
     """
     _w = 4 * torch.pi * w
@@ -158,12 +200,18 @@ def exp(t: torch.Tensor, a: float = 5, _y: torch.Tensor | None = None) -> torch.
     Tests integration of rapidly growing functions. The growth rate ``a``
     makes this increasingly difficult for larger integration domains.
 
-    Args:
-        t: Time points at which to evaluate the integrand. Shape: [N, T].
-        a: Growth rate parameter.
-        y: Unused. Present for interface compatibility.
+    Parameters
+    ----------
+    t : torch.Tensor
+        Time points at which to evaluate the integrand. Shape: [N, T].
+    a : float
+        Growth rate parameter.
+    y
+        Unused. Present for interface compatibility.
 
-    Returns:
+    Returns
+    -------
+    torch.Tensor
         exp(a*t) evaluated at each time point. Shape: [N, T].
     """
     return torch.exp(a * t)
@@ -175,12 +223,18 @@ def exp_solution(
     """
     Analytical solution for the integral of exp(a*t) from mesh_init to mesh_final.
 
-    Args:
-        mesh_init: Lower integration bound. Shape: [T].
-        mesh_final: Upper integration bound. Shape: [T].
-        a: Growth rate parameter (must match the integrand).
+    Parameters
+    ----------
+    mesh_init : torch.Tensor
+        Lower integration bound. Shape: [T].
+    mesh_final : torch.Tensor
+        Upper integration bound. Shape: [T].
+    a : float
+        Growth rate parameter (must match the integrand).
 
-    Returns:
+    Returns
+    -------
+    torch.Tensor
         Exact integral value. Shape: [T].
     """
     return (
@@ -199,13 +253,20 @@ def damped_sine(
     challenging test cases as it requires the integrator to handle both
     rapid sign changes and varying amplitude.
 
-    Args:
-        t: Time points at which to evaluate the integrand. Shape: [N, T].
-        w: Frequency parameter controlling oscillation rate.
-        a: Damping rate parameter controlling exponential decay.
-        y: Unused. Present for interface compatibility.
+    Parameters
+    ----------
+    t : torch.Tensor
+        Time points at which to evaluate the integrand. Shape: [N, T].
+    w : float
+        Frequency parameter controlling oscillation rate.
+    a : float
+        Damping rate parameter controlling exponential decay.
+    y
+        Unused. Present for interface compatibility.
 
-    Returns:
+    Returns
+    -------
+    torch.Tensor
         exp(-a*t)*sin(2*pi*w*t) evaluated at each time point. Shape: [N, T].
     """
     return torch.exp(-a * t) * torch.sin(w * t * 2 * torch.pi)
@@ -219,13 +280,20 @@ def damped_sine_solution(
 
     Derived via integration by parts (or Laplace transform tables).
 
-    Args:
-        mesh_init: Lower integration bound. Shape: [T].
-        mesh_final: Upper integration bound. Shape: [T].
-        w: Frequency parameter (must match the integrand).
-        a: Damping rate parameter (must match the integrand).
+    Parameters
+    ----------
+    mesh_init : torch.Tensor
+        Lower integration bound. Shape: [T].
+    mesh_final : torch.Tensor
+        Upper integration bound. Shape: [T].
+    w : float
+        Frequency parameter (must match the integrand).
+    a : float
+        Damping rate parameter (must match the integrand).
 
-    Returns:
+    Returns
+    -------
+    torch.Tensor
         Exact integral value. Shape: [T].
     """
     _w = 2 * torch.pi * w
@@ -261,11 +329,16 @@ def wolf_schlegel(t: torch.Tensor, _y: torch.Tensor | None = None) -> torch.Tens
     This is a multi-dimensional output integrand (returns a scalar per time point)
     useful for testing integration of chemistry potential energy surfaces.
 
-    Args:
-        t: Time points in [0, 1]. Shape: [N, T].
-        _y: Unused. Present for interface compatibility.
+    Parameters
+    ----------
+    t : torch.Tensor
+        Time points in [0, 1]. Shape: [N, T].
+    _y : torch.Tensor | None
+        Unused. Present for interface compatibility.
 
-    Returns:
+    Returns
+    -------
+    torch.Tensor
         Potential energy at each time point. Shape: [N, 1].
     """
     while len(t.shape) < 2:

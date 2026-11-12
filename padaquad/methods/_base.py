@@ -41,14 +41,18 @@ class _Tableau:
     within a step (c) and how integrand evaluations are weighted to produce
     the integral (b) and error estimate (b_error).
 
-    Attributes:
-        c: Node positions as fractions of step size. c[0]=0 is the step start,
-            c[-1]=1 is the step end. Shape: [C] where C is the number of
-            quadrature points per step.
-        b: Weights for the primary (higher-order) integral estimate.
-            Shape: [C], like c.
-        b_error: Difference between primary and embedded method weights.
-            The error estimate is h * sum(b_error * f(t)). Shape: [C].
+    Attributes
+    ----------
+    c : torch.Tensor
+        Node positions as fractions of step size. c[0]=0 is the step start,
+        c[-1]=1 is the step end. Shape: [C] where C is the number of
+        quadrature points per step.
+    b : torch.Tensor
+        Weights for the primary (higher-order) integral estimate.
+        Shape: [C], like c.
+    b_error : torch.Tensor
+        Difference between primary and embedded method weights.
+        The error estimate is h * sum(b_error * f(t)). Shape: [C].
     """
 
     c: torch.Tensor
@@ -78,15 +82,20 @@ class DegreeMeasurement(NamedTuple):
     """
     Result of ``MethodClass.measure_degree``.
 
-    Attributes:
-        degree: Measured degree of the method (weights ``b``): the highest
-            polynomial degree it integrates exactly. -1 if it does not even
-            integrate a constant exactly.
-        lower_degree: Measured degree of the lower-degree method inside the
-            error estimate (weights ``b - b_error``).
-        errors: Error of the method on the Legendre polynomial P_k(2t - 1)
-            over [0, 1], for k = 0, 1, ..., 2C. Shape: [2C + 1], float64.
-        lower_errors: The same for the lower-degree method. Shape: [2C + 1].
+    Attributes
+    ----------
+    degree : int
+        Measured degree of the method (weights ``b``): the highest
+        polynomial degree it integrates exactly. -1 if it does not even
+        integrate a constant exactly.
+    lower_degree : int
+        Measured degree of the lower-degree method inside the
+        error estimate (weights ``b - b_error``).
+    errors : torch.Tensor
+        Error of the method on the Legendre polynomial P_k(2t - 1)
+        over [0, 1], for k = 0, 1, ..., 2C. Shape: [2C + 1], float64.
+    lower_errors : torch.Tensor
+        The same for the lower-degree method. Shape: [2C + 1].
     """
 
     degree: int
@@ -106,24 +115,29 @@ class MethodClass(ABC):
     positions. Every registered rule is an instance of one of them. Nothing
     family-specific (a tableau, a weight formula) lives on this class.
 
-    Attributes:
-        degree: Highest polynomial degree the rule integrates exactly (it is not
-            exact for every polynomial of degree ``degree + 1``). Gonnet 2012,
-            ACM Comput. Surv. 44(4), Sec. 2. For a rule whose weights depend on
-            the node positions, the degree at general positions.
-        error_exponent: k such that the per-step error estimate (``b_error``
-            weights) scales as h^k for a step of width h: k = d + 2, where d is
-            the degree of the less accurate rule in the estimate. Sets the
-            step-merging cutoff (``_prune_excess_mesh``).
+    Attributes
+    ----------
+    degree
+        Highest polynomial degree the rule integrates exactly (it is not
+        exact for every polynomial of degree ``degree + 1``). Gonnet 2012,
+        ACM Comput. Surv. 44(4), Sec. 2. For a rule whose weights depend on
+        the node positions, the degree at general positions.
+    error_exponent
+        k such that the per-step error estimate (``b_error``
+        weights) scales as h^k for a step of width h: k = d + 2, where d is
+        the degree of the less accurate rule in the estimate. Sets the
+        step-merging cutoff (``_prune_excess_mesh``).
     """
 
     def __init__(self, degree: int, error_exponent: int) -> None:
         """
         Initialize with the method's degree and error exponent.
 
-        Raises:
-            ValueError: If ``degree`` is not an int >= 0, or ``error_exponent``
-                is not an int >= 2 (k = d + 2 with d >= 0).
+        Raises
+        ------
+        ValueError
+            If ``degree`` is not an int >= 0, or ``error_exponent``
+            is not an int >= 2 (k = d + 2 with d >= 0).
         """
         for name, value, minimum in (
             ("degree", degree, 0),
@@ -157,7 +171,9 @@ class MethodClass(ABC):
         The solver places node i of a panel [left, right] at
         ``left + c_i * (right - left)``.
 
-        Returns:
+        Returns
+        -------
+        torch.Tensor
             Fractions c. Shape: [C], with C the number of nodes per panel.
         """
 
@@ -170,10 +186,14 @@ class MethodClass(ABC):
         ``h * sum_i(b_i * y_i)`` to the integral and
         ``h * sum_i(b_error_i * y_i)`` to the error estimate.
 
-        Args:
-            nodes: Node positions of each panel. Shape: [N, C, T].
+        Parameters
+        ----------
+        nodes : torch.Tensor
+            Node positions of each panel. Shape: [N, C, T].
 
-        Returns:
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
             Tuple (b, b_error), each of shape [N, C, 1] for every rule.
         """
 
@@ -194,13 +214,17 @@ class MethodClass(ABC):
         """
         Validate node fractions; called at the end of each constructor.
 
-        Args:
-            c: Fractions to check. Default: ``node_fractions()``.
+        Parameters
+        ----------
+        c : torch.Tensor | None
+            Fractions to check. Default: ``node_fractions()``.
 
-        Raises:
-            ValueError: Unless the fractions are 1-D with at least two entries,
-                start at 0, end at 1, and never decrease (repeated values are
-                allowed: dopri5 has two nodes at 1).
+        Raises
+        ------
+        ValueError
+            Unless the fractions are 1-D with at least two entries,
+            start at 0, end at 1, and never decrease (repeated values are
+            allowed: dopri5 has two nodes at 1).
         """
         if c is None:
             c = self.node_fractions()
@@ -241,25 +265,32 @@ class MethodClass(ABC):
         degree 2C and is zero at every node, so the method gives 0 for it, but
         its integral is positive.
 
-        Args:
-            nodes: Node fractions at which to measure a method whose weights
-                depend on the node positions: 1-D with C entries, from 0 to 1,
-                never decreasing. Default: ``node_fractions()``.
-            tol: Errors at most this large count as exact. The default suits
-                the float64 tables of ``UNIFORM_METHODS`` and
-                ``VARIABLE_METHODS``. A solver's copy of a method lowered to
-                float32 is measured as float32 values.
+        Parameters
+        ----------
+        nodes : torch.Tensor | None
+            Node fractions at which to measure a method whose weights
+            depend on the node positions: 1-D with C entries, from 0 to 1,
+            never decreasing. Default: ``node_fractions()``.
+        tol : float
+            Errors at most this large count as exact. The default suits
+            the float64 tables of ``UNIFORM_METHODS`` and
+            ``VARIABLE_METHODS``. A solver's copy of a method lowered to
+            float32 is measured as float32 values.
 
-        Returns:
+        Returns
+        -------
+        DegreeMeasurement
             DegreeMeasurement with the two measured degrees and the errors.
 
-        Raises:
-            ValueError: If ``nodes`` is malformed or does not have C entries;
-                if ``nodes`` differs from the node fractions while the weights
-                do not depend on the node positions (the measurement would
-                apply the weights at nodes they were not made for); or if no
-                error is larger than ``tol`` up to degree 2C (the weights cannot
-                be right).
+        Raises
+        ------
+        ValueError
+            If ``nodes`` is malformed or does not have C entries;
+            if ``nodes`` differs from the node fractions while the weights
+            do not depend on the node positions (the measurement would
+            apply the weights at nodes they were not made for); or if no
+            error is larger than ``tol`` up to degree 2C (the weights cannot
+            be right).
         """
         f64 = torch.float64
         default = self.node_fractions().detach().to("cpu", f64)
@@ -326,18 +357,22 @@ class UniformMethodClass(MethodClass):
     ``tableau.b`` / ``tableau.b_error``, whatever the panel's nodes. Used by
     the Runge-Kutta, Gauss-Kronrod and Clenshaw-Curtis families.
 
-    Attributes:
-        tableau: The Butcher tableau defining the method's coefficients.
+    Attributes
+    ----------
+    tableau
+        The Butcher tableau defining the method's coefficients.
     """
 
     def __init__(self, degree: int, error_exponent: int, tableau: _Tableau) -> None:
         """
         Initialize with the method's degree, error exponent and Butcher tableau.
 
-        Raises:
-            ValueError: If ``degree`` or ``error_exponent`` is invalid (see
-                ``MethodClass.__init__``), or the tableau's node fractions are
-                malformed (see ``MethodClass._check_node_fractions``).
+        Raises
+        ------
+        ValueError
+            If ``degree`` or ``error_exponent`` is invalid (see
+            ``MethodClass.__init__``), or the tableau's node fractions are
+            malformed (see ``MethodClass._check_node_fractions``).
         """
         super().__init__(degree, error_exponent)
         self.tableau = tableau
@@ -351,11 +386,15 @@ class UniformMethodClass(MethodClass):
         """
         The tableau's weights, the same for every panel.
 
-        Args:
-            nodes: Node positions of each panel. Shape: [N, C, T]. Only N is
-                used; the weights do not depend on the positions.
+        Parameters
+        ----------
+        nodes : torch.Tensor
+            Node positions of each panel. Shape: [N, C, T]. Only N is
+            used; the weights do not depend on the positions.
 
-        Returns:
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
             Tuple (b, b_error), each ``[C]`` expanded (a view, no copy) to
             [N, C, 1]. The views share memory with the tableau: do not modify
             them in place.
@@ -391,11 +430,14 @@ class VariableMethodClass(MethodClass):
     raises ``PicklingError``). It is stored on the instance; assigning it to the
     class instead would make Python pass ``self`` to it.
 
-    Attributes:
-        c: Node fractions of a fresh panel, ascending from 0 to 1. Shape: [C].
-        weight_function: Maps normalized node positions [N, C, T] to
-            (b, b_error), each of shape [N, C], in the dtype and on the device
-            of its input.
+    Attributes
+    ----------
+    c
+        Node fractions of a fresh panel, ascending from 0 to 1. Shape: [C].
+    weight_function
+        Maps normalized node positions [N, C, T] to
+        (b, b_error), each of shape [N, C], in the dtype and on the device
+        of its input.
     """
 
     def __init__(
@@ -409,10 +451,12 @@ class VariableMethodClass(MethodClass):
         Initialize with the method's degree, error exponent, node fractions and
         weight function.
 
-        Raises:
-            ValueError: If ``degree`` or ``error_exponent`` is invalid (see
-                ``MethodClass.__init__``), or ``c`` is malformed (see
-                ``MethodClass._check_node_fractions``).
+        Raises
+        ------
+        ValueError
+            If ``degree`` or ``error_exponent`` is invalid (see
+            ``MethodClass.__init__``), or ``c`` is malformed (see
+            ``MethodClass._check_node_fractions``).
         """
         super().__init__(degree, error_exponent)
         self.c = c
@@ -431,16 +475,22 @@ class VariableMethodClass(MethodClass):
         divide by the panel width) and applies ``weight_function`` there. The
         weights take the dtype and device of ``nodes``.
 
-        Args:
-            nodes: Node positions of each panel. Shape: [N, C, T].
+        Parameters
+        ----------
+        nodes : torch.Tensor
+            Node positions of each panel. Shape: [N, C, T].
 
-        Returns:
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
             Tuple (b, b_error), each of shape [N, C, 1].
 
-        Raises:
-            ValueError: If ``weight_function`` does not return two [N, C]
-                tensors (a [1, C] result would broadcast silently in the
-                weighted sum).
+        Raises
+        ------
+        ValueError
+            If ``weight_function`` does not return two [N, C]
+            tensors (a [1, C] result would broadcast silently in the
+            weighted sum).
         """
         norm_dt = nodes - nodes[:, 0, None]
         norm_dt = norm_dt / norm_dt[:, -1, None]

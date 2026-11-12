@@ -120,7 +120,7 @@ class MethodClass(ABC):
     degree
         Highest polynomial degree the rule integrates exactly (it is not
         exact for every polynomial of degree ``degree + 1``). Gonnet 2012,
-        ACM Comput. Surv. 44(4), Sec. 2. For a rule whose weights depend on
+        ACM Comput. Surv. 44(4), Sec. 1 (arXiv:1003.4629v2, p. 3). For a rule whose weights depend on
         the node positions, the degree at general positions.
     error_exponent
         k such that the per-step error estimate (``b_error``
@@ -157,7 +157,7 @@ class MethodClass(ABC):
         Order of accuracy, ``degree + 1``.
 
         The composite rule's error on a smooth integrand falls as h^order for
-        steps of width h (Gonnet 2012, ACM Comput. Surv. 44(4), Sec. 2: a rule
+        steps of width h (Gonnet 2012, ACM Comput. Surv. 44(4), Sec. 1 (arXiv:1003.4629v2, p. 3): a rule
         of degree n has order n + 1).
         """
         return self.degree + 1

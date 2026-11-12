@@ -187,6 +187,7 @@ _GK21_WG = [
 _GK21_G_INDICES = [1, 3, 5, 7, 9]
 
 _GAUSS_KRONROD_21 = UniformMethodClass(
+    references=("quadpack_netlib", "gonnet2012"),
     degree=31,  # K21: 3n+1 with n = 10 (even); order (convergence rate) 32
     error_exponent=21,  # estimate dominated by G10, degree 2n-1 = 19
     tableau=_build_gauss_kronrod_tableau(
@@ -222,6 +223,7 @@ _GK7_G_INDICES = [1]
 _GK7_WG_CENTER = 0.888888888888888888888888888889
 
 _GAUSS_KRONROD_7 = UniformMethodClass(
+    references=("gonnet2012",),
     degree=11,  # K7: 3n+2 with n = 3 (odd); order (convergence rate) 12
     error_exponent=7,  # estimate dominated by G3, degree 2n-1 = 5
     tableau=_build_gauss_kronrod_tableau(
@@ -269,6 +271,7 @@ _GK15_G_INDICES = [1, 3, 5]
 _GK15_WG_CENTER = 0.417959183673469387755102040816327
 
 _GAUSS_KRONROD_15 = UniformMethodClass(
+    references=("quadpack_netlib", "gonnet2012"),
     degree=23,  # K15: 3n+2 with n = 7 (odd); order (convergence rate) 24
     error_exponent=15,  # estimate dominated by G7, degree 2n-1 = 13
     tableau=_build_gauss_kronrod_tableau(
@@ -335,6 +338,7 @@ _GK31_G_INDICES = [1, 3, 5, 7, 9, 11, 13]
 _GK31_WG_CENTER = 0.202578241925561272880620199967519
 
 _GAUSS_KRONROD_31 = UniformMethodClass(
+    references=("quadpack_netlib", "gonnet2012"),
     degree=47,  # K31: 3n+2 with n = 15 (odd); order (convergence rate) 48
     error_exponent=31,  # estimate dominated by G15, degree 2n-1 = 29
     tableau=_build_gauss_kronrod_tableau(

@@ -125,6 +125,7 @@ def _build_clenshaw_curtis_tableau(n: int) -> _Tableau:
 # Theorem 5.2, Eq. (5.4), p. 78); measured in tests/test_exactness.py.
 # CC_4 (5 nodes): degree 5, error vs CC_2 (3 nodes, Simpson's rule, degree 3)
 _CLENSHAW_CURTIS_5 = UniformMethodClass(
+    references=("trefethen2008",),
     degree=5,  # CC_n with even n has degree n + 1; order (convergence rate) 6
     # Estimate dominated by the embedded CC_(n/2) (n/2 + 1 points), exact
     # through degree n/2 + 1 (n/2 even), so error_exponent = n/2 + 3.
@@ -133,24 +134,28 @@ _CLENSHAW_CURTIS_5 = UniformMethodClass(
 )
 # CC_8 (9 nodes): degree 9, error vs CC_4 (5 nodes, degree 5)
 _CLENSHAW_CURTIS_9 = UniformMethodClass(
+    references=("trefethen2008",),
     degree=9,
     error_exponent=7,
     tableau=_build_clenshaw_curtis_tableau(8),
 )
 # CC_16 (17 nodes): degree 17, error vs CC_8 (9 nodes, degree 9)
 _CLENSHAW_CURTIS_17 = UniformMethodClass(
+    references=("trefethen2008",),
     degree=17,
     error_exponent=11,
     tableau=_build_clenshaw_curtis_tableau(16),
 )
 # CC_32 (33 nodes): degree 33, error vs CC_16 (17 nodes, degree 17)
 _CLENSHAW_CURTIS_33 = UniformMethodClass(
+    references=("trefethen2008",),
     degree=33,
     error_exponent=19,
     tableau=_build_clenshaw_curtis_tableau(32),
 )
 # CC_64 (65 nodes): degree 65, error vs CC_32 (33 nodes, degree 33)
 _CLENSHAW_CURTIS_65 = UniformMethodClass(
+    references=("trefethen2008",),
     degree=65,
     error_exponent=35,
     tableau=_build_clenshaw_curtis_tableau(64),

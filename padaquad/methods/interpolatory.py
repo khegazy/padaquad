@@ -77,6 +77,7 @@ def _interpolatory3_weights(c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
 # Veldman 2019, Eq. (119); error estimate against the trapezoidal rule (degree 1,
 # padaquad's choice).
 _INTERPOLATORY_3 = VariableMethodClass(
+    references=("sanderse2019",),
     degree=2,
     error_exponent=3,
     c=torch.linspace(0.0, 1.0, 3, dtype=torch.float64),

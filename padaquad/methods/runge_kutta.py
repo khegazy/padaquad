@@ -45,6 +45,7 @@ from ._base import UniformMethodClass, _Tableau
 # Tableau transcribed from torchdiffeq (Chen 2018, github.com/rtqichen/torchdiffeq,
 # _impl/adaptive_heun.py at commit 657943a); Heun 1900 not checked.
 _ADAPTIVE_HEUN = UniformMethodClass(
+    references=("torchdiffeq",),
     degree=1,  # trapezoidal rule
     # The error weights subtract the right-endpoint rectangle rule [0, 1]
     # (degree 0), not Euler's method [1, 0]: the estimate has the size of
@@ -64,6 +65,7 @@ _ADAPTIVE_HEUN = UniformMethodClass(
 # h (f(1) - f(0)) / 512, ignores curvature (see the module docstring and
 # examples/verification/integral_accuracy.py).
 _FEHLBERG2 = UniformMethodClass(
+    references=("fehlberg1969",),
     degree=1,
     error_exponent=2,  # embedded first-order method, degree 0
     tableau=_Tableau(
@@ -79,6 +81,7 @@ _FEHLBERG2 = UniformMethodClass(
 # weights subtract the embedded second-order weights 7/24, 1/4, 1/3, 1/8.
 # Bogacki and Shampine 1989 not checked.
 _BOGACKI_SHAMPINE = UniformMethodClass(
+    references=("torchdiffeq", "scipy_quadvec"),
     degree=2,
     error_exponent=3,  # embedded second-order method, degree 1
     tableau=_Tableau(
@@ -95,6 +98,7 @@ _BOGACKI_SHAMPINE = UniformMethodClass(
 # 657943a); c and b match SciPy's RK45 (rk.py, v1.18.1, lines 541-552).
 # Dormand and Prince 1980 not checked.
 _DORMAND_PRINCE_SHAMPINE = UniformMethodClass(
+    references=("torchdiffeq", "scipy_quadvec"),
     degree=4,
     error_exponent=5,  # embedded fourth-order method, degree 3
     tableau=_Tableau(

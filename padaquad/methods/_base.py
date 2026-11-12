@@ -126,17 +126,24 @@ class MethodClass(ABC):
         shrinks like :math:`h^k`: k = d + 2, with d the degree of the embedded
         method. Sets the merge cutoff of the optimal mesh
         (:ref:`ug-optimal-mesh`).
+    references : tuple of str
+        Keys of ``docs/references.bib`` for the sources of the method's
+        nodes, weights and error weights; the documentation's methods table
+        cites them.
     """
 
-    def __init__(self, degree: int, error_exponent: int) -> None:
+    def __init__(
+        self, degree: int, error_exponent: int, references: tuple[str, ...] = ()
+    ) -> None:
         """
-        Initialize with the method's degree and error exponent.
+        Initialize with the method's degree, error exponent and sources.
 
         Raises
         ------
         ValueError
-            If ``degree`` is not an int >= 0, or ``error_exponent``
-            is not an int >= 2 (k = d + 2 with d >= 0).
+            If ``degree`` is not an int >= 0, ``error_exponent`` is not an
+            int >= 2 (k = d + 2 with d >= 0), or ``references`` is not a tuple
+            of strings.
         """
         for name, value, minimum in (
             ("degree", degree, 0),
@@ -147,8 +154,17 @@ class MethodClass(ABC):
                     f"{type(self).__name__}: {name} must be an int >= {minimum}, "
                     f"got {value!r}"
                 )
+        if not (
+            isinstance(references, tuple)
+            and all(isinstance(r, str) for r in references)
+        ):
+            raise ValueError(
+                f"{type(self).__name__}: references must be a tuple of str, "
+                f"got {references!r}"
+            )
         self.degree = degree
         self.error_exponent = error_exponent
+        self.references = references
 
     @property
     def order(self) -> int:
@@ -384,7 +400,13 @@ class UniformMethodClass(MethodClass):
         ``b_error``.
     """
 
-    def __init__(self, degree: int, error_exponent: int, tableau: _Tableau) -> None:
+    def __init__(
+        self,
+        degree: int,
+        error_exponent: int,
+        tableau: _Tableau,
+        references: tuple[str, ...] = (),
+    ) -> None:
         """
         Initialize with the method's degree, error exponent and tableau.
 
@@ -395,7 +417,7 @@ class UniformMethodClass(MethodClass):
             int >= 2, or the node fractions are not a 1-D tensor of at least
             two non-decreasing values from 0 to 1.
         """
-        super().__init__(degree, error_exponent)
+        super().__init__(degree, error_exponent, references)
         self.tableau = tableau
         self._check_node_fractions()
 
@@ -468,6 +490,7 @@ class VariableMethodClass(MethodClass):
         error_exponent: int,
         c: torch.Tensor,
         weight_function: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]],
+        references: tuple[str, ...] = (),
     ) -> None:
         """
         Initialize with the degree, error exponent, node fractions and weight function.
@@ -479,7 +502,7 @@ class VariableMethodClass(MethodClass):
             int >= 2, or ``c`` is not a 1-D tensor of at least two
             non-decreasing values from 0 to 1.
         """
-        super().__init__(degree, error_exponent)
+        super().__init__(degree, error_exponent, references)
         self.c = c
         self.weight_function = weight_function
         self._check_node_fractions()

@@ -10,10 +10,12 @@ What padaquad promises: it accepts a subinterval when its *estimated* error is
 below the tolerance, ``max(atol, rtol * |integral|)``. The returned integral adds
 up the accepted subintervals, so if every estimate were an upper bound on the
 true error, the total error would be at most (number of subintervals) x
-tolerance. That bound is what this script checks. It also prints the ratio of
-the actual error to the tolerance, which is usually far below 1, because the
-integral uses the higher-degree method while the estimate measures the
-lower-degree one.
+tolerance. That bound is what this script checks. It also prints the largest
+ratio of actual error to tolerance. For the Gauss-Kronrod and Clenshaw-Curtis
+methods it is far below 1, because the integral uses the higher-degree method
+while the estimate measures the lower-degree one. For the low-degree
+Runge-Kutta methods it can exceed 1: each subinterval meets its tolerance, but
+the errors of many subintervals add up.
 
 Run it with::
 

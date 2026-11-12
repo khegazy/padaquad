@@ -35,11 +35,13 @@ import torch
 
 from padaquad import adaptive_quadrature, integrate, steps
 
-# Common settings.
-MESH_INIT = torch.tensor([0.0])
-MESH_FINAL = torch.tensor([math.pi])
+# Common settings: float64 bounds (padaquad computes in the dtype of the
+# bounds), the CPU, and a fixed batch size, which skips the memory benchmark.
+MESH_INIT = torch.tensor([0.0], dtype=torch.float64)
+MESH_FINAL = torch.tensor([math.pi], dtype=torch.float64)
 ATOL = 1e-8
 RTOL = 1e-8
+OPTIONS = {"device": "cpu", "max_batch": 10_000}
 
 
 def path_a_backprop_through_integral(theta: torch.Tensor) -> float:
@@ -48,7 +50,7 @@ def path_a_backprop_through_integral(theta: torch.Tensor) -> float:
     The recommended pattern for differentiable integration: pass
     ``take_gradient=True`` to ``solver.integrate(...)``. This makes
     the solver call ``loss.backward()`` after every accepted batch
-    of panels, so the autograd graph for that batch can be released
+    of subintervals, so the autograd graph for that batch can be released
     immediately and the next batch's graph fits in memory.
     """
     solver = adaptive_quadrature(
@@ -56,6 +58,7 @@ def path_a_backprop_through_integral(theta: torch.Tensor) -> float:
         method="gk21",
         atol=ATOL,
         rtol=RTOL,
+        **OPTIONS,
     )
 
     def f_theta(t: torch.Tensor) -> torch.Tensor:
@@ -93,6 +96,7 @@ def path_b_integrate_the_gradient() -> float:
         rtol=RTOL,
         mesh_init=MESH_INIT,
         mesh_final=MESH_FINAL,
+        **OPTIONS,
     )
     return out.integral.item()
 

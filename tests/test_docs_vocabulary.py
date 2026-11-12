@@ -46,7 +46,7 @@ BANNED_WORDS = {
     "rule": r"\brules?\b",
 }
 # "rule" is allowed in these proper names and phrases.
-ALLOWED_RULE = r"(trapezoidal|trapezoid|Simpson's|rectangle|merge|acceptance|accept-or-split) rules?"
+ALLOWED_RULE = r"(trapezoidal|trapezoid|Simpson's|rectangle|merge|acceptance|accept-or-split)\s+rules?"
 PUBLIC_ONLY = {
     "bug ID": r"\bB\d+\b",
     "Phase N": r"\bPhase \d",
@@ -111,9 +111,34 @@ def test_public_docstring_vocabulary(name: str) -> None:
     assert not found, f"{name}: {found}"
 
 
-@pytest.mark.parametrize("page", PAGES, ids=lambda p: str(p.relative_to(ROOT)))
+# Example scripts shown in the gallery: their docstrings and comments are prose.
+EXAMPLES = sorted(p for p in (ROOT / "examples").rglob("*.py") if "pode" not in p.parts)
+
+
+def _example_prose(path: Path) -> str:
+    """Docstrings and comment lines of an example script."""
+    import ast  # noqa: PLC0415
+
+    tree = ast.parse(path.read_text())
+    parts = [
+        ast.get_docstring(node) or ""
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Module, ast.FunctionDef, ast.ClassDef))
+    ]
+    parts += [
+        line.split("#", 1)[1]
+        for line in path.read_text().splitlines()
+        if line.lstrip().startswith("#")
+    ]
+    return "\n".join(parts)
+
+
+@pytest.mark.parametrize(
+    "page", PAGES + EXAMPLES, ids=lambda p: str(p.relative_to(ROOT))
+)
 def test_page_vocabulary(page: Path) -> None:
-    text = _prose(page.read_text())
+    raw = _example_prose(page) if page.suffix == ".py" else page.read_text()
+    text = _prose(raw)
     found = {
         label: re.findall(pattern, text, flags=re.I)
         for label, pattern in BANNED_WORDS.items()

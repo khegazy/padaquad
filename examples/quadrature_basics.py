@@ -6,10 +6,11 @@ Run with::
 
     python examples/quadrature_basics.py
 
-Each example computes a definite integral via ``integrate(f, ...)`` and
-checks the result against an analytical reference. Nothing fancy: no
-neural networks, no autograd, no training loops. The point is to show
-the simplest possible use of the library.
+Each example computes a definite integral with ``integrate(f, ...)`` and
+compares it with the exact value. Every call passes float64 bounds (padaquad
+computes in the dtype of the bounds), ``device="cpu"`` and a fixed
+``max_batch``, which skips the memory benchmark that otherwise runs on every
+call without one.
 """
 
 from __future__ import annotations
@@ -18,7 +19,11 @@ import math
 
 import torch
 
-from padaquad import adaptive_quadrature, integrate, steps
+from padaquad import adaptive_quadrature, integrate
+
+F64 = torch.float64
+# Keyword options shared by every call: CPU, and a fixed batch size.
+OPTIONS = {"device": "cpu", "max_batch": 10_000}
 
 
 def _check(label: str, got: float, expected: float, tol: float = 1e-6) -> None:
@@ -36,19 +41,19 @@ torch.manual_seed(0)
 
 
 def example_sin_over_pi() -> None:
-    """∫ sin(t) dt from 0 to π  =  2."""
+    """Integrate sin(t) from 0 to pi; the exact value is 2."""
     result = integrate(
-        f=torch.sin,
-        method="gk21",
+        torch.sin,
+        "gk21",
         atol=1e-10,
         rtol=1e-10,
-        mesh_init=torch.tensor([0.0]),
-        mesh_final=torch.tensor([math.pi]),
+        mesh_init=torch.tensor([0.0], dtype=F64),
+        mesh_final=torch.tensor([math.pi], dtype=F64),
+        **OPTIONS,
     )
     print("sin over [0, pi]:")
-    _check("integral", result.integral.item(), 2.0)
-    print(f"    estimated error : {result.integral_error.item():.2e}")
-    print(f"    optimal mesh    : {result.mesh_optimal.shape[0]} barriers")
+    _check("integral", float(result.integral), 2.0)
+    print(f"    estimated error : {float(result.integral_error):.2e}")
     print(f"    converged       : {result.converged}")
 
 
@@ -58,26 +63,26 @@ print()
 
 
 def example_polynomial() -> None:
-    """∫ t^4 dt from 0 to 1  =  1/5.
+    """Integrate t^4 from 0 to 1; the exact value is 1/5.
 
-    gk21 is exact for polynomials of degree <= 31, so a single-panel
-    application of the rule gives the answer to float64 rounding. The
-    adaptive controller in this example splits the panel anyway (its
-    per-step error estimator uses a *different* polynomial estimate
-    than the rule itself), so the result accumulates a few ULPs of
-    summation error across panels.
+    gk21 integrates every polynomial of degree at most 31 exactly, and its error
+    estimate subtracts the 10-point Gauss method, which is exact through degree
+    19. Both are exact for t^4, so every subinterval of the starting mesh has an
+    error estimate at rounding level and none is split; the result is exact to
+    float64 rounding.
     """
     result = integrate(
-        f=lambda t: t**4,
-        method="gk21",
+        lambda t: t**4,
+        "gk21",
         atol=1e-12,
         rtol=1e-12,
-        # float64 bounds: the solver takes its dtype from the bounds.
-        mesh_init=torch.tensor([0.0], dtype=torch.float64),
-        mesh_final=torch.tensor([1.0], dtype=torch.float64),
+        mesh_init=torch.tensor([0.0], dtype=F64),
+        mesh_final=torch.tensor([1.0], dtype=F64),
+        **OPTIONS,
     )
     print("t^4 over [0, 1]:")
-    _check("integral", result.integral.item(), 1.0 / 5.0, tol=1e-7)
+    _check("integral", float(result.integral), 1.0 / 5.0, tol=1e-14)
+    print(f"    subintervals split: {result.n_start_steps_split}")
 
 
 # %%
@@ -86,18 +91,19 @@ print()
 
 
 def example_gaussian_bump() -> None:
-    """∫ exp(-t^2) dt from -2 to 2  =  sqrt(π) * erf(2)."""
+    """Integrate exp(-t^2) from -2 to 2; the exact value is sqrt(pi) erf(2)."""
     result = integrate(
-        f=lambda t: torch.exp(-(t**2)),
-        method="gk21",
+        lambda t: torch.exp(-(t**2)),
+        "gk21",
         atol=1e-10,
         rtol=1e-10,
-        mesh_init=torch.tensor([-2.0]),
-        mesh_final=torch.tensor([2.0]),
+        mesh_init=torch.tensor([-2.0], dtype=F64),
+        mesh_final=torch.tensor([2.0], dtype=F64),
+        **OPTIONS,
     )
     expected = math.sqrt(math.pi) * math.erf(2.0)
     print("exp(-t^2) over [-2, 2]:")
-    _check("integral", result.integral.item(), expected)
+    _check("integral", float(result.integral), expected)
 
 
 # %%
@@ -106,40 +112,42 @@ print()
 
 
 def example_method_comparison() -> None:
-    """Compare several methods on a hard wiggly integrand.
+    """Compare several methods on an oscillating integrand.
 
-    f(t) = sin(10*t) * exp(-0.1*t) on [0, 4]. The analytical solution
-    requires complex arithmetic so we just compare the methods to
-    each other.
+    f(t) = sin(10 t) exp(-0.1 t) on [0, 4]. With a = -0.1 and b = 10, an
+    antiderivative of exp(a t) sin(b t) is
+    exp(a t) (a sin(b t) - b cos(b t)) / (a^2 + b^2).
     """
-    f = lambda t: torch.sin(10 * t) * torch.exp(-0.1 * t)  # noqa: E731
-    print("damped sinusoid over [0, 4] — comparison across methods:")
-    mesh_init = torch.tensor([0.0])
-    mesh_final = torch.tensor([4.0])
-    # The per-evaluation memory footprint of ``f`` is the same for every method,
-    # so benchmark it once on the first method and reuse the resulting
-    # ``max_batch`` for the rest. Without this, each method's solver re-runs the
-    # (slow) memory benchmark even though the answer never changes. We use the
-    # class API rather than ``integrate(...)`` here so we can read ``max_batch``
-    # back off the solver after the first run via ``get_max_batch()``.
-    max_batch = None
+
+    def f(t: torch.Tensor) -> torch.Tensor:
+        return torch.sin(10 * t) * torch.exp(-0.1 * t)
+
+    a, b = -0.1, 10.0
+
+    def antiderivative(t: float) -> float:
+        return (
+            math.exp(a * t)
+            * (a * math.sin(b * t) - b * math.cos(b * t))
+            / (a * a + b * b)
+        )
+
+    expected = antiderivative(4.0) - antiderivative(0.0)
+    print("damped sinusoid over [0, 4], atol = rtol = 1e-8, by method:")
     for method in ("adaptive_heun", "bosh3", "dopri5", "gk21", "cc33"):
-        solver = adaptive_quadrature(
-            sampling_type=steps.ADAPTIVE_UNIFORM,
-            method=method,
+        result = integrate(
+            f,
+            method,
             atol=1e-8,
             rtol=1e-8,
-            max_batch=max_batch,
+            mesh_init=torch.tensor([0.0], dtype=F64),
+            mesh_final=torch.tensor([4.0], dtype=F64),
+            **OPTIONS,
         )
-        result = solver.integrate(f=f, mesh_init=mesh_init, mesh_final=mesh_final)
-        # Capture the benchmarked budget after the first run and reuse it.
-        if max_batch is None:
-            max_batch = solver.get_max_batch()
-        # nodes is flattened across panels, so its length is the node count.
-        n_evals = result.nodes.shape[0]
+        error = abs(float(result.integral) - expected)
+        # result.y holds one integrand value per evaluated node.
         print(
-            f"  {method:>14}: integral={result.integral.item():+.10f}  "
-            f"err≈{result.integral_error.item():.2e}  evals={n_evals:>5}"
+            f"  {method:>14}: error {error:.1e}   "
+            f"integrand evaluations {result.y.shape[0]:>5}"
         )
 
 
@@ -149,36 +157,29 @@ print()
 
 
 def example_warm_start_loop() -> None:
-    """Use the class API to warm-start across a series of similar calls.
+    """Warm-start a series of similar integrals with one solver.
 
-    This pattern is what training loops use: the integrand changes only
-    slightly each iteration, so the previous run's optimal mesh is a
-    near-perfect starting point for the next run.
+    This is the pattern of a training loop: the integrand changes a little at
+    each iteration, so the mesh the previous call ended with is a good starting
+    mesh for the next one (``same_f=True``). The first call starts from a fresh
+    mesh and splits some of its subintervals; the later calls start from the
+    refined mesh and need fewer splits. The low-degree method ``bosh3`` is used so
+    that the first call has to refine; ``gk21`` would need no split here.
     """
-    print("warm-start loop over scaled sin integrand:")
-    solver = adaptive_quadrature(
-        sampling_type=steps.ADAPTIVE_UNIFORM,
-        method="gk21",
-        atol=1e-9,
-        rtol=1e-9,
-    )
-    mesh_init = torch.tensor([0.0])
-    mesh_final = torch.tensor([math.pi])
-
-    # One integrand whose scale changes slightly each iteration.
-    # same_f=True starts each call from the previous call's optimal
-    # mesh and max_batch (the first call has none stored, so it uses a fresh
-    # mesh and the memory benchmark).
+    print("warm-start loop over a scaled sin integrand:")
+    solver = adaptive_quadrature("uniform", "bosh3", atol=1e-8, rtol=1e-8, **OPTIONS)
     for k, scale in enumerate([1.0, 1.05, 1.1, 1.15]):
         result = solver.integrate(
-            f=lambda t, s=scale: s * torch.sin(t),
-            mesh_init=mesh_init,
-            mesh_final=mesh_final,
+            lambda t, s=scale: torch.sin(s * t),
+            mesh_init=torch.tensor([0.0], dtype=F64),
+            mesh_final=torch.tensor([3 * math.pi], dtype=F64),
             same_f=True,
         )
+        expected = (1 - math.cos(3 * math.pi * scale)) / scale
         print(
-            f"  iter {k} (scale={scale:.2f}): integral={result.integral.item():.6f}  "
-            f"optimal mesh={result.mesh_optimal.shape[0]}"
+            f"  iter {k} (scale={scale:.2f}): error "
+            f"{abs(float(result.integral) - expected):.1e}, starting subintervals "
+            f"split: {result.percent_start_steps_split:.0f}%"
         )
 
 

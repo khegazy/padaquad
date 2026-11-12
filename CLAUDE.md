@@ -25,7 +25,7 @@ python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 .venv/bin/pre-commit install
 
-# Run all tests (3218 pass and 138 skip on a CPU-only Mac; GPU-only tests skip there)
+# Run all tests (3242 pass and 138 skip on a CPU-only Mac; GPU-only tests skip there)
 .venv/bin/pytest tests/ -v
 
 # Run all tests with coverage
@@ -97,7 +97,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: `mesh_optimal` re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
 | `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
-| `test_split_statistics.py` | `n_start_steps` / `n_start_steps_split` / `max_split_depth` on integrands with known answers; `converged` in absolute, cumulative and `failure_fraction` modes, against the final integral, and its warning; `max_adaptive_splits` type check |
+| `test_split_statistics.py` | `n_start_steps` / `n_start_steps_split` / `max_split_depth` on integrands with known answers; `converged` against a hand-computed tolerance check (absolute and cumulative, with `y0`), in `failure_fraction` mode (including a NaN component), against the final integral, and its warning (numbers, output component, remedies); `max_adaptive_splits` type check |
 
 **Snapshot tests** are the regression net for internal refactors: the
 file `tests/test_snapshots_data.json` pins `integral`, `integral_error`,
@@ -385,7 +385,9 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
   `same_f=False`.
 - A non-converged call (e.g. under `max_adaptive_splits`) stores a
   `mesh_optimal` that splits its failing steps, so repeated `same_f=True`
-  calls refine further.
+  calls refine further. In cumulative mode `_prune_excess_mesh` can instead
+  merge a failing step with a right neighbour whose running integral (and so
+  tolerance) is much larger.
 
 ### Dtype management
 

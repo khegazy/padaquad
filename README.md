@@ -186,7 +186,7 @@ The library ships thirteen quadrature rules across three families:
 
 | Family | Methods | Degree | Notes |
 |---|---|---|---|
-| Gauss-Kronrod | `gk7`, `gk15`, `gk21`, `gk31` | 11 / 23 / 31 / 47 | Embedded G_n / K_(2n+1) pair, the canonical adaptive-quadrature workhorse since 1965 (Laurie 1997). `gk21` is the default. `gk7` (G3-K7, 9 evaluation slots) fills the low-node end. |
+| Gauss-Kronrod | `gk7`, `gk15`, `gk21`, `gk31` | 11 / 23 / 31 / 47 | Embedded G_n / K_(2n+1) pair: the error estimate is the difference between the Kronrod and the Gauss rule, as in QUADPACK (Gonnet 2012, Sec. 2.4). `gk21` is the default. `gk7` (G3-K7, 9 evaluation slots) fills the low-node end. |
 | Clenshaw-Curtis | `cc5`, `cc9`, `cc17`, `cc33`, `cc65` | 5 / 9 / 17 / 33 / 65 | Chebyshev nodes, **nested** by doubling. Excellent on analytic integrands (Trefethen 2008). |
 | Runge-Kutta | `adaptive_heun`, `fehlberg2`, `bosh3`, `dopri5` | 1 / 1 / 2 / 4 | Embedded RK pairs from the ODE-solver literature. `fehlberg2`'s error estimate ignores curvature and can be far too small (see `examples/verification/integral_accuracy.py`). |
 
@@ -304,28 +304,36 @@ the same text. In short:
 
 ## Comparisons
 
-| Library | Adaptive | Differentiable | Parallel | Best for |
+| Library | Adaptive subdivision | Differentiable | Parallel | Best for |
 |---|---|---|---|---|
 | `scipy.integrate.quad` | ✓ | ✗ | ✗ | classical one-shot smooth quadrature |
-| `torchquad` | ✗ | ✓ | ✓ | uniform-grid Monte-Carlo / Trapezoidal |
-| `torchdiffeq` | ✓ | ✓ | ✗ | true state-coupled ODEs $\dot y = f(t, y)$ |
+| `torchquad` | ✗ | ✓ | ✓ | fixed-grid rules and Monte Carlo (including VEGAS), also in several dimensions |
+| `torchdiffeq` | adaptive step size | ✓ | ✗ | true state-coupled ODEs $\dot y = f(t, y)$ |
 | **padaquad** | ✓ | ✓ | ✓ | path integrals, learned-integrand integration, PINN-style residuals |
 
-For one-shot scalar quadrature with no autograd, `scipy.integrate.quad`
-is fine. The library's value is when the integrand is a learnable
+torchquad's README (commit fc6f9cd, 2026-10-28) states that it does not
+implement adaptive subdivision. For one-shot scalar quadrature with no
+autograd, `scipy.integrate.quad` is fine. The library's value is when the integrand is a learnable
 PyTorch function and many evaluations are needed.
 
 ## References
 
 - Piessens, de Doncker-Kapenga, Überhuber, Kahaner. **QUADPACK: A
   subroutine package for automatic integration**. Springer, 1983.
-- Laurie. **Calculation of Gauss-Kronrod quadrature rules**. *Math.
-  Comp.* 66 (1997), 1133-1145.
+- Netlib QUADPACK routines `dqk15.f`, `dqk21.f`, `dqk31.f`
+  (<https://www.netlib.org/quadpack/>): source of the Gauss-Kronrod digits.
+- Gonnet. **A review of error estimation in adaptive quadrature**. *ACM
+  Comput. Surv.* 44(4), Article 22 (2012).
+  [doi:10.1145/2333112.2333117](https://doi.org/10.1145/2333112.2333117)
+- Fehlberg. **Low-order classical Runge-Kutta formulas with stepsize
+  control and their application to some heat transfer problems**. NASA
+  TR R-315 (1969), Table XIV (`fehlberg2`).
 - Trefethen. **Is Gauss quadrature better than Clenshaw-Curtis?**
   *SIAM Review* 50:1 (2008), 67-87.
 - Sanderse and Veldman. **Constraint-consistent Runge-Kutta methods
   for one-dimensional incompressible multiphase flow**. *J. Comput.
-  Phys.* 384 (2019).
+  Phys.* 384 (2019), 170-199, Eq. (119) (`interpolatory3_variable`
+  weights).
 - Chen, Rubanova, Bettencourt, Duvenaud. **Neural Ordinary Differential
   Equations**. *NeurIPS* 2018. (For comparison; this library is not an
   ODE solver but is related.)

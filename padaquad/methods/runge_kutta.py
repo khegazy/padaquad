@@ -26,7 +26,7 @@ from ._base import UniformMethodClass, _Tableau
 
 # Adaptive Heun: 2nd-order method with 2 evaluations per step (endpoints only)
 _ADAPTIVE_HEUN = UniformMethodClass(
-    order=2,
+    degree=1,  # trapezoidal rule
     error_exponent=2,  # embedded Euler, exact degree 0
     tableau=_Tableau(
         c=torch.tensor([0.0, 1.0], dtype=torch.float64),
@@ -37,7 +37,7 @@ _ADAPTIVE_HEUN = UniformMethodClass(
 
 # Fehlberg2: 2nd-order method with 3 evaluations per step (start, mid, end)
 _FEHLBERG2 = UniformMethodClass(
-    order=2,
+    degree=1,
     error_exponent=2,  # embedded 1st-order rule, exact degree 0
     tableau=_Tableau(
         c=torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64),
@@ -48,7 +48,7 @@ _FEHLBERG2 = UniformMethodClass(
 
 # Bogacki-Shampine: 3rd-order method with 4 evaluations per step
 _BOGACKI_SHAMPINE = UniformMethodClass(
-    order=3,
+    degree=2,
     error_exponent=3,  # embedded 2nd-order rule, exact degree 1
     tableau=_Tableau(
         c=torch.tensor([0.0, 0.5, 0.75, 1.0], dtype=torch.float64),
@@ -61,7 +61,7 @@ _BOGACKI_SHAMPINE = UniformMethodClass(
 
 # Dormand-Prince: 5th-order method with 7 evaluations per step
 _DORMAND_PRINCE_SHAMPINE = UniformMethodClass(
-    order=5,
+    degree=4,
     error_exponent=5,  # embedded 4th-order rule, exact degree 3
     tableau=_Tableau(
         c=torch.tensor(

@@ -1,8 +1,13 @@
 """
 Clenshaw-Curtis quadrature using Chebyshev nodes.
 
-CC_n integrates polynomials of degree n exactly using n+1 Chebyshev
-nodes x_k = cos(k*pi/n) on (-1, 1). Two key properties:
+CC_n uses n+1 Chebyshev nodes x_k = cos(k*pi/n) on (-1, 1). It integrates
+polynomials of degree n exactly because it integrates the interpolating
+polynomial; for even n (an odd number of nodes, as for every rule here) it is
+exact through degree n+1, because the nodes and weights are symmetric and
+every odd power integrates to zero both exactly and by the rule. So ccN with
+N = n+1 nodes has degree N. The degrees are measured from the stored tables by
+tests/test_exactness.py. Two key properties:
 
   1. CC nodes are NESTED. The CC_(n/2) grid is exactly the every-other
      subset of the CC_n grid. This makes CC the natural method for
@@ -11,7 +16,7 @@ nodes x_k = cos(k*pi/n) on (-1, 1). Two key properties:
      map to c = 1 and c = 0). No endpoint padding is needed (unlike
      Gauss-Kronrod).
 
-We provide cc17 (n=16), cc33 (n=32), cc65 (n=64). The error indicator
+We provide cc5 (n=4), cc9 (n=8), cc17 (n=16), cc33 (n=32), cc65 (n=64). The error indicator
 pairs CC_n with CC_(n/2): b_error = CC_n_weights - CC_(n/2)_extended,
 where the extension places 0 at CC_n-only nodes.
 
@@ -32,7 +37,7 @@ def _clenshaw_curtis_weights_unit(n: int) -> list[float]:
     """Compute Clenshaw-Curtis weights on (-1, 1) for n+1 Chebyshev nodes.
 
     Nodes are x_k = cos(k * pi / n) for k = 0..n; the rule integrates
-    polynomials of degree at most n exactly.
+    polynomials of degree at most n exactly (n + 1 for even n, by symmetry).
 
     Returns weights of length n+1, indexed as the nodes (i.e. weight at
     cos(k*pi/n) is at position k).
@@ -101,35 +106,35 @@ def _build_clenshaw_curtis_tableau(n: int) -> _Tableau:
     )
 
 
-# CC_4 (5 nodes): polynomial exactness 4, error vs CC_2 (3 nodes, exactness 2)
+# CC_4 (5 nodes): degree 5, error vs CC_2 (3 nodes, Simpson's rule, degree 3)
 _CLENSHAW_CURTIS_5 = UniformMethodClass(
-    order=5,  # CC_n exactness = n; convergence rate ~ n + 1 in RK convention
+    degree=5,  # CC_n with even n has degree n + 1; order (convergence rate) 6
     # Estimate dominated by the embedded CC_(n/2) (n/2 + 1 points), exact
     # through degree n/2 + 1 (n/2 even), so error_exponent = n/2 + 3.
     error_exponent=5,
     tableau=_build_clenshaw_curtis_tableau(4),
 )
-# CC_8 (9 nodes): polynomial exactness 8, error vs CC_4 (5 nodes, exactness 4)
+# CC_8 (9 nodes): degree 9, error vs CC_4 (5 nodes, degree 5)
 _CLENSHAW_CURTIS_9 = UniformMethodClass(
-    order=9,
+    degree=9,
     error_exponent=7,
     tableau=_build_clenshaw_curtis_tableau(8),
 )
-# CC_16 (17 nodes): polynomial exactness 16, error vs CC_8 (9 nodes, exactness 8)
+# CC_16 (17 nodes): degree 17, error vs CC_8 (9 nodes, degree 9)
 _CLENSHAW_CURTIS_17 = UniformMethodClass(
-    order=17,
+    degree=17,
     error_exponent=11,
     tableau=_build_clenshaw_curtis_tableau(16),
 )
-# CC_32 (33 nodes): polynomial exactness 32, error vs CC_16 (17 nodes, exactness 16)
+# CC_32 (33 nodes): degree 33, error vs CC_16 (17 nodes, degree 17)
 _CLENSHAW_CURTIS_33 = UniformMethodClass(
-    order=33,
+    degree=33,
     error_exponent=19,
     tableau=_build_clenshaw_curtis_tableau(32),
 )
-# CC_64 (65 nodes): polynomial exactness 64, error vs CC_32 (33 nodes, exactness 32)
+# CC_64 (65 nodes): degree 65, error vs CC_32 (33 nodes, degree 33)
 _CLENSHAW_CURTIS_65 = UniformMethodClass(
-    order=65,
+    degree=65,
     error_exponent=35,
     tableau=_build_clenshaw_curtis_tableau(64),
 )

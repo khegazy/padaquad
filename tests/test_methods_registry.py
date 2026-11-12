@@ -117,11 +117,16 @@ def test_every_uniform_method_has_well_formed_tableau():
             f"{name}: shape mismatch c={tuple(c.shape)} b={tuple(b.shape)} "
             f"b_error={tuple(b_error.shape)}"
         )
-        # order is a positive int.
-        assert isinstance(method.order, int), (
-            f"{name}: order has type {type(method.order).__name__}, expected int"
+        # degree is an int >= 0 and error_exponent an int >= 2 (the values
+        # themselves are measured from the tables in tests/test_exactness.py).
+        assert type(method.degree) is int, f"{name}: degree={method.degree!r}"
+        assert method.degree >= 0, f"{name}: degree={method.degree!r}, expected >= 0"
+        assert type(method.error_exponent) is int, (
+            f"{name}: error_exponent={method.error_exponent!r}"
         )
-        assert method.order >= 1, f"{name}: order={method.order!r}, expected >= 1"
+        assert method.error_exponent >= 2, (
+            f"{name}: error_exponent={method.error_exponent!r}, expected >= 2"
+        )
 
 
 def _registered() -> list[tuple[steps, str]]:

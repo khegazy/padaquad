@@ -78,25 +78,54 @@ class MethodClass(ABC):
     """
     A quadrature rule on one panel: the interface every solver uses.
 
-    The base class holds what every rule shares (its orders) and declares the
-    operations a solver calls. Two generic subclasses implement them from data:
-    ``UniformMethodClass`` from a fixed ``_Tableau``, ``VariableMethodClass``
-    from node fractions and a weight function of the node positions. Every
-    registered rule is an instance of one of them. Nothing family-specific (a
-    tableau, a weight formula) lives on this class.
+    The base class holds what every rule shares (its degree and error exponent)
+    and declares the operations a solver calls. Two generic subclasses implement
+    them from data: ``UniformMethodClass`` from a fixed ``_Tableau``,
+    ``VariableMethodClass`` from node fractions and a weight function of the node
+    positions. Every registered rule is an instance of one of them. Nothing
+    family-specific (a tableau, a weight formula) lives on this class.
 
     Attributes:
-        order: Convergence order of the method.
+        degree: Highest polynomial degree the rule integrates exactly (it is not
+            exact for every polynomial of degree ``degree + 1``). Gonnet 2012,
+            ACM Comput. Surv. 44(4), Sec. 2. For a rule whose weights depend on
+            the node positions, the degree at general positions.
         error_exponent: k such that the per-step error estimate (``b_error``
             weights) scales as h^k for a step of width h: k = d + 2, where d is
-            the polynomial exactness of the less accurate rule in the estimate.
-            Sets the step-merging cutoff (``_prune_excess_mesh``).
+            the degree of the less accurate rule in the estimate. Sets the
+            step-merging cutoff (``_prune_excess_mesh``).
     """
 
-    def __init__(self, order: int, error_exponent: int) -> None:
-        """Initialize with the method's convergence order and error exponent."""
-        self.order = order
+    def __init__(self, degree: int, error_exponent: int) -> None:
+        """
+        Initialize with the method's degree and error exponent.
+
+        Raises:
+            ValueError: If ``degree`` is not an int >= 0, or ``error_exponent``
+                is not an int >= 2 (k = d + 2 with d >= 0).
+        """
+        for name, value, minimum in (
+            ("degree", degree, 0),
+            ("error_exponent", error_exponent, 2),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+                raise ValueError(
+                    f"{type(self).__name__}: {name} must be an int >= {minimum}, "
+                    f"got {value!r}"
+                )
+        self.degree = degree
         self.error_exponent = error_exponent
+
+    @property
+    def order(self) -> int:
+        """
+        Order of accuracy, ``degree + 1``.
+
+        The composite rule's error on a smooth integrand falls as h^order for
+        steps of width h (Gonnet 2012, ACM Comput. Surv. 44(4), Sec. 2: a rule
+        of degree n has order n + 1).
+        """
+        return self.degree + 1
 
     @abstractmethod
     def node_fractions(self) -> torch.Tensor:
@@ -185,15 +214,16 @@ class UniformMethodClass(MethodClass):
         tableau: The Butcher tableau defining the method's coefficients.
     """
 
-    def __init__(self, order: int, error_exponent: int, tableau: _Tableau) -> None:
+    def __init__(self, degree: int, error_exponent: int, tableau: _Tableau) -> None:
         """
-        Initialize with the method's orders and Butcher tableau.
+        Initialize with the method's degree, error exponent and Butcher tableau.
 
         Raises:
-            ValueError: If the tableau's node fractions are malformed (see
-                ``MethodClass._check_node_fractions``).
+            ValueError: If ``degree`` or ``error_exponent`` is invalid (see
+                ``MethodClass.__init__``), or the tableau's node fractions are
+                malformed (see ``MethodClass._check_node_fractions``).
         """
-        super().__init__(order, error_exponent)
+        super().__init__(degree, error_exponent)
         self.tableau = tableau
         self._check_node_fractions()
 
@@ -254,19 +284,21 @@ class VariableMethodClass(MethodClass):
 
     def __init__(
         self,
-        order: int,
+        degree: int,
         error_exponent: int,
         c: torch.Tensor,
         weight_function: Callable[[torch.Tensor], tuple[torch.Tensor, torch.Tensor]],
     ) -> None:
         """
-        Initialize with the method's orders, node fractions and weight function.
+        Initialize with the method's degree, error exponent, node fractions and
+        weight function.
 
         Raises:
-            ValueError: If ``c`` is malformed (see
+            ValueError: If ``degree`` or ``error_exponent`` is invalid (see
+                ``MethodClass.__init__``), or ``c`` is malformed (see
                 ``MethodClass._check_node_fractions``).
         """
-        super().__init__(order, error_exponent)
+        super().__init__(degree, error_exponent)
         self.c = c
         self.weight_function = weight_function
         self._check_node_fractions()

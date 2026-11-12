@@ -2,11 +2,13 @@
 Gauss-Kronrod embedded quadrature pairs.
 
 A pair (G_n, K_{2n+1}) is an n-point Gauss-Legendre rule plus an
-(n+1)-point Kronrod extension. K_{2n+1} integrates polynomials of degree
-3n+1 exactly; the pair's error indicator is K_{2n+1} - G_n.
+(n+1)-point Kronrod extension. K_{2n+1} integrates polynomials exactly up
+to degree 3n+1 for even n and 3n+2 for odd n (gk7, gk15, gk21, gk31:
+11, 23, 31, 47); the pair's error indicator is K_{2n+1} - G_n. The degrees
+are measured from the stored tables by tests/test_exactness.py.
 
 Nodes / weights tabulated to ~30 decimal digits, sourced from QUADPACK
-(Piessens et al. 1983) and Laurie 1997 (Math. Comp. 66 #213). Truncated
+(Piessens et al. 1983) and Laurie 1997 (Math. Comp. 66 #219). Truncated
 to float64 precision below. Polynomial-exactness tests in
 tests/test_exactness.py validate the values.
 """
@@ -113,7 +115,7 @@ def _build_gauss_kronrod_tableau(
     return _Tableau(c=c_padded, b=b_padded, b_error=b_padded - b_g_padded)
 
 
-# G10-K21 (Gauss-Kronrod 21-point). K21 polynomial exactness = 31.
+# G10-K21 (Gauss-Kronrod 21-point). K21 degree = 3n+1 = 31 (n = 10, even).
 # Source: QUADPACK / Laurie 1997. Positive half-axis nodes followed by
 # the center node 0.0.
 _GK21_XGK_HALF = [
@@ -155,7 +157,7 @@ _GK21_WG = [
 _GK21_G_INDICES = [1, 3, 5, 7, 9]
 
 _GAUSS_KRONROD_21 = UniformMethodClass(
-    order=32,  # K21 polynomial exactness 31, global convergence rate 32
+    degree=31,  # K21: 3n+1 with n = 10 (even); order (convergence rate) 32
     error_exponent=21,  # estimate dominated by G10, exactness 2n-1 = 19
     tableau=_build_gauss_kronrod_tableau(
         _GK21_XGK_HALF,
@@ -167,7 +169,7 @@ _GAUSS_KRONROD_21 = UniformMethodClass(
 )
 
 
-# G3-K7 (Gauss-Kronrod 7-point). K7 polynomial exactness = 10.
+# G3-K7 (Gauss-Kronrod 7-point). K7 degree = 3n+2 = 11 (n = 3, odd).
 # G3 (odd n=3) has a center node — note wg_at_center below.
 # Source: Patterson 1968 Math. Comp. 22 #104 Table 1.
 _GK7_XGK_HALF = [
@@ -189,7 +191,7 @@ _GK7_G_INDICES = [1]
 _GK7_WG_CENTER = 0.888888888888888888888888888889
 
 _GAUSS_KRONROD_7 = UniformMethodClass(
-    order=11,  # K7 polynomial exactness 10, global convergence rate 11
+    degree=11,  # K7: 3n+2 with n = 3 (odd); order (convergence rate) 12
     error_exponent=7,  # estimate dominated by G3, exactness 2n-1 = 5
     tableau=_build_gauss_kronrod_tableau(
         _GK7_XGK_HALF,
@@ -201,7 +203,7 @@ _GAUSS_KRONROD_7 = UniformMethodClass(
 )
 
 
-# G7-K15 (Gauss-Kronrod 15-point). K15 polynomial exactness = 22.
+# G7-K15 (Gauss-Kronrod 15-point). K15 degree = 3n+2 = 23 (n = 7, odd).
 # G7 (odd n=7) has a center node — note wg_at_center below.
 _GK15_XGK_HALF = [
     0.991455371120812639206854697526329,
@@ -234,7 +236,7 @@ _GK15_G_INDICES = [1, 3, 5]
 _GK15_WG_CENTER = 0.417959183673469387755102040816327
 
 _GAUSS_KRONROD_15 = UniformMethodClass(
-    order=23,  # K15 polynomial exactness 22, global convergence rate 23
+    degree=23,  # K15: 3n+2 with n = 7 (odd); order (convergence rate) 24
     error_exponent=15,  # estimate dominated by G7, exactness 2n-1 = 13
     tableau=_build_gauss_kronrod_tableau(
         _GK15_XGK_HALF,
@@ -246,7 +248,7 @@ _GAUSS_KRONROD_15 = UniformMethodClass(
 )
 
 
-# G15-K31 (Gauss-Kronrod 31-point). K31 polynomial exactness = 46.
+# G15-K31 (Gauss-Kronrod 31-point). K31 degree = 3n+2 = 47 (n = 15, odd).
 # G15 (odd n=15) has a center node.
 _GK31_XGK_HALF = [
     0.998002298693397060285172840152271,
@@ -298,7 +300,7 @@ _GK31_G_INDICES = [1, 3, 5, 7, 9, 11, 13]
 _GK31_WG_CENTER = 0.202578241925561272880620199967519
 
 _GAUSS_KRONROD_31 = UniformMethodClass(
-    order=47,  # K31 polynomial exactness 46, global convergence rate 47
+    degree=47,  # K31: 3n+2 with n = 15 (odd); order (convergence rate) 48
     error_exponent=31,  # estimate dominated by G15, exactness 2n-1 = 29
     tableau=_build_gauss_kronrod_tableau(
         _GK31_XGK_HALF,

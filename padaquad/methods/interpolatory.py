@@ -60,7 +60,7 @@ def _interpolatory3_weights(c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
 # Interpolatory 3-node rule (exactness 2; 3 at a = 1/2), error estimate against
 # the trapezoidal rule (exact through degree 1).
 _INTERPOLATORY_3 = VariableMethodClass(
-    order=3,
+    degree=2,
     error_exponent=3,
     c=torch.linspace(0.0, 1.0, 3, dtype=torch.float64),
     weight_function=_interpolatory3_weights,

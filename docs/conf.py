@@ -53,6 +53,9 @@ exclude_patterns = [
 
 # Types come from the docstrings (numpydoc), not from the annotations.
 autodoc_typehints = "none"
+# Show a class's docstring and its __init__ docstring, where the solvers'
+# constructor options are documented.
+autoclass_content = "both"
 autodoc_member_order = "bysource"
 autosummary_generate = True
 

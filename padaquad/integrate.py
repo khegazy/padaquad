@@ -9,49 +9,57 @@ sampling type (``integrate()`` uses it).
 
 from __future__ import annotations
 
+import inspect
 from typing import TYPE_CHECKING, Any
 
-from .base import DEFAULT_SAMPLING_TYPE, get_sampling_type, steps
-from .quadrature import UniformAdaptiveQuadrature, VariableAdaptiveQuadrature
+from .base import DEFAULT_METHOD, DEFAULT_SAMPLING_TYPE, get_sampling_type, steps
+from .quadrature import (
+    AdaptiveQuadrature,
+    UniformAdaptiveQuadrature,
+    VariableAdaptiveQuadrature,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    import torch
 
     from .results import IntegrationResult
 
 
 def adaptive_quadrature(
-    sampling_type: str | steps = DEFAULT_SAMPLING_TYPE, *args: Any, **kwargs: Any
+    sampling_type: str | steps = DEFAULT_SAMPLING_TYPE,
+    method: str = DEFAULT_METHOD,
+    **options: Any,
 ) -> UniformAdaptiveQuadrature | VariableAdaptiveQuadrature:
     """
-    Factory function to create the appropriate parallel adaptive solver.
+    Build the adaptive solver for a sampling type.
 
-    Selects between the uniform-sampling and variable-sampling solver
-    based on the requested sampling type. All additional arguments are
-    forwarded to the solver constructor.
+    Selects between the uniform-sampling and the variable-sampling solver.
+    ``sampling_type`` and ``method`` may be passed by position; every other
+    option is a keyword argument of the solver constructor
+    (``AdaptiveQuadrature.__init__``).
 
     Args:
-        sampling_type: Either a ``steps`` enum value or a string name
-            ('uniform', 'adaptive_uniform', 'variable', 'adaptive_variable').
-            Defaults to ``DEFAULT_SAMPLING_TYPE`` ('uniform').
-        *args: Positional arguments forwarded to the solver constructor.
-        **kwargs: Keyword arguments forwarded to the solver constructor
-            (e.g., method, atol, rtol, f, etc.).
+        sampling_type: A ``steps`` value or a name ('uniform',
+            'adaptive_uniform', 'variable', 'adaptive_variable'). Default:
+            ``DEFAULT_SAMPLING_TYPE`` ('uniform').
+        method: Name of the quadrature method. Default: ``DEFAULT_METHOD``
+            ('gk21').
+        **options: Keyword options of the solver constructor (atol, rtol, f,
+            mesh_init, max_batch, device, ...).
 
     Returns:
-        An initialized parallel adaptive solver instance.
+        The solver.
 
     Raises:
-        ValueError: If sampling_type is not a recognized uniform or variable type.
+        ValueError: If sampling_type is not a recognized adaptive sampling type.
+        TypeError: If an option is not an option of the solver.
     """
     if isinstance(sampling_type, str):
         sampling_type = get_sampling_type(sampling_type)
     if sampling_type == steps.ADAPTIVE_UNIFORM:
-        return UniformAdaptiveQuadrature(*args, **kwargs)
+        return UniformAdaptiveQuadrature(method=method, **options)
     elif sampling_type == steps.ADAPTIVE_VARIABLE:
-        return VariableAdaptiveQuadrature(*args, **kwargs)
+        return VariableAdaptiveQuadrature(method=method, **options)
     else:
         raise ValueError(
             f"adaptive_quadrature supports sampling_type {steps.ADAPTIVE_UNIFORM} "
@@ -59,162 +67,73 @@ def adaptive_quadrature(
         )
 
 
+# Options of the solver's ``integrate`` call, read from its signature. In the
+# one-shot ``integrate()`` below, these go to the call and every other keyword
+# goes to the constructor, so no option or default is repeated here.
+_CALL_OPTIONS = frozenset(
+    inspect.signature(AdaptiveQuadrature.integrate).parameters
+) - {"self"}
+
+
 def integrate(
     f: Callable[..., Any],
-    method: str = "gk21",
-    sampling: str = DEFAULT_SAMPLING_TYPE,
-    atol: float = 1e-5,
-    rtol: float = 1e-5,
-    mesh: torch.Tensor | None = None,
-    mesh_init: torch.Tensor | None = None,
-    mesh_final: torch.Tensor | None = None,
-    y0: torch.Tensor | None = None,
-    remove_cut: float = 0.1,
-    total_mem_usage: float = 0.9,
-    use_absolute_error_ratio: bool = True,
-    error_norm: str | Callable[[torch.Tensor], torch.Tensor] = "2",
-    mesh_failure_tolerance: float = 0.0,
-    take_gradient: bool = True,
-    max_adaptive_splits: int | None = None,
-    error_on_nonfinite: bool = True,
-    device: str | torch.device | None = None,
-    result_device: str | torch.device | None = "cpu",
-    **kwargs: Any,
+    method: str = DEFAULT_METHOD,
+    sampling: str | steps = DEFAULT_SAMPLING_TYPE,
+    **options: Any,
 ) -> IntegrationResult:
     """
     Compute the definite integral of f from mesh_init to mesh_final.
 
-    This is the main public API. It creates a parallel adaptive quadrature
-    solver, runs the integration in batched evaluations on GPU/CPU, and
-    returns the result.
+    Builds the solver with ``adaptive_quadrature(sampling, method, ...)`` and
+    calls its ``integrate`` once. Each keyword in ``options`` goes to the
+    solver's ``integrate`` call if it is one of that call's arguments (for
+    example mesh_init, mesh_final, mesh, y0, take_gradient, f_args, same_f,
+    max_batch, result_device), and to the solver constructor otherwise (for
+    example atol, rtol, remove_cut, use_absolute_error_ratio, device). The
+    defaults are those of ``AdaptiveQuadrature.__init__`` and
+    ``AdaptiveQuadrature.integrate``.
 
-    The integrand f depends only on time t (not on accumulated state
-    y). This independence is what enables batched parallel evaluation.
+    The integrand f depends only on t, not on an accumulated state y; this
+    is what lets many points be evaluated in one batch.
 
     Example::
 
         result = integrate(
-            f=lambda t: torch.sin(t),
-            method='gk21',
+            torch.sin,
             atol=1e-8,
-            rtol=1e-6,
-            mesh_init=torch.tensor([0.0]),
-            mesh_final=torch.tensor([3.14159]),
+            rtol=1e-8,
+            mesh_init=torch.tensor([0.0], dtype=torch.float64),
+            mesh_final=torch.tensor([3.14159], dtype=torch.float64),
+            device="cpu",
+            max_batch=10_000,
         )
-        print(result.integral)  # Should be close to 2.0
+        print(round(float(result.integral), 6))  # 2.0
 
     Args:
-        f: The integrand function. Takes time points of shape [N, T]
-            and returns evaluations of shape [N, D]. Optionally, f may
-            instead return a 2-tuple ``(integrand, tracked_variables)``
-            where ``tracked_variables`` is a tuple of tensors (or None).
-            Tracked variables are evaluated at every node but NOT
-            integrated; they are returned at the accepted nodes in
-            ``result.tracked_variables``.
-        method: Name of the quadrature method: a key of ``UNIFORM_METHODS``
-            for uniform sampling or of ``VARIABLE_METHODS`` for variable
-            sampling.
-        sampling: 'uniform' uses fixed quadrature point positions within
-            each step; 'variable' computes weights dynamically based on
-            actual point positions. Defaults to ``DEFAULT_SAMPLING_TYPE``
-            ('uniform').
-        atol: Absolute error tolerance. A step is accepted when its
-            estimated error < max(atol, rtol * |integral_value|)
-            (atol + rtol * |integral_value| for
-            ``error_norm="failure_fraction"``).
-        rtol: Relative error tolerance. See atol.
-        t: Optional initial time mesh (step barrier positions). If None,
-            the solver generates an initial mesh automatically. Shape:
-            [N, T] for step barriers.
-        mesh_init: Lower integration bound. Shape: [T].
-        mesh_final: Upper integration bound. Shape: [T].
-        y0: Initial value of the integral accumulator. Shape: [D].
-        remove_cut: Threshold for merging consecutive steps whose
-            combined error ratio is below this value. Must be < 1. Lower
-            values are more conservative (keep more steps).
-        total_mem_usage: Fraction of total GPU/CPU memory the solver is
-            allowed to use (0 < value <= 1). The solver dynamically
-            adjusts batch size to stay within this budget.
-        use_absolute_error_ratio: If True (default), error ratios use the
-            total integral value as the reference. If False, uses the
-            cumulative integral up to each step (more like traditional
-            ODE error control).
-        error_norm: How a vector-valued (D > 1) per-step error is reduced to a
-            single accept/reject decision. One of "2" (default, scipy-style L2),
-            "max" (L-infinity), "rms" (root-mean-square), "failure_fraction"
-            (per-component control), or a callable reducing the last axis. See
-            ``AdaptiveQuadrature.__init__`` for details.
-        mesh_failure_tolerance: Fraction in [0, 1] of output elements allowed to
-            exceed tolerance while a panel is still accepted; used only when
-            ``error_norm == "failure_fraction"``. Default 0.0.
-        max_adaptive_splits: Maximum number of times a panel may be split
-            during adaptive refinement. A panel split this many times is
-            accepted even if it still fails the error tolerance, rather than
-            being split further. If None (default), refinement is uncapped.
-        error_on_nonfinite: If True (default), raise a ValueError naming the
-            offending ``t`` when the integrand returns NaN/Inf. If False, those
-            panels are accepted and the non-finite value propagates into the
-            result. The integration never hangs in either case.
-        device: Device to run on: 'cpu', 'cuda', an indexed 'cuda:N', or a
-            torch.device. If None, auto-detects.
-        result_device: Device the returned IntegrationResult tensors live on
-            (default 'cpu'). The large per-step records (nodes, y, ...) are
-            detached and moved here as they are recorded so they do not
-            accumulate on the integration device's memory. An index-less
-            'cuda' means the solver's GPU; None keeps them on the solver's device.
-        **kwargs: Additional keyword arguments forwarded to the solver
-            constructor (e.g. max_batch).
+        f: The integrand. Takes points of shape [N, T] and returns values of
+            shape [N, D], or a 2-tuple ``(values, tracked_variables)`` (see
+            ``AdaptiveQuadrature.integrate``).
+        method: Name of the quadrature method, a key of ``UNIFORM_METHODS``
+            (uniform sampling) or ``VARIABLE_METHODS`` (variable sampling).
+            Default: ``DEFAULT_METHOD`` ('gk21').
+        sampling: 'uniform' (fixed node positions) or 'variable' (weights
+            computed from the actual node positions), or any sampling type
+            ``adaptive_quadrature`` accepts. Default: 'uniform'.
+        **options: Keyword options of ``AdaptiveQuadrature.integrate`` and of
+            ``AdaptiveQuadrature.__init__``.
 
     Returns:
-        IntegrationResult containing the computed integral, error estimates,
-        time mesh, and optimization diagnostics.
+        IntegrationResult with the integral, its error estimate, the mesh and
+        diagnostics.
 
     Raises:
-        ValueError: If sampling is not 'uniform' or 'variable', or if method
-            is not a method of that sampling type.
-
-    Note:
-        If t is None, the solver creates an initial mesh of
-        ~sqrt(N_init_steps) barriers with random sub-divisions in
-        [mesh_init, mesh_final]. Steps are adaptively added (split) or removed
-        (merged) based on error estimates until all steps meet tolerance.
+        ValueError: If sampling is not a supported sampling type, or method is
+            not a method of that sampling type.
+        TypeError: If an option is neither a call nor a constructor option.
     """
-    # Select the sampling strategy for the parallel solver
-    if sampling.lower() == "uniform":
-        sampling_type = steps.ADAPTIVE_UNIFORM
-    elif sampling.lower() == "variable":
-        sampling_type = steps.ADAPTIVE_VARIABLE
-    else:
-        raise ValueError(
-            f"Sampling method must be either 'uniform' or 'variable', "
-            f"instead got {sampling}"
-        )
-
-    # Create the parallel RK solver and run integration
-    integrator = adaptive_quadrature(
-        sampling_type=sampling_type,
-        method=method,
-        f=f,
-        atol=atol,
-        rtol=rtol,
-        remove_cut=remove_cut,
-        mesh_init=mesh_init,
-        mesh_final=mesh_final,
-        use_absolute_error_ratio=use_absolute_error_ratio,
-        error_norm=error_norm,
-        mesh_failure_tolerance=mesh_failure_tolerance,
-        device=device,
-        **kwargs,
-    )
-
-    return integrator.integrate(
-        y0=y0,
-        mesh=mesh,
-        mesh_init=mesh_init,
-        mesh_final=mesh_final,
-        total_mem_usage=total_mem_usage,
-        take_gradient=take_gradient,
-        max_adaptive_splits=max_adaptive_splits,
-        error_on_nonfinite=error_on_nonfinite,
-        result_device=result_device,
-    )
+    call = {name: value for name, value in options.items() if name in _CALL_OPTIONS}
+    construct = {
+        name: value for name, value in options.items() if name not in _CALL_OPTIONS
+    }
+    solver = adaptive_quadrature(sampling, method, **construct)
+    return solver.integrate(f, **call)

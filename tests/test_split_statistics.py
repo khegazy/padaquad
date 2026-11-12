@@ -181,11 +181,18 @@ def test_stale_max_path_change_keyword_raises():
         adaptive_quadrature("uniform", method="gk21", max_path_change=0.1)
 
 
-def test_float_in_former_max_path_change_position_raises():
-    """max_path_change was the 4th positional argument; that slot is now
-    max_adaptive_splits, and a float there must not act as a cap."""
-    with pytest.raises(TypeError, match="max_adaptive_splits"):
+def test_positional_constructor_arguments_raise():
+    """Constructor options are keyword-only, so the old positional slots
+    (where max_path_change was the 4th) cannot be filled by position."""
+    with pytest.raises(TypeError, match="positional argument"):
         UniformAdaptiveQuadrature(0.1, None, 0.9, 0.1, method="gk21", device="cpu")
+
+
+def test_float_max_adaptive_splits_raises():
+    """A float such as 0.1, meant for the removed max_path_change, must not
+    act as a split cap."""
+    with pytest.raises(TypeError, match="max_adaptive_splits"):
+        UniformAdaptiveQuadrature(max_adaptive_splits=0.1, device="cpu")
 
 
 @pytest.mark.parametrize(

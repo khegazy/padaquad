@@ -243,86 +243,21 @@ uses of `integrate(f, ...)` with the right `f`.
 
 ## API reference
 
-### Free function
+The full reference, generated from the docstrings, is on the documentation
+site, <https://khegazy.github.io/padaquad/>; `help(padaquad.integrate)` shows
+the same text. In short:
 
-```text
-padaquad.integrate(
-    f, method="gk21", sampling="uniform",
-    atol=1e-5, rtol=1e-5,
-    mesh=None, mesh_init=None, mesh_final=None,
-    y0=None, remove_cut=0.1, total_mem_usage=0.9,
-    use_absolute_error_ratio=True, device=None,
-    **kwargs,
-) -> IntegrationResult
-```
-
-One-shot integration. Constructs an `AdaptiveQuadrature` and calls
-`integrate()` on it. For repeated calls (e.g. training loops),
-instantiate the class directly via `adaptive_quadrature(...)` so
-warm-start cache state persists across iterations. `device` accepts
-`"cpu"`, `"cuda"`, an indexed `"cuda:N"`, or a `torch.device`; `None`
-auto-detects.
-
-### Class API
-
-```text
-padaquad.adaptive_quadrature(
-    sampling_type, method="gk21", atol=1e-5, rtol=1e-5,
-    mesh_init=None, mesh_final=None, f=None,
-    remove_cut=0.1, max_batch=None, total_mem_usage=0.9,
-    max_adaptive_splits=None, use_absolute_error_ratio=True,
-    device=None, **kwargs,
-) -> UniformAdaptiveQuadrature | VariableAdaptiveQuadrature
-
-solver.integrate(
-    f=None, y0=None,
-    mesh=None, mesh_init=None, mesh_final=None,
-    take_gradient=True,
-    same_f=False, random_initial_mesh=True,
-    loss_fxn=None, total_mem_usage=None, max_batch=None,
-    N_init_steps=13, f_args=(),
-) -> IntegrationResult
-```
-
-### `IntegrationResult` fields
-
-`IntegrationResult` is a keyword-only dataclass. Every field is a tensor
-except where noted.
-
-- `integral` — the computed integral, shape `[D]`.
-- `integral_error` — estimated total error, shape `[D]`.
-- `mesh_optimal` — refined-and-pruned barriers from this run, shape
-  `[M, T]`. Pass back via `mesh=...` for explicit warm-start. Always a
-  tensor on a returned result; `None` in the per-batch result that
-  `loss_fxn` receives.
-- `mesh_init`, `mesh_final` — bounds used.
-- `nodes` — quadrature points, flattened across steps with shared step
-  boundaries deduplicated, shape `[P, T]`.
-- `h` — per-step widths, shape `[N, T]`.
-- `y` — integrand evaluations at `nodes`, shape `[P, D]`.
-- `tracked_variables` — extra outputs of the integrand at `nodes`, a tuple
-  of tensors, or `None` when the integrand returns none.
-- `mesh_quadratures`, `mesh_quadrature_errors`, `error_ratios` — per-step diagnostics.
-- `loss`, `gradient_taken` (`bool`), `y0` — training-loop diagnostics.
-- `converged: bool` — `True` when every accepted step meets the tolerance
-  judged against the final integral (in cumulative mode, the final running
-  integral through the step). Usually `False` when `max_adaptive_splits`
-  stopped the refinement of a failing step; `False` when a step's error
-  ratio is NaN/Inf, or when a step accepted against the running integral fails against the
-  final one (with `take_gradient=True` accepted steps are not re-checked).
-  A warning reporting the size of the error is logged when `False`.
-- `n_start_steps`, `n_start_steps_split` (`int`) — steps in the starting
-  mesh, and how many of them were split at least once;
-  `percent_start_steps_split` (property) is the second as a percentage of
-  the first. Splits made to build `mesh_optimal` are not counted.
-- `max_split_depth` (`int`) — the largest number of times any one step was
-  halved.
-
-The per-batch result that `loss_fxn` receives covers only that batch's
-accepted steps: `integral` is their contribution without `y0`, `y0` is
-zero, `mesh_optimal`, `loss`, `converged` and the split counts are `None`,
-and `nodes`, `y` and `tracked_variables` keep one row per step
-(`[N, C, T]`, `[N, C, D]`).
+- `integrate(f, method="gk21", sampling="uniform", **options)` computes one
+  integral. Each keyword option goes to the solver's `integrate` call if it is
+  one of that call's arguments (`mesh_init`, `mesh_final`, `mesh`, `y0`,
+  `take_gradient`, `f_args`, `same_f`, `max_batch`, ...), and to the solver
+  constructor otherwise (`atol`, `rtol`, `remove_cut`, `device`, ...).
+- `adaptive_quadrature(sampling_type="uniform", method="gk21", **options)`
+  builds a solver to reuse across calls, for example to warm-start with
+  `same_f=True`. Every constructor option is keyword-only.
+- Both return an `IntegrationResult`: the integral, its estimated error (a
+  signed sum over subintervals), the mesh, and diagnostics such as
+  `converged`, `mesh_optimal` and the split statistics.
 
 ## How it works
 

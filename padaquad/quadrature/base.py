@@ -47,6 +47,7 @@ engine reaches it only through ``node_fractions()`` and ``weights()``.
 from __future__ import annotations
 
 import contextlib
+import inspect
 import logging
 import math
 import numbers
@@ -56,8 +57,8 @@ from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
 
-from padaquad.base import SolverBase, steps
-from padaquad.distributed import _resolve_device
+from padaquad.base import DEFAULT_METHOD, SolverBase, steps
+from padaquad.distributed import DistributedEnvironment, _resolve_device
 from padaquad.methods import _get_method
 from padaquad.quadrature.memory import _is_out_of_memory, _MemoryManagement
 from padaquad.results import IntegrationResult, MethodOutput
@@ -133,6 +134,13 @@ def _RK_integral(
     return integral, RK_steps, h
 
 
+# Multi-GPU keyword options the solver forwards to ``DistributedEnvironment``,
+# read from its signature so the names and defaults live only there.
+_DISTRIBUTED_OPTIONS = frozenset(
+    inspect.signature(DistributedEnvironment.__init__).parameters
+) - {"self", "device"}
+
+
 class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     """
     Base class for parallel adaptive-stepsize numerical integration.
@@ -178,6 +186,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
     def __init__(
         self,
+        *,
+        f: Callable[..., Any] | None = None,
+        method: str = DEFAULT_METHOD,
+        atol: float = 1e-5,
+        rtol: float = 1e-5,
+        mesh_init: torch.Tensor | None = None,
+        mesh_final: torch.Tensor | None = None,
+        y0: torch.Tensor | None = None,
         remove_cut: float = 0.1,
         max_batch: int | None = None,
         total_mem_usage: float = 0.9,
@@ -186,13 +202,31 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         error_norm: str | Callable[[torch.Tensor], torch.Tensor] = "2",
         mesh_failure_tolerance: float = 0.0,
         error_on_nonfinite: bool = True,
-        *args: Any,
-        **kwargs: Any,
+        dtype: torch.dtype = torch.float64,
+        device: str | torch.device | None = None,
+        output_speed_info: bool = False,
+        **distributed_options: Any,
     ) -> None:
         """
         Initialize the parallel adaptive solver.
 
+        Every argument is keyword-only, and this signature names every option
+        of the solver (``SolverBase`` takes them from here).
+
         Args:
+            f: The integrand f(t) -> Tensor, used by ``integrate()`` calls that
+                pass no ``f``. Takes points of shape [N, T] and returns values
+                of shape [N, D].
+            method: Name of the quadrature method, a key of ``UNIFORM_METHODS``
+                (uniform solver) or ``VARIABLE_METHODS`` (variable solver).
+                Converted to lowercase. Default: ``DEFAULT_METHOD`` ("gk21").
+            atol: Absolute error tolerance. A step is accepted when its
+                estimated error is below max(atol, rtol*|integral|)
+                (atol + rtol*|integral| for ``error_norm="failure_fraction"``).
+            rtol: Relative error tolerance; see ``atol``.
+            mesh_init: Default lower integration bound. Shape: [T].
+            mesh_final: Default upper integration bound. Shape: [T].
+            y0: Default additive offset of the returned integral. Shape: [D].
             remove_cut: Largest predicted error ratio of a merged step pair when
                 the optimal mesh is built. A pair is merged only if the merged
                 step's error ratio, predicted from the two steps' errors, is
@@ -244,12 +278,44 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 such panels are accepted and the non-finite value propagates
                 into the result (the run never hangs in either case). Can be
                 overridden per call via ``integrate(error_on_nonfinite=...)``.
-            *args: Forwarded to SolverBase (and DistributedEnvironment).
-            **kwargs: Forwarded to SolverBase (and DistributedEnvironment).
-        """
+            dtype: Floating-point precision, torch.float64 (default) or
+                torch.float32; torch.float16 is refused. ``integrate()``
+                switches to the dtype of the bounds it is given.
+            device: 'cpu', 'cuda', an indexed 'cuda:N', or a torch.device;
+                None auto-detects (CUDA if available).
+            output_speed_info: If True, logs the time of each sub-operation to
+                the file ``padaquad_speed.log``.
+            **distributed_options: Multi-GPU options of
+                ``DistributedEnvironment`` (backend, master_addr, master_port,
+                is_slurm); for multi-process runs only.
 
-        super().__init__(*args, **kwargs)
-        assert remove_cut < 1.0
+        Raises:
+            TypeError: If an argument is passed by position, or a keyword is
+                not an option of the solver.
+            ValueError: If ``remove_cut`` is not below 1, or another option is
+                invalid.
+        """
+        unknown = set(distributed_options) - _DISTRIBUTED_OPTIONS
+        if unknown:
+            raise TypeError(
+                f"{type(self).__name__} got unexpected keyword argument(s) "
+                f"{sorted(unknown)}"
+            )
+        if not remove_cut < 1.0:
+            raise ValueError(f"remove_cut must be below 1, got {remove_cut!r}")
+        super().__init__(
+            method=method,
+            atol=atol,
+            rtol=rtol,
+            y0=y0,
+            f=f,
+            mesh_init=mesh_init,
+            mesh_final=mesh_final,
+            output_speed_info=output_speed_info,
+            dtype=dtype,
+            device=device,
+            **distributed_options,
+        )
         self._check_max_adaptive_splits(max_adaptive_splits)
         self.remove_cut = remove_cut
 
@@ -313,9 +379,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         Validate that ``max_adaptive_splits`` is None or a non-negative integer.
 
-        The type check also catches a float passed by position: before
-        ``max_path_change`` was removed, the 4th positional constructor argument
-        was that fraction, and a float such as 0.1 would otherwise act as a cap.
+        The type check also catches a float such as 0.1 meant for the removed
+        ``max_path_change``, which would otherwise act as a cap.
 
         Raises:
             TypeError: If the value is not None and not an integer

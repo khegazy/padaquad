@@ -49,13 +49,16 @@ class steps(Enum):
 # Sampling type used when the caller gives none (adaptive_quadrature, integrate).
 DEFAULT_SAMPLING_TYPE = "uniform"
 
+# Default quadrature method of the solvers and of ``padaquad.integrate()``.
+DEFAULT_METHOD = "gk21"
+
 
 def get_sampling_type(sampling_type: str) -> steps:
     """
     Convert a string sampling type name into the corresponding ``steps`` enum.
 
     Accepts both short names ('uniform', 'variable') and full names
-    ('adaptive_uniform', 'adaptive_variable').
+    ('adaptive_uniform', 'adaptive_variable'), in any letter case.
 
     Args:
         sampling_type: One of 'fixed', 'uniform', 'adaptive_uniform',
@@ -74,11 +77,12 @@ def get_sampling_type(sampling_type: str) -> steps:
         "adaptive_variable": steps.ADAPTIVE_VARIABLE,
         "variable": steps.ADAPTIVE_VARIABLE,
     }
-    if sampling_type not in types:
+    name = sampling_type.lower() if isinstance(sampling_type, str) else sampling_type
+    if name not in types:
         raise ValueError(
             f"Unknown sampling_type {sampling_type!r}; valid names are {sorted(types)}."
         )
-    return types[sampling_type]
+    return types[name]
 
 
 # Result dataclasses live in ``results.py``; re-exported here for
@@ -115,21 +119,24 @@ class SolverBase(ABC, DistributedEnvironment):
 
     def __init__(
         self,
-        method: str = "gk21",
-        atol: float = 1e-5,
-        rtol: float = 1e-5,
-        y0: torch.Tensor | None = None,
-        f: Callable[..., Any] | None = None,
-        mesh_init: torch.Tensor | None = None,
-        mesh_final: torch.Tensor | None = None,
-        output_speed_info: bool = False,
-        dtype: torch.dtype = torch.float64,
-        device: str | torch.device | None = None,
-        *args: Any,
-        **kwargs: Any,
+        *,
+        method: str,
+        atol: float,
+        rtol: float,
+        y0: torch.Tensor | None,
+        f: Callable[..., Any] | None,
+        mesh_init: torch.Tensor | None,
+        mesh_final: torch.Tensor | None,
+        output_speed_info: bool,
+        dtype: torch.dtype,
+        device: str | torch.device | None,
+        **distributed_options: Any,
     ) -> None:
         """
         Initialize the solver base with integration parameters.
+
+        Every argument is required and keyword-only: the defaults live once, in
+        ``AdaptiveQuadrature.__init__``, the constructor users call.
 
         Args:
             method: Name of the RK integration method (e.g. 'dopri5', 'bosh3').
@@ -155,14 +162,11 @@ class SolverBase(ABC, DistributedEnvironment):
                 meaningful error control.
             device: 'cpu', 'cuda', an indexed 'cuda:N', or a torch.device;
                 None auto-detects. Resolved by DistributedEnvironment.
-            *args: Additional arguments forwarded to DistributedEnvironment.
-            **kwargs: Additional keyword arguments forwarded to
-                DistributedEnvironment.
+            **distributed_options: Multi-GPU options forwarded to
+                DistributedEnvironment (backend, master_addr, master_port,
+                is_slurm).
         """
-        # ``device`` is a named parameter here, so it can never also be in
-        # ``kwargs``; pass it through kwargs so the call is statically checkable.
-        kwargs["device"] = device
-        super().__init__(*args, **kwargs)
+        super().__init__(device=device, **distributed_options)
 
         # Speed timing logger — writes to a dedicated file, no other output
         self.speed_logger: logging.Logger | None
@@ -454,5 +458,10 @@ class SolverBase(ABC, DistributedEnvironment):
     # -------------------------------------------------------------------------------- #
 
     def __del__(self) -> None:
-        """Destructor that cleans up the distributed process group."""
-        self.end_process()
+        """Destructor that cleans up the distributed process group.
+
+        Does nothing if construction failed before the distributed state was
+        set, so a constructor error is not followed by a second, unrelated one.
+        """
+        if hasattr(self, "is_distributed"):
+            self.end_process()

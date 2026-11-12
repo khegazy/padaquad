@@ -156,9 +156,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         max_batch: Maximum number of integrand evaluations per batch. If None,
             determined dynamically from available memory.
         total_mem_usage: Fraction of total memory to use (0 < value <= 1).
-        max_path_change: If set, stops integration when the failing fraction of
-            the starting mesh's steps reaches this value (used with a given or
-            stored starting mesh).
         use_absolute_error_ratio: If True, uses the total integral for error
             normalization. If False, uses cumulative integral up to each step.
         error_norm: Vector-error reduction / acceptance scheme (one of "2",
@@ -183,7 +180,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         remove_cut: float = 0.1,
         max_batch: int | None = None,
         total_mem_usage: float = 0.9,
-        max_path_change: float | None = None,
         max_adaptive_splits: int | None = None,
         use_absolute_error_ratio: bool = True,
         error_norm: str | Callable[[torch.Tensor], torch.Tensor] = "2",
@@ -205,19 +201,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 batch size is determined dynamically based on available memory.
             total_mem_usage: Fraction of total device memory the solver may use
                 for batched evaluations (0 < value <= 1). Default: 0.9.
-            max_path_change: If set, and the starting mesh is the caller's
-                ``mesh`` or the stored mesh used by ``same_f=True`` (not
-                a freshly generated one), integration stops early, returning
-                ``converged=False``, once the steps of the starting mesh that
-                fail the error tolerance reach this fraction of the starting
-                mesh's step count. The count spans every batch; halves of split
-                steps are not counted. Useful for iterative optimization.
             max_adaptive_splits: Maximum number of times a panel may be split
                 during adaptive refinement. A panel that has been split this
                 many times is accepted even if it still fails the error
-                tolerance, instead of being split further. If None (default),
-                refinement is uncapped. Can be overridden per call via
-                ``integrate(max_adaptive_splits=...)``.
+                tolerance, instead of being split further; the call then
+                returns ``converged=False``. A non-negative ``int``; if None
+                (default), refinement is uncapped. Can be overridden per call
+                via ``integrate(max_adaptive_splits=...)``.
             use_absolute_error_ratio: If True, error ratios use the total
                 (converging) integral value. If False, uses cumulative sum up
                 to each step. Default: True.
@@ -257,12 +247,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         super().__init__(*args, **kwargs)
         assert remove_cut < 1.0
-        assert max_adaptive_splits is None or max_adaptive_splits >= 0
+        self._check_max_adaptive_splits(max_adaptive_splits)
         self.remove_cut = remove_cut
 
         # Memory handling variables
-        # max_batch of the last integrate() call that returned (converged or
-        # stopped early by max_path_change); reused by same_f=True.
+        # max_batch of the last integrate() call that returned; reused by
+        # same_f=True.
         self.previous_max_batch: int | None = None
         # Per-evaluation memory cost; set by each _setup_memory_checks run and
         # used by get_max_batch to size batches from live free memory.
@@ -275,7 +265,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # Construction-time defaults; each integrate() call falls back to these
         # when its corresponding argument is None.
         self.init_max_batch = max_batch
-        self.max_path_change = max_path_change
         self.init_max_adaptive_splits = max_adaptive_splits
         self.use_absolute_error_ratio = use_absolute_error_ratio
 
@@ -314,6 +303,33 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             raise ValueError(
                 "mesh_failure_tolerance must be in [0, 1], got "
                 f"{mesh_failure_tolerance!r}"
+            )
+
+    @staticmethod
+    def _check_max_adaptive_splits(max_adaptive_splits: object) -> None:
+        """
+        Validate that ``max_adaptive_splits`` is None or a non-negative int.
+
+        The type check also catches a float passed by position: before
+        ``max_path_change`` was removed, the 4th positional constructor argument
+        was that fraction, and a float such as 0.1 would otherwise act as a cap.
+
+        Raises:
+            TypeError: If the value is not None and not an int (bool rejected).
+            ValueError: If the value is a negative int.
+        """
+        if max_adaptive_splits is None:
+            return
+        if isinstance(max_adaptive_splits, bool) or not isinstance(
+            max_adaptive_splits, int
+        ):
+            raise TypeError(
+                "max_adaptive_splits must be None or an int, got "
+                f"{type(max_adaptive_splits).__name__} {max_adaptive_splits!r}"
+            )
+        if max_adaptive_splits < 0:
+            raise ValueError(
+                f"max_adaptive_splits must be >= 0, got {max_adaptive_splits}"
             )
 
     # -------------------------------------------------------------------------------- #
@@ -575,16 +591,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 previous call, or changes only slightly (e.g. between
                 training-loop iterations). The solver then starts from the mesh
                 and ``max_batch`` stored by the last call that returned on this
-                solver (converged, or stopped early by ``max_path_change``),
-                in place of the caller's ``mesh`` and ``max_batch``, and skips
+                solver (converged or not), in place of the caller's ``mesh`` and ``max_batch``, and skips
                 the memory benchmark. The integration bounds still come from
                 the caller's arguments; the stored mesh is filtered and padded
                 to them. If nothing is stored yet (first call), the caller's
                 values or the defaults are used, so the flag can be passed from
                 the first iteration. Default False: the caller's values are
                 used (the stored values are still updated). The stored mesh is
-                the previous ``mesh_optimal`` (pruned and refined, or partly
-                refined after an early exit). The stored ``max_batch`` is a
+                the previous ``mesh_optimal`` (pruned and refined). The stored ``max_batch`` is a
                 fixed number computed when that call returned, whatever its
                 integrand or ``take_gradient`` setting: a value learned with
                 ``take_gradient=False`` has no backpropagation memory margin
@@ -626,6 +640,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             if max_adaptive_splits is None
             else max_adaptive_splits
         )
+        self._check_max_adaptive_splits(max_adaptive_splits)
 
         # Per-call error_on_nonfinite takes priority over the constructor value.
         # Stored on self so the evaluation helpers can read it without threading
@@ -700,7 +715,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         #     snapping its endpoints to [mesh_init, mesh_final];
         #   - explicit mesh passed in: use it;
         #   - otherwise: generate a fresh random initial mesh.
-        mesh, mesh_trackers, mesh_indices, mesh_is_given = self._setup_initial_mesh(
+        mesh, mesh_trackers, mesh_indices = self._setup_initial_mesh(
             mesh,
             mesh_init,
             mesh_final,
@@ -708,21 +723,17 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             random_initial_mesh,
             N_init_steps,
         )
-        # max_path_change counts failing steps of the starting mesh (split
-        # depth 0) across all batches, against the starting step count.
-        check_path_change = mesh_is_given and self.max_path_change is not None
         n_start_steps = len(mesh) - 1
-        n_start_failed = 0
 
         record: dict[str, torch.Tensor] = {}
         split_node_state: _SplitState = (None, None, None, None)
-        # Per-panel split counter, parallel to mesh/mesh_trackers. Only
-        # maintained when a depth cap or the max_path_change check needs it
-        # (None ⇒ zero overhead, no behavior change).
-        split_counts = (
-            torch.zeros(len(mesh), dtype=torch.long, device=self.device)
-            if max_adaptive_splits is not None or check_path_change
-            else None
+        # Per-panel split counter, parallel to mesh/mesh_trackers: how many
+        # times each step was halved (0 = a step of the starting mesh). It
+        # enforces max_adaptive_splits and gives the split statistics returned
+        # with the result. Typed Optional because _adaptively_increase_mesh
+        # returns it as Optional (its post-convergence caller passes None).
+        split_counts: torch.Tensor | None = torch.zeros(
+            len(mesh), dtype=torch.long, device=self.device
         )
         # === Main integration loop ===
         # Continues until all steps have been evaluated and accepted
@@ -813,93 +824,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             logger.debug("error_ratios: %s", error_ratios)
             logger.debug("error_ratios_2steps: %s", error_ratios_2steps)
 
-            # Early exit if too many steps of a given or stored starting mesh
-            # fail. Bug B6 fix: previously returned bare `None`, breaking the
-            # documented return-type contract. Now returns an
-            # IntegrationResult with converged=False populated from the
-            # most-recent batch's intermediate result so callers can
-            # inspect partial state instead of having to special-case
-            # None.
-            if check_path_change:
-                # A "failed step" is one that would be split under the active
-                # error_norm scheme (consistent with the accept/reject masks).
-                # Only steps of the starting mesh (split depth 0) count, each
-                # once (it is evaluated once), against the starting step count,
-                # so the ratio covers the whole starting mesh even when it spans
-                # several batches. The count only grows, so the call exits as
-                # soon as the ratio is certain to reach max_path_change.
-                # Both set whenever check_path_change (narrows for mypy).
-                assert split_counts is not None
-                assert self.max_path_change is not None
-                is_start_step = split_counts[step_idxs] == 0
-                n_start_failed += int((remove_mask & is_start_step).sum())
-                fail_ratio = n_start_failed / n_start_steps
-                if fail_ratio >= self.max_path_change:
-                    logger.warning(
-                        "%.1f%% of the starting mesh's integration steps failed "
-                        "error requirements, which is at least max_path_change "
-                        "(%s), now exiting.",
-                        fail_ratio * 100,
-                        self.max_path_change,
-                    )
-                    # Store this call's mesh and max_batch for same_f
-                    # (as on convergence), with this batch's failing steps
-                    # split as the loop would have done next, so the next call
-                    # refines further instead of restarting from (and stopping
-                    # on) the same mesh: the default path evaluates the whole
-                    # starting mesh in its first batch, before any split.
-                    mesh = self._adaptively_increase_mesh(
-                        method_output=None,
-                        error_ratios=error_ratios,
-                        y_step_eval=None,
-                        nodes=None,
-                        mesh=mesh,
-                        mesh_idxs=step_idxs,
-                        mesh_trackers=mesh_trackers.clone(),
-                        split_counts=split_counts,
-                        max_adaptive_splits=max_adaptive_splits,
-                        keep_mask=keep_mask,
-                        remove_mask=remove_mask,
-                    )[4]
-                    self.mesh_previous = mesh
-                    self.previous_max_batch = self.get_max_batch(
-                        total_mem_usage, force_max_batch
-                    )
-                    # Place the partial result on result_device for a
-                    # device-consistent return, matching the converged path.
-                    # integral, integral_error and y0 stay on the integration
-                    # device (the primary answer), as in the converged path.
-                    return IntegrationResult(
-                        integral=method_output.integral,
-                        integral_error=method_output.integral_error,
-                        # mesh family stays on the integration device (warm-start).
-                        mesh_optimal=mesh,
-                        mesh_init=mesh_init,
-                        mesh_final=mesh_final,
-                        # Flatten nodes/y/tracked_variables to match the
-                        # converged path's output format.
-                        nodes=self._flatten_output(nodes.to(result_device)),
-                        h=method_output.h.to(result_device),
-                        y=self._flatten_output(y_step_eval.to(result_device)),
-                        tracked_variables=tuple(
-                            self._flatten_output(tv.to(result_device))
-                            for tv in tracked_step_eval
-                        )
-                        if tracked_step_eval is not None
-                        else None,
-                        mesh_quadratures=method_output.mesh_quadratures.to(
-                            result_device
-                        ),
-                        mesh_quadrature_errors=torch.abs(
-                            method_output.mesh_quadrature_errors
-                        ).to(result_device),
-                        error_ratios=error_ratios.to(result_device),
-                        loss=None,
-                        gradient_taken=take_gradient,
-                        y0=y0,
-                        converged=False,
-                    )
-
             # --- Step 4b: Re-check already-accepted (recorded) panels ---
             # The accept/reject denominator (built from reference_integral, Step 4)
             # drifts as the running integral changes, so a panel accepted early
@@ -925,20 +849,24 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 # All inputs are integration-device-resident (mesh_quadratures
                 # and mesh_quadrature_errors are in _DEVICE_RESIDENT_KEYS;
                 # reference_integral is on self.device) -- no host<->device copy.
-                rec_quad = record["mesh_quadratures"]
-                rec_ratios, _, rec_per_dim = self._compute_error_ratios(
-                    mesh_quadrature_errors=record["mesh_quadrature_errors"],
-                    mesh_quadratures=rec_quad,
-                    cum_mesh_quadratures=torch.cumsum(rec_quad, 0),
-                    integral=reference_integral,
+                # The record is non-empty here, so Step 3 took its merge branch
+                # and set idxs_keep. Cumulative mode judges each recorded step
+                # against the running integral through it, which includes this
+                # batch's steps to its left: the merged record+batch cumsum,
+                # restricted to the recorded positions (a cumsum over the record
+                # alone would leave the batch out).
+                _, _, rec_remove = self._record_error_check(
+                    record,
+                    torch.cumsum(all_mesh_quadratures.detach(), 0)[idxs_keep],
+                    reference_integral,
                 )
-                _, rec_remove = self._accept_reject_masks(rec_ratios, rec_per_dim)
                 rec_positions = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
                 # Respect the split cap so the record stays consistent with the
                 # mesh: a failing panel already at the cap is not split, so it
                 # must stay recorded.
                 splittable = rec_remove
-                if max_adaptive_splits is not None and split_counts is not None:
+                if max_adaptive_splits is not None:
+                    assert split_counts is not None  # always kept in the loop
                     splittable = rec_remove & (
                         split_counts[rec_positions] < max_adaptive_splits
                     )
@@ -980,6 +908,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             assert kept_output is not None
             assert kept_y is not None
             assert kept_nodes is not None
+            assert split_counts is not None  # returned non-None for non-None input
             method_output, y_step_eval, nodes = kept_output, kept_y, kept_nodes
             # Verify barrier ordering after adaptive refinement.
             # Any-T invariant: consecutive barriers are distinct (no
@@ -1052,15 +981,51 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         # === Post-convergence: sort results and optimize the mesh ===
         record = self._sort_record(record, mesh_indices)
+
+        # Split statistics. A step of the starting mesh has split count 0 and
+        # every half of a split step has count >= 1, so the steps still at 0
+        # are the starting steps that were never split. The last barrier
+        # starts no step. Splits made below by _get_optimal_mesh are not
+        # counted, and max_adaptive_splits truncates the depth.
+        assert split_counts is not None  # always kept in the loop
+        step_split_counts = split_counts[:-1]
+        n_start_steps_split = n_start_steps - int((step_split_counts == 0).sum())
+        max_split_depth = int(step_split_counts.max())
+
+        # Final error check: does the returned integral meet the tolerance?
+        # Every recorded step is judged again against the final integral, the
+        # reference _get_optimal_mesh also uses, so converged agrees with the
+        # mesh_optimal built below. A step can fail here although it passed
+        # when accepted: it was judged against the running integral (and with
+        # take_gradient=True nothing re-checks it), or max_adaptive_splits
+        # stopped its refinement. A non-finite error never meets a tolerance;
+        # _accept_reject_masks accepts it only because splitting cannot reduce
+        # it. Runs here, before the record is moved to result_device, so all
+        # inputs are on the integration device.
+        final_ratios, final_per_dim, final_fails = self._record_error_check(
+            record,
+            torch.cumsum(record["mesh_quadratures"].detach(), 0),
+            record["integral"].detach(),
+        )
+        nonfinite = ~torch.isfinite(final_ratios)
+        if final_per_dim is not None:
+            nonfinite = nonfinite | (~torch.isfinite(final_per_dim)).any(dim=-1)
+        final_fails = final_fails | nonfinite
+        converged = not bool(final_fails.any())
+        if not converged:
+            self._warn_not_converged(
+                record, final_ratios, final_fails, nonfinite, max_adaptive_splits
+            )
+
         # Prune over-resolved steps and refine under-resolved ones. This re-derives
         # node positions through the method tableau, so it must run with the
         # tableau and device-bound allocations co-located with its inputs. The
-        # bulky per-step fields (nodes, mesh_quadrature_errors) already live on
-        # result_device, so we evaluate the whole computation there -- moving the
-        # small tableau to result_device for the duration -- rather than copying
-        # those tensors back to the integration device. The two device-resident
-        # fields (mesh_quadratures, integral) are the only ones that must be moved
-        # to result_device to join them.
+        # bulky per-step field nodes already lives on result_device, so we
+        # evaluate the whole computation there -- moving the small tableau to
+        # result_device for the duration -- rather than copying it back to the
+        # integration device. The device-resident fields (mesh_quadratures,
+        # mesh_quadrature_errors, integral; see _DEVICE_RESIDENT_KEYS) are the
+        # ones that must be moved to result_device to join it.
         with self._integration_on_device(result_device):
             mesh_optimal = self._get_optimal_mesh(
                 nodes=record["nodes"],
@@ -1076,7 +1041,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # are mesh_init/mesh_final, which live on self.device).
         mesh_optimal = mesh_optimal.to(self.device)
         # Stored together for same_f=True; only a returning call writes
-        # them (also on the max_path_change exit), so both come from one call.
+        # them (converged or not), so both come from one call.
         self.mesh_previous = mesh_optimal
         self.previous_max_batch = self.get_max_batch(total_mem_usage, force_max_batch)
 
@@ -1121,6 +1086,120 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             loss=record["loss"],
             gradient_taken=take_gradient,
             y0=y0,
+            converged=converged,
+            n_start_steps=n_start_steps,
+            n_start_steps_split=n_start_steps_split,
+            max_split_depth=max_split_depth,
+        )
+
+    def _record_error_check(
+        self,
+        record: dict[str, torch.Tensor],
+        cum_mesh_quadratures: torch.Tensor,
+        integral: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
+        """
+        Judge every recorded (accepted) step against a given tolerance reference.
+
+        One definition of "a recorded step fails", used by the in-loop re-check
+        of accepted steps (Step 4b of ``integrate``) and by the final
+        ``converged`` check. Uses the same error ratios and accept rule as a
+        freshly evaluated batch (``_compute_error_ratios``,
+        ``_accept_reject_masks``).
+
+        Args:
+            record: The running record, mesh-ordered, with
+                ``mesh_quadratures`` and ``mesh_quadrature_errors`` [N, D] on
+                the integration device.
+            cum_mesh_quadratures: Running integral through each recorded step
+                [N, D] (used in cumulative mode only).
+            integral: Reference integral [D] for the absolute-mode tolerance.
+
+        Returns:
+            Tuple ``(error_ratios, error_ratios_per_dim, reject_mask)``: the
+            per-step ratio [N], the per-element ratio [N, D] for
+            ``"failure_fraction"`` (else None), and the split mask [N] of
+            ``_accept_reject_masks`` (non-finite steps count as accepted
+            there).
+        """
+        error_ratios, _, error_ratios_per_dim = self._compute_error_ratios(
+            mesh_quadrature_errors=record["mesh_quadrature_errors"].detach(),
+            mesh_quadratures=record["mesh_quadratures"].detach(),
+            cum_mesh_quadratures=cum_mesh_quadratures,
+            integral=integral,
+        )
+        _, reject_mask = self._accept_reject_masks(error_ratios, error_ratios_per_dim)
+        return error_ratios, error_ratios_per_dim, reject_mask
+
+    def _warn_not_converged(
+        self,
+        record: dict[str, torch.Tensor],
+        final_ratios: torch.Tensor,
+        final_fails: torch.Tensor,
+        nonfinite: torch.Tensor,
+        max_adaptive_splits: int | None,
+    ) -> None:
+        """
+        Log how far a returned integral is from meeting the tolerance.
+
+        Called by ``integrate`` when the final error check fails. The sizes
+        reported are the method's embedded error estimates (the difference
+        between the rule and its lower-order companion), not the true error.
+
+        Args:
+            record: The sorted record on the integration device.
+            final_ratios: Per-step error ratio against the final integral [N]
+                (error / tolerance for the norm family; fraction of failing
+                output elements for ``"failure_fraction"``).
+            final_fails: Steps that fail the final check, including
+                non-finite ones [N].
+            nonfinite: Steps whose error ratio is NaN/Inf [N].
+            max_adaptive_splits: The split cap used by the call, or None.
+        """
+        finite_fails = final_fails & ~nonfinite
+        is_fraction = (not callable(self.error_norm)) and (
+            self.error_norm == "failure_fraction"
+        )
+        ratio_meaning = (
+            "fraction of output elements over tolerance"
+            if is_fraction
+            else "error / tolerance"
+        )
+        # Sums of |per-step error estimate| (largest output component), over the
+        # failing steps and over all steps. Absolute values, unlike
+        # integral_error, whose signed per-step errors can cancel.
+        abs_errors = torch.abs(record["mesh_quadrature_errors"])
+        all_error = float(abs_errors[~nonfinite].sum(0).max())
+        if bool(finite_fails.any()):
+            worst = float(final_ratios[finite_fails].max())
+            fail_error = float(abs_errors[finite_fails].sum(0).max())
+        else:
+            worst = fail_error = float("nan")
+        remedy = (
+            "raise max_adaptive_splits, " if max_adaptive_splits is not None else ""
+        )
+        logger.warning(
+            "The integral did not converge: %d of %d accepted steps (%.1f%%) do "
+            "not meet the tolerance (atol=%.3g, rtol=%.3g) when judged against "
+            "the final integral, %d of them with a non-finite error. Largest "
+            "error ratio among the finite failing steps: %.3g (%s). Their summed "
+            "|error estimate| is %.3g, of %.3g summed over all finite steps, for "
+            "|integral| = %.3g (largest output component; estimates, not the "
+            "true error). To refine further: %spass take_gradient=False "
+            "(accepted steps are then re-checked), or call again with "
+            "same_f=True to start from mesh_optimal.",
+            int(final_fails.sum()),
+            len(final_fails),
+            100.0 * float(final_fails.float().mean()),
+            float(self.atol),
+            float(self.rtol),
+            int((final_fails & nonfinite).sum()),
+            worst,
+            ratio_meaning,
+            fail_error,
+            all_error,
+            float(torch.abs(record["integral"]).max()),
+            remedy,
         )
 
     # -------------------------------------------------------------------------------- #
@@ -2139,13 +2218,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         same_f: bool,
         random_initial_mesh: bool,
         N_init_steps: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[tuple[float, ...], int], bool]:
-        # mesh_is_given: the starting mesh came from outside (the stored mesh
-        # or the caller's), not freshly generated; the max_path_change check
-        # runs only then.
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[tuple[float, ...], int]]:
         if same_f and self.mesh_previous is not None:
             # The stored mesh replaces the caller's mesh.
-            mesh_is_given = True
             # Filter cached barriers to within the new [mesh_init, mesh_final]
             # box, comparing every time dimension (min/max handles either
             # integration direction). For 1-D forward integration this is the
@@ -2172,9 +2247,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # moved to it). Without this, the loop indexes a CPU mesh with
             # device-side indices and crashes on GPU.
             mesh = mesh.to(self.dtype).to(self.device)
-            mesh_is_given = True
         else:
-            mesh_is_given = False
             # Generate a fresh initial mesh of barriers across [mesh_init, mesh_final].
             # Layout: sqrt(N_init_steps) evenly-spaced top-level segments, each
             # subdivided into sqrt(N_init_steps)+1 sub-barriers. The total
@@ -2244,7 +2317,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_trackers[-1] = False  # mesh_final cannot be a step starting point
         mesh_indices = self._get_mesh_indices(mesh)
 
-        return mesh, mesh_trackers, mesh_indices, mesh_is_given
+        return mesh, mesh_trackers, mesh_indices
 
     def _get_mesh_indices(self, mesh: torch.Tensor) -> dict[tuple[float, ...], int]:
         # Map each barrier to its position in the ordered mesh. Keyed on the

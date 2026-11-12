@@ -163,7 +163,7 @@ def integrate(
             accumulate on the integration device's memory. An index-less
             'cuda' means the solver's GPU; None keeps them on the solver's device.
         **kwargs: Additional keyword arguments forwarded to the solver
-            constructor (e.g. max_batch, max_path_change).
+            constructor (e.g. max_batch).
 
     Returns:
         IntegrationResult containing the computed integral, error estimates,

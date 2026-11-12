@@ -62,7 +62,13 @@ def _hard_f(t: torch.Tensor) -> torch.Tensor:
 @pytest.mark.parametrize(("sampling", "method"), SOLVER_CASES, ids=SOLVER_IDS)
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 def test_panel_count_equals_K_times_2_pow_n(sampling, method, n, take_gradient):
-    """With a fail-everywhere tolerance, panels = K * 2**max_adaptive_splits."""
+    """With a fail-everywhere tolerance, panels = K * 2**max_adaptive_splits.
+
+    The split statistics follow: every starting step was halved n times. Steps
+    stopped by the cap still fail, so the call is not converged. At n = 2 gk21's
+    capped steps are small enough that the round-off floor sets their tolerance
+    and they pass, so ``converged`` is checked for n <= 1 only.
+    """
     K = 2
     solver = adaptive_quadrature(
         sampling_type=sampling,
@@ -79,6 +85,11 @@ def test_panel_count_equals_K_times_2_pow_n(sampling, method, n, take_gradient):
         max_batch=BIG_BATCH,
     )
     assert result.h.shape[0] == K * 2**n
+    assert result.n_start_steps == K
+    assert result.n_start_steps_split == (K if n else 0)
+    assert result.max_split_depth == n
+    if n <= 1:
+        assert result.converged is False
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
@@ -183,6 +194,7 @@ def test_high_cap_does_not_interfere_via_free_function(take_gradient):
         max_batch=BIG_BATCH,
     )
     assert abs(result.integral.item() - 2.0) < 1e-6
+    assert result.converged is True
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)

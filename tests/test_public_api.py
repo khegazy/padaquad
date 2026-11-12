@@ -134,6 +134,10 @@ class TestIntegrationResultFields:
             "gradient_taken",
             "y0",
             "converged",
+            "n_start_steps",
+            "n_start_steps_split",
+            "max_split_depth",
+            "percent_start_steps_split",
         ):
             assert hasattr(r, name), f"IntegrationResult missing field {name!r}"
 

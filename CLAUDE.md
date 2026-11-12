@@ -25,7 +25,7 @@ python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 .venv/bin/pre-commit install
 
-# Run all tests (3203 pass and 125 skip on a 1-GPU node)
+# Run all tests (3218 pass and 138 skip on a CPU-only Mac; GPU-only tests skip there)
 .venv/bin/pytest tests/ -v
 
 # Run all tests with coverage
@@ -97,6 +97,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: `mesh_optimal` re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
 | `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
+| `test_split_statistics.py` | `n_start_steps` / `n_start_steps_split` / `max_split_depth` on integrands with known answers; `converged` in absolute, cumulative and `failure_fraction` modes, against the final integral, and its warning; `max_adaptive_splits` type check |
 
 **Snapshot tests** are the regression net for internal refactors: the
 file `tests/test_snapshots_data.json` pins `integral`, `integral_error`,
@@ -235,7 +236,12 @@ is a boolean array where `True` means the panel still needs evaluation.
      sub-panels for re-evaluation.
    - Record accepted results into the running record.
    - If `take_gradient`: per-batch `loss.backward()`.
-3. **Post-convergence.** Sort the record, compute `mesh_optimal` via
+3. **Post-convergence.** Sort the record; read the split statistics off
+   `split_counts` (per-barrier count of halvings, 0 = starting step);
+   judge every recorded step against the final integral with
+   `_record_error_check` (the same helper the in-loop re-check uses) to set
+   `converged`, logging `_warn_not_converged` when it is `False` (a NaN/Inf
+   error counts as failing); then compute `mesh_optimal` via
    `_get_optimal_mesh` (prune low-error pairs, refine
    high-error gaps), cache for reuse on the next call.
 
@@ -366,10 +372,8 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
 
 ### Warm-starting (`same_f=True`)
 
-- Every call that returns (converged, or stopped early by
-  `max_path_change`) stores its mesh (`mesh_previous`: `mesh_optimal`, or
-  after an early exit the mesh at the exit with the failing steps of that
-  batch split, so the next call refines further) and its `max_batch`
+- Every call that returns (converged or not) stores its mesh
+  (`mesh_previous` = `mesh_optimal`) and its `max_batch`
   (`previous_max_batch`) together. A call that raises stores nothing.
 - With `same_f=True` and stored values, the stored mesh (filtered
   to `[mesh_init, mesh_final]`, padded if needed) and `max_batch` replace
@@ -379,9 +383,9 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
 - The solver does not identify integrands (no `id(f)` matching); the
   caller says when the integrand is the same. Default is
   `same_f=False`.
-- `max_path_change` runs on a given or stored starting mesh (never a
-  fresh one) and counts failing steps of that starting mesh across all
-  batches (split depth 0, via `split_counts`) against its step count.
+- A non-converged call (e.g. under `max_adaptive_splits`) stores a
+  `mesh_optimal` that splits its failing steps, so repeated `same_f=True`
+  calls refine further.
 
 ### Dtype management
 

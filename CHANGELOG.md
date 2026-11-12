@@ -4,6 +4,28 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Removed
+
+- **`max_path_change`.** The constructor argument and the early exit it controlled are gone; `max_adaptive_splits` bounds refinement instead. Passing `max_path_change=` now raises `TypeError`. To migrate:
+  - To limit how much a call refines, set `max_adaptive_splits`. The call returns `converged=False` when it stopped short of the tolerance, and repeated `same_f=True` calls refine further from `mesh_optimal`, which splits the failing steps (as the early exit's stored mesh did).
+  - To see how much of the starting mesh failed, read `n_start_steps_split` / `percent_start_steps_split` (below). With `max_adaptive_splits=0` nothing is split, so read `converged`, or `(result.error_ratios >= 1).float().mean()`, the fraction of steps that failed when accepted.
+  - What is lost is the conditional behaviour "refine fully only when few starting steps fail".
+- **Positional arguments shifted.** `max_path_change` was the 4th positional constructor argument, so `max_adaptive_splits` and every later argument moved one place left. A non-`int` `max_adaptive_splits` now raises `TypeError` (a negative one `ValueError`), so a float passed in the old `max_path_change` position fails instead of acting as a cap. Pass these arguments by keyword.
+
+### Added
+
+- **Split statistics on `IntegrationResult`.** `n_start_steps` (steps in the starting mesh: the caller's `mesh`, the mesh stored by `same_f=True`, or a fresh one), `n_start_steps_split` (starting steps split at least once, including splits by the re-check of accepted steps), the property `percent_start_steps_split` (`100 * n_start_steps_split / n_start_steps`), and `max_split_depth` (the largest number of times any one step was halved). They are read off the per-step split counter, which is now always kept (it was kept only when a cap was set); results are unchanged. Splits made afterwards to build `mesh_optimal` are not counted. All three are `None` in the per-batch result passed to `loss_fxn`.
+
+### Changed
+
+- **`converged` reports whether the returned integral meets the tolerance.** It was `True` on every call except a `max_path_change` early exit, including calls where `max_adaptive_splits` left steps failing. Every accepted step is now judged against the final integral, the reference `mesh_optimal` is built with (also when `error_integral_reference` is given), and `converged` is `False` if any fails or has a NaN/Inf error. A warning then reports the number and percentage of failing steps, the largest error ratio, and the failing steps' summed error estimate next to the total over all steps and `|integral|`. Steps are accepted against the running integral, and with `take_gradient=True` (the default) accepted steps are never re-checked, so `converged=False` also appears without a cap. Over 576 uncapped `take_gradient=True` runs (bosh3, dopri5, gk7, gk21, cc9, cc17; six integrands on [0, 1], three of them cancelling; an rtol-dominated and an atol-dominated tolerance; two seeds; absolute and cumulative mode; the `"2"` and `"failure_fraction"` norms; eight steps per batch), 47 (8.2 %) returned `converged=False`, all in absolute mode, where the tolerance follows the running total; the median worst ratio of the `"2"`-norm failures was about 1e4, from cancelling integrands whose total is near 0. The same 576 runs with `take_gradient=False` all converged. Integrals are unchanged; the result only reports what it did not report before. `error_ratios` still holds each step's ratio at acceptance, so it can show every step passing while `converged` is `False`. `converged` is `None` in the per-batch result.
+
+### Fixed
+
+- **The re-check of accepted steps used the wrong running integral in cumulative mode.** With `use_absolute_error_ratio=False` and `take_gradient=False`, each recorded step is re-judged against `|running integral through it|`; that sum was taken over the recorded steps only, leaving out the batch just evaluated, so steps to the right of a batch step were judged against the wrong value and could be left failing. It now uses the running integral of the record and the batch together. Cumulative-mode results can change; absolute-mode results do not.
+
 ## [1.3.0] - Unreleased
 
 ### Added

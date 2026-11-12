@@ -10,8 +10,9 @@ Tests in this file:
     (that matching was bug B2's fix; ids are reused and closures get new ones).
   - test_warm_start_with_new_t_final_yields_correct_mesh: Bug B1, the
     warm-started mesh ends at the new ``mesh_final``.
-  - test_max_path_change_returns_integral_output_not_none,
-    test_normal_completion_has_converged_true: Bug B6.
+  - test_normal_completion_has_converged_true: a normal call returns
+    ``converged=True`` (Bug B6's early-exit path was removed with
+    ``max_path_change``).
   - test_float16_construction_raises: Bug B4.
   - NaN/Inf integrand tests, and the integrand test-call shape.
 """
@@ -226,44 +227,17 @@ def test_warm_start_with_new_t_final_yields_correct_mesh(take_gradient):
 
 
 # -----------------------------------------------------------------------------
-# B6: max_path_change early exit must return an IntegrationResult with
-# converged=False, not bare None (which violated the type contract).
+# converged on a normal call
 # -----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
-def test_max_path_change_returns_integral_output_not_none(take_gradient):
-    """When ``max_path_change`` triggers early exit on a user-provided
-    mesh, the solver must return an ``IntegrationResult`` with
-    ``converged=False``, not ``None``. Phase 1's Bug B6 fix.
-    """
-    # Provide a far-too-coarse mesh on a wiggly integrand so the solver
-    # cannot meet a tight tolerance on most steps. max_path_change=0.1
-    # means: exit if more than 10% of steps fail. With 4-point initial
-    # mesh on a damped sine and 1e-12 atol, that threshold trips hard.
-    solver = make_uniform_solver("dopri5", atol=1e-12, rtol=1e-12, max_path_change=0.1)
-    t = torch.linspace(0.0, 4.0, 4, dtype=torch.float64).unsqueeze(-1)
-
-    out = solver.integrate(
-        f=lambda t, *_: torch.sin(10 * t) * torch.exp(-0.1 * t),
-        mesh=t,
-        take_gradient=take_gradient,
-    )
-    assert isinstance(out, IntegrationResult), (
-        f"max_path_change early-exit returned {type(out).__name__}, "
-        f"expected IntegrationResult. This is bug B6."
-    )
-    assert out.converged is False, (
-        "early-exit IntegrationResult should have converged=False; "
-        f"got converged={out.converged!r}"
-    )
-
-
-@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 def test_normal_completion_has_converged_true(take_gradient):
-    """A normal integration call returns ``converged=True``. Pins the
-    default value of the new field.
+    """A normal integration call returns ``converged=True``: every accepted step
+    meets the tolerance against the final integral. Seeded, because the random
+    initial mesh decides how close the worst step gets to the tolerance.
     """
+    torch.manual_seed(0)
     out = integrate(
         f=torch.sin,
         method="dopri5",
@@ -399,8 +373,9 @@ def test_nonfinite_integrand_does_not_hang(nan_f, sampling, method, take_gradien
     assert isinstance(out, IntegrationResult)
     # The non-finite contribution propagates into the integral (honest result).
     assert torch.isnan(out.integral).any()
-    # The loop "converged" by accepting the non-finite panel rather than hanging.
-    assert out.converged is True
+    # The loop ended by accepting the non-finite panel rather than hanging, but
+    # a NaN error does not meet the tolerance, so the result is not converged.
+    assert out.converged is False
 
 
 @pytest.mark.parametrize("nan_f", _NAN_SIDE_CASES, ids=_NAN_SIDE_IDS)
@@ -455,7 +430,8 @@ def test_nonfinite_cumulative_error_mode_terminates(nan_f):
     )
     assert isinstance(out, IntegrationResult)
     assert torch.isnan(out.integral).any()
-    assert out.converged is True
+    # Terminated, but a NaN error does not meet the tolerance.
+    assert out.converged is False
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)

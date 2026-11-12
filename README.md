@@ -27,8 +27,11 @@ loop, it is suitable for:
   through the integral (option A) or by integrating $\nabla_\theta f$
   directly (option B);
 - one-shot definite integrals where you want batched parallel evaluation
-  of a smooth integrand — often two orders of magnitude faster than
-  sequential ODE-style integrators on the same problem.
+  of a smooth integrand. On one CPU (Apple M2 Max) padaquad was 1.6 to 46
+  times faster than torchdiffeq at the same tolerance, with equal or smaller
+  errors for its default method; see the
+  [Performance page](https://khegazy.github.io/padaquad/performance.html)
+  for the measurements and how to reproduce them.
 
 <!-- include-start: what-for -->
 ## What this is for

@@ -1,0 +1,381 @@
+{
+ "metadata": {
+  "date_utc": "2026-11-12T09:37:17+00:00",
+  "git_commit": "2ec1d44ef0e47a40917ad1723077f28fe6ca5800",
+  "git_dirty": false,
+  "device": "cpu",
+  "device_name": "Apple M2 Max",
+  "cpu_count": 12,
+  "torch_threads": 8,
+  "platform": "macOS-26.4.1-arm64-arm-64bit-Mach-O",
+  "python": "3.14.6",
+  "torch": "2.15.0",
+  "torchdiffeq": "0.2.5",
+  "padaquad": "source",
+  "scipy": "1.18.1",
+  "max_batch": 100000
+ },
+ "repeats": 7,
+ "rows": [
+  {
+   "integrand": "t",
+   "tolerance": 1e-06,
+   "solver": "torchdiffeq dopri5",
+   "time_median_s": 0.001494874944910407,
+   "time_min_s": 0.0014726659283041954,
+   "time_max_s": 0.0016632089391350746,
+   "evaluations": 32,
+   "abs_error": 2.7755575615628914e-16
+  },
+  {
+   "integrand": "t",
+   "tolerance": 1e-06,
+   "solver": "padaquad dopri5",
+   "time_median_s": 0.0009251248557120562,
+   "time_min_s": 0.0008996250107884407,
+   "time_max_s": 0.0010377501603215933,
+   "evaluations": 78,
+   "abs_error": 0.0
+  },
+  {
+   "integrand": "t",
+   "tolerance": 1e-06,
+   "solver": "padaquad gk21",
+   "time_median_s": 0.0008921250700950623,
+   "time_min_s": 0.0008879159577190876,
+   "time_max_s": 0.0009042909368872643,
+   "evaluations": 254,
+   "abs_error": 0.0
+  },
+  {
+   "integrand": "t",
+   "tolerance": 1e-09,
+   "solver": "torchdiffeq dopri5",
+   "time_median_s": 0.0014362090732902288,
+   "time_min_s": 0.0014287910889834166,
+   "time_max_s": 0.001459375023841858,
+   "evaluations": 32,
+   "abs_error": 2.7755575615628914e-16
+  },
+  {
+   "integrand": "t",
+   "tolerance": 1e-09,
+   "solver": "padaquad dopri5",
+   "time_median_s": 0.000892583979293704,
+   "time_min_s": 0.0008839578367769718,
+   "time_max_s": 0.0009101659525185823,
+   "evaluations": 78,
+   "abs_error": 0.0
+  },
+  {
+   "integrand": "t",
+   "tolerance": 1e-09,
+   "solver": "padaquad gk21",
+   "time_median_s": 0.0008839999791234732,
+   "time_min_s": 0.0008782921358942986,
+   "time_max_s": 0.0009002911392599344,
+   "evaluations": 254,
+   "abs_error": 0.0
+  },
+  {
+   "integrand": "t_squared",
+   "tolerance": 1e-06,
+   "solver": "torchdiffeq dopri5",
+   "time_median_s": 0.001528667053207755,
+   "time_min_s": 0.0015233750455081463,
+   "time_max_s": 0.0015444580931216478,
+   "evaluations": 32,
+   "abs_error": 1.1102230246251565e-16
+  },
+  {
+   "integrand": "t_squared",
+   "tolerance": 1e-06,
+   "solver": "padaquad dopri5",
+   "time_median_s": 0.0008960000704973936,
+   "time_min_s": 0.0008820409420877695,
+   "time_max_s": 0.0009084169287234545,
+   "evaluations": 78,
+   "abs_error": 5.551115123125783e-17
+  },
+  {
+   "integrand": "t_squared",
+   "tolerance": 1e-06,
+   "solver": "padaquad gk21",
+   "time_median_s": 0.0008823331445455551,
+   "time_min_s": 0.0008799170609563589,
+   "time_max_s": 0.0008879171218723059,
+   "evaluations": 254,
+   "abs_error": 5.551115123125783e-17
+  },
+  {
+   "integrand": "t_squared",
+   "tolerance": 1e-09,
+   "solver": "torchdiffeq dopri5",
+   "time_median_s": 0.0015270409639924765,
+   "time_min_s": 0.001523416955024004,
+   "time_max_s": 0.0015490411315113306,
+   "evaluations": 32,
+   "abs_error": 1.1102230246251565e-16
+  },
+  {
+   "integrand": "t_squared",
+   "tolerance": 1e-09,
+   "solver": "padaquad dopri5",
+   "time_median_s": 0.0008917921222746372,
+   "time_min_s": 0.0008834169711917639,
+   "time_max_s": 0.0009152919519692659,
+   "evaluations": 78,
+   "abs_error": 5.551115123125783e-17
+  },
+  {
+   "integrand": "t_squared",
+   "tolerance": 1e-09,
+   "solver": "padaquad gk21",
+   "time_median_s": 0.0008863329421728849,
+   "time_min_s": 0.0008812081068754196,
+   "time_max_s": 0.0009005831088870764,
+   "evaluations": 254,
+   "abs_error": 5.551115123125783e-17
+  },
+  {
+   "integrand": "sine_squared",
+   "tolerance": 1e-06,
+   "solver": "torchdiffeq dopri5",
+   "time_median_s": 0.013522542081773281,
+   "time_min_s": 0.0134935830719769,
+   "time_max_s": 0.013755042105913162,
+   "evaluations": 272,
+   "abs_error": 1.5223391092167304e-06
+  },
+  {
+   "integrand": "sine_squared",
+   "tolerance": 1e-06,
+   "solver": "padaquad dopri5",
+   "time_median_s": 0.0022557091433554888,
+   "time_min_s": 0.002220374997705221,
+   "time_max_s": 0.0024188749957829714,
+   "evaluations": 414,
+   "abs_error": 1.373770650126005e-06
+  },
+  {
+   "integrand": "sine_squared",
+   "tolerance": 1e-06,
+   "solver": "padaquad gk21",
+   "time_median_s": 0.0008621669840067625,
+   "time_min_s": 0.0008575830142945051,
+   "time_max_s": 0.0008743749931454659,
+   "evaluations": 254,
+   "abs_error": 5.551115123125783e-17
+  },
+  {
+   "integrand": "sine_squared",
+   "tolerance": 1e-09,
+   "solver": "torchdiffeq dopri5",
+   "time_median_s": 0.040938583901152015,
+   "time_min_s": 0.039413125021383166,
+   "time_max_s": 0.041894332971423864,
+   "evaluations": 794,
+   "abs_error": 1.051876363789006e-10
+  },
+  {
+   "integrand": "sine_squared",
+   "tolerance": 1e-09,
+   "solver": "padaquad dopri5",
+   "time_median_s": 0.003347249934449792,
+   "time_min_s": 0.0032717089634388685,
+   "time_max_s": 0.003585624974220991,
+   "evaluations": 1828,
+   "abs_error": 3.088699185305188e-09
+  },
+  {
+   "integrand": "sine_squared",
+   "tolerance": 1e-09,
+   "solver": "padaquad gk21",
+   "time_median_s": 0.0008847499266266823,
+   "time_min_s": 0.0008738329634070396,
+   "time_max_s": 0.0008949579205363989,
+   "evaluations": 254,
+   "abs_error": 5.551115123125783e-17
+  },
+  {
+   "integrand": "exp",
+   "tolerance": 1e-06,
+   "solver": "torchdiffeq dopri5",
+   "time_median_s": 0.003554208902642131,
+   "time_min_s": 0.003539249999448657,
+   "time_max_s": 0.003596666967496276,
+   "evaluations": 74,
+   "abs_error": 0.0004462153261570734
+  },
+  {
+   "integrand": "exp",
+   "tolerance": 1e-06,
+   "solver": "padaquad dopri5",
+   "time_median_s": 0.0013207921292632818,
+   "time_min_s": 0.0013076248578727245,
+   "time_max_s": 0.001358667155727744,
+   "evaluations": 92,
+   "abs_error": 2.833471899776896e-06
+  },
+  {
+   "integrand": "exp",
+   "tolerance": 1e-06,
+   "solver": "padaquad gk21",
+   "time_median_s": 0.0009020410943776369,
+   "time_min_s": 0.0008969169575721025,
+   "time_max_s": 0.0009105000644922256,
+   "evaluations": 254,
+   "abs_error": 3.552713678800501e-15
+  },
+  {
+   "integrand": "exp",
+   "tolerance": 1e-09,
+   "solver": "torchdiffeq dopri5",
+   "time_median_s": 0.009685792028903961,
+   "time_min_s": 0.009617249947041273,
+   "time_max_s": 0.009852708783000708,
+   "evaluations": 200,
+   "abs_error": 9.83751391459009e-09
+  },
+  {
+   "integrand": "exp",
+   "tolerance": 1e-09,
+   "solver": "padaquad dopri5",
+   "time_median_s": 0.002245041076093912,
+   "time_min_s": 0.0022328749764710665,
+   "time_max_s": 0.0022964999079704285,
+   "evaluations": 288,
+   "abs_error": 8.066304957310422e-09
+  },
+  {
+   "integrand": "exp",
+   "tolerance": 1e-09,
+   "solver": "padaquad gk21",
+   "time_median_s": 0.0009186668321490288,
+   "time_min_s": 0.0009166670497506857,
+   "time_max_s": 0.0009292499162256718,
+   "evaluations": 254,
+   "abs_error": 3.552713678800501e-15
+  },
+  {
+   "integrand": "damped_sine",
+   "tolerance": 1e-06,
+   "solver": "torchdiffeq dopri5",
+   "time_median_s": 0.005701082991436124,
+   "time_min_s": 0.005690917139872909,
+   "time_max_s": 0.005728292046114802,
+   "evaluations": 104,
+   "abs_error": 4.9239540131085224e-06
+  },
+  {
+   "integrand": "damped_sine",
+   "tolerance": 1e-06,
+   "solver": "padaquad dopri5",
+   "time_median_s": 0.0018382910639047623,
+   "time_min_s": 0.0018282500095665455,
+   "time_max_s": 0.0018762920517474413,
+   "evaluations": 204,
+   "abs_error": 3.7757128367593706e-07
+  },
+  {
+   "integrand": "damped_sine",
+   "tolerance": 1e-06,
+   "solver": "padaquad gk21",
+   "time_median_s": 0.000929167028516531,
+   "time_min_s": 0.0009231669828295708,
+   "time_max_s": 0.0009415410459041595,
+   "evaluations": 254,
+   "abs_error": 2.0816681711721685e-17
+  },
+  {
+   "integrand": "damped_sine",
+   "tolerance": 1e-09,
+   "solver": "torchdiffeq dopri5",
+   "time_median_s": 0.01916233287192881,
+   "time_min_s": 0.019137082854285836,
+   "time_max_s": 0.019224165938794613,
+   "evaluations": 362,
+   "abs_error": 4.426742757079882e-09
+  },
+  {
+   "integrand": "damped_sine",
+   "tolerance": 1e-09,
+   "solver": "padaquad dopri5",
+   "time_median_s": 0.0027972080279141665,
+   "time_min_s": 0.002770625054836273,
+   "time_max_s": 0.00286316592246294,
+   "evaluations": 820,
+   "abs_error": 5.602239158686295e-10
+  },
+  {
+   "integrand": "damped_sine",
+   "tolerance": 1e-09,
+   "solver": "padaquad gk21",
+   "time_median_s": 0.0009227499831467867,
+   "time_min_s": 0.0009170409757643938,
+   "time_max_s": 0.0009274589829146862,
+   "evaluations": 254,
+   "abs_error": 2.0816681711721685e-17
+  },
+  {
+   "integrand": "neural_network",
+   "tolerance": 1e-06,
+   "solver": "torchdiffeq dopri5",
+   "time_median_s": 0.0030900000128895044,
+   "time_min_s": 0.003075124928727746,
+   "time_max_s": 0.003114958992227912,
+   "evaluations": 50,
+   "abs_error": 2.040016861659666e-06
+  },
+  {
+   "integrand": "neural_network",
+   "tolerance": 1e-06,
+   "solver": "padaquad dopri5",
+   "time_median_s": 0.0010687080211937428,
+   "time_min_s": 0.0010324169415980577,
+   "time_max_s": 0.0012288328725844622,
+   "evaluations": 78,
+   "abs_error": 5.09003911353112e-07
+  },
+  {
+   "integrand": "neural_network",
+   "tolerance": 1e-06,
+   "solver": "padaquad gk21",
+   "time_median_s": 0.0011375839821994305,
+   "time_min_s": 0.0010835831053555012,
+   "time_max_s": 0.0013887090608477592,
+   "evaluations": 254,
+   "abs_error": 0.0
+  },
+  {
+   "integrand": "neural_network",
+   "tolerance": 1e-09,
+   "solver": "torchdiffeq dopri5",
+   "time_median_s": 0.00823637517169118,
+   "time_min_s": 0.008172958856448531,
+   "time_max_s": 0.00844045914709568,
+   "evaluations": 140,
+   "abs_error": 4.8297501553662414e-09
+  },
+  {
+   "integrand": "neural_network",
+   "tolerance": 1e-09,
+   "solver": "padaquad dopri5",
+   "time_median_s": 0.002916208002716303,
+   "time_min_s": 0.0028163339011371136,
+   "time_max_s": 0.0030654589645564556,
+   "evaluations": 246,
+   "abs_error": 6.51660614359173e-10
+  },
+  {
+   "integrand": "neural_network",
+   "tolerance": 1e-09,
+   "solver": "padaquad gk21",
+   "time_median_s": 0.0011906251311302185,
+   "time_min_s": 0.0011374580208212137,
+   "time_max_s": 0.001524417195469141,
+   "evaluations": 254,
+   "abs_error": 0.0
+  }
+ ]
+}

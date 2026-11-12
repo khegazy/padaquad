@@ -48,12 +48,15 @@ dev = [
   "torchdiffeq",
 ]
 docs = [
-  "mkdocs-material>=9.4.0",
-  "mkdocstrings[python]>=0.22.0",
-  "mkdocs-gen-files>=0.5.0",
-  "mkdocs-literate-nav>=0.6.0",
-  "pillow>=10.0.0",
-  "cairosvg>=2.7.1",
+  # The combination the documentation is built and tested with.
+  "sphinx>=9.1",
+  "numpydoc>=1.11",
+  "myst-parser>=5.1",
+  "sphinx-gallery>=0.22",
+  "pydata-sphinx-theme>=0.24",
+  "sphinx-design>=0.6",
+  "sphinx-copybutton>=0.5",
+  "sphinxcontrib-bibtex>=2.6",
 ]
 
 [project.urls]
@@ -161,6 +164,8 @@ required-imports = ["from __future__ import annotations"]
 "__init__.py" = ["F401"]
 "tests/**" = ["ANN", "ARG", "D", "E402", "PTH", "S101"]
 "examples/**" = ["T201"]
+"docs/conf.py" = ["INP001", "ERA001"]
+"docs/_ext/**" = ["INP001"]
 
 [tool.ruff.format]
 indent-style = "space"

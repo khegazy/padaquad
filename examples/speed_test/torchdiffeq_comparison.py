@@ -42,7 +42,6 @@ from typing import TYPE_CHECKING, Any, cast
 import scipy
 import scipy.integrate
 import torch
-import torchdiffeq
 
 import padaquad
 from padaquad import integrand_dict
@@ -128,6 +127,8 @@ def run_once(solver: str, f: CountingIntegrand, tol: float, device: str) -> floa
     lo = torch.tensor([0.0], dtype=torch.float64, device=device)
     hi = torch.tensor([1.0], dtype=torch.float64, device=device)
     if solver == "torchdiffeq dopri5":
+        import torchdiffeq  # noqa: PLC0415 (dev dependency; the docs import this file)
+
         y = torchdiffeq.odeint(
             lambda t, _y: f(t.reshape(1, 1)).reshape(1),
             torch.zeros(1, dtype=torch.float64, device=device),
@@ -195,6 +196,8 @@ def metadata(device: str) -> dict[str, Any]:
         return subprocess.run(
             ["git", *args], cwd=root, capture_output=True, text=True, check=True
         ).stdout.strip()
+
+    import torchdiffeq  # noqa: PLC0415 (dev dependency; the docs import this file)
 
     return {
         "date_utc": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),

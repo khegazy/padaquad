@@ -1,5 +1,6 @@
 """
-quadrature_basics.py — minimal one-shot quadrature examples.
+Basic integrals
+===============
 
 Run with::
 
@@ -28,6 +29,12 @@ def _check(label: str, got: float, expected: float, tol: float = 1e-6) -> None:
     )
 
 
+# %%
+# The starting mesh is random (see the user guide); a fixed seed makes the
+# printed numbers the same on every run.
+torch.manual_seed(0)
+
+
 def example_sin_over_pi() -> None:
     """∫ sin(t) dt from 0 to π  =  2."""
     result = integrate(
@@ -43,6 +50,11 @@ def example_sin_over_pi() -> None:
     print(f"    estimated error : {result.integral_error.item():.2e}")
     print(f"    optimal mesh    : {result.mesh_optimal.shape[0]} barriers")
     print(f"    converged       : {result.converged}")
+
+
+# %%
+example_sin_over_pi()
+print()
 
 
 def example_polynomial() -> None:
@@ -68,6 +80,11 @@ def example_polynomial() -> None:
     _check("integral", result.integral.item(), 1.0 / 5.0, tol=1e-7)
 
 
+# %%
+example_polynomial()
+print()
+
+
 def example_gaussian_bump() -> None:
     """∫ exp(-t^2) dt from -2 to 2  =  sqrt(π) * erf(2)."""
     result = integrate(
@@ -81,6 +98,11 @@ def example_gaussian_bump() -> None:
     expected = math.sqrt(math.pi) * math.erf(2.0)
     print("exp(-t^2) over [-2, 2]:")
     _check("integral", result.integral.item(), expected)
+
+
+# %%
+example_gaussian_bump()
+print()
 
 
 def example_method_comparison() -> None:
@@ -121,6 +143,11 @@ def example_method_comparison() -> None:
         )
 
 
+# %%
+example_method_comparison()
+print()
+
+
 def example_warm_start_loop() -> None:
     """Use the class API to warm-start across a series of similar calls.
 
@@ -155,20 +182,5 @@ def example_warm_start_loop() -> None:
         )
 
 
-if __name__ == "__main__":
-    # Seed for reproducibility. The default initial-mesh path uses
-    # torch.rand to break alignment with uniformly-spaced features in
-    # the integrand; a fixed seed makes the example print stable
-    # numbers run-to-run (and keeps test_examples_run.py deterministic).
-    torch.manual_seed(0)
-    print("=" * 64)
-    example_sin_over_pi()
-    print()
-    example_polynomial()
-    print()
-    example_gaussian_bump()
-    print()
-    example_method_comparison()
-    print()
-    example_warm_start_loop()
-    print("=" * 64)
+# %%
+example_warm_start_loop()

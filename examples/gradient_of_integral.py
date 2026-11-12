@@ -1,6 +1,8 @@
 """
-gradient_of_integral.py — two equivalent ways to compute
-``d/dtheta integrate(f_theta(t)) dt``.
+Two ways to differentiate an integral
+=====================================
+
+Two equivalent ways to compute ``d/dtheta integrate(f_theta(t)) dt``.
 
 The integration operator is linear in the integrand, so it commutes
 with differentiation by a parameter that ``f`` depends on linearly.
@@ -115,7 +117,8 @@ def main() -> None:
     print("  All three agree to within 1e-6.")
 
 
-if __name__ == "__main__":
-    # Seed for reproducibility — see quadrature_basics.py for the why.
-    torch.manual_seed(0)
-    main()
+# %%
+# The starting mesh is random; a fixed seed makes the printed numbers the same
+# on every run.
+torch.manual_seed(0)
+main()

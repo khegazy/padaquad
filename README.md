@@ -269,9 +269,10 @@ the same text. In short:
 ## How it works
 <!-- include-start: how-it-works -->
 
-1. **Starting mesh.** When no `mesh` is given, $[a, b]$ is cut into about
-   $\sqrt{N}$ equal pieces and each piece is cut again at random points, for
-   about $N$ = `N_init_steps` mesh points (default 13). The points are random
+1. **Starting mesh.** When no `mesh` is given, $[a, b]$ is cut into
+   $s = \lfloor\sqrt{N}\rfloor$ equal pieces, $N$ = `N_init_steps`
+   (default 13), and each piece receives $s + 1$ mesh points at random
+   positions: $s(s+1)$ mesh points in all, 11 subintervals by default. The points are random
    because evenly spaced subintervals can line up with the features of a
    periodic integrand, so that every error estimate misses them. Call
    `torch.manual_seed` first for results that repeat exactly.

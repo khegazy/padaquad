@@ -7,7 +7,7 @@ method, it integrates each test function in ``padaquad.integrand_dict`` over
 [0, 1] at several tolerances, and compares the result with the exact answer.
 
 What padaquad promises: it accepts a subinterval when its *estimated* error is
-below the tolerance, max(atol, rtol x |integral|). The returned integral adds
+below the tolerance, ``max(atol, rtol * |integral|)``. The returned integral adds
 up the accepted subintervals, so if every estimate were an upper bound on the
 true error, the total error would be at most (number of subintervals) x
 tolerance. That bound is what this script checks. It also prints the ratio of

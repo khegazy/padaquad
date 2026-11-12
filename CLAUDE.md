@@ -25,7 +25,7 @@ python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 .venv/bin/pre-commit install
 
-# Run all tests (3304 pass and 129 skip on a CPU-only Mac; GPU-only tests skip there)
+# Run all tests and docstring examples (3379 pass and 129 skip on a CPU-only Mac; GPU-only tests skip there)
 .venv/bin/pytest tests/ -v
 
 # Run all tests with coverage
@@ -45,7 +45,44 @@ TPD_REGENERATE_SNAPSHOTS=1 .venv/bin/pytest tests/test_snapshots.py
 
 # Type check (enforced in CI by .github/workflows/tests.yaml; must report no issues)
 .venv/bin/mypy padaquad/
+
+# Docstring checks (pre-commit hook numpydoc-validation; config in pyproject.toml)
+numpydoc lint $(git ls-files 'padaquad/*.py')
+
+# Build the documentation (warnings are errors; CI: .github/workflows/docs.yaml)
+pip install -e ".[docs]"
+sphinx-build -W --keep-going -b html docs docs/_build/html
+sphinx-build -b linkcheck docs docs/_build/linkcheck
 ```
+
+`pytest` also runs the docstring Examples (`--doctest-modules`, testpaths
+include `padaquad/`); the repository-root `conftest.py` seeds torch and quiets
+the padaquad log for them.
+
+## Documentation
+
+- Sphinx + PyData theme in `docs/` (`conf.py`; pages in MyST Markdown). The
+  API reference is generated from the NumPy docstrings (autodoc, autosummary,
+  numpydoc; `autodoc_typehints = "none"`, so types come from the docstrings;
+  `autoclass_content = "both"`, so the solvers' constructor options, documented
+  in `AdaptiveQuadrature.__init__`, appear on the class pages).
+- Writing rules for docstrings and pages: `docs/development/docstrings.md`;
+  vocabulary: `docs/glossary.md` (subinterval, mesh, node, method; never
+  panel/barrier/step for a subinterval). `tests/test_docs_vocabulary.py`
+  checks the public docstrings and user pages.
+- One bibliography, `docs/references.bib`: only sources that were opened and
+  checked, each with a `note` saying what was checked. Each method's
+  `references` attribute holds its keys.
+- Generated at build time, never typed by hand: the methods table
+  (`docs/_ext/methods_table.py`, from the registries; tested by
+  `tests/test_docs_methods_table.py`) and the Performance table
+  (`docs/_ext/performance_table.py`, from `docs/performance/results.json`,
+  written by `examples/speed_test/torchdiffeq_comparison.py`).
+- README sections reused on the site are marked
+  `<!-- include-start: NAME -->` / `<!-- include-end: NAME -->`; README Python
+  blocks run in `tests/test_examples_run.py` unless preceded by
+  `<!-- not-tested -->`.
+- The gallery runs `examples/*.py` and `examples/verification/*.py`.
 
 mypy runs with every function annotated and every body checked
 (`disallow_untyped_defs`, `check_untyped_defs`, `disallow_any_generics`,

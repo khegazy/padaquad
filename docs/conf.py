@@ -106,3 +106,7 @@ html_context = {
     "doc_path": "docs",
 }
 html_static_path: list[str] = []
+
+# ACM and SIAM answer automated requests with 403 Forbidden. These DOIs
+# (Gonnet 2012, Trefethen 2008) were confirmed through the Crossref API.
+linkcheck_ignore = [r"https://doi\.org/10\.1145/", r"https://doi\.org/10\.1137/"]

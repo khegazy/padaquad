@@ -9,7 +9,7 @@ with code in this repository.
 quadrature**: it computes definite integrals
 $\int_a^b f(t)\,dt$ for a known integrand $f$ by evaluating many
 quadrature panels in parallel batches on GPU, with full autograd through
-the integration loop. v0.2.0 (Alpha), Python 3.11+.
+the integration loop. Version 1.3.0 in `pyproject.toml` (Alpha), Python 3.11+.
 
 **Critical distinction.** The integrand `f` depends only on `t` (and
 optional extra args), NOT on accumulated state `y`. This independence
@@ -75,7 +75,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_tableau.py` | Weights sum to 1 (uniform tables and the position-dependent rule) |
 | `test_path_integral.py` | `integrate()` wrapper matches direct solver construction |
 | `test_chemistry.py` | Wolf-Schlegel 2D potential: parallel vs scipy.integrate.quad |
-| `test_exactness.py` | **Polynomial-exactness** for every method (each method is exact through its claimed degree, e.g. gk21 through degree 31) |
+| `test_exactness.py` | **Polynomial degree** of every method via `MethodClass.measure_degree` (Legendre polynomials): exact through `method.degree` and not one degree further; error-estimate degree = `error_exponent - 2`; stored float64 tables checked in 60 digits (mpmath) |
 | `test_scipy_agreement.py` | Cross-validation against `scipy.integrate.quad` on canonical smooth integrands |
 | `test_convergence_rate.py` | Empirical convergence-rate slope matches each method's theoretical rate |
 | `test_autodiff_consistency.py` | $\nabla_\theta\int f_\theta dt$ via backprop equals $\int \nabla_\theta f_\theta dt$ |
@@ -97,6 +97,18 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: `mesh_optimal` re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
 | `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
+| `test_error_integral_reference.py` | The `error_integral_reference` argument of `integrate()` |
+| `test_error_masks.py` | Vector-error machinery (norms, `failure_fraction`, rounding floor) in float32 and float64 |
+| `test_evaluate_f_on_mesh.py` | `_evaluate_f_on_mesh` and its evaluation paths |
+| `test_examples_run.py` | Runs `examples/*.py`, every script in `examples/verification/`, and every ```python block of the README (except blocks preceded by `<!-- not-tested -->`) |
+| `test_max_adaptive_splits.py` | The `max_adaptive_splits` depth cap |
+| `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks` |
+| `test_methods_registry.py` | Registry consistency: table shapes and dtypes, `degree` / `error_exponent` types |
+| `test_multi_d_integrand.py` | Integrands with D > 1 outputs |
+| `test_oom_recovery.py` | The out-of-memory catch-and-retry path |
+| `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance |
+| `test_solver_isolation.py` | Solvers do not share method objects or state |
+| `test_tracked_variables.py` | The `tracked_variables` feature |
 | `test_split_statistics.py` | `n_start_steps` / `n_start_steps_split` / `max_split_depth` on integrands with known answers; `converged` against a hand-computed tolerance check (absolute and cumulative, with `y0`), in `failure_fraction` mode (including a NaN component), against the final integral, and its warning (numbers, output component, remedies); `max_adaptive_splits` type check |
 
 **Snapshot tests** are the regression net for internal refactors: the
@@ -163,6 +175,16 @@ built from data (a `_Tableau`; or node fractions and a module-level
 `weight_function`), never of a rule-specific subclass; both classes reject
 malformed node fractions with `ValueError`. `adaptive_heun` is one object in
 both registries.
+
+Each method stores `degree` (highest polynomial degree integrated exactly,
+validated int >= 0) and `error_exponent` (k = degree of the lower-degree method
+in the error estimate + 2, validated int >= 2); `order` is the property
+`degree + 1`. `MethodClass.measure_degree(nodes=None)` measures both degrees
+from the weights (Legendre polynomials, float64, CPU) and is what
+`tests/test_exactness.py` and `examples/verification/polynomial_degree.py`
+call. `examples/verification/integral_accuracy.py` checks whole integrations
+against exact answers; `fehlberg2`'s error estimate ignores curvature and is a
+documented known limitation there.
 
 ### Public API
 

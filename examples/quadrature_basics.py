@@ -49,7 +49,7 @@ def example_polynomial() -> None:
     """∫ t^4 dt from 0 to 1  =  1/5.
 
     gk21 is exact for polynomials of degree <= 31, so a single-panel
-    application of the rule gives bit-exact answer in float64. The
+    application of the rule gives the answer to float64 rounding. The
     adaptive controller in this example splits the panel anyway (its
     per-step error estimator uses a *different* polynomial estimate
     than the rule itself), so the result accumulates a few ULPs of
@@ -60,8 +60,9 @@ def example_polynomial() -> None:
         method="gk21",
         atol=1e-12,
         rtol=1e-12,
-        mesh_init=torch.tensor([0.0]),
-        mesh_final=torch.tensor([1.0]),
+        # float64 bounds: the solver takes its dtype from the bounds.
+        mesh_init=torch.tensor([0.0], dtype=torch.float64),
+        mesh_final=torch.tensor([1.0], dtype=torch.float64),
     )
     print("t^4 over [0, 1]:")
     _check("integral", result.integral.item(), 1.0 / 5.0, tol=1e-7)

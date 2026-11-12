@@ -19,9 +19,12 @@ The examples are also useful as integration smoke tests that exercise:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES_DIR = REPO_ROOT / "examples"
@@ -116,3 +119,42 @@ def test_verification_scripts_pass():
             f"stderr=\n{out.stderr}"
         )
         assert "[FAIL]" not in out.stdout, f"{script.name}: stdout=\n{out.stdout}"
+
+
+README = REPO_ROOT / "README.md"
+NOT_TESTED = "<!-- not-tested -->"
+
+
+def _readme_python_blocks() -> list[tuple[int, str]]:
+    """(line number, code) of every ```python block in the README that is not
+    preceded by the line ``<!-- not-tested -->`` (used for sketches that need
+    the reader's own model or data)."""
+    lines = README.read_text().splitlines()
+    blocks, i = [], 0
+    while i < len(lines):
+        if lines[i].strip() == "```python":
+            start = i + 1
+            end = lines.index("```", start)
+            previous = next((x for x in reversed(lines[:i]) if x.strip()), "")
+            if previous.strip() != NOT_TESTED:
+                blocks.append((start + 1, "\n".join(lines[start:end])))
+            i = end
+        i += 1
+    return blocks
+
+
+@pytest.mark.parametrize(
+    "line_and_code", _readme_python_blocks(), ids=lambda b: f"README.md:{b[0]}"
+)
+def test_readme_python_block_runs(line_and_code: tuple[int, str]) -> None:
+    """Each tested Python block of the README runs without error on the CPU."""
+    line, code = line_and_code
+    out = subprocess.run(
+        [PY, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=REPO_ROOT,
+        env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+    )
+    assert out.returncode == 0, f"README.md:{line} failed:\n{out.stderr[-2000:]}"

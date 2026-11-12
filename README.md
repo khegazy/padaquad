@@ -93,7 +93,7 @@ result = integrate(
     mesh_final=torch.tensor([math.pi]),
 )
 print(result.integral)  # tensor([2.0000])
-print(result.integral_error)  # estimated absolute error
+print(result.integral_error)  # estimated error: signed sum over subintervals
 print(result.converged)  # True
 ```
 
@@ -115,7 +115,7 @@ from padaquad import adaptive_quadrature, steps
 
 theta = torch.tensor(1.7, dtype=torch.float64, requires_grad=True)
 mesh_init = torch.tensor([0.0])
-mesh_final = torch.tensor([torch.pi.item()])
+mesh_final = torch.tensor([torch.pi])
 
 
 # (A) Backprop through the integral.
@@ -156,8 +156,10 @@ post-pruning mesh that the integration converged to. This mesh is the
 ideal starting point for a *similar* integrand on the next call: when
 training a model, the integrand changes only slightly between iterations,
 so re-running adaptive refinement from a coarse random mesh wastes
-work.
+work. The sketch below assumes your own integrand `f_theta`, bounds and
+optimizer.
 
+<!-- not-tested -->
 ```python
 solver = adaptive_quadrature(method="gk21", atol=1e-8, rtol=1e-8)
 
@@ -341,9 +343,9 @@ and `nodes`, `y` and `tracked_variables` keep one row per step
 
 3. **Per-step error estimate.** Each method computes both a primary
    integral and an embedded lower-order estimate; their difference is
-   the per-step error. The error ratio
-   $\text{step\\_error} / \max(\text{atol}, \text{rtol} \cdot |I|)$
-   (with $\text{atol} + \text{rtol} \cdot |I_d|$ per output element for
+   the per-step error estimate $e$. The error ratio
+   $|e| / \max(\text{atol}, \text{rtol} \cdot |I|)$, where $I$ is the
+   integral (with $\text{atol} + \text{rtol} \cdot |I_d|$ per output element for
    `error_norm="failure_fraction"`) controls acceptance: ratios $< 1$
    accept; ratios $\geq 1$ reject and split the step at its midpoint.
 
@@ -395,4 +397,4 @@ PyTorch function and many evaluations are needed.
 
 ## License
 
-CC-BY-4.0. See `LICENSE` for details.
+CC-BY-4.0. See [`LICENSE.md`](LICENSE.md) for details.

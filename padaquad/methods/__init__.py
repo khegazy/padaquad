@@ -48,7 +48,13 @@ from typing import TYPE_CHECKING
 
 from padaquad.base import steps
 
-from ._base import MethodClass, UniformMethodClass, VariableMethodClass, _Tableau
+from ._base import (
+    DegreeMeasurement,
+    MethodClass,
+    UniformMethodClass,
+    VariableMethodClass,
+    _Tableau,
+)
 from .clenshaw_curtis import CC_METHODS
 from .gauss_kronrod import GK_METHODS
 from .interpolatory import INTERPOLATORY_METHODS
@@ -121,6 +127,7 @@ __all__ = [
     "RK_METHODS",
     "UNIFORM_METHODS",
     "VARIABLE_METHODS",
+    "DegreeMeasurement",
     "MethodClass",
     "UniformMethodClass",
     "VariableMethodClass",

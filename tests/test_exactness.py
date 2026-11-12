@@ -1,31 +1,26 @@
-"""Polynomial-exactness tests for every quadrature rule.
+"""Polynomial-degree tests for every quadrature method.
 
-For an order-p Runge-Kutta method applied as quadrature, the rule
-integrates polynomials of degree <= p-1 exactly (for an order-p ODE
-method, the per-step truncation error vanishes when the integrand's
-(p)-th derivative is zero, i.e. for polynomials of degree p-1).
+A method's degree is the highest polynomial degree it integrates exactly. Each
+method stores the degree its theory gives (``method.degree``); these tests
+measure it from the stored nodes and weights with ``MethodClass.measure_degree``
+and check, for every method:
 
-This test directly applies each method's tableau weights to integrate
-``t**d`` on the unit interval ``[0, 1]`` and compares against the
-analytical truth ``1 / (d + 1)``. By bypassing the adaptive solver
-loop, we isolate the rule's intrinsic polynomial exactness from any
-adaptive refinement that could mask weight errors.
+1. it is exact through ``degree`` and not one degree further (both directions);
+2. the lower-degree method inside its error estimate (weights ``b - b_error``)
+   has degree ``error_exponent - 2``, the strength the solver's step-merging
+   rule assumes;
+3. in 60-digit arithmetic, the stored float64 tables are exact through
+   ``degree`` up to the rounding of the stored values. This uses mpmath's own
+   Legendre polynomials, so it also checks the float64 measurement.
 
-Two assertions per method:
+The measurement integrates Legendre polynomials, not powers of t. A power
+t^(d+1) is almost entirely made of lower-degree polynomials, so a method's
+error on it is tiny (about 3e-17 for gk31, below float64 rounding) and the
+power test reports false degrees. The Legendre errors one degree past each
+method's degree are all at least 4e-6.
 
-  1. For ``d`` from 0 up to and including the claimed exactness, the
-     rule is exact to ~1e-13 in float64.
-  2. For ``d = exactness + 1``, the rule is *not* exact (catches
-     "claimed exactness too high" bugs).
-
-Variable methods are tested at multiple interior-node positions ``a``
-to verify position-dependent behavior. Crucial sanity check:
-``generic3`` at ``a = 1/2`` reduces to Simpson's rule (weights
-``[1/6, 2/3, 1/6]``), which has exactness 3 rather than 2 — the test
-encodes both the general-position bound (degree 2) and the
-Simpson's-rule edge case (degree 3).
-
-Phase 0 of the quadrature alignment plan.
+``examples/verification/polynomial_degree.py`` runs the same measurement for
+users.
 """
 
 from __future__ import annotations
@@ -33,209 +28,117 @@ from __future__ import annotations
 import pytest
 import torch
 
-from padaquad import UNIFORM_METHODS
-from padaquad.base import steps
-from padaquad.methods import _get_method
+from padaquad import UNIFORM_METHODS, VARIABLE_METHODS
 
-EXACTNESS_TOL = 1e-13  # absolute tolerance in float64
-INEXACTNESS_MARGIN = 1e-6  # one degree past exactness must miss by at least this
+# Measured on 2026-11-12: the largest float64 error through a method's degree
+# is 3.5e-16 and the smallest error one degree past it is 4.2e-6 (cc65).
+MISS_MARGIN = 1e-8  # an error one degree past the degree must be at least this
+# Measured in 60 digits on the stored float64 tables: at most 3.1e-16.
+STORED_TABLE_TOL = 1e-14
 
-
-# Claimed polynomial exactness for each uniform method (degree p such that
-# the rule integrates t^d exactly for d <= p). Each value here is the
-# order-p-1 bound for an order-p RK method applied as a quadrature rule:
-# when the integrand is t^k with k <= p-1, the per-step truncation error
-# vanishes (the (p+1)-th derivative of the antiderivative is zero).
-UNIFORM_EXACTNESS = {
-    "adaptive_heun": 1,  # order 2 RK = trapezoidal-like
-    "fehlberg2": 1,  # order 2
-    "bosh3": 2,  # order 3
-    "dopri5": 4,  # order 5
-    # Gauss-Kronrod K_{2n+1} integrates polynomials of degree 3n+1
-    # exactly (n even) or 3n+2 (n odd). The G_n alone integrates
-    # 2n-1, so the embedded G estimate is exact for degree 19 (G10),
-    # 13 (G7), or 29 (G15); the b_error indicator picks up the gap
-    # between K and G.
-    "gk7": 10,  # G3-K7: K7 exactness = 3*3 + 1 = 10
-    "gk15": 22,  # G7-K15: K15 exactness = 3*7 + 1 = 22
-    "gk21": 31,  # G10-K21: K21 exactness = 3*10 + 1 = 31
-    "gk31": 46,  # G15-K31: K31 exactness = 3*15 + 1 = 46
-    # Clenshaw-Curtis CC_n integrates polynomials of degree n exactly.
-    "cc5": 4,
-    "cc9": 8,
-    "cc17": 16,
-    "cc33": 32,
-    "cc65": 64,
-}
-
-# Methods for which the "not exact one degree higher" upper-bound check
-# is reliable in float64. Above ~degree 20 the mathematical error at
-# exactness+1 falls below machine epsilon, so a tight upper-bound check
-# is no longer informative — float64 cancellation produces apparent
-# exactness at degrees where the rule is in fact mathematically inexact.
-# Coefficient-transcription bugs in high-order rules manifest at much
-# higher degrees and are caught by the convergence-rate / scipy-agreement
-# tests instead.
-UNIFORM_TIGHT_UPPER_BOUND = {
-    "adaptive_heun",
-    "fehlberg2",
-    "bosh3",
-    "dopri5",
-}
+# interpolatory3_variable: degree 2 for a general middle node, 3 at 1/2
+# (Simpson's rule). Its default nodes put the middle node at 1/2.
+OFF_CENTER = (0.25, 0.3, 0.7)
 
 
-def _uniform_quadrature(method, d: int) -> float:
-    """Apply ``method``'s tableau as a quadrature rule on ``[0, 1]`` to
-    integrate ``t**d``.
-
-    For a unit panel, the rule is ``sum(b_i * c_i**d)``: no h scaling.
-    """
-    c = method.tableau.c.to(torch.float64)
-    b = method.tableau.b.to(torch.float64)
-    return torch.sum(b * c**d).item()
+def _middle_node(a: float) -> torch.Tensor:
+    return torch.tensor([0.0, a, 1.0], dtype=torch.float64)
 
 
-@pytest.mark.parametrize("method_name", list(UNIFORM_METHODS.keys()))
-class TestUniformExactness:
-    """Each uniform method integrates polynomials up to its exactness."""
+@pytest.mark.parametrize("name", list(UNIFORM_METHODS))
+def test_uniform_degree_both_directions(name: str) -> None:
+    """Exact through ``degree``; not exact at ``degree + 1``."""
+    method = UNIFORM_METHODS[name]
+    measured = method.measure_degree()
+    assert measured.degree == method.degree, (
+        f"{name}: stored degree {method.degree}, measured {measured.degree}"
+    )
+    miss = abs(float(measured.errors[method.degree + 1]))
+    assert miss >= MISS_MARGIN, f"{name}: error at degree + 1 is only {miss:.2e}"
 
-    def test_exact_through_claimed_degree(self, method_name):
-        method = UNIFORM_METHODS[method_name]
-        exactness = UNIFORM_EXACTNESS[method_name]
-        for d in range(exactness + 1):
-            got = _uniform_quadrature(method, d)
-            truth = 1.0 / (d + 1)
-            assert abs(got - truth) < EXACTNESS_TOL, (
-                f"{method_name} should integrate t^{d} exactly: "
-                f"got {got!r}, truth {truth!r}, "
-                f"diff {abs(got - truth)!r} > tol {EXACTNESS_TOL!r}"
-            )
 
-    def test_not_exact_one_degree_higher(self, method_name):
-        if method_name not in UNIFORM_TIGHT_UPPER_BOUND:
-            pytest.skip(
-                f"upper-bound check skipped for {method_name}: at this "
-                f"polynomial-exactness level the mathematical error at "
-                f"exactness+1 falls below float64 machine epsilon, so the "
-                f"check is not informative. Coefficient errors are caught "
-                f"by test_scipy_agreement and test_convergence_rate."
-            )
-        method = UNIFORM_METHODS[method_name]
-        exactness = UNIFORM_EXACTNESS[method_name]
-        d = exactness + 1
-        got = _uniform_quadrature(method, d)
-        truth = 1.0 / (d + 1)
-        assert abs(got - truth) > INEXACTNESS_MARGIN, (
-            f"{method_name} accidentally exact for t^{d}? "
-            f"got {got!r}, truth {truth!r}, "
-            f"diff {abs(got - truth)!r} <= margin {INEXACTNESS_MARGIN!r}. "
-            f"Either exactness is higher than claimed or a weight is wrong."
+@pytest.mark.parametrize("name", list(UNIFORM_METHODS))
+def test_uniform_error_estimate_strength(name: str) -> None:
+    """The lower-degree method in the error estimate has degree k - 2."""
+    method = UNIFORM_METHODS[name]
+    assert method.measure_degree().lower_degree == method.error_exponent - 2
+
+
+@pytest.mark.parametrize("a", OFF_CENTER)
+def test_interpolatory3_general_position(a: float) -> None:
+    """Degree 2 and error-estimate degree 1 with the middle node off center."""
+    method = VARIABLE_METHODS["interpolatory3_variable"]
+    measured = method.measure_degree(_middle_node(a))
+    assert measured.degree == method.degree == 2
+    assert abs(float(measured.errors[3])) >= MISS_MARGIN
+    assert measured.lower_degree == method.error_exponent - 2
+
+
+def test_interpolatory3_center_is_simpson() -> None:
+    """With the middle node at 1/2 the method is Simpson's rule: degree 3."""
+    method = VARIABLE_METHODS["interpolatory3_variable"]
+    assert method.measure_degree(_middle_node(0.5)).degree == method.degree + 1
+    assert method.measure_degree().degree == method.degree + 1  # default nodes
+
+
+def test_variable_adaptive_heun() -> None:
+    """The variable registry's adaptive_heun is the trapezoidal rule."""
+    method = VARIABLE_METHODS["adaptive_heun"]
+    measured = method.measure_degree()
+    assert measured.degree == method.degree == 1
+    assert measured.lower_degree == method.error_exponent - 2
+
+
+@pytest.mark.parametrize("name", list(UNIFORM_METHODS))
+def test_stored_tables_in_60_digits(name: str) -> None:
+    """The stored float64 tables are exact through ``degree`` to 1e-14 and miss
+    at ``degree + 1``, evaluated in 60-digit arithmetic with mpmath's Legendre
+    polynomials (independent of ``measure_degree``)."""
+    mpmath = pytest.importorskip("mpmath")
+    method = UNIFORM_METHODS[name]
+    mp = mpmath.mp.clone()
+    mp.dps = 60
+    c = [float(v) for v in method.tableau.c]
+    b = [float(v) for v in method.tableau.b]
+    x = [2 * mp.mpf(v) - 1 for v in c]
+    w = [mp.mpf(v) for v in b]
+    for k in range(method.degree + 2):
+        exact = 1 if k == 0 else 0
+        error = abs(
+            mp.fsum(wi * mp.legendre(k, xi) for xi, wi in zip(x, w, strict=True))
+            - exact
         )
+        if k <= method.degree:
+            assert error <= STORED_TABLE_TOL, f"{name}: degree {k} error {error}"
+        else:
+            assert error >= MISS_MARGIN, f"{name}: degree {k} error only {error}"
 
 
-# -----------------------------------------------------------------------------
-# Variable methods: weights depend on interior node position(s).
-# -----------------------------------------------------------------------------
+def test_measure_degree_rejects_other_nodes_for_fixed_weights() -> None:
+    """A method whose weights ignore the node positions can only be measured at
+    its own node fractions."""
+    method = UNIFORM_METHODS["cc5"]
+    other = torch.tensor([0.0, 0.2, 0.5, 0.75, 1.0], dtype=torch.float64)
+    with pytest.raises(ValueError, match="do not depend on the node positions"):
+        method.measure_degree(other)
 
 
-def _variable_quadrature(method, c_normalized: torch.Tensor, d: int) -> float:
-    """Apply a variable-sampling method's weights for nodes at ``c_normalized``.
-
-    Args:
-        method: A variable-registry method (``_get_method`` result).
-        c_normalized: Node positions ``[C]`` in ``[0, 1]`` of one unit panel.
-        d: Polynomial degree to integrate.
-    """
-    c = c_normalized.to(torch.float64)
-    b, _ = method.weights(c.view(1, -1, 1))  # [1, C, 1]
-    return (b[0, :, 0] * c**d).sum().item()
-
-
-class TestVariableHeunExactness:
-    """Variable adaptive_heun has fixed weights (position-independent)
-    so it should be trapezoidal: exact for degree 1 only.
-    """
-
-    @pytest.fixture
-    def method(self):
-        return _get_method(
-            steps.ADAPTIVE_VARIABLE, "adaptive_heun", "cpu", torch.float64
-        )
-
-    def test_exact_through_degree_1(self, method):
-        # Endpoints at [0, 1] is the natural choice for a 2-node trap rule
-        c = torch.tensor([0.0, 1.0], dtype=torch.float64)
-        for d in range(2):
-            got = _variable_quadrature(method, c, d)
-            truth = 1.0 / (d + 1)
-            assert abs(got - truth) < EXACTNESS_TOL
-
-    def test_not_exact_for_degree_2(self, method):
-        c = torch.tensor([0.0, 1.0], dtype=torch.float64)
-        d = 2
-        got = _variable_quadrature(method, c, d)
-        truth = 1.0 / (d + 1)
-        assert abs(got - truth) > INEXACTNESS_MARGIN
+@pytest.mark.parametrize(
+    "nodes",
+    [
+        torch.tensor([0.0, 1.0], dtype=torch.float64),  # wrong count
+        torch.tensor([0.0, 0.7, 0.5], dtype=torch.float64),  # malformed
+    ],
+    ids=["wrong-count", "malformed"],
+)
+def test_measure_degree_rejects_bad_nodes(nodes: torch.Tensor) -> None:
+    method = VARIABLE_METHODS["interpolatory3_variable"]
+    with pytest.raises(ValueError, match="node"):
+        method.measure_degree(nodes)
 
 
-class TestVariableThirdOrderExactness:
-    """`generic3` (Sanderse-Veldman) is a 3-point interpolatory rule with
-    one variable interior node ``a``.
-
-    At ``a = 1/2`` the weights become ``[1/6, 2/3, 1/6]`` — Simpson's rule —
-    so exactness rises to degree 3. At general ``a in (0, 1) \\ {1/2}`` the
-    rule has exactness 2.
-    """
-
-    @pytest.fixture
-    def method(self):
-        return _get_method(
-            steps.ADAPTIVE_VARIABLE, "interpolatory3_variable", "cpu", torch.float64
-        )
-
-    def test_simpson_reduction_at_half(self, method):
-        # Verify the weights themselves match Simpson's rule.
-        c = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64).view(1, 3, 1)
-        b, _ = method.weights(c)  # [1, 3, 1]
-        expected = torch.tensor([1.0 / 6.0, 2.0 / 3.0, 1.0 / 6.0], dtype=torch.float64)
-        assert torch.allclose(b[0, :, 0], expected, atol=1e-15), (
-            f"generic3 at a=1/2 should be Simpson's rule [1/6, 2/3, 1/6]; "
-            f"got {b[0, :, 0].tolist()}"
-        )
-
-    def test_simpson_exact_through_degree_3(self, method):
-        c = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64)
-        for d in range(4):
-            got = _variable_quadrature(method, c, d)
-            truth = 1.0 / (d + 1)
-            assert abs(got - truth) < EXACTNESS_TOL, (
-                f"generic3 at a=1/2 (Simpson's) should be exact for t^{d}: "
-                f"got {got}, truth {truth}"
-            )
-
-    def test_simpson_not_exact_for_degree_4(self, method):
-        c = torch.tensor([0.0, 0.5, 1.0], dtype=torch.float64)
-        d = 4
-        got = _variable_quadrature(method, c, d)
-        truth = 1.0 / (d + 1)
-        assert abs(got - truth) > INEXACTNESS_MARGIN
-
-    @pytest.mark.parametrize("a", [0.2, 0.3, 0.4, 0.7])
-    def test_general_position_exact_through_degree_2(self, method, a):
-        c = torch.tensor([0.0, a, 1.0], dtype=torch.float64)
-        for d in range(3):
-            got = _variable_quadrature(method, c, d)
-            truth = 1.0 / (d + 1)
-            assert abs(got - truth) < EXACTNESS_TOL, (
-                f"generic3 at a={a} should be exact for t^{d}: got {got}, truth {truth}"
-            )
-
-    @pytest.mark.parametrize("a", [0.2, 0.3, 0.4, 0.7])
-    def test_general_position_not_exact_for_degree_3(self, method, a):
-        c = torch.tensor([0.0, a, 1.0], dtype=torch.float64)
-        d = 3
-        got = _variable_quadrature(method, c, d)
-        truth = 1.0 / (d + 1)
-        assert abs(got - truth) > INEXACTNESS_MARGIN, (
-            f"generic3 at a={a} unexpectedly exact for t^{d}? got {got}, truth {truth}"
-        )
+def test_measure_degree_rejects_weights_exact_everywhere() -> None:
+    """Weights that are exact up to degree 2C cannot be right: raise."""
+    method = UNIFORM_METHODS["gk7"]
+    with pytest.raises(ValueError, match="no error above"):
+        method.measure_degree(tol=1.0)

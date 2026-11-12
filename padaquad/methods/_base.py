@@ -24,12 +24,12 @@ from __future__ import annotations
 import copy
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Self
+from typing import TYPE_CHECKING, NamedTuple, Self
+
+import torch
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    import torch
 
 
 @dataclass
@@ -72,6 +72,27 @@ class _Tableau:
         self.c = self.c.to(device)
         self.b = self.b.to(device)
         self.b_error = self.b_error.to(device)
+
+
+class DegreeMeasurement(NamedTuple):
+    """
+    Result of ``MethodClass.measure_degree``.
+
+    Attributes:
+        degree: Measured degree of the method (weights ``b``): the highest
+            polynomial degree it integrates exactly. -1 if it does not even
+            integrate a constant exactly.
+        lower_degree: Measured degree of the lower-degree method inside the
+            error estimate (weights ``b - b_error``).
+        errors: Error of the method on the Legendre polynomial P_k(2t - 1)
+            over [0, 1], for k = 0, 1, ..., 2C. Shape: [2C + 1], float64.
+        lower_errors: The same for the lower-degree method. Shape: [2C + 1].
+    """
+
+    degree: int
+    lower_degree: int
+    errors: torch.Tensor
+    lower_errors: torch.Tensor
 
 
 class MethodClass(ABC):
@@ -169,16 +190,20 @@ class MethodClass(ABC):
         """Number of nodes per panel (C)."""
         return len(self.node_fractions())
 
-    def _check_node_fractions(self) -> None:
+    def _check_node_fractions(self, c: torch.Tensor | None = None) -> None:
         """
-        Validate ``node_fractions()``; called at the end of each constructor.
+        Validate node fractions; called at the end of each constructor.
+
+        Args:
+            c: Fractions to check. Default: ``node_fractions()``.
 
         Raises:
             ValueError: Unless the fractions are 1-D with at least two entries,
                 start at 0, end at 1, and never decrease (repeated values are
                 allowed: dopri5 has two nodes at 1).
         """
-        c = self.node_fractions()
+        if c is None:
+            c = self.node_fractions()
         if not (
             c.ndim == 1
             and len(c) >= 2
@@ -190,6 +215,97 @@ class MethodClass(ABC):
                 f"{type(self).__name__}: node fractions must be 1-D, start at 0, "
                 f"end at 1 and never decrease; got {c.tolist()}"
             )
+
+    def measure_degree(
+        self, nodes: torch.Tensor | None = None, tol: float = 1e-12
+    ) -> DegreeMeasurement:
+        """
+        Measure the polynomial degree of the method and of its error estimate.
+
+        Integrates the Legendre polynomials P_k(2t - 1), k = 0, 1, ..., 2C, over
+        one subinterval [0, 1] (C = number of nodes) with the method's weights
+        ``b``, and with the weights ``b - b_error`` of the lower-degree method
+        inside its error estimate. The exact values are 1 for k = 0 and 0 for
+        k >= 1. The measured degree is the last k before the first error larger
+        than ``tol``. The calculation runs in float64 on the CPU.
+
+        Legendre polynomials are used instead of the powers t^k because a high
+        power is almost entirely made of lower-degree polynomials, which the
+        method integrates exactly: its error on t^(d+1) is its error on
+        P_(d+1) times (k!)^2 2^k / (2k)! with k = d + 1, about 4e-14 for
+        gk31, which float64 cannot resolve. The Legendre errors one degree past
+        each method's degree are all at least 4e-6.
+
+        The search stops at k = 2C because no method with C nodes is exact at
+        degree 2C (derivation): the polynomial (t - c_1)^2 ... (t - c_C)^2 has
+        degree 2C and is zero at every node, so the method gives 0 for it, but
+        its integral is positive.
+
+        Args:
+            nodes: Node fractions at which to measure a method whose weights
+                depend on the node positions: 1-D with C entries, from 0 to 1,
+                never decreasing. Default: ``node_fractions()``.
+            tol: Errors at most this large count as exact. The default suits
+                the float64 tables of ``UNIFORM_METHODS`` and
+                ``VARIABLE_METHODS``. A solver's copy of a method lowered to
+                float32 is measured as float32 values.
+
+        Returns:
+            DegreeMeasurement with the two measured degrees and the errors.
+
+        Raises:
+            ValueError: If ``nodes`` is malformed or does not have C entries;
+                if ``nodes`` differs from the node fractions while the weights
+                do not depend on the node positions (the measurement would
+                apply the weights at nodes they were not made for); or if no
+                error is larger than ``tol`` up to degree 2C (the weights cannot
+                be right).
+        """
+        f64 = torch.float64
+        default = self.node_fractions().detach().to("cpu", f64)
+        c = default if nodes is None else nodes.detach().to("cpu", f64)
+        self._check_node_fractions(c)
+        if c.shape != default.shape:
+            raise ValueError(
+                f"nodes must have {len(default)} entries (one per node), got "
+                f"shape {tuple(c.shape)}"
+            )
+        b, b_error = (w[0, :, 0].to("cpu", f64) for w in self.weights(c[None, :, None]))
+        if nodes is not None and not torch.equal(c, default):
+            b_default = self.weights(default[None, :, None])[0][0, :, 0].to("cpu", f64)
+            if torch.equal(b, b_default):
+                raise ValueError(
+                    f"{type(self).__name__}: the weights do not depend on the node "
+                    "positions, so the method can only be measured at its own "
+                    "node fractions"
+                )
+
+        # Legendre polynomials P_0..P_2C at x = 2c - 1 by the three-term
+        # recurrence P_(k+1) = ((2k + 1) x P_k - k P_(k-1)) / (k + 1)
+        # (NIST DLMF Eq. 18.9.1 with Table 18.9.1).
+        x = 2 * c - 1
+        max_degree = 2 * len(c)
+        legendre = [torch.ones_like(x), x]
+        for k in range(1, max_degree):
+            legendre.append(
+                ((2 * k + 1) * x * legendre[k] - k * legendre[k - 1]) / (k + 1)
+            )
+        p = torch.stack(legendre[: max_degree + 1])  # [2C + 1, C]
+        exact = torch.zeros(max_degree + 1, dtype=f64)
+        exact[0] = 1.0  # integral of P_k(2t - 1) over [0, 1] is 1 for k = 0, else 0
+
+        measured = []
+        for weights in (b, b - b_error):
+            errors = p @ weights - exact
+            failing = torch.nonzero(errors.abs() > tol)
+            if len(failing) == 0:
+                raise ValueError(
+                    f"{type(self).__name__}: no error above tol={tol} up to degree "
+                    f"{max_degree}; a method with {len(c)} nodes cannot be exact there"
+                )
+            measured.append((int(failing[0]) - 1, errors))
+        (degree, errors), (lower_degree, lower_errors) = measured
+        return DegreeMeasurement(degree, lower_degree, errors, lower_errors)
 
     def clone(self) -> Self:
         """

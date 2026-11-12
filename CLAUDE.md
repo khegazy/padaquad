@@ -71,7 +71,8 @@ the padaquad log for them.
   panel/barrier/step for a subinterval). `tests/test_docs_vocabulary.py`
   checks the public docstrings and user pages.
 - One bibliography, `docs/references.bib`: only sources that were opened and
-  checked, each with a `note` saying what was checked. Each method's
+  checked, each with a `checked` field saying what was checked (not printed on
+  the site). Each method's
   `references` attribute holds its keys.
 - Generated at build time, never typed by hand: the methods table
   (`docs/_ext/methods_table.py`, from the registries; tested by

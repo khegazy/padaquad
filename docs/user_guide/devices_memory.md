@@ -4,8 +4,7 @@
 
 `device` selects where the integrand is evaluated: `"cpu"`, `"cuda"`,
 `"cuda:N"` or a `torch.device`; `None` picks the GPU if one is available. The
-solver never changes PyTorch's global default device. `result_device` (default
-`"cpu"`) is where the per-subinterval arrays of the result go (nodes,
+solver never changes PyTorch's global default device. `result_device` is where the per-subinterval arrays of the result go (nodes,
 integrand values, contributions, errors), to keep them off the GPU; `None`
 keeps them on the solver's device. The integral, its error estimate and
 `mesh_optimal` stay on the solver's device.
@@ -25,9 +24,9 @@ stored value is used ({ref}`ug-same-f`), a **memory benchmark** measures how
 much memory one evaluation of the integrand takes, by calling it on 1, 10,
 100, … points. The batch size is then computed at every evaluation from the
 memory free at that moment: the usable memory is the free memory minus
-`(1 - total_mem_usage)` times the total memory (default `total_mem_usage` =
-0.9). With `take_gradient=True` the measured cost is multiplied by 2.1, a
-margin for backpropagation.
+`(1 - total_mem_usage)` times the total memory. With `take_gradient=True` the
+measured cost is multiplied by a safety factor, a margin for the memory that
+backpropagation needs.
 
 The benchmark takes a few seconds and logs warnings, and it runs on every call
 without `max_batch`. To run it once, integrate once without `max_batch`, read

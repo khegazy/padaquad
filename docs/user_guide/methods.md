@@ -11,9 +11,13 @@ subinterval's error estimate ({doc}`error_control`).
 
 The table is generated from `UNIFORM_METHODS` and `VARIABLE_METHODS` when this
 page is built. "Degree" is the highest polynomial degree the method integrates
-exactly, and "order" is the degree plus one: on a smooth integrand, the error of
-the method applied on subintervals of width $h$ falls like $h^\text{order}$
-{cite:p}`gonnet2012`. The last numeric column is the degree of the lower-degree
+exactly, and "order" is the degree plus one {cite:p}`gonnet2012`, Sec. 1. On a
+smooth integrand, the error of the method on one subinterval of width $h$ is of
+order $h^{\text{degree}+2}$ ({doc}`error_control`), and there are about $1/h$
+subintervals, so the total error falls like $h^\text{order}$ (derivation). The
+"Sources" column lists where each method's nodes and weights come from; for
+`gk7` it cites only the method's degree, because its digits are padaquad's own
+80-digit computation (see below). The last numeric column is the degree of the lower-degree
 method in the error estimate; the solver assumes the error estimate shrinks like
 $h$ to the power of that degree plus 2.
 
@@ -109,7 +113,7 @@ the nodes and weights are symmetric, it is also exact for degree $n + 1$
 {cite:p}`trefethen2008`, Theorem 5.2, Eq. (5.4). So `ccN` has degree $N$. The
 weights are computed in `_clenshaw_curtis_weights_unit` from a cosine sum that
 is algebraically the same as the program `clenshaw_curtis.m` in
-{cite:t}`trefethen2008`, Sec. 2, and are checked against a direct solve of the
+{cite:t}`trefethen2008`, Sec. 2 (checked for this project by expanding both), and are checked against a direct solve of the
 moment equations in the test suite.
 
 Every other node of `ccN` is a node of the Clenshaw-Curtis method with
@@ -124,20 +128,25 @@ The four Runge-Kutta methods use the weights of embedded Runge-Kutta pairs as
 quadrature formulas: with an integrand that does not depend on $y$, one step of
 a Runge-Kutta method is the quadrature formula {eq}`concepts-method` with the
 method's nodes $c_i$ and weights $b_i$. A Runge-Kutta method of order $p$ has
-degree at least $p - 1$ as a quadrature formula; the table gives the measured
+degree at least $p - 1$ as a quadrature formula (derivation: for $f$ a
+polynomial of degree $k$, the error of one step of width $h$ is a fixed multiple
+of $h^{k+1}$; order $p$ requires the error to be of order $h^{p+1}$, so the
+multiple is zero for every $k \le p - 1$). The table gives the measured
 degrees.
 
 - `fehlberg2` is Fehlberg's RK1(2) pair {cite:p}`fehlberg1969`, Table XIV:
   nodes $0, 1/2, 1$, weights $1/512, 255/256, 1/512$, and error weights that
   subtract the first-order weights $1/256, 255/256, 0$.
 - `adaptive_heun`, `bosh3` and `dopri5` were transcribed from torchdiffeq
-  {cite:p}`torchdiffeq`, and their nodes and weights agree with SciPy's RK23 and
-  RK45 tables {cite:p}`scipy_quadvec`. The original papers (Heun 1900;
+  {cite:p}`torchdiffeq`. The nodes and weights of `bosh3` and `dopri5` also agree
+  with SciPy's RK23 and RK45 tables {cite:p}`scipy_quadvec`; SciPy has no Heun
+  method. The original papers (Heun 1900;
   Bogacki and Shampine 1989; Dormand and Prince 1980) could not be opened to
   check them. The embedded weights of `dopri5`'s error estimate,
   $1951/21600, 0, 22642/50085, 451/720, -12231/42400, 649/6300, 1/60$, come from
   torchdiffeq; SciPy uses a different embedded set. Both satisfy the
-  fourth-order conditions, and both have degree 3 as quadrature formulas.
+  fourth-order conditions, and both have degree 3 as quadrature formulas
+  (checked for this project with exact fractions).
 - `adaptive_heun`'s error weights subtract the rectangle rule that uses the
   right end of the subinterval; the estimate has the same size as with Euler's
   method, which uses the left end.

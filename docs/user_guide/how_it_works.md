@@ -9,12 +9,12 @@
 ## The starting mesh
 
 Without a `mesh` argument, and without a stored mesh from `same_f=True`, the
-starting mesh is built from `N_init_steps` (default 13). With
+starting mesh is built from `N_init_steps`. With
 $s = \lfloor\sqrt{N_\text{init}}\rfloor$, the domain is cut into $s$ equal
 segments, and each segment receives $s + 1$ mesh points: at random positions
 (sorted) by default, or evenly spaced with `random_initial_mesh=False`. The
-mesh has $s(s+1)$ points and $s(s+1) - 1$ subintervals: 11 for the default
-(`result.n_start_steps` reports it).
+mesh has $s(s+1)$ points and $s(s+1) - 1$ subintervals (`result.n_start_steps`
+reports the number).
 
 The random positions are the default because evenly spaced subintervals can
 line up with evenly spaced features of the integrand, such as the zeros of a
@@ -52,7 +52,7 @@ e_\text{merged} \approx K (2h)^k = 2^{k-1}\, S\, \tau .
 $$ (merge-prediction)
 
 Its error ratio is therefore about $2^{k-1} S$, and the pair is merged only
-when that prediction is below `remove_cut` (default 0.1):
+when that prediction is below `remove_cut`:
 
 $$
 S < \frac{\texttt{remove\_cut}}{2^{k-1}} .

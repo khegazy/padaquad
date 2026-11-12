@@ -13,10 +13,11 @@ python -m venv .venv
 ## Checks every change must pass
 
 ```bash
-.venv/bin/pytest tests/                  # the test suite
+.venv/bin/pytest                         # tests and docstring examples
 .venv/bin/ruff check padaquad/ tests/    # lint
 .venv/bin/ruff format --check padaquad/  # formatting
 .venv/bin/mypy padaquad/                 # types (run where torch is installed)
+numpydoc lint $(git ls-files 'padaquad/*.py')  # docstring format
 ```
 
 `tests/test_snapshots.py` pins the integral, error estimate and optimal-mesh

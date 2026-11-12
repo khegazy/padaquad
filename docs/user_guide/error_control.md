@@ -23,11 +23,13 @@ The last term is the **rounding floor**: rounding alone makes an error of
 about this size on a subinterval, so the tolerance is never set below it, and
 refinement stops once a subinterval's error is at rounding level. This matters
 when the requested tolerance is smaller than the dtype can resolve. SciPy's
-`scipy.integrate.quad_vec` uses the same size, $50\,\varepsilon$ times the
-subinterval's contribution {cite:p}`scipy_quadvec`, but adds it to the error
-rather than to the tolerance, and only when it is larger than the smallest
-positive double; QUADPACK also rescales its error estimate
-{cite:p}`quadpack_netlib`, which padaquad does not.
+`scipy.integrate.quad_vec` has a similar floor {cite:p}`scipy_quadvec`, with
+three differences: it uses $50\,\varepsilon$ times the integral of $|f|$ over
+the subinterval rather than the absolute value of the subinterval's
+contribution; it raises the error estimate rather than the tolerance; and it
+applies the floor only when it is larger than the smallest positive double.
+QUADPACK also rescales its error estimate {cite:p}`quadpack_netlib`, which
+padaquad does not.
 
 The error estimate measures the embedded method's error, so it is usually much
 larger than the error of the integral padaquad returns, which uses the
@@ -77,15 +79,15 @@ and `converged` is `False`. Either way the run ends.
 When the integrand has $D > 1$ outputs, each subinterval has an error vector
 $e_k$, and `error_norm` turns it into one accept-or-split decision:
 
-- `"2"` (the default), `"max"`, `"rms"`, or a callable norm: the norm
+- `"2"`, `"max"`, `"rms"`, or a callable norm: the norm
   $R(e_k)$ of the error vector is compared with
   $\max(\text{atol}, \text{rtol}\, R(I))$. `"2"` is the Euclidean norm, `"max"`
   the largest absolute component, `"rms"` the root-mean-square; a callable must
   reduce the last axis of a `[..., D]` tensor.
 - `"failure_fraction"`: each component $d$ is compared with its own tolerance
   $\text{atol} + \text{rtol}\,|I_d|$, and the subinterval is accepted when the
-  fraction of failing components is at most `mesh_failure_tolerance` (default
-  0, so every component must pass). This bounds the error of every output, not
+  fraction of failing components is at most `mesh_failure_tolerance` (0 means
+  every component must pass). This bounds the error of every output, not
   an aggregate. This scheme is padaquad's own.
 
 For $D = 1$ the norm options all reduce to Eq. {eq}`error-ratio`.
@@ -102,14 +104,18 @@ by its own error ratio. SciPy has no `"rms"` or `"failure_fraction"` option.
 
 The relative tolerance multiplies a reference value of the integral:
 
-- **Absolute mode** (`use_absolute_error_ratio=True`, the default): the whole
-  integral. During the integration only part of it is known, so the solver
-  uses the running total of the subintervals evaluated so far. Early batches
-  therefore get a smaller tolerance than they would with the final integral,
-  and may be refined more than needed. With `take_gradient=False`, accepted
-  subintervals are checked again as the total grows. Passing
-  `error_integral_reference`, a value close to the true integral, fixes the
-  reference from the first batch.
+- **Absolute mode** (`use_absolute_error_ratio=True`): the whole integral.
+  During the integration only part of it is known, so the solver uses the
+  running total of the subintervals evaluated so far, and early batches get a
+  different tolerance than they would with the final integral. When the
+  running total is smaller than the final integral, early subintervals are
+  refined more than needed. When it is larger, for example when positive and
+  negative parts of the integrand cancel, early subintervals are accepted
+  against a tolerance that is too loose. With `take_gradient=False`, accepted
+  subintervals are checked again as the total changes and split if they fail;
+  with `take_gradient=True` they are not, and `converged` reports the failure
+  ({ref}`ug-convergence`). Passing `error_integral_reference`, a value close to
+  the true integral, fixes the reference from the first batch.
 - **Cumulative mode** (`use_absolute_error_ratio=False`): the running integral
   from `mesh_init` through each subinterval, as in ODE solvers. Tolerances then
   change along the domain; where the running integral passes through zero, the

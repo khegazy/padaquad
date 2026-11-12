@@ -2,8 +2,8 @@
 % the README reference list all take their references from this file.
 %
 % Rule: an entry is added only after the source has been opened and the cited
-% number, table or equation found in it. The `note` field says what was
-% checked. Sources that could not be opened (paywalls) are not listed; they are
+% number, table or equation found in it. The `checked` field (not printed on
+% the site) says what was checked. Sources that could not be opened (paywalls) are not listed; they are
 % recorded in the citation audit instead.
 
 @misc{dlmf,
@@ -12,7 +12,7 @@
   howpublished = {Online, accessed 2026-11-12},
   year         = {2026},
   url          = {https://dlmf.nist.gov/18.9},
-  note         = {Opened 2026-11-12. Sec. 18.9(i), Eq. 18.9.1 (p_{n+1} = (A_n x + B_n) p_n - C_n p_{n-1}) and Table 18.9.1 (Legendre: A_n = (2n+1)/(n+1), B_n = 0, C_n = n/(n+1)).}
+  checked      = {Opened 2026-11-12. Sec. 18.9(i), Eq. 18.9.1 (p_{n+1} = (A_n x + B_n) p_n - C_n p_{n-1}) and Table 18.9.1 (Legendre: A_n = (2n+1)/(n+1), B_n = 0, C_n = n/(n+1)).}
 }
 
 @techreport{fehlberg1969,
@@ -24,7 +24,7 @@
   year        = {1969},
   month       = jul,
   url         = {https://ntrs.nasa.gov/citations/19690021375},
-  note        = {NTRS document ID 19690021375; PDF opened. Checked Table XIV "Coefficients for RK1(2)" (report p. 29): alpha = 0, 1/2, 1; first-order weights c = 1/256, 255/256, 0; second-order weights c-hat = 1/512, 255/256, 1/512; Eq. (63) TE = (1/512)(f0 - f2) h. Matches padaquad fehlberg2 c, b, b_error exactly.}
+  checked     = {NTRS document ID 19690021375; PDF opened. Checked Table XIV "Coefficients for RK1(2)" (report p. 29): alpha = 0, 1/2, 1; first-order weights c = 1/256, 255/256, 0; second-order weights c-hat = 1/512, 255/256, 1/512; Eq. (63) TE = (1/512)(f0 - f2) h. Matches padaquad fehlberg2 c, b, b_error exactly.}
 }
 
 @article{trefethen2008,
@@ -36,7 +36,7 @@
   pages   = {67--87},
   year    = {2008},
   doi     = {10.1137/060659831},
-  note    = {Published version opened (mirror https://www.sci.utah.edu/~beiwang/teaching/cs6210-fall-2016/CC.pdf). Checked: Sec. 2, Eq. (2.2) and p. 69 (interpolatory rule exact for degree <= n); Eq. (2.3), p. 70 (Chebyshev points cos(j pi/n)); p. 70 clenshaw_curtis.m (weights 2/(1-k^2) on even Chebyshev coefficients) and node reuse when n is doubled; Theorem 5.2, Eq. (5.4), p. 78 (T_{n+p} integrated exactly when n +- p is odd, so degree n+1 for even n); Sec. 6, p. 82 ("since n is even, we get one more").}
+  checked = {Published version opened (mirror https://www.sci.utah.edu/~beiwang/teaching/cs6210-fall-2016/CC.pdf). Checked: Sec. 2, Eq. (2.2) and p. 69 (interpolatory rule exact for degree <= n); Eq. (2.3), p. 70 (Chebyshev points cos(j pi/n)); p. 70 clenshaw_curtis.m (weights 2/(1-k^2) on even Chebyshev coefficients) and node reuse when n is doubled; Theorem 5.2, Eq. (5.4), p. 78 (T_{n+p} integrated exactly when n +- p is odd, so degree n+1 for even n); Sec. 6, p. 82 ("since n is even, we get one more").}
 }
 
 @article{gonnet2012,
@@ -50,7 +50,7 @@
   doi     = {10.1145/2333112.2333117},
   eprint  = {1003.4629},
   archiveprefix = {arXiv},
-  note    = {arXiv v2 (7 Nov 2010) opened; page numbers below are the arXiv version's. Checked: Sec. 1, p. 3 (degree n => order n+1, Skeel-Keiper); Eqs. (4)-(5), Sec. 2.1, p. 5 (Simpson error ~ (b-a)^5 f^(4)); Eq. (24), Sec. 2.4, p. 10 (Piessens' error |G_n - K_{2n+1}|; K_{2n+1} degree 3n+1; Patterson extensions 3->7,15,31 of degree 5, 11, 23, 47); Sec. 2.5, pp. 12-13 (category 2: difference of rules of different degree); footnote 20, p. 26 (estimate is that of the lower-degree rule); Sec. 6, p. 34 (nested Clenshaw-Curtis or Gauss-Kronrod pairs).}
+  checked = {arXiv v2 (7 Nov 2010) opened; page numbers below are the arXiv version's. Checked: Sec. 1, p. 3 (degree n => order n+1, Skeel-Keiper); Eqs. (4)-(5), Sec. 2.1, p. 5 (Simpson error ~ (b-a)^5 f^(4)); Eq. (24), Sec. 2.4, p. 10 (Piessens' error |G_n - K_{2n+1}|; K_{2n+1} degree 3n+1; Patterson extensions 3->7,15,31 of degree 5, 11, 23, 47); Sec. 2.5, pp. 12-13 (category 2: difference of rules of different degree); footnote 20, p. 26 (estimate is that of the lower-degree rule); Sec. 6, p. 34 (nested Clenshaw-Curtis or Gauss-Kronrod pairs).}
 }
 
 @article{sanderse2019,
@@ -63,16 +63,16 @@
   doi     = {10.1016/j.jcp.2019.02.001},
   eprint  = {1809.06114},
   archiveprefix = {arXiv},
-  note    = {arXiv v2 (15 Feb 2019) opened; journal version not opened. Checked Eq. (119), Sec. 5.2, p. 21: one-parameter RK3 family with nodes 0, c2, 1 and weights b = (1/2 - 1/(6 c2), 1/(6 c2 (1 - c2)), (2 - 3 c2)/(6 (1 - c2))). Matches padaquad _interpolatory3_weights with a = c2.}
+  checked = {arXiv v2 (15 Feb 2019) opened; journal version not opened. Checked Eq. (119), Sec. 5.2, p. 21: one-parameter RK3 family with nodes 0, c2, 1 and weights b = (1/2 - 1/(6 c2), 1/(6 c2 (1 - c2)), (2 - 3 c2)/(6 (1 - c2))). Matches padaquad _interpolatory3_weights with a = c2.}
 }
 
 @misc{quadpack_netlib,
   author       = {Piessens, Robert and de Doncker, Elise},
-  title        = {{QUADPACK} routines dqk15, dqk21, dqk31 (double precision Gauss-Kronrod rules)},
+  title        = {{QUADPACK} routines dqk15, dqk21, dqk31 (double-precision Gauss-Kronrod quadrature)},
   howpublished = {Netlib},
   year         = {1983},
   url          = {https://netlib.org/quadpack/},
-  note         = {Files dqk15.f, dqk21.f, dqk31.f downloaded 2026-11-12 (revision date 830518). Header: nodes and weights "evaluated with 80 decimal digit arithmetic by L. W. Fullerton, Bell Labs, Nov. 1981". Every xgk/wgk/wg data value compared digit-by-digit with padaquad _GK15_*, _GK21_*, _GK31_*: 86 of 87 identical to all 33 digits; dqk21 wgk(3) differs in the 33rd digit (padaquad ...244582, Netlib ...244580; Netlib is correctly rounded). Also checked the error logic (dqk21.f lines 176-180: |resk - resg| * hlgth, (200*abserr/resasc)^1.5 rescaling, max(50*epmach*resabs, abserr)). Companion book: Piessens, de Doncker-Kapenga, Ueberhuber, Kahaner, QUADPACK, Springer 1983, doi:10.1007/978-3-642-61786-7 (book not opened).}
+  checked      = {Files dqk15.f, dqk21.f, dqk31.f downloaded 2026-11-12 (revision date 830518). Header: nodes and weights "evaluated with 80 decimal digit arithmetic by L. W. Fullerton, Bell Labs, Nov. 1981". Every xgk/wgk/wg data value compared digit-by-digit with padaquad _GK15_*, _GK21_*, _GK31_*: 86 of 87 identical to all 33 digits; dqk21 wgk(3) differs in the 33rd digit (padaquad ...244582, Netlib ...244580; Netlib is correctly rounded). Also checked the error logic (dqk21.f lines 176-180: |resk - resg| * hlgth, (200*abserr/resasc)^1.5 rescaling, max(50*epmach*resabs, abserr)). Companion book: Piessens, de Doncker-Kapenga, Ueberhuber, Kahaner, QUADPACK, Springer 1983, doi:10.1007/978-3-642-61786-7 (book not opened).}
 }
 
 @misc{scipy_quadvec,
@@ -81,7 +81,7 @@
   howpublished = {GitHub, tags v1.18.1 (tag object c2df8ace) and v1.17.0 (tag object e2f9e521)},
   year         = {2026},
   url          = {https://github.com/scipy/scipy/blob/v1.18.1/scipy/integrate/_quad_vec.py},
-  note         = {Opened. _quad_vec.py v1.18.1: line 81 _max_norm; line 98 default norm='2'; line 115 norm : {'max', '2'}; lines 288-295 norm map; lines 373/409 tol = max(epsabs, epsrel*norm_func(global_integral)); line 410 global_error < tol/8 (global acceptance); lines 536-543 QUADPACK rescaling and round_err = norm(50*eps*h*s_k_abs), err = max(err, round_err). v1.17.0 has the same code at lines 383/419/420/547-553. rk.py v1.18.1 lines 360-367 (RK23 C, B, E) and 541-552 (RK45 C, B, E with the 5179/57600 embedded set). Documentation page https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.quad_vec.html (v1.18.0 manual) also opened. The SciPy 1.0 paper (Virtanen et al. 2020) was not opened.}
+  checked      = {Opened. _quad_vec.py v1.18.1: line 81 _max_norm; line 98 default norm='2'; line 115 norm : {'max', '2'}; lines 288-295 norm map; lines 373/409 tol = max(epsabs, epsrel*norm_func(global_integral)); line 410 global_error < tol/8 (global acceptance); lines 536-543 QUADPACK rescaling and round_err = norm(50*eps*h*s_k_abs), err = max(err, round_err). v1.17.0 has the same code at lines 383/419/420/547-553. rk.py v1.18.1 lines 360-367 (RK23 C, B, E) and 541-552 (RK45 C, B, E with the 5179/57600 embedded set). Documentation page https://docs.scipy.org/doc/scipy/reference/generated/scipy.integrate.quad_vec.html (v1.18.0 manual) also opened. The SciPy 1.0 paper (Virtanen et al. 2020) was not opened.}
 }
 
 @inproceedings{chen2018,
@@ -90,7 +90,7 @@
   booktitle = {Advances in Neural Information Processing Systems 31 (NeurIPS 2018)},
   year      = {2018},
   url       = {https://papers.nips.cc/paper_files/paper/2018/hash/69386f6bb1dfed68692a24c8686939b9-Abstract.html},
-  note      = {Proceedings abstract page opened (title, authors, volume). Page numbers not shown there and not filled in.}
+  checked   = {Proceedings abstract page opened (title, authors, volume). Page numbers not shown there and not filled in.}
 }
 
 @misc{torchdiffeq,
@@ -98,7 +98,7 @@
   title        = {torchdiffeq},
   year         = {2018},
   url          = {https://github.com/rtqichen/torchdiffeq},
-  note         = {Opened README and _impl/{adaptive_heun,fehlberg2,bosh3,dopri5}.py at master commit 657943acefa826ef04c025ebeb1ff5e9d60dc268 (2025-04-04). README lines 160-165 give this @misc entry. Tableaus match padaquad's RK tables exactly, including dopri5 c_error built from the 1951/21600 embedded set (earlier check on release 0.2.5, 2026-11-11).}
+  checked      = {Opened README and _impl/{adaptive_heun,fehlberg2,bosh3,dopri5}.py at master commit 657943acefa826ef04c025ebeb1ff5e9d60dc268 (2025-04-04). README lines 160-165 give this @misc entry. Tableaus match padaquad's RK tables exactly, including dopri5 c_error built from the 1951/21600 embedded set (earlier check on release 0.2.5, 2026-11-11).}
 }
 
 @misc{torchquad,
@@ -106,5 +106,5 @@
   title        = {torchquad},
   year         = {2026},
   url          = {https://github.com/esa/torchquad},
-  note         = {Opened README at main commit fc6f9cd017624f0ba9210ed294c2b55a676fa7bd (2026-10-28); latest release v0.6.0 (2026-08-29). README lines 339-341: "Adaptive subdivision is simply the right approach for a low-dimensional integrand with a localized feature, and torchquad does not implement it." Methods: Monte Carlo, VEGAS, Boole, Simpson, trapezoid, Gaussian quadrature (docs/source/integration_methods.rst). Author field is the GitHub owner/repository name, not taken from a citation file (none was checked).}
+  checked      = {Opened README at main commit fc6f9cd017624f0ba9210ed294c2b55a676fa7bd (2026-10-28); latest release v0.6.0 (2026-08-29). README lines 339-341: "Adaptive subdivision is simply the right approach for a low-dimensional integrand with a localized feature, and torchquad does not implement it." Methods: Monte Carlo, VEGAS, Boole, Simpson, trapezoid, Gaussian quadrature (docs/source/integration_methods.rst). Author field is the GitHub owner/repository name, not taken from a citation file (none was checked).}
 }

@@ -5,9 +5,9 @@
 :end-before: "<!-- include-end: quickstart -->"
 ```
 
-The integral above runs with the defaults: the method `gk21`, absolute and
-relative tolerances of `1e-5`, and a batch size chosen from the free memory
-(the first call measures how much memory one evaluation of `f` uses, which
-takes a few seconds; pass `max_batch` to skip it). See
+The integral above uses the default method and tolerances, and a batch size
+chosen from the free memory: the first call measures how much memory one
+evaluation of `f` uses, which takes a few seconds; pass `max_batch` to skip
+it. See
 {doc}`../user_guide/index` for what each option does, and
 {func}`padaquad.integrate` for the full list.

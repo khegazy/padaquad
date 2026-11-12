@@ -275,6 +275,39 @@ def render_markdown(results: dict[str, Any]) -> str:
             f"{1e3 * row['time_max_s']:.2f} | {row['evaluations']} | {row['abs_error']:.1e} | "
             f"{speedup:.1f}x |"
         )
+    return "\n".join(lines) + "\n\n" + _summary(results)
+
+
+def _summary(results: dict[str, Any]) -> str:
+    """Summarize the results table in sentences, from the same numbers."""
+    rows = results["rows"]
+    base = {
+        (r["integrand"], r["tolerance"]): r
+        for r in rows
+        if r["solver"] == "torchdiffeq dopri5"
+    }
+    lines = []
+    for solver in SOLVERS[1:]:
+        mine = [r for r in rows if r["solver"] == solver]
+        speedups = [
+            base[(r["integrand"], r["tolerance"])]["time_median_s"] / r["time_median_s"]
+            for r in mine
+        ]
+        worse = [
+            f"{r['integrand']} at {r['tolerance']:.0e} ({r['abs_error']:.1e} against "
+            f"{base[(r['integrand'], r['tolerance'])]['abs_error']:.1e})"
+            for r in mine
+            if r["abs_error"] > base[(r["integrand"], r["tolerance"])]["abs_error"]
+        ]
+        accuracy = (
+            "its error is at or below torchdiffeq's in every case"
+            if not worse
+            else "its error is above torchdiffeq's in " + "; ".join(worse)
+        )
+        lines.append(
+            f"- **{solver}** is {min(speedups):.1f} to {max(speedups):.1f} times "
+            f"faster than torchdiffeq at the same tolerance; {accuracy}."
+        )
     return "\n".join(lines) + "\n"
 
 

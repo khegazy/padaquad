@@ -71,3 +71,15 @@ def test_references_must_be_a_tuple_of_str(references):
             tableau=_Tableau(c=c, b=c * 0 + 0.5, b_error=c * 0),
             references=references,
         )
+
+
+def test_readme_references_match_the_bibliography():
+    """The README's reference list is generated from docs/references.bib; run
+    ``python docs/_ext/readme_references.py`` after editing the bibliography."""
+    spec = importlib.util.spec_from_file_location(
+        "readme_references", DOCS / "_ext" / "readme_references.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    readme = module.README.read_text()
+    assert readme == module.readme_with_references(readme)

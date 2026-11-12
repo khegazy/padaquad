@@ -29,7 +29,9 @@ For each case the script records the median wall time of 7 runs after one
 warm-up run (with `torch.cuda.synchronize` around each run on a GPU), the
 smallest and largest time, the number of points at which $f$ was evaluated,
 and the absolute error against the exact answer. padaquad runs with a fixed
-`max_batch` of 100 000, so its one-time memory benchmark is not timed.
+`max_batch`, so its one-time memory benchmark is not timed, and with
+`take_gradient=False`, because no gradient is computed (torchdiffeq's forward
+solve is timed without one too).
 
 **Read the errors as well as the times.** The two libraries apply the
 tolerance differently: torchdiffeq tests each step's error against
@@ -44,20 +46,19 @@ tolerances therefore do not give equal accuracy.
 
 ## What the results show
 
-- On this CPU, padaquad is 1.6 to 46 times faster than torchdiffeq at the same
-  tolerance: `gk21` 1.6 to 46 times, padaquad's `dopri5` 1.6 to 12 times.
-- `gk21`'s error is at or below torchdiffeq's in every case; on these smooth
-  integrands it meets both tolerances on the starting mesh (254 evaluations:
-  11 subintervals of 23 nodes, plus one check call) without splitting.
-  padaquad's `dopri5` is less accurate than torchdiffeq on `sine_squared` at
-  $10^{-9}$ ($3.1 \times 10^{-9}$ against $1.1 \times 10^{-10}$).
+The two lines under the table are generated from the results file, like the
+table itself.
+
 - The gain is smallest on the simplest integrands (`t`, `t_squared`), where
   both solvers finish in about a millisecond and fixed per-call costs
   dominate, and largest where torchdiffeq needs many sequential steps
-  (`sine_squared`, `damped_sine` at $10^{-9}$).
-- **Not measured here:** GPU runs. The batching should matter more on a GPU,
-  where one call on many points costs about as much as a call on one point,
-  but no GPU result is claimed until it is measured.
+  (`sine_squared`, `damped_sine` at the tighter tolerance).
+- On these smooth integrands `gk21` meets both tolerances on the starting mesh,
+  without splitting a subinterval: its number of evaluations is the same at
+  both tolerances.
+- **Not measured here:** GPU runs. The batching is expected to matter more on a
+  GPU, where one call on many points costs little more than a call on one
+  point, but no GPU result is claimed until it is measured.
 
 ## Reproduce
 

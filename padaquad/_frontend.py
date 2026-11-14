@@ -1,5 +1,5 @@
 """
-One-call integration and the solver factory.
+User-facing functions that build a solver and run it.
 
 ``integrate()`` computes a definite integral in one call, without building a
 solver object. ``adaptive_quadrature()`` builds the solver for a sampling type;
@@ -170,7 +170,7 @@ def integrate(
     The integral of ``sin(t)`` from 0 to ``pi`` is 2.
 
     >>> import torch
-    >>> from padaquad.integrate import integrate
+    >>> from padaquad import integrate
     >>> _ = torch.manual_seed(0)  # the starting mesh is random
     >>> result = integrate(
     ...     torch.sin,

@@ -8,6 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Removed
 
+- **The submodule `padaquad.integrate`.** It had the same name as the function it defined, so `padaquad.integrate` meant the module or the function depending on how it was imported. Its code is now the private module `padaquad._frontend`. `from padaquad import integrate, adaptive_quadrature` is unchanged; `from padaquad.integrate import integrate` now raises `ModuleNotFoundError`; use `from padaquad import integrate`.
 - **`max_path_change`.** The constructor argument and the early exit it controlled are gone; `max_adaptive_splits` bounds refinement instead. Passing `max_path_change=` now raises `TypeError`. To migrate:
   - To limit how much a call refines, set `max_adaptive_splits`. The call returns `converged=False` when it stopped short of the tolerance, and repeated `same_f=True` calls refine further from `mesh_optimal`, which splits the failing steps (as the early exit's stored mesh did; in cumulative mode a failing step can instead be merged with a right neighbour whose running integral, and so tolerance, is much larger).
   - To see how much of the starting mesh failed, read `n_start_steps_split` / `percent_start_steps_split` (below). With `max_adaptive_splits=0` nothing is split, so read `converged`, or `(result.error_ratios >= 1).float().mean()`, the fraction of steps that failed when accepted (with `error_norm="failure_fraction"`, `error_ratios` holds failure fractions, so compare with `> mesh_failure_tolerance` instead).
@@ -50,7 +51,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
   - Both registries hold instances that `_get_method` clones per solver, so `VARIABLE_METHODS[name]()` no longer works; `VARIABLE_METHODS["adaptive_heun"]` is the same object as `UNIFORM_METHODS["adaptive_heun"]` (its two nodes are the panel ends, so its weights cannot depend on positions).
   - `method.weights(nodes)` returns `b` and `b_error` shaped `[N, C, 1]` for every rule (the uniform weights were `[C, 1]`, adaptive heun's `[1, C, 1]`); stored tables are `[C]`, including adaptive heun's, which was `[1, 2]`.
   - An unknown method name raises `ValueError` listing the valid names, from `_get_method`; it was an `AssertionError` in the solver or a `KeyError` in `_get_method`.
-  - `UniformAdaptiveQuadrature` and `VariableAdaptiveQuadrature` are defined in `padaquad.quadrature`, and `adaptive_quadrature` in `padaquad.integrate`; `from padaquad import ...` is unchanged.
+  - `UniformAdaptiveQuadrature` and `VariableAdaptiveQuadrature` are defined in `padaquad.quadrature`, and `integrate` and `adaptive_quadrature` in the private module `padaquad._frontend` (it was `padaquad.integrate`, a module with the same name as the function it defines); `from padaquad import ...` is unchanged.
 
   No numerical result changes: 1,280 integrations (both sampling modes, float32 and float64, gradients, D = 3, several batches, `conserve_memory`, warm starts) give bit-identical tensors.
 - **The variable solver detaches its error estimates,** as the uniform solver already did (they only drive accept/split decisions). With `take_gradient=False` and a learnable integrand, its `integral_error` and `mesh_quadrature_errors` no longer require grad; the values are unchanged.

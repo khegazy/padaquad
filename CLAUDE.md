@@ -180,7 +180,7 @@ padaquad/
 │   │                        #   batch-size budget, OOM recognition
 │   ├── uniform.py           # UniformAdaptiveQuadrature
 │   └── variable.py          # VariableAdaptiveQuadrature
-├── integrate.py           # integrate() free function + adaptive_quadrature factory
+├── _frontend.py           # user-facing integrate() and adaptive_quadrature() (build a solver, run it)
 ├── examples.py            # integrand_dict (test integrands) + wolf_schlegel
 └── distributed.py         # multi-GPU / SLURM support (internal)
 ```

@@ -4,7 +4,7 @@
 
 | Module | Contents |
 |---|---|
-| `padaquad/integrate.py` | `integrate()` and the `adaptive_quadrature()` factory |
+| `padaquad/_frontend.py` | `integrate()` and the `adaptive_quadrature()` factory |
 | `padaquad/quadrature/base.py` | `AdaptiveQuadrature`: the integration loop, node placement, error ratios, the optimal mesh |
 | `padaquad/quadrature/uniform.py`, `variable.py` | The two solvers; they differ in how a split or merged subinterval gets its nodes |
 | `padaquad/quadrature/memory.py` | The memory benchmark and the batch-size budget |

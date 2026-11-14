@@ -109,7 +109,7 @@ class IntegrationResult:
     Examples
     --------
     >>> import torch
-    >>> from padaquad.integrate import integrate
+    >>> from padaquad import integrate
     >>> _ = torch.manual_seed(0)  # the starting mesh is random
     >>> result = integrate(
     ...     lambda t: torch.exp(t),

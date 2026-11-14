@@ -6,4 +6,6 @@
 contributing
 architecture
 docstrings
+adding_a_method
+deploying
 ```

@@ -335,6 +335,11 @@ list).
 - Trefethen, Lloyd N. (2008). **Is Gauss Quadrature Better than Clenshaw-Curtis?** *SIAM Review* 50(1), 67-87. [doi:10.1137/060659831](https://doi.org/10.1137/060659831)
 <!-- references-end -->
 
+## Citing
+
+To cite padaquad, use [`CITATION.cff`](CITATION.cff) (GitHub shows it under
+"Cite this repository").
+
 ## License
 
 CC-BY-4.0. See [`LICENSE.md`](LICENSE.md) for details.

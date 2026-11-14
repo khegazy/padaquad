@@ -83,3 +83,13 @@ def test_readme_references_match_the_bibliography():
     spec.loader.exec_module(module)
     readme = module.README.read_text()
     assert readme == module.readme_with_references(readme)
+
+
+def test_citation_version_matches_the_package():
+    """CITATION.cff names the same version as pyproject.toml."""
+    root = DOCS.parent
+    cff = (root / "CITATION.cff").read_text()
+    pyproject = (root / "pyproject.toml").read_text()
+    cff_version = re.search(r'^version:\s*"([^"]+)"', cff, re.M).group(1)
+    package_version = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M).group(1)
+    assert cff_version == package_version

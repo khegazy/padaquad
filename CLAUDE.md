@@ -25,7 +25,7 @@ python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 .venv/bin/pre-commit install
 
-# Run all tests and docstring examples (3379 pass and 129 skip on a CPU-only Mac; GPU-only tests skip there)
+# Run all tests and docstring examples (3390 pass and 129 skip on a CPU-only Mac; GPU-only tests skip there)
 .venv/bin/pytest tests/ -v
 
 # Run all tests with coverage

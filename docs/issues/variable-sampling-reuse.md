@@ -18,14 +18,16 @@ halves, discarding the parent's values. The method that implements reuse,
 `VariableAdaptiveQuadrature._evaluate_adaptive_nodes`, still exists and is
 unit-tested, but nothing in the integration loop calls it.
 
-Consequences:
+Consequence: the variable solver costs as many evaluations as the uniform
+solver; the feature it exists for is missing.
 
-- The variable solver costs as many evaluations as the uniform solver; the
-  feature it exists for is missing.
-- Every subinterval's nodes sit at the method's node fractions, so
-  `interpolatory3_variable` always has its middle node at the center, where its
-  weights are Simpson's rule. Its general position-dependent weights (Sanderse
-  and Veldman 2019, Eq. (119)) are never used in a real integration.
+A separate observation, not caused by the missing reuse: every subinterval's
+nodes sit at the method's node fractions, so `interpolatory3_variable` always
+has its middle node at the center, where its weights are Simpson's rule. Its
+general position-dependent weights (`sanderse2019` in `docs/references.bib`,
+Eq. (119)) are never used in a real integration. Reconnecting reuse does not
+change this: bisecting a subinterval whose nodes are at 0, 1/2, 1 gives halves
+with nodes at 0, 1/2, 1 again (see point 3 of "What has to change").
 
 ## Evidence
 
@@ -36,7 +38,8 @@ Consequences:
    `tests/test_evaluate_and_merge.py`.
 2. Runtime check (2026-11-12): wrapping
    `VariableAdaptiveQuadrature._evaluate_adaptive_nodes` with a counter and
-   integrating `exp(-200 (t - 0.5)^2)` on [0, 1] with `interpolatory3_variable`,
+   integrating `exp(-200 (t - 0.5)^2)` on [0, 1] with
+   `integrate(f, "interpolatory3_variable", sampling="variable", ...)`,
    `atol = rtol = 1e-10`, `device="cpu"`, `max_batch=100_000`,
    `take_gradient=False`, `torch.manual_seed(0)`: the result had 2495
    subintervals, `f` was evaluated at 14938 points (about 6 per subinterval, not
@@ -49,10 +52,18 @@ Consequences:
      `_adaptively_add_steps`, which splits by adding mesh points, and kept the
      reuse path only in functions nothing called (`_adaptively_add_steps_orig`,
      `__depricated_adaptively_add_steps`).
-   - `3063c37` (2025-03-07, "Cleaning code (#13)") deleted those dead copies.
-   - `bde5e72` (2026-05-12, "Quadrature alignment (#27)") re-added
-     `_evaluate_adaptive_nodes` on both solvers with unit tests, and CLAUDE.md
-     described split-reuse as working, but the loop was never reconnected.
+   - The reuse method itself was never removed: `git log -G'def
+     _evaluate_adaptive_(y|nodes)'` shows `_evaluate_adaptive_y` defined
+     continuously from `342ff6a` (2024-09-24) onward, uncalled after `da752ea`.
+   - `3063c37` (2025-03-07, "Cleaning code (#13)") deleted the dead callers
+     (`_adaptively_add_steps_orig`, `__depricated_adaptively_add_steps`); the
+     three `_evaluate_adaptive_y` definitions in `parallel_solver.py` stayed.
+   - `a7365ae` (2026-03-18, "Improve tests and interpretability (#25)") added
+     its unit tests (`tests/test_evaluate_and_merge.py`).
+   - `bde5e72` (2026-05-12, "Quadrature alignment (#27)") renamed it to
+     `_evaluate_adaptive_nodes` and moved it into `padaquad/quadrature/`, and
+     CLAUDE.md described split-reuse as working ("Splitting: reuses existing
+     evaluations"), but the loop was never reconnected.
 
 ## The existing reuse method
 
@@ -78,8 +89,12 @@ Known defects of the method as it stands (fix them when reconnecting it):
   `(2R, 3, 2)`. The unit tests use `D = T = 1`, so they miss it.
 - It returns `nodes` and `y` per half, but not the tracked variables the
   integrand may return (see "Tracked variables" below).
-- The interleaving assumes an odd `C` with a middle node, or `C = 2`; it should
-  validate `C` or be written generally.
+- The split point is the parent's node `(C - 1) / 2` for odd `C`, and the
+  midpoint between the two central nodes for even `C` (for `C = 4`, nodes
+  `[p0, p1, p2, p3]` give the halves `[p0, m01, p1, m12]` and
+  `[m12, p2, m23, p3]`). It is the subinterval's midpoint only when the node
+  fractions are symmetric about 1/2; a method with asymmetric node fractions
+  would be split off-center without notice. Validate that or document it.
 
 `UniformAdaptiveQuadrature._evaluate_adaptive_nodes` re-evaluates both halves at
 the fixed node fractions; it is also unused and can stay as the uniform path or
@@ -125,9 +140,9 @@ the code.
    symmetric (for `interpolatory3_variable`, at 0, 1/2, 1 again); non-central
    positions appear only after merges or non-midpoint splits.
 4. **Gradients (`take_gradient=True`).** Today each batch is back-propagated and
-   its results detached before the next batch. A reused value from an earlier
-   batch has either already been back-propagated through (when its subinterval
-   was rejected it contributed no loss, so its graph was never used) or freed.
+   its results detached before the next batch. A value from a subinterval rejected in
+   an earlier batch contributed nothing to that batch's loss, but its graph was
+   part of the batched call of `f`, and that batch's `backward()` frees it.
    Reusing it in a later accepted subinterval needs its autograd graph to stay
    alive until that subinterval is accepted, or the gradient of the reused
    values is lost. Decide whether to (a) keep the graph of pending values (more
@@ -183,15 +198,13 @@ These now say that reuse does not happen; change them back:
 - `docs/glossary.md`, "variable sampling".
 - `docs/user_guide/methods.md`, "How to choose" and "The variable-node method".
 - `CLAUDE.md`, "Uniform vs variable sampling".
-- Docstrings of `VariableAdaptiveQuadrature` and its
-  `_evaluate_adaptive_nodes` (`padaquad/quadrature/variable.py`), and the
-  module docstring of `padaquad/quadrature/__init__.py`.
+- The module docstring of `padaquad/quadrature/variable.py`, and the
+  docstrings of `VariableAdaptiveQuadrature` and its
+  `_evaluate_adaptive_nodes` in that file.
 - `tests/test_variable_integration.py` module docstring.
 - `CHANGELOG.md`: a "Fixed" entry.
 
 ## References
 
-- Sanderse, B. and Veldman, A. E. P. (2019), Constraint-consistent Runge-Kutta
-  methods for one-dimensional incompressible multiphase flow, J. Comput. Phys.
-  384, 170-199, Eq. (119) (checked in arXiv:1809.06114v2, p. 21): the weights
-  of `interpolatory3_variable` for nodes 0, a, 1.
+- `sanderse2019` in `docs/references.bib`, Eq. (119): the weights of
+  `interpolatory3_variable` for nodes 0, a, 1.

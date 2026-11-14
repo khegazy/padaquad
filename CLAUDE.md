@@ -25,8 +25,8 @@ python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 .venv/bin/pre-commit install
 
-# Run all tests and docstring examples (3390 pass and 129 skip on a CPU-only Mac; GPU-only tests skip there)
-.venv/bin/pytest tests/ -v
+# Run all tests and docstring examples (3396 pass and 129 skip on a CPU-only Mac; GPU-only tests skip there)
+.venv/bin/pytest -v
 
 # Run all tests with coverage
 .venv/bin/pytest --cov=padaquad --cov-report=xml
@@ -78,11 +78,13 @@ the padaquad log for them.
   (`docs/_ext/methods_table.py`, from the registries; tested by
   `tests/test_docs_methods_table.py`) and the Performance table
   (`docs/_ext/performance_table.py`, from `docs/performance/results_<device>.json`,
-  written by `examples/speed_test/torchdiffeq_comparison.py`).
+  written by `examples/speed_test/torchdiffeq_comparison.py`; one section per
+  file, tested by `tests/test_docs_performance_table.py`).
 - README sections reused on the site are marked
-  `<!-- include-start: NAME -->` / `<!-- include-end: NAME -->`; README Python
-  blocks run in `tests/test_examples_run.py` unless preceded by
-  `<!-- not-tested -->`.
+  `<!-- include-start: NAME -->` / `<!-- include-end: NAME -->`; the Python
+  blocks of the README and of `docs/development/adding_a_method.md`
+  (`DOCUMENTS` in `tests/test_examples_run.py`) run in that test unless
+  preceded by `<!-- not-tested -->`.
 - The gallery runs `examples/*.py` and `examples/verification/*.py`.
 
 mypy runs with every function annotated and every body checked
@@ -138,7 +140,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_error_integral_reference.py` | The `error_integral_reference` argument of `integrate()` |
 | `test_error_masks.py` | Vector-error machinery (norms, `failure_fraction`, rounding floor) in float32 and float64 |
 | `test_evaluate_f_on_mesh.py` | `_evaluate_f_on_mesh` and its evaluation paths |
-| `test_examples_run.py` | Runs `examples/*.py`, every script in `examples/verification/`, and every ```python block of the README (except blocks preceded by `<!-- not-tested -->`) |
+| `test_examples_run.py` | Runs `examples/*.py`, every script in `examples/verification/`, and every ```python block of the files in its `DOCUMENTS` (the README, `docs/development/adding_a_method.md`; except blocks preceded by `<!-- not-tested -->`) |
 | `test_max_adaptive_splits.py` | The `max_adaptive_splits` depth cap |
 | `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks` |
 | `test_methods_registry.py` | Registry consistency: table shapes and dtypes, `degree` / `error_exponent` types |
@@ -147,6 +149,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance |
 | `test_solver_isolation.py` | Solvers do not share method objects or state |
 | `test_tracked_variables.py` | The `tracked_variables` feature |
+| `test_docs_performance_table.py` | The Performance page's rendering of `docs/performance/results_*.json`: no file, one, two (name order, hardware headings), unreadable files named in the error |
 | `test_split_statistics.py` | `n_start_steps` / `n_start_steps_split` / `max_split_depth` on integrands with known answers; `converged` against a hand-computed tolerance check (absolute and cumulative, with `y0`), in `failure_fraction` mode (including a NaN component), against the final integral, and its warning (numbers, output component, remedies); `max_adaptive_splits` type check |
 
 **Snapshot tests** are the regression net for internal refactors: the

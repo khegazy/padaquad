@@ -47,8 +47,9 @@ tolerances therefore do not give equal accuracy.
 
 ## What the results show
 
-The two lines under the table are generated from the results file, like the
-table itself.
+The lines under each table are generated from its results file, like the table
+itself. The observations below are written by hand from the CPU results
+(`results_cpu.json`); check them again whenever a results file changes.
 
 - The gain is smallest on the simplest integrands (`t`, `t_squared`), where
   both solvers finish in about a millisecond and fixed per-call costs
@@ -57,9 +58,10 @@ table itself.
 - On these smooth integrands `gk21` meets both tolerances on the starting mesh,
   without splitting a subinterval: its number of evaluations is the same at
   both tolerances.
-- **Not measured here:** GPU runs. The batching is expected to matter more on a
-  GPU, where one call on many points costs little more than a call on one
-  point, but no GPU result is claimed until it is measured.
+- **GPU runs** are claimed only where a CUDA table appears above. The batching
+  is expected to matter more on a GPU, where one call on many points costs
+  little more than a call on one point, but that is an expectation, not a
+  measurement.
 
 ## Reproduce
 
@@ -70,5 +72,6 @@ python examples/speed_test/torchdiffeq_comparison.py --device cpu \
 ```
 
 For a GPU, use `--device cuda --out docs/performance/results_cuda.json`; the
-page then shows both tables. Commit the results file only from a clean
+page then shows both tables. Then revise "What the results show" for the new
+numbers. Commit the results file only from a clean
 working tree: the file records the git commit, and marks uncommitted changes.

@@ -20,25 +20,36 @@ if TYPE_CHECKING:
     from sphinx.application import Sphinx
 
 ROOT = Path(__file__).resolve().parents[2]
-RESULTS = sorted((ROOT / "docs" / "performance").glob("results_*.json"))
+RESULTS_DIR = ROOT / "docs" / "performance"
 BENCHMARK = ROOT / "examples" / "speed_test" / "torchdiffeq_comparison.py"
 OUTPUT = ROOT / "docs" / "reference" / "generated" / "performance_table.md"
 
 
-def render() -> str:
-    """Render one results section per committed results file, as Markdown."""
+def render(results_dir: Path = RESULTS_DIR) -> str:
+    """Render each ``results_*.json`` file in ``results_dir`` as Markdown.
+
+    One section per file, in name order, headed by the measured hardware.
+
+    Raises ``FileNotFoundError`` when there is no results file, and
+    ``ValueError`` naming the file when one cannot be read or rendered.
+    """
     spec = importlib.util.spec_from_file_location("torchdiffeq_comparison", BENCHMARK)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {BENCHMARK}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    if not RESULTS:
-        raise FileNotFoundError("no docs/performance/results_*.json file")
+    paths = sorted(results_dir.glob("results_*.json"))
+    if not paths:
+        raise FileNotFoundError(f"no results_*.json file in {results_dir}")
     sections = []
-    for path in RESULTS:
-        results = json.loads(path.read_text())
-        device = results["metadata"]["device"]
-        sections.append(f"### {device.upper()}\n\n" + module.render_markdown(results))
+    for path in paths:
+        try:
+            results = json.loads(path.read_text())
+            meta = results["metadata"]
+            heading = f"### {meta['device_name']} ({meta['device']})"
+            sections.append(heading + "\n\n" + module.render_markdown(results))
+        except (ValueError, KeyError, TypeError, StopIteration) as error:
+            raise ValueError(f"cannot render {path}: {error!r}") from error
     return "\n".join(sections)
 
 

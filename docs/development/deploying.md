@@ -18,14 +18,19 @@ and afterwards.
    3. Under **Build and deployment**, set **Source** to **GitHub Actions**.
 
    GitHub then creates the deployment environment `github-pages` if it does not
-   exist. The old `gh-pages` branch is no longer used once this is set; the old
-   template pages stop being served.
-3. **Allow release tags to deploy (only if needed).** If a deploy started by a
-   release later fails with a message like
-   `Tag "v1.4.0" is not allowed to deploy to github-pages due to environment protection rules`,
-   open **Settings → Environments → github-pages → Deployment branches and
-   tags**, click **Add deployment branch or tag rule**, choose **Tag**, enter
-   `v*`, and save. Deploys started by hand from `main` do not need this rule.
+   exist. The `gh-pages` branch is no longer used for new deploys, but the site
+   it last published may stay online until the first deploy from the workflow
+   replaces it.
+3. **Allow release tags to deploy.** A deploy started by a release runs on the
+   release's tag (for example `v1.4.0`), not on `main`, and the `github-pages`
+   environment may allow only the default branch to deploy. GitHub's
+   documentation does not say what it allows by default, and the rule is
+   harmless if it is not needed, so add it now: open **Settings → Environments →
+   github-pages**, under **Deployment branches and tags** click **Add deployment
+   branch or tag rule**, choose **Tag**, enter `v*`, and save. Without it, the
+   deploy of a release fails with a message like
+   `Tag "v1.4.0" is not allowed to deploy to github-pages due to environment protection rules`.
+   Deploys started by hand from `main` do not need this rule.
 
 ## Publish the site without making a release
 
@@ -44,11 +49,15 @@ releases.
 ## Publish the site with a release
 
 Publishing a GitHub release deploys the site automatically. **It also uploads
-the package to PyPI**: `.github/workflows/release.yaml` runs on every new
-release. Only take this route when you mean to release a new version.
+the package to PyPI**: `.github/workflows/release.yaml` runs on every published
+release. Only take this route when you mean to release a new version. Both
+workflows run when the release is published, not when a draft is saved, so a
+draft release starts neither.
 
-1. Make sure `version` in `pyproject.toml` and the CHANGELOG heading name the
-   new version, and that they are merged into `main`.
+1. Make sure the new version and its release date are in all three places, and
+   that they are merged into `main`: `version` in `pyproject.toml`, the heading
+   `## [<version>] - <date>` in `CHANGELOG.md`, and `version` and
+   `date-released` in `CITATION.cff`. A test checks that the three agree.
 2. Open **Releases → Draft a new release**, create a tag such as `v1.4.0` on
    `main`, write the notes, and click **Publish release**.
 3. Check the **Actions** tab: the **docs** workflow (build and deploy) and the

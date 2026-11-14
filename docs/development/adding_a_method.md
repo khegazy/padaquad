@@ -46,7 +46,7 @@ simpson = UniformMethodClass(
 
 # Check the claimed degrees against the weights before using the method.
 measured = simpson.measure_degree()
-print(measured.degree, measured.lower_degree)  # 3 1
+assert (measured.degree, measured.lower_degree) == (3, 1)
 
 # Make it available to the uniform solver by name (lower case).
 UNIFORM_METHODS["simpson"] = simpson
@@ -60,8 +60,11 @@ result = integrate(
     device="cpu",
     max_batch=10_000,
 )
-print(round(float(result.integral), 8))  # 2.0
+assert abs(float(result.integral) - 2.0) < 1e-9
 ```
+
+This block runs in the test suite (`tests/test_examples_run.py`), so the
+assertions above are checked.
 
 Registering the method in `UNIFORM_METHODS` at run time makes it available to
 every solver created afterwards; each solver works on its own copy.
@@ -90,16 +93,23 @@ pattern to follow; register the method in `VARIABLE_METHODS`.
 2. Put a comment above each block of numbers saying where it comes from
    (author, year, venue, table or equation), and list the sources in
    `references`.
-3. Run the checks that every method must pass:
-   - `tests/test_exactness.py` measures the degree in both directions and checks
-     `error_exponent` against the lower-degree method;
-   - `tests/test_tableau.py` checks the weights against an independent
-     calculation for each family; add one for a new family;
-   - `examples/verification/polynomial_degree.py` and
-     `examples/verification/integral_accuracy.py` include the method
-     automatically;
-   - `tests/test_docs_methods_table.py` checks that its row is complete and that
-     its references are in the bibliography.
-4. Regenerate the snapshot values for the new method
+3. Run the checks that every method must pass. Some include a new method
+   automatically; others use hand-written lists that you must extend:
+   - automatic for a uniform method: `tests/test_exactness.py` measures the
+     degree in both directions and checks `error_exponent` against the
+     lower-degree method, for every entry of `UNIFORM_METHODS`;
+   - automatic for every method: `tests/test_docs_methods_table.py` checks that
+     its row is complete and that its references are in the bibliography, and
+     `examples/verification/polynomial_degree.py` and
+     `examples/verification/integral_accuracy.py` include it;
+   - by hand for a variable method: `tests/test_exactness.py` has one test per
+     variable method (`test_interpolatory3_*`, `test_variable_adaptive_heun`);
+     add one;
+   - by hand for every method: `tests/test_tableau.py` checks the weights against
+     an independent calculation through per-family lists (`GAUSS_POINTS`, the
+     Clenshaw-Curtis names, `RK_LOWER_WEIGHTS`); add the new method to its
+     family's list, or write a test for a new family.
+4. For a uniform method, regenerate the snapshot values
    (`TPD_REGENERATE_SNAPSHOTS=1 pytest tests/test_snapshots.py`) and say in the
-   commit that only new entries were added.
+   commit that only new entries were added. The snapshot cells cover uniform
+   methods only.

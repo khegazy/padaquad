@@ -11,8 +11,8 @@ abstract: >-
 authors:
   - family-names: Hegazy
     given-names: Kareem
-# Keep version and date-released equal to the latest release on PyPI;
-# tests/test_docs_methods_table.py checks the version against pyproject.toml.
+# version equals pyproject.toml, and date-released equals that version's date in
+# CHANGELOG.md; tests/test_docs_methods_table.py checks both.
 version: "1.3.0"
 date-released: "2026-11-10"
 license: CC-BY-4.0

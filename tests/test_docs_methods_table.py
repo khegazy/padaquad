@@ -86,10 +86,18 @@ def test_readme_references_match_the_bibliography():
 
 
 def test_citation_version_matches_the_package():
-    """CITATION.cff names the same version as pyproject.toml."""
+    """CITATION.cff names the version of pyproject.toml, and the release date
+    of that version's CHANGELOG heading."""
     root = DOCS.parent
     cff = (root / "CITATION.cff").read_text()
     pyproject = (root / "pyproject.toml").read_text()
+    changelog = (root / "CHANGELOG.md").read_text()
     cff_version = re.search(r'^version:\s*"([^"]+)"', cff, re.M).group(1)
     package_version = re.search(r'^version\s*=\s*"([^"]+)"', pyproject, re.M).group(1)
     assert cff_version == package_version
+    cff_date = re.search(r'^date-released:\s*"([^"]+)"', cff, re.M).group(1)
+    heading = re.search(
+        rf"^## \[{re.escape(package_version)}\] - (\S+)$", changelog, re.M
+    )
+    assert heading is not None, f"CHANGELOG.md has no '## [{package_version}] - <date>'"
+    assert cff_date == heading.group(1)

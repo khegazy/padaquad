@@ -1,8 +1,8 @@
-name: Upload Python Package to PyPI when a Release is Created
+name: Upload Python Package to PyPI when a Release is Published
 
 on:
   release:
-    types: [created]
+    types: [published]
 
 jobs:
   deploy:

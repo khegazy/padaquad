@@ -121,34 +121,37 @@ def test_verification_scripts_pass():
         assert "[FAIL]" not in out.stdout, f"{script.name}: stdout=\n{out.stdout}"
 
 
-README = REPO_ROOT / "README.md"
+# Documents whose Python blocks are complete programs that must run.
+DOCUMENTS = ("README.md", "docs/development/adding_a_method.md")
 NOT_TESTED = "<!-- not-tested -->"
 
 
-def _readme_python_blocks() -> list[tuple[int, str]]:
-    """(line number, code) of every ```python block in the README that is not
+def _python_blocks() -> list[tuple[str, str]]:
+    """("file:line", code) of every ```python block in ``DOCUMENTS`` that is not
     preceded by the line ``<!-- not-tested -->`` (used for sketches that need
     the reader's own model or data)."""
-    lines = README.read_text().splitlines()
-    blocks, i = [], 0
-    while i < len(lines):
-        if lines[i].strip() == "```python":
-            start = i + 1
-            end = lines.index("```", start)
-            previous = next((x for x in reversed(lines[:i]) if x.strip()), "")
-            if previous.strip() != NOT_TESTED:
-                blocks.append((start + 1, "\n".join(lines[start:end])))
-            i = end
-        i += 1
+    blocks = []
+    for document in DOCUMENTS:
+        lines = (REPO_ROOT / document).read_text().splitlines()
+        i = 0
+        while i < len(lines):
+            if lines[i].strip() == "```python":
+                start = i + 1
+                end = lines.index("```", start)
+                previous = next((x for x in reversed(lines[:i]) if x.strip()), "")
+                if previous.strip() != NOT_TESTED:
+                    blocks.append(
+                        (f"{document}:{start + 1}", "\n".join(lines[start:end]))
+                    )
+                i = end
+            i += 1
     return blocks
 
 
-@pytest.mark.parametrize(
-    "line_and_code", _readme_python_blocks(), ids=lambda b: f"README.md:{b[0]}"
-)
-def test_readme_python_block_runs(line_and_code: tuple[int, str]) -> None:
-    """Each tested Python block of the README runs without error on the CPU."""
-    line, code = line_and_code
+@pytest.mark.parametrize("where_and_code", _python_blocks(), ids=lambda b: b[0])
+def test_document_python_block_runs(where_and_code: tuple[str, str]) -> None:
+    """Each tested Python block of ``DOCUMENTS`` runs without error on the CPU."""
+    where, code = where_and_code
     out = subprocess.run(
         [PY, "-c", code],
         capture_output=True,
@@ -157,4 +160,4 @@ def test_readme_python_block_runs(line_and_code: tuple[int, str]) -> None:
         cwd=REPO_ROOT,
         env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
     )
-    assert out.returncode == 0, f"README.md:{line} failed:\n{out.stderr[-2000:]}"
+    assert out.returncode == 0, f"{where} failed:\n{out.stderr[-2000:]}"

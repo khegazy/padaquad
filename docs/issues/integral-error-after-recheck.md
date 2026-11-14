@@ -72,18 +72,24 @@ In `AdaptiveQuadrature.integrate()` (`padaquad/quadrature/base.py`):
   values. Its docstring already says the result "is an approximation".
 - `_adaptively_increase_mesh` (around line 1550) recomputes
   `method_output.integral_error = torch.sum(method_output.mesh_quadrature_errors, 0)`
-  after dropping rejected subintervals from a batch; check whether this sum is
-  of signed values at that point (it is before the `torch.abs` above, so it is
-  signed — verify).
+  after dropping rejected subintervals from a batch. This sum is of signed
+  values (checked): `_calculate_integral` returns signed errors, and the
+  `torch.abs` above is applied later.
 
 ## Proposed fix
 
-1. Record the **signed** per-subinterval error estimates (drop the `torch.abs`
-   when building the per-batch result that is recorded).
+1. Record the **signed** per-subinterval error estimates: give
+   `_record_results` the signed `method_output.mesh_quadrature_errors`. Do not
+   drop the `torch.abs` from the per-batch `IntegrationResult` itself (around
+   line 1040): that object is also passed to `loss_fxn(intermediate_results)`,
+   and its `mesh_quadrature_errors` is documented as absolute values
+   (`padaquad/results.py`), so user loss functions must keep receiving
+   absolute values.
 2. In `_remove_failed_record_panels`, subtract the signed sum of the removed
    subintervals; `integral_error` then equals the signed sum over the kept
    subintervals exactly, as `integral` does.
 3. Take absolute values where they are needed, so no other behavior changes:
+   - the per-batch result passed to `loss_fxn` keeps its `torch.abs` (step 1);
    - the result field `mesh_quadrature_errors` is documented as absolute values
      and is built with `torch.abs(record["mesh_quadrature_errors"])` (around
      line 1181) — keep that;
@@ -106,13 +112,17 @@ In `AdaptiveQuadrature.integrate()` (`padaquad/quadrature/base.py`):
   for example with a counting wrapper), `integral_error` equals the signed sum
   of the kept subintervals' estimates recomputed from `result.h` and the
   method's `b_error`, to float64 rounding.
-- `tests/test_snapshots.py` pins `integral_error` per `take_gradient` mode. Cells
-  with `take_gradient=False` in which the re-check removed subintervals will
-  change; regenerate with `TPD_REGENERATE_SNAPSHOTS=1` and state in the commit
-  that only `integral_error` of those cells changed and why. `integral` and
-  `n_optimal_mesh` must not change (step 3 keeps the merges identical).
-- The bit-identity check of the integrals (snapshot `integral` values) must
-  pass unchanged.
+- The snapshot data (`tests/test_snapshots_data.json`) does not change and
+  does not guard this bug: an independent review (2026-11-14) ran every
+  snapshot cell through a patched copy that applies steps 1-3, and no
+  `take_gradient=False` cell has a re-check removal, so no `integral_error`
+  changed. The regression test above is the only guard. `tests/test_snapshots.py`
+  must still pass unchanged, which checks that `integral` and `n_optimal_mesh`
+  did not move.
+- In the same patched copy, the reproduction gave `integral_error`
+  -3.4368769904242198e-06 against a signed sum of -3.4368769904242333e-06, and
+  `integral` and `mesh_optimal` were identical to the unpatched code for all
+  four combinations of `take_gradient` and `conserve_memory`.
 
 ## Documentation to update when fixed
 

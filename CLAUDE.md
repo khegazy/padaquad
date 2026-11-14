@@ -77,7 +77,7 @@ the padaquad log for them.
 - Generated at build time, never typed by hand: the methods table
   (`docs/_ext/methods_table.py`, from the registries; tested by
   `tests/test_docs_methods_table.py`) and the Performance table
-  (`docs/_ext/performance_table.py`, from `docs/performance/results.json`,
+  (`docs/_ext/performance_table.py`, from `docs/performance/results_<device>.json`,
   written by `examples/speed_test/torchdiffeq_comparison.py`).
 - README sections reused on the site are marked
   `<!-- include-start: NAME -->` / `<!-- include-end: NAME -->`; README Python

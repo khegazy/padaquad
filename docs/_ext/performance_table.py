@@ -1,11 +1,12 @@
 """
 Sphinx extension: render the Performance page's table from the benchmark results.
 
-The numbers on the Performance page come only from
-``docs/performance/results.json``, which
-``examples/speed_test/torchdiffeq_comparison.py`` writes. At every build this
-extension renders that file with the benchmark's own ``render_markdown``, so the
-page shows measured numbers and the table has one definition.
+The numbers on the Performance page come only from the files
+``docs/performance/results_<device>.json`` (for example ``results_cpu.json``,
+``results_cuda.json``), which ``examples/speed_test/torchdiffeq_comparison.py``
+writes. At every build this extension renders each file, in name order, with
+the benchmark's own ``render_markdown``, so the page shows measured numbers and
+the table has one definition.
 """
 
 from __future__ import annotations
@@ -19,19 +20,26 @@ if TYPE_CHECKING:
     from sphinx.application import Sphinx
 
 ROOT = Path(__file__).resolve().parents[2]
-RESULTS = ROOT / "docs" / "performance" / "results.json"
+RESULTS = sorted((ROOT / "docs" / "performance").glob("results_*.json"))
 BENCHMARK = ROOT / "examples" / "speed_test" / "torchdiffeq_comparison.py"
 OUTPUT = ROOT / "docs" / "reference" / "generated" / "performance_table.md"
 
 
 def render() -> str:
-    """Render the results table as Markdown from the committed results file."""
+    """Render one results section per committed results file, as Markdown."""
     spec = importlib.util.spec_from_file_location("torchdiffeq_comparison", BENCHMARK)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {BENCHMARK}")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return str(module.render_markdown(json.loads(RESULTS.read_text())))
+    if not RESULTS:
+        raise FileNotFoundError("no docs/performance/results_*.json file")
+    sections = []
+    for path in RESULTS:
+        results = json.loads(path.read_text())
+        device = results["metadata"]["device"]
+        sections.append(f"### {device.upper()}\n\n" + module.render_markdown(results))
+    return "\n".join(sections)
 
 
 def _write_table(app: Sphinx) -> None:  # noqa: ARG001 (Sphinx event signature)

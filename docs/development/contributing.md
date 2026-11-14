@@ -39,4 +39,4 @@ independent calculations. A new method must pass them.
 
 The build fails on any warning. The API pages come from the docstrings (see
 {doc}`docstrings`), the methods table from the method registries, and the
-Performance table from `docs/performance/results.json`.
+Performance table from `docs/performance/results_<device>.json`.

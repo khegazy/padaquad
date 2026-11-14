@@ -2,9 +2,10 @@
 
 This page compares padaquad with torchdiffeq {cite:p}`torchdiffeq`, the
 differentiable ODE solver of {cite:t}`chen2018`, on integrals with known
-answers. Every number below comes from `docs/performance/results.json`, written
-by `examples/speed_test/torchdiffeq_comparison.py`; the table is rendered from
-that file when this page is built.
+answers. Every number below comes from the files
+`docs/performance/results_<device>.json`, written by
+`examples/speed_test/torchdiffeq_comparison.py`; one table per file is rendered
+when this page is built.
 
 ## What is compared
 
@@ -65,8 +66,9 @@ table itself.
 ```bash
 pip install -e ".[dev]"   # includes torchdiffeq
 python examples/speed_test/torchdiffeq_comparison.py --device cpu \
-    --out docs/performance/results.json
+    --out docs/performance/results_cpu.json
 ```
 
-Use `--device cuda` for a GPU. Commit the results file only from a clean
+For a GPU, use `--device cuda --out docs/performance/results_cuda.json`; the
+page then shows both tables. Commit the results file only from a clean
 working tree: the file records the git commit, and marks uncommitted changes.

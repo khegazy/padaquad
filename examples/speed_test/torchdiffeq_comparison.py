@@ -19,7 +19,9 @@ accuracy: compare the errors as well as the times.
 Run (writes JSON; the documentation renders the table from it)::
 
     python examples/speed_test/torchdiffeq_comparison.py --device cpu \
-        --out docs/performance/results.json
+        --out docs/performance/results_cpu.json
+
+and ``--device cuda --out docs/performance/results_cuda.json`` on a GPU.
 
 ``render_markdown(results)`` turns the JSON into the table on the Performance
 page.

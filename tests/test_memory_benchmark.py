@@ -1283,7 +1283,8 @@ def test_messages_when_measuring(caplog, monkeypatch):
     assert "PadaQuad is measuring how much memory" in text
     assert "may result in an underutilization of your hardware" in text
     assert "devices_memory.html#ug-memory-limitations" in text
-    assert "All of this is avoided by passing max_batch" in text
+    assert "All of this is avoided by passing your own max_batch" in text
+    assert "only skips the time of this measurement" in text
     assert "same_f=True" in text
     assert "Memory measurement finished in" in text
     assert "bytes per evaluation" in text

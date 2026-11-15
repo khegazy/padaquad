@@ -560,10 +560,12 @@ class _MemoryManagement:
             "underutilization of your hardware (or, for some integrands, a batch "
             "too large for memory); see "
             "https://khegazy.github.io/padaquad/user_guide/devices_memory.html#ug-memory-limitations "
-            "for more details. All of this is avoided by passing max_batch (your "
-            "own value, or solver.get_max_batch() after an earlier run), or "
-            "same_f=True to reuse both the max_batch and the mesh of the "
-            f"previous call.{hidden_note}"
+            "for more details. All of this is avoided by passing your own "
+            "max_batch, chosen for your integrand and machine. Passing "
+            "solver.get_max_batch() from an earlier run, or same_f=True (which "
+            "reuses the max_batch and the mesh of the previous call), only "
+            "skips the time of this measurement: they reuse its result, with "
+            f"the same limitations.{hidden_note}"
         )
         t0 = time.time()
 

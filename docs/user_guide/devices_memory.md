@@ -67,7 +67,9 @@ The benchmark takes a few seconds and logs warnings, and it runs on every call
 without `max_batch`. To run it once, integrate once without `max_batch`, read
 `max_batch = solver.get_max_batch()`, and pass that value to later calls or
 new solvers; or pass `same_f=True`. `get_max_batch()` returns the batch size
-the solver would use now, without running the benchmark.
+the solver would use now, without running the benchmark. Both reuse the
+benchmark's result, so they save its time but keep its limitations
+({ref}`ug-memory-limitations`).
 
 With `take_gradient=False`, if an evaluation runs out of memory, the batch is
 shrunk to three quarters and retried; the smaller size stays in force until
@@ -83,8 +85,11 @@ linearly with the number of points N, or at most like N², measured where every
 allocation can be seen (a GPU, or Linux with glibc). It cannot be right for
 every integrand on every machine. It can choose a batch far smaller than what
 fits, which leaves the hardware underused, and for some integrands a batch
-larger than what fits. **Passing `max_batch` avoids all of this**: the
-benchmark does not run, and the batch is the value given. The known
+larger than what fits. **Passing your own `max_batch`, chosen for the
+integrand and the machine, avoids all of this**: the benchmark does not run,
+and the batch is the value given. Reusing the benchmark's result, through
+`solver.get_max_batch()` or `same_f=True`, only skips the time it takes; the
+batch keeps the limitations below. The known
 limitations follow. Numbers marked "simulated" come from fake memory readings
 and a fake clock (`tests/test_memory_benchmark.py` and review scripts);
 numbers marked "measured" come from real runs on an Apple-silicon Mac. None

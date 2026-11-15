@@ -1095,7 +1095,7 @@ def test_linux_reader(fake, monkeypatch, online, allowed, trim):
     - E = 2 * (CPUs the process may run on) * max(32, 2 * online CPUs) pages:
       the kernel's counters hold up to max(32, 2 * online) pages on every CPU
       the process ran on, and a reading is the difference of two counts. On a
-      256-CPU node pinned to 4 CPUs that is 8 MiB with 4 KiB pages, not
+      256-CPU node pinned to 4 CPUs that is 16 MiB with 4 KiB pages, not
       1 GiB.
     """
     events = []

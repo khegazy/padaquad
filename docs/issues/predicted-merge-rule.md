@@ -17,7 +17,11 @@ What the implementation on `improve_pruning` does differently from the plan, and
   cached and uncached paths). In float32 it differs by about one float32 rounding step,
   because each subinterval's width is taken from its own end nodes. So the counts in
   Evidence A and B describe the library too.
-- **Memory is bounded for any mesh.** The vectors are built per chunk of 2^16 pairs,
+- **Memory is bounded for any mesh.** (Corrected after the code review,
+  `merge-rule-code-review.md`, Findings 1 and 2: as first committed, the node check ran
+  on the whole record and a chunk held 2^16 pairs for any number of outputs D, so the
+  peak was 3.0 times the size of `y` at D = 1 and 5.0 times at D = 256. Both are fixed;
+  a chunk now holds 2^16 // D pairs.) The vectors are built per chunk of 2^16 pairs,
   for that chunk's width ratios only, and in blocks of 1,024 ratios. A caller's mesh
   in which every pair has its own ratio would otherwise build temporaries of
   ratios × C × U values (about 34 GB for cc65 at 10^6 ratios). Adaptive meshes have
@@ -80,7 +84,10 @@ What the implementation on `improve_pruning` does differently from the plan, and
     rule T against 0.52 s under rule 2 (gk21).
   - Small meshes: about 0.7–1.0 ms more per call; step 5 caches what causes it.
   - Memory: the chunked predictor's peak is at most 0.76 times the size of the
-    stored integrand values.
+    stored integrand values. (Corrected after the code review: that figure was
+    measured on the prototype predictor (`pred/memory_chunked.py`), which had no node
+    check and was run at small D; see the note under
+    "Memory is bounded for any mesh".)
 - **All three rules stay available** through one constructor option, `merge_rule`,
   with rule T the default (decided by the user, 2026-11-14).
 - **Known limit, shared by every rule.** A merge decided from stored values cannot see

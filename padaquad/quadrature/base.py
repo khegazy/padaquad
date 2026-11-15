@@ -2313,8 +2313,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         return nodes, f_evals, tracked_out, step_idxs, split_node_state
 
     #: log2 of a pair's width ratio is rounded to a multiple of 2**-48 before
-    #: pairs are grouped by ratio in ``_predict_merged_errors``, so that pairs
-    #: whose widths are equal up to rounding share one set of weight vectors.
+    #: pairs are grouped by ratio in ``_predict_merged_errors``. Pairs of exactly
+    #: equal widths share one set of weight vectors; widths computed from mesh
+    #: points differ in their last bits, so a mesh of equal subintervals of
+    #: [0, 1] still has a few tens of distinct ratios (29 at 10^5, measured).
     #: Half a step moves the prediction by at most 0.24 of a pair's rounding
     #: floor (measured; docs/issues/predicted-merge-rule.md, "The rule").
     _RATIO_QUANTUM = 2.0**48
@@ -2324,8 +2326,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     #: Largest number of width ratios kept in ``_merge_weight_cache``; a chunk
     #: with more distinct ratios than this builds its vectors without caching.
     _MERGE_CACHE_SIZE = 256
-    #: Width ratios per block in ``_merged_pair_weights``, which holds about
-    #: six [block, C, U] float64 temporaries (35 MB each for cc65).
+    #: Width ratios per block in ``_merged_pair_weights``. When every pair has
+    #: its own ratio, the prediction's temporaries peak at about 0.25 GB for
+    #: gk21 and 0.7 GB for cc65 (measured; docs/issues/merge-rule-code-review.md).
     _RATIO_BLOCK = 1024
 
     def _merge_inputs(

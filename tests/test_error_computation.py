@@ -6,7 +6,7 @@ import math
 
 import pytest
 import torch
-from _helpers import make_solver_for_unit_test
+from _helpers import make_solver_for_unit_test, needs_cuda
 
 # ---------------------------------------------------------------------------
 # _reduce_norm
@@ -227,6 +227,18 @@ class TestRecRemove:
                 assert torch.equal(self.solver._rec_remove(mask), expected), (
                     f"length {length}, mask {mask.int().tolist()}"
                 )
+
+    @needs_cuda
+    def test_matches_cpu_on_gpu(self):
+        """The one-pass version uses cummax, whose CUDA kernel differs from the
+        CPU one: same output on the GPU, which it stays on."""
+        generator = torch.Generator().manual_seed(0)
+        for length in [0, 1, 2, 3, 17, 1000, 100_000]:
+            for density in (0.2, 0.8, 1.0):
+                mask = torch.rand(length, generator=generator) < density
+                on_gpu = self.solver._rec_remove(mask.cuda())
+                assert on_gpu.device.type == "cuda"
+                assert torch.equal(on_gpu.cpu(), self.solver._rec_remove(mask))
 
 
 # ---------------------------------------------------------------------------

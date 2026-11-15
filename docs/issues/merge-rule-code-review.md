@@ -346,3 +346,106 @@ Run on a compute node from `git archive` of the final commit
   future change to how a warm start chooses its bounds.
 - Finding 5 will need an end-to-end test once `docs/issues/multi-coordinate-t.md`
   is resolved.
+
+## Author's response
+
+Written by the author after checking the review. Scripts and logs:
+`/pscratch/sd/k/khegazy/u028/verify3/`.
+
+### The two fixes (`b1dd7a6`, `6f1a0dc`): confirmed
+
+- **Bugs reproduced.** The three regression tests were run against the code before
+  each fix, in scratch copies (`verify3/fix1`: `b1dd7a6` with the `387d1bc`
+  `base.py`; `verify3/fix2`: `6f1a0dc` with the `b1dd7a6` `base.py`). All three
+  fail there and pass after the fix.
+- **Memory measured independently** (`verify3/scripts/mem.py`, CUDA,
+  `torch.cuda.max_memory_allocated`, random widths so that every pair has its own
+  ratio). Predictions are bit-identical between `387d1bc` and the fixed tree in all
+  three cases.
+
+  | Case | Size of `y` | Peak at `387d1bc` | Peak after both fixes |
+  |---|---|---|---|
+  | gk21, 10^6 subintervals, D = 1 | 175 MB | +528 MB | +253 MB |
+  | cc65, 4·10^5, D = 1 | 198 MB | +906 MB | +739 MB |
+  | gk21, 6·10^4, D = 64 | 674 MB | +1,650 MB | +87 MB |
+
+- **The fixes are minimal and in style.** The check moved into the existing loop
+  (no new function), and the chunk size is one expression. The per-subinterval
+  tolerance is never looser than the former global one, so it can only refuse
+  more. The full suites, which include float32 and far-from-0 records, pass with it.
+
+### Findings not fixed by the reviewer
+
+- **Finding 6 (non-finite width ratio): fixed by the author in `5eb52d7`, test
+  first.** `test_predicted_refuses_pairs_without_a_finite_width_ratio` failed
+  before the fix (the pair got a finite prediction from the int64 key of an
+  infinite ratio). Such a pair now gets an infinite prediction and is never
+  merged. Converting a non-finite float to an integer is undefined, so the old
+  result depended on the platform; robustness is required here even though the
+  case is rare.
+- **Finding 3 (cost per distinct width ratio): confirmed and documented, not
+  changed.** Measured again on a compute node (`verify3/scripts/cost.py`, 8
+  threads, f = e^{-t} sin 40t + a Lorentzian; times are the median of 5 warm calls).
+
+  | Method, `N_init_steps` | `power_law` cold / warm | `predicted` cold / warm |
+  |---|---|---|
+  | gk21, 13 | 8.5 / 2.0 ms | 6.5 / 2.4 ms |
+  | gk21, 10^4 | 23.8 / 4.4 ms | 92.6 / 11.2 ms |
+  | cc65, 10^4 | 26.6 / 6.5 ms | 244.8 / 31.3 ms |
+
+  The CHANGELOG's Cost bullet now states this case, using the review's 10^6 numbers
+  instead of the earlier ones. The reviewer's batched-product option halves the
+  cost but does not change how it grows with the number of ratios. Coarser
+  quantization of the ratio would change predictions by more than the rounding
+  floor. A real reduction needs a different way to build the weights, which is a
+  decision for the maintainer. It is a speed cost only: merged subintervals are
+  evaluated again on the next call, so the cost does not affect accuracy.
+- **Finding 4 (`same_f=True` after a call with only `mesh=`): left as is.** It
+  happens on `main` too, it is outside this work, and choosing a warm call's
+  bounds is a behaviour decision for the maintainer. The test helper
+  `_warm_errors` now takes the bounds and says why.
+- **Finding 5 (T > 1 fallback not reachable through `integrate()`): agreed, no
+  action.**
+- **Finding 7 (comments and plan): corrected.** The comments on `_RATIO_QUANTUM`
+  and `_RATIO_BLOCK` now give the measured figures. The plan's two memory claims
+  carry a correction note.
+
+### Test selection
+
+The kept review tests were moved into the existing files, written with the
+helpers those files already have (`_warm_errors`, which now takes the bounds and
+the dtype's eps; a new `_record`, which also replaces the hand-built records of
+five tests; `needs_cuda` from `_helpers`). `tests/test_merge_rule_review.py` is
+deleted.
+
+| Test | Decision | Reason |
+|---|---|---|
+| `test_cache_eviction_gives_the_uncached_prediction` | Kept (`test_prune_and_optimal.py`) | The only test that reaches the eviction branch; mutation-checked by the reviewer |
+| `test_predicted_warm_starts_with_vector_output` (4) | Kept | D = 2 end to end in both norm families and both tolerance modes; fails if `failure_fraction` ignores `pair_errors` |
+| `test_variable_solver_predicted_warm_chain` | Kept, with the warm-start check of `_warm_errors` in place of its own bound | The variable solver merging end to end |
+| `test_float32_predicted_merges_where_power_law_does_not` | Kept, same change | float32 end to end; asserts the mesh sizes |
+| `test_predicted_far_from_the_origin` (4) | Kept, same change | The node check on the solver's own records far from 0, both dtypes |
+| `test_nan_integrand_does_not_break_the_prediction` | Kept | `error_on_nonfinite=False` reaches the predictor; it would catch a crash or a NaN that spreads across output components |
+| `test_predicted_on_gpu_with_either_result_device` | Kept | Device switching of the cache; runs in the GPU suite |
+| `test_rec_remove_on_gpu_matches_cpu` | Kept, as `TestRecRemove.test_matches_cpu_on_gpu` (`test_error_computation.py`) | The CUDA `cummax` kernel |
+| `test_take_gradient_does_not_change_the_merges` | Dropped | As the reviewer notes, it passes with or without the `detach`, which only saves memory, so it cannot catch a defect in the predictor; `test_predicted_detaches_and_caches` checks the detach directly |
+| `test_predicted_node_check_works_in_chunks`, `test_predicted_chunks_shrink_with_the_number_of_outputs` | Merged into `test_predicted_works_in_bounded_chunks` (D = 1 and 4) | Same spy and record; the merged test fails before each fix (checked on both scratch copies) |
+
+Changes to the author's tests, as the review suggested:
+
+- `test_merge_inputs_per_rule` now asserts that the prediction is positive and
+  that the pair errors equal it plus the summed errors.
+- `test_predicted_detaches_and_caches` lost its vacuous second half; the eviction
+  test covers the bound.
+- `_distinct_fractions` is removed. The exactness test counts the distinct
+  fractions with `torch.unique`. The reviewer suggested the library's own
+  `first`, but that would make the test check the library against itself.
+
+### Checks on the final tree
+
+Full suite on a compute node from a copy of the final tree
+(`verify3/suite_cpu.log`, `verify3/suite_gpu.log`): CPU 3531 passed, 133 skipped;
+GPU 3542 passed, 122 skipped; no failures. The counts equal the reviewer's: one test
+was added (`5eb52d7`), one dropped, and the merged chunk test keeps two cases.
+Sphinx with `-W` builds (`verify3/docs.log`); `mypy padaquad/` and pre-commit on
+every changed file pass.

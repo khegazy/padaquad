@@ -423,6 +423,10 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
   the memory budget / OOM / 1e9: the cautious worst-case fit. An OOM at
   N > 1 sets `_oom_max_batch = _OOM_BACKOFF·N`; on a reader that misses
   reused memory `_oom_max_batch` is also capped at max(largest test N, C).
+  The benchmark is a heuristic for the common case (memory linear in N, or
+  at most N²); its known limitations, with measured and simulated numbers,
+  are listed in the Notes of `_setup_memory_checks` (read them before
+  changing it).
   The batch loop's out-of-memory retry shrinks the batch that failed, not
   `_oom_max_batch` (which can be far above it).
 - Unless `max_batch` or `same_f=True` fixes it, the batch size is

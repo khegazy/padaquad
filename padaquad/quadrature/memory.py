@@ -10,7 +10,9 @@ depends on the memory one evaluation uses. This module holds:
   queries free memory on the solver's device, and turns both into the batch
   size (``get_max_batch`` -> ``_get_max_f_evals``: the largest N whose fitted
   memory fits in ``_MEMORY_BUDGET`` of the usable memory), recomputed at every
-  evaluation from live memory.
+  evaluation from live memory. The benchmark is a heuristic for the common
+  case and cannot be right for every f; its known limitations are listed in
+  the Notes of ``_setup_memory_checks``.
 - ``_fit_up_to_quadratic`` and ``_largest_n``: the fit, and its inverse.
 - ``_is_out_of_memory``: recognizes the out-of-memory errors of the GPU, the
   PyTorch CPU allocator, the CUDA libraries and numpy, used by the batch loop
@@ -455,9 +457,7 @@ class _MemoryManagement:
            warning says so);
         2. c = s (M + E) / N changes by less than 1 % over each of the last
            two calls, the last three readings all reliable and the fit ready
-           (the cost per point is constant, so the growth is linear; an N^2
-           term too small to show in the readings, or hidden by their noise,
-           is missed);
+           (the cost per point is constant, so the growth is linear);
         3. a call takes longer than 1 s, with the fit ready;
         4. N reaches 1e9;
         5. N_next < 2 N: the next call would not fit in memory, or would take
@@ -471,12 +471,7 @@ class _MemoryManagement:
           factor 3 absorbs readings off by up to a factor 2). Either the
           memory grows faster than N^2, which the fit cannot follow, or (CPU
           readers) the earlier reading missed memory f reused; the benchmark
-          cannot tell which. Such growth is caught only once it shows in two
-          readings, so the call that shows it can already exceed the budget,
-          and growth only slightly faster than N^2 is not caught (N^3 passes
-          between readings less than 3 times apart in N; across a 10x step
-          N^2.5 is caught). A large fixed cost, which every bound includes,
-          delays this further;
+          cannot tell which (Notes 4 and 8);
         - the fit is not ready when the 60 s run out, or the next call needed
           for it would fit in memory but is predicted to take longer than what
           is left of the 60 s (the message names ``limit_benchmark_time``);
@@ -501,12 +496,8 @@ class _MemoryManagement:
         process that has already evaluated f, so the batch size is also capped
         at the largest test call (it ran, so a batch that size fit then; at
         least the C nodes of one subinterval), through the same
-        ``_oom_max_batch``. For an f whose cost per point stopped changing
-        early this cap can be well below what fits. The start warning says so and
-        recommends ``max_batch``. Only one input value is used for every
-        point, so an f whose memory depends on t can be mismeasured. The start
-        and end messages are logged at WARNING level, so they are silent if the
-        application configures logging above WARNING.
+        ``_oom_max_batch``. The start warning says so and recommends
+        ``max_batch``.
 
         Parameters
         ----------
@@ -529,6 +520,116 @@ class _MemoryManagement:
             The memory grows faster than N^2, the fit was not ready within the
             time limit, no reading was reliable (see above), or the measurement
             failed for another reason; pass ``max_batch`` to skip it.
+
+        Notes
+        -----
+        The benchmark is a heuristic for the common case: memory that grows
+        linearly with N, or at most like N^2, read by a reader that sees every
+        allocation (a GPU, or Linux with glibc). It cannot be right for every
+        f, and ``max_batch`` skips it. Its known limitations follow. Numbers
+        marked "simulated" come from fake readings and a fake clock (the
+        tests in ``tests/test_memory_benchmark.py`` and review scripts);
+        numbers marked "measured" come from real runs on an Apple-silicon Mac.
+        Nothing here was measured on Linux or on a GPU.
+
+        Readings (details per reader in ``_peak_memory_reader``):
+
+        1. Hidden memory on macOS and Windows. The CPU readers count resident
+           memory, so memory f takes from memory the process freed earlier and
+           kept is missed unless ``malloc_trim`` returns it first, which only
+           Linux with glibc allows. In a process that has already evaluated f
+           the readings can be far too low. Measured, in 14 repeated
+           ``integrate`` calls before the cap at the largest test call
+           existed: 6 batches needed 1.2 to 35 times the usable memory, and
+           the test calls themselves exceeded it in 7 calls, by up to 6.9
+           times. The cap now bounds the batch; the test calls are still
+           unbounded.
+        2. The cap at the largest test call costs batch size when the cost per
+           point stops changing early. Measured, first call in a fresh
+           process: ``torch.sin`` got 41.8 million points where the fit
+           allowed 143 million; a small network with ``take_gradient=True``
+           got 1.24 million where the fit allowed 2.0 million.
+        3. A preloaded allocator (jemalloc, tcmalloc) on Linux is not
+           detected. glibc's ``malloc_trim`` still resolves, so the reader is
+           taken to count reused memory (``counts_reuse``), but the trim does
+           not reach that allocator: readings can be far too low while steps
+           are 2x and the batch is not capped. With noisy readings the fit can
+           then become ready on a slope far too small (simulated: 1 of 60 runs
+           gave a batch needing 25 times the usable memory).
+        4. A reading of 0 is raised to the bytes of the input and output
+           tensors. From about a million points on, that passes the 4 MiB
+           floor while far below the true memory, so the next call looks like
+           growth faster than N^2 and raises a false error (simulated, with
+           30 % of the readings 0 and memory 1 MiB + 1 KiB per point: 85 of
+           150 runs with 10x steps).
+        5. The before/after reader (macOS, Windows) misses memory f allocates
+           and frees inside the call. The CUDA counter misses allocations made
+           outside PyTorch's allocator. Every reader measures the whole
+           process or device, so allocations by other threads during a test
+           call are counted as f's.
+        6. One input value (``node_test``) is used for every point, so an f
+           whose memory depends on t is measured at that value only, and the
+           fit is not updated if f's memory changes during the integration
+           (for example a growing cache). Batches follow only the live free
+           memory.
+        7. A reading much larger than its neighbors (memory f allocates in
+           that call only) stays in the fit and makes it conservative
+           (simulated: 1 MiB at N = 2 among readings of 1 KiB per point gave
+           a batch of 290,767 points where about 7.9e7 fit).
+
+        The fit:
+
+        8. Growth faster than N^2 is caught only once it exceeds the N^2
+           bound from an earlier reliable reading by the factor 3: growth like
+           N^p is caught across readings k times apart in N when
+           k^(p - 2) > 3, so N^3 needs readings more than 3 times apart and
+           N^2.2 more than 243 times apart. A large fixed cost enters every
+           bound and delays this further (simulated, 2x steps, 100 GB usable:
+           512 MiB + 10,000 bytes N^3 was never caught and gave a batch
+           needing 1.48 times the usable memory). The call that shows the
+           growth can already exceed the budget.
+        9. The convergence stop ends the search when the cost per point
+           changes by less than 1 % over two calls. An N^2 term too small to
+           change it that much, and hidden from the fit by noise, is missed;
+           at a batch k times larger than the last test call it adds k times
+           more memory per point than it did at that call.
+        10. The fit describes one forward call. With ``take_gradient=True`` it
+            is multiplied by 2.1 (``_GRADIENT_MEMORY_SAFETY_FACTOR``), a
+            heuristic; a backward pass that needs more is not seen. The 0.75
+            budget is the only margin for errors of the fit, and on a CPU a
+            batch that does not fit can be killed by the operating system
+            without a Python error.
+
+        Time:
+
+        11. Before three calls, time is assumed to grow at most like N^2 (a
+            call at 2 N takes at most 4 times the last one); from three calls
+            on, it is the NNLS fit of the times. Faster growth is predicted
+            too low, and a running call of f cannot be interrupted, so the
+            60 s can be exceeded (simulated: time 1e-6 N^3 s ended at 73 s,
+            1e-3 N^4 s at 170 s).
+        12. With the 60 s limit, an f whose calls take more than 10 s each
+            always raises: a fit needs three calls, and the third is predicted
+            to take 4 times the second, which no longer fits in what is left.
+            A slow f with little memory per point, which needs many doublings
+            to reach the noise floor, raises too (simulated: 5 s per call and
+            1 KiB per point needs 15 calls, 75 s). ``limit_benchmark_time=False``
+            removes the limit, and then nothing bounds the time: the search
+            ends only when the fit is ready, the memory budget ends it, or N
+            reaches 1e9.
+
+        Other:
+
+        13. An out-of-memory error during the benchmark at N > 1 caps the
+            batch at ``_OOM_BACKOFF`` N, which can be below the C nodes of one
+            subinterval (gk21 running out of memory at N = 10 gives 7 < 23).
+            ``integrate(take_gradient=True)`` then fails its assertion that one
+            subinterval fits.
+        14. With 2x steps near 1e9 points, the end message gives "the next
+            test would not fit in memory" as the reason when the 1e9 limit
+            ended the search (2 N passes 1e9).
+        15. The start and end messages are logged at WARNING level, so they
+            are silent if the application sets logging above WARNING.
         """
         # How the memory of one call is read on this device (see _Reader).
         reader = self._peak_memory_reader()
@@ -648,6 +749,7 @@ class _MemoryManagement:
                     # succeeded, so the failed call is not a reading. Cap the
                     # batch below N for the rest of this integrate() call, as
                     # the batch loop does after an out-of-memory error.
+                    # Can fall below self.C (Notes 13).
                     self._oom_max_batch = max(1, int(_OOM_BACKOFF * N))
                     reason = "an evaluation ran out of memory"
                     continue
@@ -769,7 +871,9 @@ class _MemoryManagement:
                         )
                         reason = "the next test would take too long"
                     else:
-                        # A call barely larger than this one adds little.
+                        # A call barely larger than this one adds little. Near
+                        # 1e9 with 2x steps, the 1e9 limit can be reported as
+                        # memory (Notes 14).
                         reason = (
                             "the next test would not fit in memory"
                             if n_mem < 2 * N

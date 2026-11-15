@@ -2536,13 +2536,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # prediction is only a decision.
         nodes, y = nodes.detach(), y.detach()
         mesh_quadratures = mesh_quadratures.detach()
-        expected = self._compute_nodes(nodes[:, 0, :], nodes[:, -1, :])
-        tolerance = 16 * torch.finfo(nodes.dtype).eps * float(nodes.abs().max())
-        if float((nodes - expected).abs().max()) > tolerance:
-            raise ValueError(
-                "merge_rule='predicted' needs the nodes at the method's node "
-                "fractions of each subinterval"
-            )
+        eps = torch.finfo(nodes.dtype).eps
         left_end = nodes[:, 0, 0].to(torch.float64)
         widths = nodes[:, -1, 0].to(torch.float64) - left_end
         key = torch.round(
@@ -2552,6 +2546,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         out = torch.empty(n_pairs, y.shape[-1], dtype=y.dtype, device=y.device)
         for lo in range(0, n_pairs, self._MERGE_CHUNK):
             hi = min(lo + self._MERGE_CHUNK, n_pairs)
+            # Nodes off the fractions would be mispredicted. Checked per chunk
+            # (bounded memory), each subinterval against its own largest |node|.
+            chunk = nodes[lo : hi + 1]
+            offset = chunk - self._compute_nodes(chunk[:, 0], chunk[:, -1])
+            if bool((offset.abs() > 16 * eps * chunk.abs().amax(1, True)).any()):
+                raise ValueError(
+                    "merge_rule='predicted' needs the nodes at the method's node "
+                    "fractions of each subinterval"
+                )
             # Vectors only for this chunk's ratios, so memory stays bounded
             # even when every pair has its own ratio.
             keys, inverse = torch.unique(key[lo:hi], return_inverse=True)

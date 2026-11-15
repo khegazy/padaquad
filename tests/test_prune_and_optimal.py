@@ -632,3 +632,41 @@ def test_predicted_chunking_matches_one_pass():
             - whole._predict_merged_errors(nodes, y, q)
         ).abs()
         assert torch.all(difference <= 1e-13 * (scale[:-1] + scale[1:])), name
+
+
+def test_predicted_node_check_works_in_chunks(monkeypatch):
+    """The node-position check runs on one chunk of pairs at a time, like the
+    prediction. Checking the whole record at once held three record-sized
+    temporaries, so the prediction's peak memory was 3 times the size of y at
+    D = 1 (measured at 10^6 subintervals), not bounded by the chunk size."""
+    solver = make_solver_for_unit_test("gk21")
+    solver._MERGE_CHUNK = 7
+    edges = torch.linspace(0.0, 1.0, 31, dtype=torch.float64).unsqueeze(-1)
+    nodes = solver._compute_nodes(edges[:-1], edges[1:])
+    y = torch.sin(3 * nodes)
+    b, _ = solver.method.weights(nodes)
+    q = (nodes[:, -1] - nodes[:, 0]) * (b * y).sum(1)
+    rows = []
+    compute_nodes = solver._compute_nodes
+
+    def spy(left, right):
+        rows.append(len(left))
+        return compute_nodes(left, right)
+
+    monkeypatch.setattr(solver, "_compute_nodes", spy)
+    solver._predict_merged_errors(nodes, y, q)
+    assert rows
+    assert max(rows) <= solver._MERGE_CHUNK + 1
+
+
+def test_predicted_node_check_is_relative_to_each_subinterval():
+    """A node off its fraction is refused also in a subinterval near 0 of a
+    mesh that reaches 1e6: one tolerance for the whole record, 16 eps times the
+    largest |node|, is 3.6e-9 there, 3.6e-6 of the first subinterval's width."""
+    solver = make_solver_for_unit_test("gk21")
+    edges = torch.tensor([[0.0], [1e-3], [1.0], [1e6]], dtype=torch.float64)
+    nodes = solver._compute_nodes(edges[:-1], edges[1:]).clone()
+    nodes[0, 5, 0] += 1e-9
+    y = torch.ones(3, solver.C, 1, dtype=torch.float64)
+    with pytest.raises(ValueError, match="node fractions"):
+        solver._predict_merged_errors(nodes, y, torch.ones(3, 1, dtype=torch.float64))

@@ -412,11 +412,12 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
   60 s with ≥ 3 reliable readings (warns), c = s·(M + E)/N changes < 1 %
   twice with the last 3 readings reliable, a call > 1 s with ≥ 3 reliable,
   N = 1e9, N_next < 2N. Raises `RuntimeError` (readings listed, asks for
-  `max_batch`) when M > 3·(N/N_prev)²·(M_prev + E) with M_prev reliable
-  (every reader), when < 3 readings are reliable at 60 s or the next needed
-  call is predicted past it, or when none is reliable at the end. With 1–2
-  reliable readings at the memory budget / OOM / 1e9: the cautious worst-case
-  fit. An OOM at N > 1 sets `_oom_max_batch = _OOM_BACKOFF·N`.
+  `max_batch`) when M > 3·(N/N_prev)²·(M_prev + E), M_prev the previous
+  reliable reading (every reader), when < 3 readings are reliable at 60 s or
+  the next needed call fits in memory but is predicted past it, when none is
+  reliable at the end, or when the final fit is flat (b = d = 0, would allow
+  1e9; not after an OOM). With 1–2 reliable readings at the memory budget /
+  OOM / 1e9: the cautious worst-case fit. An OOM at N > 1 sets `_oom_max_batch = _OOM_BACKOFF·N`.
 - Unless `max_batch` or `same_f=True` fixes it, the batch size is
   computed at every evaluation from live memory: `get_max_batch` →
   `_get_max_f_evals` = `_largest_n(f_mem_coeffs, _MEMORY_BUDGET·usable)`

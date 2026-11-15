@@ -84,7 +84,9 @@ class _Reader(NamedTuple):
     counts_reuse : bool
         Whether a reading includes memory that f takes from memory the process
         freed earlier and kept (CUDA always; Linux when glibc's ``malloc_trim``
-        returns that memory before each call). Without it a reading can be far
+        returns that memory before each call; also True, wrongly, when an
+        allocator such as jemalloc is preloaded in place of glibc's malloc,
+        which the trim then cannot reach). Without it a reading can be far
         too low, so the benchmark keeps its steps at 10x (a call 2x larger than
         the previous one would reuse a large share of the previous call's
         memory unseen).
@@ -104,7 +106,10 @@ def _tensor_bytes(obj: Any, device: torch.device) -> int:
     Used as a lower bound of a test call's memory: the input tile and f's
     outputs are alive when the call is read, so the call used at least their
     storages. A storage shared by several tensors (a view, or an output that
-    is the input) is counted once.
+    is the input) is counted once. An output that is a view of a larger tensor
+    f did not allocate in this call (a slice of a preallocated buffer) counts
+    that tensor's whole storage, so the bound is then too high (safe: the
+    batch gets smaller).
 
     Parameters
     ----------
@@ -112,7 +117,8 @@ def _tensor_bytes(obj: Any, device: torch.device) -> int:
         A tensor, or tuples and lists of tensors (f's output may be
         ``(integrand, tracked_variables)``); anything else counts 0.
     device : torch.device
-        Only storages on this device count (the reader measures this device).
+        Only storages on this device type count (the reader measures it; on a
+        CUDA solver, storages on another GPU count too).
 
     Returns
     -------
@@ -447,19 +453,22 @@ class _MemoryManagement:
         It raises ``RuntimeError``, asking for ``max_batch``, when:
 
         - a call uses more than 3 times the memory that growth like N^2 allows
-          from the previous call, M > 3 (N / N_prev)^2 (M_prev + E), with the
-          previous reading reliable (the factor 3 absorbs readings off by up to
-          a factor 2). Either the memory grows faster than N^2, which the fit
-          cannot follow, or (CPU readers) the earlier reading missed memory f
-          reused; the benchmark cannot tell which. Such growth is caught only
+          from the previous reliable reading, M > 3 (N / N_prev)^2 (M_prev + E)
+          (the factor 3 absorbs readings off by up to a factor 2). Either the
+          memory grows faster than N^2, which the fit cannot follow, or (CPU
+          readers) the earlier reading missed memory f reused; the benchmark
+          cannot tell which. Such growth is caught only
           once it shows in two readings, so the call that shows it can already
           exceed the budget, and growth that a large fixed cost hides, or growth
-          only slightly faster than N^2, is not caught;
+          only slightly faster than N^2, is not caught (after a 2x step, 12x is
+          allowed, so even N^3 passes);
         - fewer than three readings are reliable when the 60 s run out, or the
-          next call needed for them is predicted to take longer than what is
-          left of the 60 s;
+          next call needed for them would fit in memory but is predicted to
+          take longer than what is left of the 60 s;
         - no reading is reliable when the search ends for another reason (the
-          memory budget, an out-of-memory error, or N = 1e9).
+          memory budget, an out-of-memory error, or N = 1e9);
+        - the reliable readings do not grow with N (the fit is flat and would
+          allow 1e9 points), unless an out-of-memory error ended the search.
 
         When the memory budget, an out-of-memory error or N = 1e9 ends the
         search with one or two reliable readings, the stored fit is the worst
@@ -513,9 +522,10 @@ class _MemoryManagement:
             else (
                 " On this system a memory reading misses memory that f reuses "
                 "from memory the process already holds, so in a process that "
-                "has already evaluated f the readings can be far too low and "
-                "max_batch too large: pass max_batch when the memory of a "
-                "batch matters."
+                "has already evaluated f the readings can be far too low, and "
+                "both this measurement's calls of f and max_batch can need "
+                "several times the memory available: pass max_batch when the "
+                "memory of a batch matters."
             )
         )
         logger.warning(
@@ -545,11 +555,13 @@ class _MemoryManagement:
         time_limit = 1.0  # seconds per call, once three readings are reliable
         total_limit = 60.0  # seconds for the whole measurement
         # A call using more than this many times the memory that growth like
-        # N^2 allows from the previous call raises (faster than N^2). Readings
-        # above the floor were off by up to a factor 2 (0.5x to 1.4x of the
-        # true size on a Mac), so a previous reading at 0.5x and this one at
-        # 1.5x make N^2 growth look 3 times faster; N^2.5 over a 10x step
-        # (316x instead of 100x) is still caught.
+        # N^2 allows from the previous reliable reading raises (faster than
+        # N^2). Readings above the floor were off by up to a factor 2 (0.5x to
+        # 1.4x of the true size on a Mac, in a fresh process; in a process that
+        # had evaluated f before, as low as 0.03x), so a previous reading at
+        # 0.5x and this one at 1.5x make N^2 growth look 3 times faster;
+        # N^2.5 over a 10x step (316x instead of 100x) is still caught, but
+        # over a 2x step only growth faster than N^3.6 is (12x allowed).
         growth_tolerance = 3.0
 
         # Search state: the points, memory (GB) and wall time (s) of every call
@@ -620,20 +632,17 @@ class _MemoryManagement:
                 elapsed = time.time() - t0
 
                 # Faster than N^2: with a, b, d >= 0, M(N) <= (N / N_prev)^2
-                # M(N_prev). The previous call is the one to compare with: an
-                # earlier one can be dominated by a fixed cost that hides the
-                # growth. Only a reliable previous reading is compared.
-                bound = (
-                    (N / Ns[-2]) ** 2 * (Ms[-2] + E)
-                    if len(Ns) >= 2 and reliable[-2]
-                    else 0.0
-                )
-                if bound > 0 and growth_tolerance * bound < M:
+                # M(N_prev). The previous reliable reading is the one to
+                # compare with: an earlier one can be dominated by a fixed cost
+                # that hides the growth, and an unreliable one is noise.
+                j = next((i for i in range(len(Ns) - 2, -1, -1) if reliable[i]), None)
+                bound = 0.0 if j is None else (N / Ns[j]) ** 2 * (Ms[j] + E)
+                if j is not None and bound > 0 and growth_tolerance * bound < M:
                     error = (
                         f"The memory of one call of f grew to {M * _GB:.3g} "
                         f"bytes at {N} points, more than {growth_tolerance:g} "
                         f"times the {bound * _GB:.3g} bytes that growth like N^2 "
-                        f"allows from the {Ms[-2] * _GB:.3g} bytes at {Ns[-2]} "
+                        f"allows from the {Ms[j] * _GB:.3g} bytes at {Ns[j]} "
                         "points. Either the memory of f grows faster than N^2, "
                         "which padaquad's fit cannot follow, or the earlier "
                         "reading was too low because f reused memory the process "
@@ -705,7 +714,9 @@ class _MemoryManagement:
                     N_next = min(step * N, n_mem, n_time)
                     if N_next >= 2 * N:
                         N = N_next
-                    elif n_rel < 3 and n_time < n_mem:
+                    elif n_rel < 3 and n_mem >= 2 * N:
+                        # Only time stops the search; when the next call would
+                        # not fit in memory either, the memory budget ends it.
                         error = (
                             f"The next test call needed to reach three readings "
                             f"above the noise floor of {reader.floor * _GB:.3g} "
@@ -718,7 +729,7 @@ class _MemoryManagement:
                         # A call barely larger than this one adds little.
                         reason = (
                             "the next test would not fit in memory"
-                            if n_mem <= n_time
+                            if n_mem < 2 * N
                             else f"the next test would take longer than {time_limit} s"
                         )
         except torch.OutOfMemoryError:
@@ -736,11 +747,24 @@ class _MemoryManagement:
 
         self._release_memory()
         n_rel = sum(reliable)
+        a, b, d = memory_model()
         if error is None and n_rel == 0:
             error = (
                 f"No test call of f used at least the noise floor of "
                 f"{reader.floor * _GB:.3g} bytes before the search ended "
                 f"({reason})."
+            )
+        elif error is None and b == d == 0 and measured is not None:
+            # Reliable readings that do not grow with N (equal to within the
+            # reader's resolution, as for a fixed workspace read in whole
+            # pages after 2x steps) give a flat fit, which would allow 1e9
+            # points per call. After an out-of-memory error the batch is
+            # capped below that call instead.
+            error = (
+                f"The readings that reached the noise floor of "
+                f"{reader.floor * _GB:.3g} bytes did not grow with the number "
+                f"of points, so the memory per point could not be measured "
+                f"before the search ended ({reason})."
             )
         if error is not None:
             # Raised here, outside the try block, so it is not reported as a
@@ -763,7 +787,6 @@ class _MemoryManagement:
         # memory budget, an out-of-memory error or N = 1e9 ended the search),
         # the model is the cautious worst case.
         cautious = n_rel < 3
-        a, b, d = memory_model()
         self.f_mem_coeffs = (s * (a + E), s * b, s * d)
 
         # The estimate depends on take_gradient: the fit includes the factor s

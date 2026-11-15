@@ -132,7 +132,7 @@ def test_same_f_skips_memory_benchmark(monkeypatch):
 
     def fake_benchmark(*args, **kwargs):
         calls.append(1)
-        solver.f_unit_mem_size = 1e-6  # GB per evaluation
+        solver.f_mem_coeffs = (0.0, 1e-6, 0.0)  # GB: 1e-6 per evaluation
 
     monkeypatch.setattr(solver, "_setup_memory_checks", fake_benchmark)
     f = lambda t, *_: torch.sin(t)  # noqa: E731

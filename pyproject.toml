@@ -88,9 +88,22 @@ markers = [
 ]
 
 [tool.coverage.run]
-source = ["padaquad"]
+# The imported package, wherever it is installed. `source = ["padaquad"]` would
+# match the ./padaquad checkout instead, which a non-editable install (CI) never
+# runs, so every line was reported missed. Run `pytest --cov`, not
+# `--cov=padaquad`, which sets `source` again.
+source_pkgs = ["padaquad"]
+relative_files = true
+
+[tool.coverage.paths]
+# Report the installed copy (CI) under the repository's paths; the first entry
+# is the target, so Codecov can match the files.
+source = ["padaquad/", "*/site-packages/padaquad/"]
 
 [tool.coverage.report]
+# The full suite measured 94% (2026-11-14, CPU); a run that measures nothing
+# (as CI did for months) fails instead of passing.
+fail_under = 90
 exclude_also = [
   "if TYPE_CHECKING:",
   "if __name__ == .__main__.:",

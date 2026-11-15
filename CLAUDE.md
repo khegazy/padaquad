@@ -28,8 +28,10 @@ python -m venv .venv
 # Run all tests and docstring examples (3396 pass and 129 skip on a CPU-only Mac; GPU-only tests skip there)
 .venv/bin/pytest -v
 
-# Run all tests with coverage
-.venv/bin/pytest --cov=padaquad --cov-report=xml
+# Run all tests with coverage (bare --cov: the settings in pyproject.toml measure
+# the imported padaquad, editable or installed; --cov=padaquad would measure the
+# ./padaquad checkout and report 0% under a non-editable install, as in CI)
+.venv/bin/pytest --cov --cov-report=xml
 
 # Run a single test file
 .venv/bin/pytest tests/test_integrals.py -v

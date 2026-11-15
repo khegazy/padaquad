@@ -11,6 +11,14 @@ concurrency:
 jobs:
   tests-base:
     runs-on: ubuntu-latest
+    # id-token: the Codecov upload authenticates with GitHub's OIDC identity, so
+    # no Codecov token is stored anywhere.
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      # "true" unless this is a PR from a fork (see the Codecov upload step).
+      NOT_FORK: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
     strategy:
       fail-fast: true
       matrix:
@@ -41,12 +49,17 @@ jobs:
       - name: Type check with mypy
         run: mypy padaquad/
 
+      # padaquad is installed non-editable above, as users install it; the
+      # coverage settings in pyproject.toml measure that installed copy.
       - name: Run tests with pytest
-        run: pytest --cov=padaquad --cov-report=xml
+        run: pytest --cov --cov-report=xml
 
+      # OIDC for pushes and same-repository PRs. A PR from a fork cannot get an
+      # OIDC identity; Codecov accepts it without a token, and its failure does
+      # not fail the contributor's CI (the upload after merging to main still does).
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v4
-        env:
-          CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
+        uses: codecov/codecov-action@v7
         with:
-          fail_ci_if_error: true
+          files: coverage.xml
+          use_oidc: ${{ env.NOT_FORK }}
+          fail_ci_if_error: ${{ env.NOT_FORK }}

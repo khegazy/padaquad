@@ -49,9 +49,9 @@ allow a fit within 60 s (the error names `limit_benchmark_time`), when no
 reading reaches the noise floor, or when a call uses more than three times the
 memory that growth like N² allows from an earlier reading that reached the
 noise floor (memory growing faster than N², which the fit cannot follow).
-Faster growth that it does not catch (growth only slightly faster than N², or
-N³ before two readings are more than three times apart in N) is
-underestimated, so pass `max_batch` for such an integrand.
+Faster growth that it does not catch (growth only slightly faster than N², N³
+before two readings are more than three times apart in N, or growth hidden by a
+large fixed cost) is underestimated, so pass `max_batch` for such an integrand.
 
 On a CPU, memory is measured as the memory the operating system has given the
 process. Memory the integrand takes from memory the process freed earlier

@@ -1865,3 +1865,76 @@ def test_time_limit_raises_while_readings_do_not_grow(fake, monkeypatch, slow_at
         assert f.calls == [2**k for k in range(10)]
         assert "is predicted to take longer than" in str(info.value)
         assert "(10 readings reached the noise floor" in str(info.value)
+
+
+def test_cost_convergence_waits_for_fit_ready(fake, monkeypatch, caplog):
+    """A GPU-like reader (10 KB floor, counts reused memory) and calls of
+    0.2 s, so N doubles. The call at N = 2 reads 1 MiB (a workspace f
+    allocates only in that call, as for a kernel first used at two points;
+    integrate()'s one-point call absorbs only what N = 1 allocates); every
+    other call reads 1 KiB per point. From N = 16 on the readings are
+    reliable and the cost per point is constant, so the convergence stop
+    alone would end the search at N = 64. The fit uses every reliable
+    reading, the 1 MiB one included, and grows by less than the floor there:
+    it is not ready, so the stored fit would be the cautious worst case (a
+    batch of 70,944 points, the end message saying that four readings reached
+    the floor and a fit needs three). The search goes on until the fit is
+    ready, at N = 512, and the end message reports that fit. Catches: a
+    convergence stop that does not require the fit to be ready."""
+    set_reader(fake.solver, monkeypatch, floor=10_000, counts_reuse=True)
+    calls = stub_calls(
+        fake.solver,
+        monkeypatch,
+        lambda n: 2**20 if n == 2 else 1024 * n,
+        seconds=lambda n: 0.2,
+    )
+    with caplog.at_level(logging.WARNING, logger=qmem.__name__):
+        benchmark(fake.solver, None)
+    assert calls == [2**k for k in range(10)]
+    assert "stopped because the cost per evaluation stopped changing" in caplog.text
+    assert "did not allow a fit" not in caplog.text
+
+
+def test_out_of_memory_retry_shrinks_the_failed_batch(fake, monkeypatch):
+    """On a reader that misses reused memory (macOS, Windows), the benchmark
+    caps the batch at its largest test call, through ``_oom_max_batch``.
+    Readings of 1 MiB per point end the search at N = 1000 (the cost per
+    point is constant), so the cap is 1000 points (the fit allows 76,800).
+    During the integration f runs out of memory above 29 points, and the
+    first batch is 44 points (11 subintervals of bosh3's 4 nodes). Each retry
+    shrinks the batch that failed, 44 -> 33 -> 25 (then the 19 points left).
+    Shrinking the cap instead retried the 44 points 11 more times (750, 562,
+    ... points, cut to the 44 left); in an integration with more points left,
+    it retries a batch larger than the one that failed. Catches: seeding the
+    out-of-memory backoff of the batch loop from ``_oom_max_batch``."""
+    stub_calls(fake.solver, monkeypatch, lambda n: 2**20 * n)
+    f = CostIntegrand(fake.memory, fake.clock, oom_from=30)
+    result = fake.solver.integrate(
+        f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
+    )
+    assert f.calls == [1, 44, 33, 25, 19]  # after the one-point check
+    assert fake.solver._oom_max_batch == 25
+    assert float(result.integral.sum()) == pytest.approx(1.0)
+
+
+def test_reuse_cap_never_raises_out_of_memory_cap(monkeypatch):
+    """On a reader that misses reused memory, a heavy f (8 MiB per call) runs
+    out of memory at N = 10 after one reading at N = 1. The out-of-memory cap
+    is int(0.75 * 10) = 7 points; the cap at the largest test call is raised
+    to one gk21 subinterval, 23 points, which is more than the call that
+    failed. The smaller of the two holds: the batch is 7. Catches: the cap at
+    the largest test call replacing the out-of-memory cap instead of taking
+    the minimum."""
+    solver = make_solver_for_unit_test(method_name="gk21")
+    monkeypatch.setattr(solver, "_get_usable_memory", lambda total_mem_usage: USABLE_GB)
+    set_reader(solver, monkeypatch, counts_reuse=False)
+    calls = []
+
+    def measure_call(f, f_args, node_test, N, *rest):
+        calls.append(N)
+        return None if N >= 10 else (8 * 2**20 / GB, 0.0)
+
+    monkeypatch.setattr(solver, "_measure_call", measure_call)
+    benchmark(solver, None)
+    assert calls == [1, 10]
+    assert solver.get_max_batch() == 7 < solver.C

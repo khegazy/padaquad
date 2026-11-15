@@ -413,7 +413,8 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
   always capped by the time left of the 60 s total (`limit_benchmark_time`,
   a constructor option; False makes the total infinite). Stops: 60 s with
   the fit ready (warns), c = s·(M + E)/N changes < 1 % twice with the last 3
-  readings reliable, a call > 1 s with the fit ready, N = 1e9, N_next < 2N.
+  readings reliable and the fit ready, a call > 1 s with the fit ready,
+  N = 1e9, N_next < 2N.
   Raises `RuntimeError` (readings listed, asks for `max_batch`) when
   M > 3·(N/N_i)²·(M_i + E) for the earlier reliable reading i with the
   smallest bound (every reader), when the fit is not ready at 60 s or the
@@ -422,6 +423,8 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
   the memory budget / OOM / 1e9: the cautious worst-case fit. An OOM at
   N > 1 sets `_oom_max_batch = _OOM_BACKOFF·N`; on a reader that misses
   reused memory `_oom_max_batch` is also capped at max(largest test N, C).
+  The batch loop's out-of-memory retry shrinks the batch that failed, not
+  `_oom_max_batch` (which can be far above it).
 - Unless `max_batch` or `same_f=True` fixes it, the batch size is
   computed at every evaluation from live memory: `get_max_batch` →
   `_get_max_f_evals` = `_largest_n(f_mem_coeffs, _MEMORY_BUDGET·usable)`

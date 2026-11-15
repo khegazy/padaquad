@@ -1945,17 +1945,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 # traceback still holds f's tensors, so they cannot be freed.
                 free_mem, total_mem = self._get_memory()
                 self._release_memory()
-                # Seed from the live max_batch on the first OOM (_oom_max_batch
-                # starts as None), then shrink. min(..., prev - 1) guarantees a
-                # strict decrease -- plain round(_OOM_BACKOFF * 2) == 2 would
+                # Shrink the batch that failed, not _oom_max_batch: a cap the
+                # memory benchmark set can be far above it, and shrinking that
+                # would retry a larger batch. min(..., max_batch - 1) guarantees
+                # a strict decrease -- plain round(_OOM_BACKOFF * 2) == 2 would
                 # stick and retry forever.
-                prev = (
-                    self._oom_max_batch
-                    if self._oom_max_batch is not None
-                    else max_batch
-                )
                 self._oom_max_batch = max(
-                    1, int(min(round(_OOM_BACKOFF * prev), prev - 1))
+                    1, int(min(round(_OOM_BACKOFF * max_batch), max_batch - 1))
                 )
                 logger.warning(
                     f"Caught OOM with {free_mem} GB free of {total_mem} GB. "

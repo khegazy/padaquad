@@ -454,8 +454,8 @@ class _MemoryManagement:
         1. the measurement has taken longer than 60 s, with the fit ready (a
            warning says so);
         2. c = s (M + E) / N changes by less than 1 % over each of the last
-           two calls, the last three readings all reliable (the cost per point
-           is constant, so the growth is linear and the fit is ready; an N^2
+           two calls, the last three readings all reliable and the fit ready
+           (the cost per point is constant, so the growth is linear; an N^2
            term too small to show in the readings, or hidden by their noise,
            is missed);
         3. a call takes longer than 1 s, with the fit ready;
@@ -475,7 +475,8 @@ class _MemoryManagement:
           readings, so the call that shows it can already exceed the budget,
           and growth only slightly faster than N^2 is not caught (N^3 passes
           between readings less than 3 times apart in N; across a 10x step
-          N^2.5 is caught);
+          N^2.5 is caught). A large fixed cost, which every bound includes,
+          delays this further;
         - the fit is not ready when the 60 s run out, or the next call needed
           for it would fit in memory but is predicted to take longer than what
           is left of the 60 s (the message names ``limit_benchmark_time``);
@@ -663,9 +664,9 @@ class _MemoryManagement:
 
                 # Faster than N^2: with a, b, d >= 0, M(N) <= (N / N_i)^2 M(N_i)
                 # for every earlier N_i, so the smallest of these bounds is
-                # tested. Unreliable readings are noise and are skipped; a
-                # reading dominated by a fixed cost gives a loose bound and is
-                # not the smallest.
+                # tested. Unreliable readings are noise and are skipped. A
+                # fixed cost enters every bound, so a large one still hides
+                # faster growth until it dominates the readings.
                 bounds = {
                     i: (N / Ns[i]) ** 2 * (Ms[i] + E)
                     for i in range(len(Ns) - 1)
@@ -699,16 +700,19 @@ class _MemoryManagement:
                         )
                     reason = f"the measurement took longer than {total_limit:g} s"
                 elif (
-                    len(Ns) >= 3
+                    ready
                     and all(reliable[-3:])
                     and abs(c - c_prev) < 0.01 * c_prev
                     and abs(c_prev - c_prev2) < 0.01 * c_prev2
                 ):
                     # The cost per point changed by < 1 % over each of the last
                     # two calls, all three readings reliable: the fixed per-call
-                    # cost is spread out and the growth is linear. The fit is
-                    # then ready: readings proportional to N, at least the floor
-                    # and N at least 4 times apart grow by 3 floors or more.
+                    # cost is spread out and the growth is linear. Those three
+                    # readings grow by about 3 floors or more (proportional to
+                    # N, at least the floor, N at least 4 times apart), but the
+                    # fit uses every reliable reading, and an earlier one larger
+                    # than these (memory f allocated only in that call) can
+                    # flatten it, so the fit must also be ready.
                     reason = "the cost per evaluation stopped changing"
                 elif ready and seconds > time_limit:
                     # The backstop; before the fit is ready, a call may take

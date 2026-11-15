@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [1.3.1] - 2026-11-15
+
 ### Removed
 
 - **The submodule `padaquad.integrate`.** It had the same name as the function it defined, so `padaquad.integrate` meant the module or the function depending on how it was imported. Its code is now the private module `padaquad._frontend`. `from padaquad import integrate, adaptive_quadrature` is unchanged; `from padaquad.integrate import integrate` now raises `ModuleNotFoundError`; use `from padaquad import integrate`.

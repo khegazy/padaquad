@@ -396,3 +396,44 @@ class TestAcceptRejectMasksFailure:
         keep, remove, _ = s._accept_reject_masks(frac, per_dim)
         assert keep.dtype == torch.bool
         assert torch.equal(remove, ~keep)
+
+
+# ---------------------------------------------------------------------------
+# _compute_error_ratios: pair_errors (the numerator of the pair ratio)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("dtype", DTYPES, ids=DTYPE_IDS)
+@pytest.mark.parametrize("error_norm", ["2", "max", "failure_fraction"])
+@pytest.mark.parametrize("absolute", [True, False], ids=["absolute", "cumulative"])
+def test_pair_errors_replace_the_pair_numerator(dtype, error_norm, absolute):
+    """A supplied pair_errors replaces abs(e[k]) + abs(e[k+1]) in the pair ratio
+    of both error-norm families, in absolute and cumulative mode, and nothing
+    else changes: the per-subinterval ratios and the pair tolerance (including
+    its rounding floor) are the same. Tripling the summed errors triples the
+    pair ratio exactly (every norm here scales with its argument)."""
+    s = _solver(
+        dtype,
+        error_norm=error_norm,
+        atol=1e-12,
+        rtol=1e-6,
+        use_absolute_error_ratio=absolute,
+    )
+    # D = 2; contributions with opposite signs and one tiny one, so that the
+    # rounding floor and the cumulative tolerance both vary along the mesh.
+    q = torch.tensor([[1.0, 2.0], [-0.999, -1.998], [1e-14, 0.5]], dtype=dtype)
+    e = torch.tensor([[1e-8, 3e-8], [2e-8, 1e-8], [5e-9, 4e-9]], dtype=dtype)
+    kwargs = {
+        "mesh_quadrature_errors": e,
+        "mesh_quadratures": q,
+        "integral": q.sum(0) if absolute else None,
+    }
+    ratio, pair, per_dim = s._compute_error_ratios(**kwargs)
+    ratio3, pair3, per_dim3 = s._compute_error_ratios(
+        **kwargs, pair_errors=3 * (e[:-1].abs() + e[1:].abs())
+    )
+    assert torch.equal(ratio3, ratio)
+    assert (per_dim3 is None) == (per_dim is None)
+    if per_dim is not None:
+        assert torch.equal(per_dim3, per_dim)
+    assert torch.allclose(pair3, 3 * pair, rtol=_close(dtype), atol=0)

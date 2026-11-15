@@ -160,6 +160,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     remove_cut : float
         Largest predicted error ratio of a subinterval made by merging two
         neighbors when the optimal mesh is built.
+    merge_rule : str
+        How that predicted error ratio is computed: ``"predicted"``,
+        ``"power_law"`` or ``"sum"`` (see ``_merge_inputs``).
     init_max_batch : int or None
         The constructor's ``max_batch``.
     init_total_mem_usage : float
@@ -180,6 +183,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     # through ``_set_dtype``.
     method: MethodClass
     C: int
+    # Weight vectors of _merged_pair_weights by quantized width ratio (the key
+    # None holds the distinct-node indices); reset by ``_set_solver_dtype``.
+    _merge_weight_cache: dict[int | None, torch.Tensor]
 
     def __init__(
         self,
@@ -192,6 +198,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_final: torch.Tensor | None = None,
         y0: torch.Tensor | None = None,
         remove_cut: float = 0.1,
+        merge_rule: str = "predicted",
         max_batch: int | None = None,
         total_mem_usage: float = 0.9,
         max_adaptive_splits: int | None = None,
@@ -236,6 +243,22 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Largest predicted error ratio of a subinterval made by merging two
             neighbors when the optimal mesh is built; must be below 1. Lower
             values merge less. Default 0.1 (see :ref:`the user guide <ug-optimal-mesh>`).
+        merge_rule : str
+            How the merged subinterval's error is predicted when the optimal
+            mesh is built (see :ref:`the user guide <ug-optimal-mesh>`):
+
+            - ``"predicted"`` (default): computed from the integrand values
+              already stored for the two neighbors, by interpolating them onto
+              the merged subinterval's nodes. Use this one.
+            - ``"power_law"``: the neighbors' summed error times
+              ``2**(error_exponent - 1)``, the merge rule of padaquad 1.3.0. It
+              assumes the error shrinks like a power of the width and refuses
+              many safe merges on wide subintervals.
+            - ``"sum"``: the neighbors' summed error, the merge rule of
+              padaquad 1.2.2. Merged subintervals often fail when evaluated
+              again.
+
+            The older two are kept to reproduce meshes of earlier versions.
         max_batch : int or None
             Default for the largest number of integrand evaluations per call of
             ``f``. None (default) sets the batch size from the free memory,
@@ -283,7 +306,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             If an argument is passed by position, or a keyword is not an option
             of the solver.
         ValueError
-            If ``remove_cut`` is not below 1, or another option is invalid.
+            If ``remove_cut`` is not below 1, ``merge_rule`` is not one of
+            ``"predicted"``, ``"power_law"`` and ``"sum"``, or another option
+            is invalid.
         """
         unknown = set(distributed_options) - _DISTRIBUTED_OPTIONS
         if unknown:
@@ -293,6 +318,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             )
         if not remove_cut < 1.0:
             raise ValueError(f"remove_cut must be below 1, got {remove_cut!r}")
+        if merge_rule not in self._VALID_MERGE_RULES:
+            raise ValueError(
+                f"merge_rule must be one of {self._VALID_MERGE_RULES}, "
+                f"got {merge_rule!r}"
+            )
         super().__init__(
             method=DEFAULT_METHODS[self.sampling_type] if method is None else method,
             atol=atol,
@@ -308,6 +338,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         )
         self._check_max_adaptive_splits(max_adaptive_splits)
         self.remove_cut = remove_cut
+        self.merge_rule = merge_rule
 
         # Memory handling variables
         # max_batch of the last integrate() call that returned; reused by
@@ -343,6 +374,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
     #: String values accepted by ``error_norm`` (in addition to a callable).
     _VALID_ERROR_NORMS = ("2", "max", "rms", "failure_fraction")
+    #: Values accepted by ``merge_rule``.
+    _VALID_MERGE_RULES = ("predicted", "power_law", "sum")
 
     @classmethod
     def _check_error_norm(cls, error_norm: object) -> None:
@@ -450,6 +483,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             self.sampling_type, self.method_name, self.device, dtype
         )
         self.C = self.method.n_nodes
+        self._merge_weight_cache = {}
 
     def _compute_nodes(
         self, mesh_left: torch.Tensor, mesh_right: torch.Tensor
@@ -1132,6 +1166,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 ),
                 integral=record["integral"].to(result_device),
                 mesh=mesh.to(result_device),
+                y=record["y"],
             )
         # mesh_optimal is fed back into the integrator as the warm-start mesh on
         # the next call, so it must match the integration device (its endpoints
@@ -2277,45 +2312,333 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         return nodes, f_evals, tracked_out, step_idxs, split_node_state
 
+    #: log2 of a pair's width ratio is rounded to a multiple of 2**-48 before
+    #: pairs are grouped by ratio in ``_predict_merged_errors``, so that pairs
+    #: whose widths are equal up to rounding share one set of weight vectors.
+    #: Half a step moves the prediction by at most 0.24 of a pair's rounding
+    #: floor (measured; docs/issues/predicted-merge-rule.md, "The rule").
+    _RATIO_QUANTUM = 2.0**48
+    #: Pairs per chunk in ``_predict_merged_errors``; bounds its float64
+    #: temporaries to a fraction of the record's size.
+    _MERGE_CHUNK = 2**16
+    #: Largest number of width ratios kept in ``_merge_weight_cache``; a chunk
+    #: with more distinct ratios than this builds its vectors without caching.
+    _MERGE_CACHE_SIZE = 256
+    #: Width ratios per block in ``_merged_pair_weights``, which holds about
+    #: six [block, C, U] float64 temporaries (35 MB each for cc65).
+    _RATIO_BLOCK = 1024
+
+    def _merge_inputs(
+        self,
+        nodes: torch.Tensor,
+        y: torch.Tensor,
+        mesh_quadratures: torch.Tensor,
+        mesh_quadrature_errors: torch.Tensor,
+    ) -> tuple[torch.Tensor | None, float]:
+        """
+        Return the pair errors and the cutoff that decide which pairs merge.
+
+        A pair of neighboring subintervals is merged when its pair ratio (the
+        pair error divided by the tolerance the merged subinterval would get,
+        from ``_compute_error_ratios``) is below the cutoff. ``merge_rule``
+        decides both. With e_i the error estimate of subinterval i:
+
+        - ``"sum"`` (padaquad 1.2.2): pair error ``|e_i| + |e_{i+1}|``,
+          cutoff ``remove_cut``.
+        - ``"power_law"`` (padaquad 1.3.0): the same pair error, cutoff
+          ``remove_cut / 2**(k - 1)`` with ``k = method.error_exponent``. If a
+          subinterval's error estimate scaled as ``h**k`` with its width h,
+          the merged subinterval of width 2h would have about ``2**(k - 1)``
+          times the pair's summed error (padaquad's own derivation; the
+          ``h**k`` scaling of an embedded pair's estimate is that of its
+          lower-degree method, :cite:p:`gonnet2012` Eqs. (4)-(5) and
+          footnote 20). It holds only once the subintervals are narrow enough
+          for the leading Taylor term to dominate; on wider ones the error
+          grows far less, and the rule refuses safe merges.
+        - ``"predicted"`` (default): pair error
+          ``_predict_merged_errors(...) + |e_i| + |e_{i+1}|``, cutoff
+          ``remove_cut``. With more than one coordinate (T > 1) no
+          interpolation along a subinterval is defined, so a warning is
+          logged and ``"power_law"`` is used.
+
+        Parameters
+        ----------
+        nodes : torch.Tensor
+            Nodes of each subinterval. Shape: [N, C, T].
+        y : torch.Tensor
+            Integrand values at the nodes. Shape: [N, C, D].
+        mesh_quadratures : torch.Tensor
+            Integral contribution of each subinterval. Shape: [N, D].
+        mesh_quadrature_errors : torch.Tensor
+            Error estimate of each subinterval. Shape: [N, D].
+
+        Returns
+        -------
+        tuple[torch.Tensor | None, float]
+            ``(pair_errors, merge_cut)``: the error of each pair, shape
+            [N-1, D], or None for the summed errors that
+            ``_compute_error_ratios`` uses by default; and the cutoff on the
+            pair ratio.
+        """
+        if self.merge_rule == "sum":
+            return None, self.remove_cut
+        power_law_cut = self.remove_cut / 2 ** (self.method.error_exponent - 1)
+        if self.merge_rule == "power_law" or len(nodes) < 2:
+            return None, power_law_cut
+        if nodes.shape[-1] != 1:
+            logger.warning(
+                "merge_rule='predicted' needs a one-coordinate integration "
+                "variable (T == 1); T = %d here, so the optimal mesh is built "
+                "with merge_rule='power_law'.",
+                nodes.shape[-1],
+            )
+            return None, power_law_cut
+        abs_err = torch.abs(mesh_quadrature_errors)
+        pair_errors = (
+            self._predict_merged_errors(nodes, y, mesh_quadratures)
+            + abs_err[:-1]
+            + abs_err[1:]
+        )
+        return pair_errors, self.remove_cut
+
+    def _merged_pair_weights(
+        self, rho: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Weight vectors that give a merged subinterval's integral and error estimate.
+
+        For a pair whose right neighbor is ``rho`` times as wide as its left
+        one, each neighbor's stored values are replaced by the polynomial
+        through its distinct nodes, in barycentric form
+        (:cite:p:`berrut2004`, weights Eq. (3.2), formula Eq. (4.2)). These
+        polynomials are evaluated at the merged subinterval's nodes and the
+        method's weights b and error weights b_err are applied. Both results
+        are linear in the stored values, so with ``y_L`` and ``y_R`` the
+        neighbors' values at their distinct nodes and H the merged width::
+
+            Q_hat = H * (alpha_L . y_L + alpha_R . y_R)
+            E_hat = H * (gamma_L . y_L + gamma_R . y_R)
+
+        and the vectors depend on the pair only through ``rho``.
+
+        Parameters
+        ----------
+        rho : torch.Tensor
+            Width of the right neighbor divided by that of the left. Shape: [R].
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            ``(weights, first)``. ``weights`` holds the four vectors in
+            float64, shape [R, 2, 2, U] with U the number of distinct node
+            fractions: ``weights[:, 0]`` is ``(alpha_L, gamma_L)`` and
+            ``weights[:, 1]`` is ``(alpha_R, gamma_R)``. ``first`` is the index
+            of each distinct fraction in ``node_fractions()``, shape [U]
+            (dopri5 repeats the fraction 1, whose stored values are equal).
+        """
+        if len(rho) > self._RATIO_BLOCK:
+            blocks = [
+                self._merged_pair_weights(rho[i : i + self._RATIO_BLOCK])
+                for i in range(0, len(rho), self._RATIO_BLOCK)
+            ]
+            return torch.cat([weights for weights, _ in blocks]), blocks[0][1]
+        c = self.method.node_fractions().to(device=rho.device, dtype=torch.float64)
+        # The fractions are non-decreasing (MethodClass checks it), so repeats
+        # are neighbors.
+        new = torch.ones_like(c, dtype=torch.bool)
+        new[1:] = c[1:] != c[:-1]
+        first = torch.nonzero(new)[:, 0]
+        u = c[first]
+        diff = u[:, None] - u[None, :]
+        diff.fill_diagonal_(1.0)
+        bary = 1.0 / diff.prod(dim=1)  # Eq. (3.2); a common factor cancels
+        bary = bary / bary.abs().max()
+
+        # Merged nodes with the left neighbor at [0, 1] and the right one at
+        # [1, 1 + rho]. A merged node on the shared point 1 is taken from the
+        # left neighbor; its last value and the right one's first value are
+        # the integrand at the same point (up to the last bit, since
+        # _compute_nodes computes that point from either side).
+        x = c[None, :] * (1.0 + rho[:, None])  # [R, C]
+        in_left = x <= 1.0
+        s = torch.where(in_left, x, (x - 1.0) / rho[:, None])
+        to_node = s[..., None] - u  # [R, C, U]
+        on_node = to_node == 0
+        hits = on_node.any(dim=-1, keepdim=True)
+        terms = torch.where(
+            hits, on_node.to(torch.float64), bary / torch.where(on_node, 1.0, to_node)
+        )
+        basis = terms / terms.sum(dim=-1, keepdim=True)  # Eq. (4.2), [R, C, U]
+
+        b, b_err = self.method.weights(
+            x.unsqueeze(-1).to(self.method.node_fractions().dtype)
+        )
+        # [R, 2 (b, b_err), C, U] summed over the merged nodes in each neighbor
+        weighted = torch.stack([b, b_err], dim=1).to(torch.float64) * basis[:, None]
+        left = in_left[:, None, :, None]
+        weights = torch.stack(
+            [(weighted * left).sum(dim=2), (weighted * ~left).sum(dim=2)], dim=1
+        )
+        return weights, first.to(rho.device)
+
+    def _predict_merged_errors(
+        self, nodes: torch.Tensor, y: torch.Tensor, mesh_quadratures: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Predict the errors of merging each pair of neighboring subintervals.
+
+        For pair i (subintervals i and i + 1), the merged subinterval's
+        integral ``Q_hat`` and error estimate ``E_hat`` are computed from the
+        integrand values already stored for the two neighbors
+        (``_merged_pair_weights``); no integrand evaluation is needed. The
+        prediction is::
+
+            max(|E_hat|, |Q_hat - (Q_i + Q_{i+1})|)
+
+        - ``|E_hat|`` predicts whether the merged subinterval will pass its
+          own error estimate when it is evaluated on the next call.
+        - ``|Q_hat - (Q_i + Q_{i+1})|`` compares the merged rule, applied to
+          the neighbors' interpolants, with the sum of the two neighbors: the
+          halves-versus-whole test of adaptive Simpson quadrature
+          (:cite:p:`gander2000`, Sec. 3), used here to decide coarsening. When
+          the stored values resolve f, it approximates the merged
+          subinterval's true error, and it catches merges whose own error
+          estimate would be blind (a kink or a narrow feature that the merged
+          nodes skip over).
+
+        A feature that lies between the stored nodes is invisible to every
+        term, and so to every rule built from stored values.
+
+        Parameters
+        ----------
+        nodes : torch.Tensor
+            Nodes of each subinterval, at the method's node fractions. Shape:
+            [N, C, 1], N >= 2.
+        y : torch.Tensor
+            Integrand values at the nodes. Shape: [N, C, D].
+        mesh_quadratures : torch.Tensor
+            Integral contribution of each subinterval. Shape: [N, D].
+
+        Returns
+        -------
+        torch.Tensor
+            The prediction for each pair, in the dtype of ``y``. Shape:
+            [N-1, D].
+
+        Raises
+        ------
+        ValueError
+            If the nodes are not at the method's node fractions of their
+            subintervals (the prediction assumes it; ``_compute_nodes`` places
+            every node there).
+        """
+        # The record keeps the autograd graph when take_gradient=False; the
+        # prediction is only a decision.
+        nodes, y = nodes.detach(), y.detach()
+        mesh_quadratures = mesh_quadratures.detach()
+        expected = self._compute_nodes(nodes[:, 0, :], nodes[:, -1, :])
+        tolerance = 16 * torch.finfo(nodes.dtype).eps * float(nodes.abs().max())
+        if float((nodes - expected).abs().max()) > tolerance:
+            raise ValueError(
+                "merge_rule='predicted' needs the nodes at the method's node "
+                "fractions of each subinterval"
+            )
+        left_end = nodes[:, 0, 0].to(torch.float64)
+        widths = nodes[:, -1, 0].to(torch.float64) - left_end
+        key = torch.round(
+            torch.log2(widths[1:] / widths[:-1]) * self._RATIO_QUANTUM
+        ).to(torch.int64)
+        n_pairs = len(widths) - 1
+        out = torch.empty(n_pairs, y.shape[-1], dtype=y.dtype, device=y.device)
+        for lo in range(0, n_pairs, self._MERGE_CHUNK):
+            hi = min(lo + self._MERGE_CHUNK, n_pairs)
+            # Vectors only for this chunk's ratios, so memory stays bounded
+            # even when every pair has its own ratio.
+            keys, inverse = torch.unique(key[lo:hi], return_inverse=True)
+            weights, first = self._cached_merged_pair_weights(keys)
+            pair_weights = weights[inverse]  # [P, 2, 2, U]
+            y_l = y[lo:hi][:, first, :].to(torch.float64)  # [P, U, D]
+            y_r = y[lo + 1 : hi + 1][:, first, :].to(torch.float64)
+            width = (widths[lo:hi] + widths[lo + 1 : hi + 1])[:, None, None]
+            # [P, 2, D]: row 0 the merged integral Q_hat, row 1 its error E_hat
+            q_e_hat = width * (
+                torch.bmm(pair_weights[:, 0], y_l) + torch.bmm(pair_weights[:, 1], y_r)
+            )
+            q_halves = (mesh_quadratures[lo:hi] + mesh_quadratures[lo + 1 : hi + 1]).to(
+                torch.float64
+            )
+            out[lo:hi] = torch.maximum(
+                q_e_hat[:, 1].abs(), (q_e_hat[:, 0] - q_halves).abs()
+            ).to(y.dtype)
+        return out
+
+    def _cached_merged_pair_weights(
+        self, keys: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Return ``_merged_pair_weights`` for quantized width ratios, cached.
+
+        Adaptive meshes repeat a few width ratios (1, 2 and 1/2 from bisection,
+        plus those of the starting mesh), and building the vectors costs more
+        than applying them on a small mesh, so they are kept on the solver in
+        ``_merge_weight_cache``, keyed by the quantized ratio. The cache is
+        emptied when the method is rebuilt (``_set_solver_dtype``) or used on
+        another device, and holds at most ``_MERGE_CACHE_SIZE`` ratios; a call
+        with more distinct ratios builds its vectors without caching.
+
+        Parameters
+        ----------
+        keys : torch.Tensor
+            Distinct quantized ratios, ``round(log2(rho) * _RATIO_QUANTUM)``.
+            Shape: [K], int64.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            ``(weights, first)`` as in ``_merged_pair_weights``, with
+            ``weights`` of shape [K, 2, 2, U] in the order of ``keys``.
+        """
+        if len(keys) > self._MERGE_CACHE_SIZE:
+            return self._merged_pair_weights(
+                torch.exp2(keys.to(torch.float64) / self._RATIO_QUANTUM)
+            )
+        cache = self._merge_weight_cache
+        if cache and next(iter(cache.values())).device != keys.device:
+            cache.clear()
+        key_list = keys.tolist()
+        missing = [k for k in key_list if k not in cache]
+        if missing:
+            if len(cache) + len(missing) > self._MERGE_CACHE_SIZE:
+                cache.clear()
+                missing = key_list
+            weights, first = self._merged_pair_weights(
+                torch.exp2(
+                    torch.tensor(missing, dtype=torch.float64, device=keys.device)
+                    / self._RATIO_QUANTUM
+                )
+            )
+            cache[None] = first
+            cache.update(zip(missing, weights, strict=True))
+        return torch.stack([cache[k] for k in key_list]), cache[None]
+
     def _prune_excess_mesh(
         self,
         nodes: torch.Tensor,
         mesh_quadratures: torch.Tensor,
         mesh_quadrature_errors: torch.Tensor,
         error_ratios_2steps: torch.Tensor,
+        merge_cut: float,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Merge pairs of neighboring subintervals whose union is predicted to pass.
 
-        Pair i (subintervals i and i + 1) is merged when its summed error ratio
-        ``S = error_ratios_2steps[i]`` satisfies
-        ``S < remove_cut / 2**(k - 1)``, with ``k = method.error_exponent``
-        (padaquad's own derivation):
-
-        1. Two neighboring subintervals of width h have error ratios that sum
-           to S, so each has a ratio of about S / 2.
-        2. The error estimate scales as ``h**k``, so the merged subinterval of
-           width 2h has an error about ``2**k`` times that of one half, and an
-           error ratio of about ``2**k * S / 2 = 2**(k - 1) * S``.
-        3. Requiring that predicted ratio to be below ``remove_cut`` gives the
-           cutoff.
-
-        The scaling ``h**k`` with ``k = d + 2``, for an error estimate whose
-        less accurate method has degree d, is a derivation, not a cited
-        result: that method integrates the degree-d Taylor polynomial of f
-        exactly, so its error comes from the ``h**(d + 1)`` term integrated
-        over a width h. :cite:p:`gonnet2012` shows this for Simpson's rule
-        (Eqs. (4) and (5), Sec. 2.1) and, in footnote 20, treats the error
-        estimate of an embedded pair as that of the lower-degree method. The
-        prediction holds only when the subintervals are small enough for the
-        leading Taylor term to dominate. When the error estimate is at
-        rounding level (high k, tight tolerance, float32) it does not shrink
-        as ``h**k``, so pairs rarely reach the cut.
-
-        Of several adjacent qualifying pairs, ``_rec_remove`` keeps every other
-        one, so no subinterval is merged twice; one call merges at most one
-        level. The merge itself is ``_merge_excess_nodes`` (uniform or variable
-        sampling).
+        Pair i (subintervals i and i + 1) is merged when its pair ratio
+        ``error_ratios_2steps[i]`` is below ``merge_cut``; both come from the
+        configured ``merge_rule`` (``_merge_inputs``). Of several adjacent
+        qualifying pairs, ``_rec_remove`` keeps every other one, so no
+        subinterval is merged twice; one call merges at most one level. The
+        merge itself is ``_merge_excess_nodes`` (uniform or variable
+        sampling); the merged subinterval is not evaluated.
 
         Parameters
         ----------
@@ -2326,8 +2649,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadrature_errors : torch.Tensor
             Error estimate of each subinterval. Shape: [N, D].
         error_ratios_2steps : torch.Tensor
-            Summed error ratio of each pair of neighboring subintervals,
-            indexed by the pair's first subinterval. Shape: [N-1].
+            Pair ratio of each pair of neighboring subintervals, indexed by the
+            pair's first subinterval. Shape: [N-1].
+        merge_cut : float
+            A pair is merged when its pair ratio is below this value.
 
         Returns
         -------
@@ -2339,16 +2664,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         if len(error_ratios_2steps) == 0:
             return nodes, mesh_quadratures, mesh_quadrature_errors
-        # Merge cutoff S < remove_cut / 2^(k-1), k = error_exponent; the
-        # derivation (padaquad's own) is in the docstring. The merged
-        # subinterval is never evaluated.
-        merge_cut = self.remove_cut / 2 ** (self.method.error_exponent - 1)
-        # Since error ratios encompasses 2 RK steps each neighboring element shares
-        # a step, we cannot remove that same step twice and therefore remove the
-        # first in pair of steps that it appears in
+        # Neighboring pairs share a subinterval, which cannot be merged twice;
+        # each index is the first subinterval of a merged pair.
         ratio_idxs_cut = torch.where(self._rec_remove(error_ratios_2steps < merge_cut))[
             0
-        ]  # Index for first interval of 2
+        ]
         assert not torch.any(ratio_idxs_cut[:-1] + 1 == ratio_idxs_cut[1:])
 
         if len(ratio_idxs_cut) == 0:
@@ -2396,6 +2716,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadrature_errors: torch.Tensor,
         integral: torch.Tensor,
         mesh: torch.Tensor,
+        y: torch.Tensor,
     ) -> torch.Tensor:
         """
         Build the optimal mesh from the results of the integration loop.
@@ -2404,13 +2725,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         ``same_f=True``. It is built in two stages:
 
         1. Merge: pairs of neighboring subintervals whose merged subinterval is
-           predicted to have an error ratio below ``remove_cut`` are merged
-           (``_prune_excess_mesh``).
+           predicted to have an error ratio below ``remove_cut`` are merged;
+           ``merge_rule`` sets how the prediction is made (``_merge_inputs``,
+           ``_prune_excess_mesh``).
         2. Split: subintervals whose error ratio against the final integral is
            still 1 or above get a midpoint. A merged subinterval carries the
-           pair's summed error, so its ratio is the pair's (below the merge
-           cutoff, so below 1) unless the rounding floor sets the tolerance
-           (see ``_error_ratios_norm``): this stage does not split a merged
+           pair's summed error, which is at most the pair error the merge was
+           decided on, so its ratio is below the merge cutoff, and so below 1,
+           unless the rounding floor sets the tolerance (see
+           ``_error_ratios_norm``): this stage does not split a merged
            subinterval, and it does not check the merge prediction.
            Subintervals fail here only when no re-check ran against the final
            integral (``take_gradient=True``, or a fixed
@@ -2434,17 +2757,24 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             The final integral. Shape: [D].
         mesh : torch.Tensor
             The mesh at the end of the loop. Shape: [M, T].
+        y : torch.Tensor
+            Integrand values at ``nodes``, used by ``merge_rule="predicted"``.
+            Shape: [N, C, D].
 
         Returns
         -------
         torch.Tensor
             The optimal mesh. Shape: [M_opt, T].
         """
-        # Prune steps with excess accuracy (over-resolved regions)
+        # Merge pairs of over-resolved neighbors
+        pair_errors, merge_cut = self._merge_inputs(
+            nodes, y, mesh_quadratures, mesh_quadrature_errors
+        )
         _, error_ratios_2steps, _ = self._compute_error_ratios(
             mesh_quadrature_errors=mesh_quadrature_errors,
             mesh_quadratures=mesh_quadratures,
             integral=integral.detach(),
+            pair_errors=pair_errors,
         )
         nodes_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned = (
             self._prune_excess_mesh(
@@ -2452,6 +2782,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 mesh_quadratures,
                 mesh_quadrature_errors,
                 error_ratios_2steps,
+                merge_cut,
             )
         )
         mesh_pruned = torch.concatenate(
@@ -2845,6 +3176,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadratures: torch.Tensor | None = None,
         cum_mesh_quadratures: torch.Tensor | None = None,
         integral: torch.Tensor | None = None,
+        pair_errors: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """
         Compute the error ratio of each subinterval, choosing by ``self.error_norm``.
@@ -2874,6 +3206,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             (cumulative mode only).
         integral : torch.Tensor or None
             Current total integral [D] (absolute mode only; required there).
+        pair_errors : torch.Tensor or None
+            Error of each pair of neighbors merged into one [N-1, D], the
+            numerator of ``error_ratios_2steps``. None (default) means the
+            pair's summed errors ``abs(e[k]) + abs(e[k+1])``
+            (see ``_merge_inputs``).
 
         Returns
         -------
@@ -2901,10 +3238,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         abs_err = torch.abs(mesh_quadrature_errors)
         if self._is_failure_fraction:
             return self._error_ratios_failure_fraction(
-                abs_err, mesh_quadratures, cum_mesh_quadratures, integral
+                abs_err, mesh_quadratures, cum_mesh_quadratures, integral, pair_errors
             )
         return self._error_ratios_norm(
-            abs_err, mesh_quadratures, cum_mesh_quadratures, integral
+            abs_err, mesh_quadratures, cum_mesh_quadratures, integral, pair_errors
         )
 
     def _error_ratios_norm(
@@ -2913,6 +3250,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadratures: torch.Tensor | None,
         cum_mesh_quadratures: torch.Tensor | None,
         integral: torch.Tensor | None,
+        pair_errors: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, None]:
         """
         Error ratios of the norm family: reduce the error vector, then compare.
@@ -2934,9 +3272,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         (line 410). padaquad accepts or splits each subinterval by its own
         error ratio.
 
-        The pair ratio ``error_ratio_2steps[k] = R(abs(e[k]) + abs(e[k+1])) /
-        tol_2steps[k]`` (used only to merge subintervals, in
-        ``_prune_excess_mesh``) uses the tolerance the merged subinterval
+        The pair ratio ``error_ratio_2steps[k] = R(p[k]) / tol_2steps[k]``,
+        with ``p[k] = abs(e[k]) + abs(e[k+1])`` or the given ``pair_errors``
+        (used only to merge subintervals, in ``_prune_excess_mesh``), uses
+        the tolerance the merged subinterval
         would get: the same ``tol`` in absolute mode, subinterval k+1's (the
         merged subinterval's right end) in cumulative mode. Its rounding floor
         is ``R(floor[k]) + R(floor[k+1])``, at least the merged subinterval's
@@ -2961,6 +3300,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Shape: [N, D].
         integral : torch.Tensor | None
             Total integral (absolute mode). Shape: [D].
+        pair_errors : torch.Tensor | None
+            Error of each merged pair, in place of
+            ``abs(e[k]) + abs(e[k+1])`` (see ``_compute_error_ratios``).
+            Shape: [N-1, D].
 
         Returns
         -------
@@ -3003,7 +3346,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             error_tol_2steps = torch.maximum(error_tol_2steps, floor[:-1] + floor[1:])
 
         error_ratio = err / error_tol
-        err_2steps = self._reduce_norm(abs_err[:-1] + abs_err[1:])
+        if pair_errors is None:
+            pair_errors = abs_err[:-1] + abs_err[1:]
+        err_2steps = self._reduce_norm(pair_errors)
         error_ratio_2steps = err_2steps / error_tol_2steps
         return error_ratio, error_ratio_2steps, None
 
@@ -3013,6 +3358,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadratures: torch.Tensor | None,
         cum_mesh_quadratures: torch.Tensor | None,
         integral: torch.Tensor | None,
+        pair_errors: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Error ratios of ``"failure_fraction"``: the fraction of failing components.
@@ -3030,7 +3376,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         ``_accept_reject_masks``). The ratio of each element is also returned,
         so non-finite (NaN or Inf) subintervals can be found later. The pair
         ratio (used only to merge subintervals) is the largest over components
-        of ``(abs(e[k, d]) + abs(e[k+1, d])) / tol_2steps[k, d]``, with the
+        of ``p[k, d] / tol_2steps[k, d]``, with the pair error ``p`` and the
         merged subinterval's tolerance as in ``_error_ratios_norm``.
 
         The rounding floor is a lower bound on each component's tolerance,
@@ -3049,6 +3395,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Shape: [N, D].
         integral : torch.Tensor | None
             Total integral (absolute mode). Shape: [D].
+        pair_errors : torch.Tensor | None
+            Error of each merged pair, in place of
+            ``abs(e[k]) + abs(e[k+1])`` (see ``_compute_error_ratios``).
+            Shape: [N-1, D].
 
         Returns
         -------
@@ -3090,7 +3440,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # Merge/prune indicator: conservative max-norm of the combined 2-step
         # ratio (compared against remove_cut < 1, so a magnitude is needed here
         # rather than a fraction).
-        ratio_2steps = (abs_err[:-1] + abs_err[1:]) / error_tol_2steps
+        if pair_errors is None:
+            pair_errors = abs_err[:-1] + abs_err[1:]
+        ratio_2steps = pair_errors / error_tol_2steps
         error_ratio_2steps = torch.amax(ratio_2steps, dim=-1)  # [N-1]
         return failure_fraction, error_ratio_2steps, ratio
 

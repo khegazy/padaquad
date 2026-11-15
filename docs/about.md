@@ -12,6 +12,9 @@ The source code, issues and pull requests are at
 ## Citing padaquad
 
 There is no paper about padaquad. To cite the software, use the metadata in
-[`CITATION.cff`](https://github.com/khegazy/padaquad/blob/main/CITATION.cff);
-GitHub turns it into a citation under "Cite this repository" on the repository
-page.
+the file `CITATION.cff` at the root of the repository, shown below; GitHub turns
+it into a citation under "Cite this repository" on the repository page.
+
+```{literalinclude} ../CITATION.cff
+:language: yaml
+```

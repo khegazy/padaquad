@@ -670,3 +670,31 @@ def test_predicted_node_check_is_relative_to_each_subinterval():
     y = torch.ones(3, solver.C, 1, dtype=torch.float64)
     with pytest.raises(ValueError, match="node fractions"):
         solver._predict_merged_errors(nodes, y, torch.ones(3, 1, dtype=torch.float64))
+
+
+def test_predicted_chunks_shrink_with_the_number_of_outputs(monkeypatch):
+    """A chunk holds _MERGE_CHUNK pairs at D = 1 and _MERGE_CHUNK // D pairs for
+    D outputs, so its float64 copies of the stored values have the same size
+    for any D. With a fixed number of pairs per chunk the prediction's peak
+    memory grew with D: 5.0 times the size of y for gk21, 6 * 10^4
+    subintervals, D = 256 in float32 (+6.8 GB for a 1.35 GB y)."""
+    solver = make_solver_for_unit_test("gk21")
+    solver._MERGE_CHUNK = 8
+    edges = torch.linspace(0.0, 1.0, 31, dtype=torch.float64).unsqueeze(-1)
+    nodes = solver._compute_nodes(edges[:-1], edges[1:])
+    y = torch.sin(nodes * torch.arange(1.0, 5.0, dtype=torch.float64))  # D = 4
+    b, _ = solver.method.weights(nodes)
+    q = (nodes[:, -1] - nodes[:, 0]) * (b * y).sum(1)
+    whole = make_solver_for_unit_test("gk21")._predict_merged_errors(nodes, y, q)
+    rows = []
+    compute_nodes = solver._compute_nodes
+
+    def spy(left, right):
+        rows.append(len(left))
+        return compute_nodes(left, right)
+
+    monkeypatch.setattr(solver, "_compute_nodes", spy)
+    pieces = solver._predict_merged_errors(nodes, y, q)
+    assert max(rows) <= 8 // 4 + 1
+    scale = float(q.abs().max())
+    assert torch.allclose(pieces, whole, rtol=0, atol=1e-14 * scale)

@@ -2318,8 +2318,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     #: Half a step moves the prediction by at most 0.24 of a pair's rounding
     #: floor (measured; docs/issues/predicted-merge-rule.md, "The rule").
     _RATIO_QUANTUM = 2.0**48
-    #: Pairs per chunk in ``_predict_merged_errors``; bounds its float64
-    #: temporaries to a fraction of the record's size.
+    #: Pairs per chunk in ``_predict_merged_errors`` at D = 1 (``_MERGE_CHUNK //
+    #: D`` for D outputs); bounds its float64 temporaries for any record.
     _MERGE_CHUNK = 2**16
     #: Largest number of width ratios kept in ``_merge_weight_cache``; a chunk
     #: with more distinct ratios than this builds its vectors without caching.
@@ -2544,8 +2544,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         ).to(torch.int64)
         n_pairs = len(widths) - 1
         out = torch.empty(n_pairs, y.shape[-1], dtype=y.dtype, device=y.device)
-        for lo in range(0, n_pairs, self._MERGE_CHUNK):
-            hi = min(lo + self._MERGE_CHUNK, n_pairs)
+        chunk_size = max(1, self._MERGE_CHUNK // y.shape[-1])
+        for lo in range(0, n_pairs, chunk_size):
+            hi = min(lo + chunk_size, n_pairs)
             # Nodes off the fractions would be mispredicted. Checked per chunk
             # (bounded memory), each subinterval against its own largest |node|.
             chunk = nodes[lo : hi + 1]

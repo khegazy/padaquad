@@ -131,5 +131,5 @@ These now describe the approximation; change them:
 - `IntegrationResult.integral_error` docstring (`padaquad/results.py`).
 - `_remove_failed_record_panels` docstring.
 - `docs/user_guide/troubleshooting.md`, "The error estimate seems unreliable".
-- `CHANGELOG.md`: the [1.3.1] "Fixed" entry that documents the
+- `CHANGELOG.md`: the [1.4.0] "Fixed" entry that documents the
   approximation; replace it with the fix.

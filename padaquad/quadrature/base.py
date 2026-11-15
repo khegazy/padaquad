@@ -2498,6 +2498,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         Example: [True, True, False, True] -> [True, False, False, True]
 
+        In one pass: an entry is kept when it is flagged and its distance from
+        the first entry of its run of flags is even. The earlier loop un-flagged
+        about two entries per pass over the whole mask, so a mask whose entries
+        were mostly True took about N/2 passes (9 s of a 9.5 s call at
+        N = 10**5); the output is the same (see
+        ``docs/issues/rec-remove-quadratic-cost.md``).
+
         Parameters
         ----------
         mask : torch.Tensor
@@ -2506,31 +2513,19 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Returns
         -------
         torch.Tensor
-            Modified mask with no adjacent True values. Shape: [N].
+            New mask with no adjacent True values; the input is not modified.
+            Shape: [N].
         """
-        # Iterative form of what was a tail recursion: each pass un-flags the
-        # second element of an adjacent True pair and rebuilds the mask, looping
-        # until no adjacent pair remains. The recursive version overflowed
-        # Python's stack on the large, finely-refined meshes the accepted-panel
-        # re-check can produce; this loop is behaviourally identical (the prior
-        # body's only recursive call was the final `return self._rec_remove(...)`)
-        # but has no depth limit.
-        while True:
-            mask2 = mask[:-1] * mask[1:]
-            if not torch.any(mask2):
-                return mask
-
-            # Must keep the first integration step
-            if mask2[0]:
-                mask[1] = False
-
-            # Mask is too small to remove points
-            if len(mask) <= 2:
-                return mask
-
-            mask = torch.concatenate(
-                [mask[:2], mask2[1:] * mask[:-2] + (~mask2[1:]) * mask[2:]]
-            )
+        index = torch.arange(len(mask), device=mask.device)
+        previous = torch.cat(
+            [torch.zeros(1, dtype=torch.bool, device=mask.device), mask[:-1]]
+        )
+        # Index of the first entry of the run each entry belongs to (0 for an
+        # unflagged entry before any run; such entries are False anyway).
+        run_start = torch.cummax(
+            torch.where(mask & ~previous, index, torch.zeros_like(index)), dim=0
+        ).values
+        return mask & ((index - run_start) % 2 == 0)
 
     def _setup_integral_bounds(
         self,

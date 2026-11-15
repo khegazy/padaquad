@@ -5,10 +5,13 @@ The integrand f is evaluated in batches; how many evaluations fit in one batch
 depends on the memory one evaluation uses. This module holds:
 
 - ``_MemoryManagement``: a mixin inherited by ``AdaptiveQuadrature``
-  (``base.py``). It measures c, the memory cost of one evaluation of f
-  (``_setup_memory_checks``), queries free memory on the solver's device, and
-  turns both into the batch size (``get_max_batch`` -> ``_get_max_f_evals`` =
-  usable memory / c), recomputed at every evaluation from live memory.
+  (``base.py``). It measures how the memory of one call of f grows with the
+  number of points N, as a fit a + b N + d N^2 (``_setup_memory_checks``),
+  queries free memory on the solver's device, and turns both into the batch
+  size (``get_max_batch`` -> ``_get_max_f_evals``: the largest N whose fitted
+  memory fits in ``_MEMORY_BUDGET`` of the usable memory), recomputed at every
+  evaluation from live memory.
+- ``_fit_up_to_quadratic`` and ``_largest_n``: the fit, and its inverse.
 - ``_is_out_of_memory``: recognizes the out-of-memory errors of the GPU, the
   PyTorch CPU allocator, the CUDA libraries and numpy, used by the batch loop
   in ``base.py`` and by the benchmark.
@@ -18,18 +21,20 @@ from __future__ import annotations
 
 import gc
 import logging
+import math
 import os
 import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 import psutil
 import torch
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
 
 _GB = 1024**3  # bytes per GB; every memory quantity below is in GB
 
@@ -37,6 +42,92 @@ _GB = 1024**3  # bytes per GB; every memory quantity below is in GB
 # take_gradient=True: backpropagation uses roughly twice the forward memory.
 # A heuristic, not a measurement.
 _GRADIENT_MEMORY_SAFETY_FACTOR = 2.1
+
+# Fraction of the usable memory that one call of f may use: both the largest
+# test call of the memory benchmark and every batch of the integration. The
+# rest is a margin for errors of the fit.
+_MEMORY_BUDGET = 0.75
+
+# After an out-of-memory error, the batch size is multiplied by this factor
+# (in the benchmark below and in the batch loop of base.py).
+_OOM_BACKOFF = 0.75
+
+# Largest number of points in one call: the benchmark's search limit and the
+# cap on the batch size.
+_MAX_N = 1_000_000_000
+
+
+def _fit_up_to_quadratic(
+    n: Sequence[int], y: Sequence[float]
+) -> tuple[float, float, float]:
+    """
+    Fit y = a + b n + d n^2 with a, b, d >= 0 to readings (n_i, y_i).
+
+    The fit is nonnegative least squares (``scipy.optimize.nnls``): memory and
+    time are sums of a fixed cost, a cost per point and a cost per pair of
+    points, and nonnegative coefficients also make the fit nondecreasing in n.
+    Unweighted least squares is dominated by the largest readings, which are
+    the most reliable (small readings can read 0 when f reuses memory the
+    process already holds). With k readings, min(k, 3) terms are fitted: b n
+    for one reading, a + b n for two, all three from three on.
+
+    Parameters
+    ----------
+    n : Sequence[int]
+        Number of points of each reading (positive).
+    y : Sequence[float]
+        The quantity read at each n (memory in GB, or time in s).
+
+    Returns
+    -------
+    tuple[float, float, float]
+        The coefficients (a, b, d); those not fitted are 0.
+    """
+    # Imported here, not at module level: importing scipy takes about 0.25 s,
+    # and only the memory benchmark needs it.
+    from scipy.optimize import nnls  # noqa: PLC0415
+
+    powers = [(1,), (0, 1), (0, 1, 2)][min(len(n), 3) - 1]
+    # Columns in units of the largest n, so n^2 (up to 1e18) stays well scaled.
+    n_max = max(n)
+    A = np.array([[(ni / n_max) ** p for p in powers] for ni in n], dtype=float)
+    scaled, _ = nnls(A, np.array(y, dtype=float))
+    coeffs = [0.0, 0.0, 0.0]
+    for p, x in zip(powers, scaled, strict=True):
+        coeffs[p] = float(x) / n_max**p
+    return coeffs[0], coeffs[1], coeffs[2]
+
+
+def _largest_n(coeffs: tuple[float, float, float], budget: float) -> int:
+    """
+    Return the largest n with a + b n + d n^2 <= budget, at most ``_MAX_N``.
+
+    It is the positive root of d n^2 + b n - R = 0, R = budget - a, written as
+
+        n = 2 R / (b + sqrt(b^2 + 4 d R)),
+
+    which avoids cancellation when d is tiny and equals R / b when d = 0.
+
+    Parameters
+    ----------
+    coeffs : tuple[float, float, float]
+        (a, b, d), all >= 0, as returned by ``_fit_up_to_quadratic``.
+    budget : float
+        The bound on a + b n + d n^2.
+
+    Returns
+    -------
+    int
+        0 when even n = 0 exceeds the budget (R <= 0), ``_MAX_N`` when the
+        quantity does not grow with n (b = d = 0).
+    """
+    a, b, d = coeffs
+    R = budget - a
+    if R <= 0:
+        return 0
+    if b <= 0 and d <= 0:
+        return _MAX_N
+    return int(min(_MAX_N, 2 * R / (b + math.sqrt(b * b + 4 * d * R))))
 
 
 def _is_out_of_memory(e: BaseException) -> bool:
@@ -77,13 +168,13 @@ class _MemoryManagement:
     Memory benchmark and batch-size budget, mixed into ``AdaptiveQuadrature``.
 
     Uses these attributes of the solver: ``device`` (set by
-    ``DistributedEnvironment``), and ``f_unit_mem_size``, ``_oom_max_batch``,
+    ``DistributedEnvironment``), and ``f_mem_coeffs``, ``_oom_max_batch``,
     ``init_max_batch`` and ``init_total_mem_usage`` (set in
     ``AdaptiveQuadrature.__init__``).
     """
 
     device: torch.device
-    f_unit_mem_size: float | None
+    f_mem_coeffs: tuple[float, float, float] | None
     _oom_max_batch: int | None
     init_max_batch: int | None
     init_total_mem_usage: float
@@ -98,8 +189,8 @@ class _MemoryManagement:
 
         Does not run the memory benchmark. The first available of these is
         used: ``default_max_batch``, the ``max_batch`` given at construction,
-        and the number of evaluations that fit in the memory free now, at the
-        cost per evaluation the last benchmark measured. After an out-of-memory
+        and the number of evaluations that fit in the memory free now, with the
+        memory per call the last benchmark measured. After an out-of-memory
         error, the result is capped at the reduced batch size chosen then,
         until the next ``integrate`` call starts.
 
@@ -127,7 +218,7 @@ class _MemoryManagement:
             max_batch = default_max_batch
         elif self.init_max_batch is not None:
             max_batch = self.init_max_batch
-        elif self.f_unit_mem_size is not None:
+        elif self.f_mem_coeffs is not None:
             max_batch = self._get_max_f_evals(total_mem_usage)
         else:
             max_batch = None
@@ -225,31 +316,52 @@ class _MemoryManagement:
         f_args: tuple[Any, ...] = (),
     ) -> None:
         """
-        Measure c, the memory cost of one evaluation of f (``f_unit_mem_size``, GB).
+        Fit the memory of one call of f on N points (``f_mem_coeffs``, GB).
 
-        This only measures c; it does not choose a batch size. The batch size
-        is computed at every evaluation from the memory free at that moment:
-        ``get_max_batch`` -> ``_get_max_f_evals`` = usable memory / c.
+        This only measures; it does not choose a batch size. The batch size is
+        computed at every evaluation from the memory free at that moment:
+        ``get_max_batch`` -> ``_get_max_f_evals``.
 
-        f is called on N = 1, 10, 100, ... copies of ``node_test``. For each
+        f is called on N copies of ``node_test``, starting at N = 1. For each
         call, M is the memory the call used (``_measure_call``, with the method
-        chosen by ``_peak_memory_reader``) and c = s * (M + E) / N. s is
-        ``_GRADIENT_MEMORY_SAFETY_FACTOR`` (a heuristic for backpropagation)
-        when ``take_gradient`` and 1 otherwise; E is the most the memory reading
-        can be too low (nonzero only on Linux CPUs).
+        chosen by ``_peak_memory_reader``) and t its wall time. After each call,
+        M(N) and t(N) are fitted as a + b N + d N^2 with a, b, d >= 0
+        (``_fit_up_to_quadratic``); before three readings exist, the worst case
+        such a fit allows through the latest reading is used instead,
+        y(k N) <= k^2 y(N) for k >= 1. The next call has
 
-        The search stops, keeping the latest c, when:
+            N_next = min(10 N, n_mem, n_time),
 
-        1. c changes by less than 1 % from N/10 to N;
-        2. a call takes longer than 1 s;
+        where n_mem is the largest N whose predicted memory plus E fits in
+        ``_MEMORY_BUDGET`` of the usable memory and n_time the largest N whose
+        predicted time is at most 1 s (``_largest_n``). So an f whose memory or
+        time grows like N^2 gets smaller steps instead of a call that cannot
+        fit. E is the most the memory reading can be too low (nonzero only on
+        Linux CPUs); it is a reading error, so it enters as a fixed amount, not
+        one that grows with N.
+
+        The search stops when:
+
+        1. c = s * (M + E) / N changes by less than 1 % from one call to the
+           next, with at least three readings (the cost per point is constant,
+           so the fit has seen the growth);
+        2. a call takes longer than 1 s (a backstop: the step size normally
+           prevents it);
         3. N reaches 1e9;
-        4. the next call is predicted not to fit (10 * M > usable memory).
+        4. N_next < 2 N: the next call would not fit in memory, or would take
+           longer than 1 s, and a call barely larger than this one adds little.
 
-        After an out-of-memory error at N, the c from the previous N is kept if
-        that N was >= 100; otherwise c = max(previous c, s * F / (0.75 * N)) with
-        F the free memory before the call, because the peak counters undercount
-        a failed call. Finally c is floored at usable / 1e9, so the batch size
-        never exceeds 1e9 points.
+        The stored fit is m(B) = s * ((a + E) + b B + d B^2), the memory of a
+        batch of B points, with a, b, d fitted to every reading. s is ``_GRADIENT_MEMORY_SAFETY_FACTOR`` (a heuristic for
+        backpropagation) when ``take_gradient`` and 1 otherwise. With fewer than
+        three readings the fit is linear, so a batch can be underestimated for
+        an f whose memory grows like N^2 that stopped after one or two calls.
+        Growth faster than N^2 is underestimated too.
+
+        After an out-of-memory error at N > 1, the batch size is capped at
+        ``_OOM_BACKOFF`` * N for the rest of this ``integrate`` call
+        (``_oom_max_batch``, as the batch loop does after such an error), and
+        the fit from the calls that succeeded is kept.
 
         Only one input value is used for every point, so an f whose memory
         depends on t can be mismeasured. The start and end messages are logged
@@ -295,71 +407,88 @@ class _MemoryManagement:
         if len(node_test.shape) == 2:
             node_test = node_test[0]
         node_test = node_test.unsqueeze(0).to(self.device)
-        self.f_unit_mem_size = None
+        self.f_mem_coeffs = None
 
         # The test calls run f forward only. With take_gradient=True the
         # integration also backpropagates through every batch, which needs
-        # roughly as much memory again, so the measured cost is scaled by s.
+        # roughly as much memory again, so the stored fit is scaled by s.
         s = _GRADIENT_MEMORY_SAFETY_FACTOR if take_gradient else 1.0
-        time_limit = 1.0  # seconds; a slower test call ends the search
-        max_test = 1_000_000_000  # largest N tried, and the batch-size cap
+        time_limit = 1.0  # seconds; no test call is planned to take longer
         # How the memory of one call is read on this device, and E (GB), the
         # most that reading can be too low.
         reset_peak, read_memory, E = self._peak_memory_reader()
 
-        # Search state. c is the latest cost per evaluation (GB). c_prev and
-        # N_prev belong to the previous call, which had 10x fewer points
-        # (N_prev = 0 before the first call). The stop that ends the search
-        # sets reason, which the end message reports.
-        N, c, c_prev, N_prev, reason = 1, 0.0, 0.0, 0, None
+        # Search state: the points, memory (GB) and wall time (s) of every call
+        # so far. c is the latest cost per point, s * (M + E) / N, and c_prev
+        # the previous call's; they serve only the convergence stop. The stop
+        # that ends the search sets reason, which the end message reports.
+        Ns: list[int] = []
+        Ms: list[float] = []
+        ts: list[float] = []
+        N, c, c_prev, reason = 1, 0.0, 0.0, None
         try:
             while reason is None:
-                # Memory available right before this call: usable (after the
-                # total_mem_usage reserve) is what the next call must fit in;
-                # free (raw) bounds the cost if this call runs out of memory.
+                # Usable memory (after the total_mem_usage reserve) right before
+                # this call: what the next call must fit in.
                 usable = self._get_usable_memory(total_mem_usage)
-                free = self._get_memory()[0]
                 measured = self._measure_call(
                     f, f_args, node_test, N, reset_peak, read_memory, total_mem_usage
                 )
 
                 if measured is None:
-                    # N points did not fit. If the previous call had at least
-                    # 100 points, its c is a trustworthy measurement and is kept
-                    # (c still holds it). Otherwise also use what the failure
-                    # shows: N points needed more than the free memory F, so one
-                    # point costs more than F / N; 0.75 * N makes that bound
-                    # stricter. The peak counters cannot be used here, because
-                    # they count only the allocations that succeeded.
-                    if N_prev < 100:
-                        c = max(c_prev, s * free / (0.75 * N))
+                    # N > 1 points did not fit (at N = 1 _measure_call raises).
+                    # The peak counters count only the allocations that
+                    # succeeded, so the failed call is not a reading. Cap the
+                    # batch below N for the rest of this integrate() call, as
+                    # the batch loop does after an out-of-memory error; the fit
+                    # from the calls that succeeded is kept.
+                    self._oom_max_batch = max(1, int(_OOM_BACKOFF * N))
                     reason = "an evaluation ran out of memory"
                     continue
 
-                # Cost per evaluation: the call's memory, plus the reading's
-                # possible shortfall E, spread over its N points. A fixed
-                # per-call cost (allocator rounding, workspaces) shrinks as 1/N.
                 M, seconds = measured
-                c = s * (M + E) / N
+                Ns.append(N)
+                Ms.append(M)
+                ts.append(seconds)
+                c_prev, c = c, s * (M + E) / N
 
-                # Stops, checked in order; each keeps this call's c.
-                if N_prev and abs(c - c_prev) < 0.01 * c_prev:
-                    # 10x more points changed c by < 1 %: the fixed per-call
-                    # cost is spread out, and c is the per-point cost.
+                # Stops, checked in order.
+                if len(Ns) >= 3 and abs(c - c_prev) < 0.01 * c_prev:
+                    # More points changed the cost per point by < 1 %: the fixed
+                    # per-call cost is spread out and the growth is linear. The
+                    # three readings make the stored fit a full quadratic.
                     reason = "the cost per evaluation stopped changing"
                 elif seconds > time_limit:
-                    # The next call has 10x the points, so it would take ~10x
-                    # longer; stop to keep the measurement short.
                     reason = f"an evaluation took longer than {time_limit} s"
-                elif max_test <= N:
+                elif N >= _MAX_N:
                     reason = "the 1e9 search limit was reached"
-                elif usable < 10 * M:
-                    # The next call would need about 10 * M. Do not make it: on
-                    # a GPU it would run out of memory, and on a CPU the
-                    # operating system could kill the process without an error.
-                    reason = "the next test would not fit in memory"
                 else:
-                    c_prev, N_prev, N = c, N, 10 * N
+                    # Size the next call from the readings: min(10 N, n_mem, n_time).
+                    # Before three readings, use the worst case a fit
+                    # a + b N + d N^2 with a, b, d >= 0 allows through this
+                    # reading: y(k N) <= k^2 y(N), the coefficients (0, 0, y/N^2).
+                    if len(Ns) >= 3:
+                        a, b, d = _fit_up_to_quadratic(Ns, Ms)
+                        time_fit = _fit_up_to_quadratic(Ns, ts)
+                    else:
+                        a, b, d = 0.0, 0.0, M / N**2
+                        time_fit = (0.0, 0.0, seconds / N**2)
+                    # The test calls run forward only, so s is not applied. A
+                    # call that does not fit would run out of memory on a GPU,
+                    # and on a CPU the operating system could kill the process
+                    # without an error. E is a fixed reading error.
+                    n_mem = _largest_n((a + E, b, d), _MEMORY_BUDGET * usable)
+                    n_time = _largest_n(time_fit, time_limit)
+                    N_next = min(10 * N, n_mem, n_time)
+                    if N_next < 2 * N:
+                        # A call barely larger than this one adds little.
+                        reason = (
+                            "the next test would not fit in memory"
+                            if n_mem <= n_time
+                            else f"the next test would take longer than {time_limit} s"
+                        )
+                    else:
+                        N = N_next
         except torch.OutOfMemoryError:
             # A single evaluation of f does not fit (raised by _measure_call at
             # N = 1): memory really is too small, so pass the error through.
@@ -375,22 +504,34 @@ class _MemoryManagement:
 
         self._release_memory()
 
-        # Floor c at usable / 1e9, so the batch size usable / c never exceeds
-        # 1e9 points, the largest N the search could try. This matters for tiny
-        # integrands, which use only a few bytes per point.
-        usable = self._get_usable_memory(total_mem_usage)
-        c = max(c, usable / max_test)
-        self.f_unit_mem_size = c
+        # The memory of one call of B points during the integration:
+        # m(B) = s * ((a + E) + b B + d B^2), fitted to every
+        # reading. E is added once: it is a reading error, not a cost per point.
+        a, b, d = _fit_up_to_quadratic(Ns, Ms)
+        self.f_mem_coeffs = (s * (a + E), s * b, s * d)
 
-        # The estimate depends on take_gradient: c includes the factor s only
-        # when it is True.
+        # The estimate depends on take_gradient: the fit includes the factor s
+        # only when it is True.
+        usable = self._get_usable_memory(total_mem_usage)
         max_batch = self._get_max_f_evals(total_mem_usage)
+        a, b, d = self.f_mem_coeffs
+        quadratic = ""
+        # Name the N^2 growth only when it matters at the batch size: every
+        # fit of a linear f leaves a tiny d > 0.
+        if d * max_batch**2 >= 0.1 * (a + b * max_batch + d * max_batch**2):
+            quadratic = (
+                " The memory grows like max_batch^2, so a batch larger than "
+                "this does not fit; on a CPU, a batch that does not fit can kill "
+                "the process without an error."
+            )
         logger.warning(
             f"Memory measurement finished in {time.time() - t0:.2f} s (stopped "
-            f"because {reason}): {c * _GB:.0f} bytes per evaluation. With the "
-            f"{usable:.1f} GB usable now, max_batch is about {max_batch} for "
-            f"take_gradient={take_gradient}; pass max_batch={max_batch} to skip "
-            "this measurement in later runs."
+            f"because {reason}): one call on N points uses about "
+            f"{a * _GB / 2**20:.1f} MiB + {b * _GB:.0f} bytes per evaluation * N "
+            f"+ {d * _GB:.3g} bytes * N^2. With the {usable:.1f} GB usable now, "
+            f"max_batch is about {max_batch} for take_gradient={take_gradient}; "
+            f"pass max_batch={max_batch} to skip this measurement in later runs."
+            f"{quadratic}"
         )
 
     def _peak_memory_reader(
@@ -599,9 +740,10 @@ class _MemoryManagement:
         """
         Compute the maximum number of integrand evaluations that fit in memory.
 
-        Divides usable memory by the per-evaluation memory cost (measured by
-        _setup_memory_checks). A small epsilon (1e-12 GB) prevents division by
-        zero.
+        The largest B whose fitted memory m(B) = a + b B + d B^2
+        (``f_mem_coeffs``, measured by ``_setup_memory_checks``) is at most
+        ``_MEMORY_BUDGET`` times the usable memory, capped at 1e9
+        (``_largest_n``).
 
         Parameters
         ----------
@@ -616,12 +758,12 @@ class _MemoryManagement:
         Raises
         ------
         RuntimeError
-            If the memory benchmark has not run (``f_unit_mem_size`` is None).
+            If the memory benchmark has not run (``f_mem_coeffs`` is None).
         """
-        if self.f_unit_mem_size is None:
+        if self.f_mem_coeffs is None:
             raise RuntimeError(
-                "The per-evaluation memory cost is unknown; run the memory "
-                "benchmark (_setup_memory_checks) before sizing a batch."
+                "The memory of f is unknown; run the memory benchmark "
+                "(_setup_memory_checks) before sizing a batch."
             )
         usable = self._get_usable_memory(total_mem_usage)
-        return int(usable // (1e-12 + self.f_unit_mem_size))
+        return _largest_n(self.f_mem_coeffs, _MEMORY_BUDGET * usable)

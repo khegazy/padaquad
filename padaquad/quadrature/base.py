@@ -55,7 +55,11 @@ import torch
 from padaquad.base import DEFAULT_METHODS, SolverBase, steps
 from padaquad.distributed import DistributedEnvironment, _resolve_device
 from padaquad.methods import _get_method
-from padaquad.quadrature.memory import _is_out_of_memory, _MemoryManagement
+from padaquad.quadrature.memory import (
+    _OOM_BACKOFF,
+    _is_out_of_memory,
+    _MemoryManagement,
+)
 from padaquad.results import IntegrationResult, MethodOutput
 
 logger = logging.getLogger(__name__)
@@ -313,9 +317,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # max_batch of the last integrate() call that returned; reused by
         # same_f=True.
         self.previous_max_batch: int | None = None
-        # Per-evaluation memory cost; set by each _setup_memory_checks run and
-        # used by get_max_batch to size batches from live free memory.
-        self.f_unit_mem_size = None
+        # Fitted memory of one call of f on B points, (a, b, d) of
+        # a + b B + d B^2 in GB; set by each _setup_memory_checks run and used
+        # by get_max_batch to size batches from live free memory.
+        self.f_mem_coeffs = None
         # Cap discovered after an OOM during a take_gradient=False evaluation;
         # None until one occurs. Cleared at the start of every integrate() call
         # (same_f=True carries it over through previous_max_batch).
@@ -1932,14 +1937,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 self._release_memory()
                 # Seed from the live max_batch on the first OOM (_oom_max_batch
                 # starts as None), then shrink. min(..., prev - 1) guarantees a
-                # strict decrease -- plain round(0.75 * 2) == 2 would stick and
-                # retry forever.
+                # strict decrease -- plain round(_OOM_BACKOFF * 2) == 2 would
+                # stick and retry forever.
                 prev = (
                     self._oom_max_batch
                     if self._oom_max_batch is not None
                     else max_batch
                 )
-                self._oom_max_batch = max(1, int(min(round(0.75 * prev), prev - 1)))
+                self._oom_max_batch = max(
+                    1, int(min(round(_OOM_BACKOFF * prev), prev - 1))
+                )
                 logger.warning(
                     f"Caught OOM with {free_mem} GB free of {total_mem} GB. "
                     f"Reducing max_batch from {max_batch} to {self._oom_max_batch}."

@@ -21,12 +21,19 @@ integrand. The number of points per call is the batch size, `max_batch`.
 
 When no `max_batch` is given (to `integrate` or to the constructor) and no
 stored value is used ({ref}`ug-same-f`), a **memory benchmark** measures how
-much memory one evaluation of the integrand takes, by calling it on 1, 10,
-100, … points. The batch size is then computed at every evaluation from the
-memory free at that moment: the usable memory is the free memory minus
-`(1 - total_mem_usage)` times the total memory. With `take_gradient=True` the
-measured cost is multiplied by a safety factor, a margin for the memory that
-backpropagation needs.
+the memory of one call of the integrand grows with the number of points N. It
+calls the integrand on 1 point, then on more, and after each call fits the
+memory and the time of the calls so far as a + b N + d N², so an integrand
+whose memory grows like N² (for example, one that computes a gradient per
+point inside itself) is measured too. Each next call is at most ten times
+larger, and no larger than the fit predicts to fit in three quarters of the
+usable memory and to take at most 1 s. The batch size is then computed at
+every evaluation from the memory free at that moment: the largest batch whose
+fitted memory fits in three quarters of the usable memory, which is the free
+memory minus `(1 - total_mem_usage)` times the total memory. With
+`take_gradient=True` the fitted memory is multiplied by a safety factor, a
+margin for the memory that backpropagation needs. Memory that grows faster
+than N² is underestimated; pass `max_batch` for such an integrand.
 
 The benchmark takes a few seconds and logs warnings, and it runs on every call
 without `max_batch`. To run it once, integrate once without `max_batch`, read
@@ -34,8 +41,9 @@ without `max_batch`. To run it once, integrate once without `max_batch`, read
 new solvers; or pass `same_f=True`. `get_max_batch()` returns the batch size
 the solver would use now, without running the benchmark.
 
-If an evaluation runs out of memory, the batch is shrunk to three quarters and
-retried; the smaller size stays in force until the next `integrate` call.
+With `take_gradient=False`, if an evaluation runs out of memory, the batch is
+shrunk to three quarters and retried; the smaller size stays in force until
+the next `integrate` call. With `take_gradient=True` such an error is raised.
 Out-of-memory errors from PyTorch's allocators and from CUDA libraries are
 recognized; any other error from the integrand is raised unchanged.
 

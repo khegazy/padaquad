@@ -390,18 +390,26 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
 - All of this lives in `quadrature/memory.py` (`_MemoryManagement` mixin,
   `_is_out_of_memory`); the batch loop `_evaluate_f_in_batches` stays in
   `quadrature/base.py`.
-- `_setup_memory_checks` measures only c = `f_unit_mem_size`, the memory
-  cost of ONE evaluation of `f`. It does not choose a batch size. It calls
-  `f` on N = 1, 10, 100, … points, measures M (memory that call used) and
-  sets c = s·(M + E)/N (s = `_GRADIENT_MEMORY_SAFETY_FACTOR` = 2.1 when
-  `take_gradient`, else 1). M: CUDA peak counters; on Linux CPUs the
+- `_setup_memory_checks` fits the memory of ONE call of `f` on N points,
+  `f_mem_coeffs` = s·((a + E) + b·N + d·N²) in GB (s =
+  `_GRADIENT_MEMORY_SAFETY_FACTOR` = 2.1 when `take_gradient`, else 1). It
+  does not choose a batch size. It calls `f` starting at N = 1 and measures
+  M (memory that call used) and its time; after each call M(N) and t(N) are
+  fitted as a + b·N + d·N², a, b, d ≥ 0 (`_fit_up_to_quadratic`, scipy
+  `nnls`; before 3 readings the worst case y(kN) ≤ k²·y(N)). The next call
+  is N_next = min(10N, n_mem, n_time): the largest N whose predicted memory
+  + E fits in `_MEMORY_BUDGET` (0.75) of usable memory, and the largest N
+  predicted to take ≤ 1 s (`_largest_n`), so an f whose memory grows like
+  N² (popcornn) gets smaller steps. M: CUDA peak counters; on Linux CPUs the
   resettable process peak (`/proc/self/clear_refs` + `VmHWM`) plus the
-  kernel's counter error E; elsewhere an RSS before/after difference.
-  Stops: c changes < 1 %, call slower than 1 s,
-  N = 1e9, or 10·M > usable memory.
+  kernel's counter error E (a fixed term of the fit); elsewhere an RSS
+  before/after difference. Stops: c = s·(M + E)/N changes < 1 % (≥ 3
+  readings), call slower than 1 s, N = 1e9, or N_next < 2N. An OOM at
+  N > 1 sets `_oom_max_batch = _OOM_BACKOFF·N`.
 - Unless `max_batch` or `same_f=True` fixes it, the batch size is
   computed at every evaluation from live memory: `get_max_batch` →
-  `_get_max_f_evals = usable_memory / c` (capped at 1e9).
+  `_get_max_f_evals` = `_largest_n(f_mem_coeffs, _MEMORY_BUDGET·usable)`
+  (capped at 1e9).
 - Out-of-memory errors are recognized by `_is_out_of_memory` (GPU OOM, CPU
   `DefaultCPUAllocator` refusal, CUDA "out of memory" and CUDA-library
   `*ALLOC*_FAILED` statuses, `MemoryError`);

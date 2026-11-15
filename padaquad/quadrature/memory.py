@@ -19,13 +19,14 @@ depends on the memory one evaluation uses. This module holds:
 
 from __future__ import annotations
 
+import ctypes
 import gc
 import logging
 import math
 import os
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import numpy as np
 import psutil
@@ -55,6 +56,83 @@ _OOM_BACKOFF = 0.75
 # Largest number of points in one call: the benchmark's search limit and the
 # cap on the batch size.
 _MAX_N = 1_000_000_000
+
+# Noise floors of the memory readers (GB): a reading below its reader's floor
+# is not used in the fit. The CUDA counter is exact to 512-byte blocks; the CPU
+# readers count resident memory, whose readings below a few MiB are mostly
+# noise (0 when f reuses memory the process holds, or steps of 2 MiB: the
+# kernel's counter batch on a 256-CPU node is 512 pages of 4 KiB).
+_CUDA_NOISE_FLOOR_GB = 10_000 / _GB
+_CPU_NOISE_FLOOR_GB = 4 * 2**20 / _GB
+
+
+class _Reader(NamedTuple):
+    """
+    How the memory of one test call is measured on the solver's device.
+
+    Attributes
+    ----------
+    reset : Callable[[], None]
+        Starts a new peak measurement (a no-op where no resettable peak exists).
+    read : Callable[[], int]
+        The memory reading in bytes.
+    E : float
+        The most the reading can be too low because of the kernel's counters
+        (GB); added once to every fitted memory.
+    floor : float
+        The noise floor (GB): readings below it are not fitted.
+    counts_reuse : bool
+        Whether a reading includes memory that f takes from memory the process
+        freed earlier and kept (CUDA always; Linux when glibc's ``malloc_trim``
+        returns that memory before each call). Without it a reading can be far
+        too low, so the benchmark keeps its steps at 10x (a call 2x larger than
+        the previous one would reuse a large share of the previous call's
+        memory unseen).
+    """
+
+    reset: Callable[[], None]
+    read: Callable[[], int]
+    E: float
+    floor: float
+    counts_reuse: bool
+
+
+def _tensor_bytes(obj: Any, device: torch.device) -> int:
+    """
+    Return the bytes of the distinct tensor storages in obj on device.
+
+    Used as a lower bound of a test call's memory: the input tile and f's
+    outputs are alive when the call is read, so the call used at least their
+    storages. A storage shared by several tensors (a view, or an output that
+    is the input) is counted once.
+
+    Parameters
+    ----------
+    obj : Any
+        A tensor, or tuples and lists of tensors (f's output may be
+        ``(integrand, tracked_variables)``); anything else counts 0.
+    device : torch.device
+        Only storages on this device count (the reader measures this device).
+
+    Returns
+    -------
+    int
+        Total bytes of the distinct storages found.
+    """
+    storages: dict[int, int] = {}
+    stack = [obj]
+    while stack:
+        item = stack.pop()
+        if isinstance(item, (tuple, list)):
+            stack.extend(item)
+        elif torch.is_tensor(item) and item.device.type == device.type:
+            try:
+                storage = item.untyped_storage()
+                storages[storage.data_ptr()] = storage.nbytes()
+            except (RuntimeError, NotImplementedError):
+                # Sparse and other storage-less layouts: count the elements.
+                storages[id(item)] = item.nelement() * item.element_size()
+    return sum(storages.values())
 
 
 def _fit_up_to_quadratic(
@@ -192,9 +270,7 @@ class _MemoryManagement:
         and the number of evaluations that fit in the memory free now, with the
         memory per call the last benchmark measured. After an out-of-memory
         error, the result is capped at the reduced batch size chosen then,
-        until the next ``integrate`` call starts; so is it after a benchmark
-        on a CPU whose readings grew faster than its fit allows (capped at
-        the largest call that ran).
+        until the next ``integrate`` call starts.
 
         Passing the result as ``max_batch`` to a later call or solver skips
         the slow benchmark. See :ref:`ug-memory`.
@@ -325,82 +401,86 @@ class _MemoryManagement:
         ``get_max_batch`` -> ``_get_max_f_evals``.
 
         f is called on N copies of ``node_test``, starting at N = 1. For each
-        call, M is the memory the call used (``_measure_call``, with the method
-        chosen by ``_peak_memory_reader``) and t its wall time. After each call,
-        M(N) and t(N) are fitted as a + b N + d N^2 with a, b, d >= 0
-        (``_fit_up_to_quadratic``); before three readings exist, the worst case
-        such a fit allows through the latest reading is used instead,
-        y(k N) <= k^2 y(N) for k >= 1. The next call has
+        call, M is the memory the call used (``_measure_call``, with the reader
+        chosen by ``_peak_memory_reader``; never less than the bytes of the
+        input and output tensors) and t its wall time. A reading is *reliable*
+        when M is at least the reader's noise floor (10 KB for CUDA, 4 MiB for
+        the CPU readers); only reliable readings are fitted, as
+        a + b N + d N^2 with a, b, d >= 0 (``_fit_up_to_quadratic``), and the
+        search goes on until there are three of them. The next call has
 
-            N_next = min(10 N, n_mem, n_time),
+            N_next = min(step N, n_mem, n_time),
 
-        where n_mem is the largest N whose predicted memory plus E fits in
-        ``_MEMORY_BUDGET`` of the usable memory and n_time the largest N whose
-        predicted time is at most 1 s (``_largest_n``). So an f whose memory or
-        time grows like N^2 gets smaller steps instead of a call that cannot
-        fit. E is the most the memory reading can be too low (nonzero only on
-        Linux CPUs); it is a reading error, so it enters as a fixed amount, not
-        one that grows with N.
+        - step: 2 after a call that took more than 0.1 s, if the reader counts
+          memory f reuses (CUDA; Linux with ``malloc_trim``), and 10 otherwise.
+        - n_mem: the largest N whose predicted memory plus E fits in
+          ``_MEMORY_BUDGET`` of the usable memory. The prediction is the fit
+          from three reliable readings on; before that, the worst case such a
+          fit allows through the reliable reading with the largest N (or, with
+          none, through the latest reading), y(k N) <= k^2 y(N) for k >= 1.
+        - n_time: the largest N whose predicted time (the fit of all times from
+          three calls on, the same worst case before) is at most 1 s. For the
+          first two calls n_time is at least 2 N (one or two times say nothing
+          about how time grows). While fewer than three readings are reliable
+          and this would end the search, n_time is 2 N if that call is
+          predicted to finish within the rest of the 60 s total: the 1 s limit
+          is extended one doubling at a time, only as far as needed.
 
-        Before three readings the time bound always allows doubling N: one
-        point of a slow f says nothing about how its time grows, and the worst
-        case k^2 would end the search after one call for any f slower than
-        0.25 s. Such a doubled call takes at most 4 times the last one, and the
-        1 s stop below then ends the search.
+        So an f whose memory or time grows like N^2 gets smaller steps instead
+        of a call that cannot fit. E is the most the kernel's counters can make
+        a reading too low (nonzero only on Linux); it is a reading error, so it
+        enters as a fixed amount, not one that grows with N.
 
-        The search stops when:
+        The search stops, keeping the fit, when (in this order):
 
-        1. c = s * (M + E) / N changes by less than 1 % over each of the last
-           two calls (the cost per point is constant, so the growth is linear;
-           two changes, so noise in one reading does not end the search). An
-           N^2 term too small to show in the readings, or hidden by their
-           noise, is missed;
-        2. a call takes longer than 1 s (a backstop: the step size normally
-           prevents it);
-        3. N reaches 1e9;
-        4. N_next < 2 N: the next call would not fit in memory, or would take
-           longer than 1 s, and a call barely larger than this one adds little.
+        1. the measurement has taken longer than 60 s, with three reliable
+           readings (a warning says so);
+        2. c = s (M + E) / N changes by less than 1 % over each of the last
+           two calls, the last three readings all reliable (the cost per point
+           is constant, so the growth is linear; an N^2 term too small to show
+           in the readings, or hidden by their noise, is missed);
+        3. a call takes longer than 1 s, with three reliable readings;
+        4. N reaches 1e9;
+        5. N_next < 2 N: the next call would not fit in memory, or would take
+           too long, and a call barely larger than this one adds little.
 
-        The search also ends when a call uses more than 3 times the memory
-        that growth like N^2 allows from the previous call,
-        M > 3 (N / N_prev)^2 (M_prev + E) (the factor 3 absorbs readings off
-        by up to a factor 2), counted only when the previous reading is at
-        least 1 MiB (smaller readings are mostly noise). What happens then
-        depends on the reader (``_peak_memory_reader``):
+        It raises ``RuntimeError``, asking for ``max_batch``, when:
 
-        - On a GPU the readings count every allocation, so the memory grows
-          faster than N^2, which the fit cannot follow: ``RuntimeError``.
-        - On a CPU a reading misses the memory f reuses from memory the
-          process already holds, so an earlier reading that was too low looks
-          the same as growth faster than N^2 (seen with an integrand whose
-          memory grows exactly like N^2, in a process that had run it
-          before). The fit cannot be trusted beyond N in either case, and the
-          call at N ran, so the batch size is capped at N for the rest of
-          this ``integrate`` call (``_oom_max_batch``) and a warning says so.
+        - a call uses more than 3 times the memory that growth like N^2 allows
+          from the previous call, M > 3 (N / N_prev)^2 (M_prev + E), with the
+          previous reading reliable (the factor 3 absorbs readings off by up to
+          a factor 2). Either the memory grows faster than N^2, which the fit
+          cannot follow, or (CPU readers) the earlier reading missed memory f
+          reused; the benchmark cannot tell which. Such growth is caught only
+          once it shows in two readings, so the call that shows it can already
+          exceed the budget, and growth that a large fixed cost hides, or growth
+          only slightly faster than N^2, is not caught;
+        - fewer than three readings are reliable when the 60 s run out, or the
+          next call needed for them is predicted to take longer than what is
+          left of the 60 s;
+        - no reading is reliable when the search ends for another reason (the
+          memory budget, an out-of-memory error, or N = 1e9).
 
-        Such growth is caught only once it shows in two readings, so a call
-        that first shows it can already exceed the memory budget, and growth
-        that a large fixed cost hides, or growth only slightly faster than
-        N^2, is not caught.
+        When the memory budget, an out-of-memory error or N = 1e9 ends the
+        search with one or two reliable readings, the stored fit is the worst
+        case N^2 through the reliable reading with the largest N, and a warning
+        says so. That call was already near the budget, so the batch is about
+        its size.
 
-        The stored fit is m(B) = s * ((a + E) + b B + d B^2), the memory of a
-        batch of B points, with a, b, d fitted to every reading. s is
-        ``_GRADIENT_MEMORY_SAFETY_FACTOR`` (a heuristic for backpropagation)
-        when ``take_gradient`` and 1 otherwise. With fewer than three readings
-        the fit is linear, so the memory of a batch can be underestimated when
-        the search stopped after one or two calls: for an f whose memory grows
-        like N^2 and is heavy, or an f whose first call took longer than 1 s.
-        A single reading of 0 gives the largest batch, 1e9 points.
-
-        After an out-of-memory error at N > 1, the batch size is capped at
+        The stored fit is m(B) = s ((a + E) + b B + d B^2), the memory of a
+        batch of B points. s is ``_GRADIENT_MEMORY_SAFETY_FACTOR`` (a heuristic
+        for backpropagation) when ``take_gradient`` and 1 otherwise. After an
+        out-of-memory error at N > 1, the batch size is capped at
         ``_OOM_BACKOFF`` * N for the rest of this ``integrate`` call
-        (``_oom_max_batch``, as the batch loop does after such an error), and
-        the fit from the calls that succeeded is kept.
+        (``_oom_max_batch``, as the batch loop does after such an error).
 
-        Only one input value is used for every point, so an f whose memory
-        depends on t can be mismeasured. The start and end messages are logged
-        at WARNING level, so they are silent if the application configures
-        logging above WARNING.
+        On a CPU reader that does not count reused memory (macOS, Windows, a
+        C library without ``malloc_trim``), readings can be far too low in a
+        process that has already evaluated f: the start warning says so and
+        recommends ``max_batch``. Only one input value is used for every
+        point, so an f whose memory depends on t can be mismeasured. The start
+        and end messages are logged at WARNING level, so they are silent if the
+        application configures logging above WARNING.
 
         Parameters
         ----------
@@ -420,10 +500,24 @@ class _MemoryManagement:
         torch.OutOfMemoryError
             A single evaluation of f does not fit.
         RuntimeError
-            The memory grows faster than N^2 (GPU readings only), or the
-            measurement failed for another reason; pass ``max_batch`` to skip
-            it.
+            The memory grows faster than N^2, too few readings were reliable
+            (see above), or the measurement failed for another reason; pass
+            ``max_batch`` to skip it.
         """
+        # How the memory of one call is read on this device (see _Reader).
+        reader = self._peak_memory_reader()
+        E = reader.E
+        hidden_note = (
+            ""
+            if reader.counts_reuse
+            else (
+                " On this system a memory reading misses memory that f reuses "
+                "from memory the process already holds, so in a process that "
+                "has already evaluated f the readings can be far too low and "
+                "max_batch too large: pass max_batch when the memory of a "
+                "batch matters."
+            )
+        )
         logger.warning(
             "PadaQuad is measuring how much memory one integrand (f) evaluation "
             "uses, to determine max_batch (the maximum number of evaluations per "
@@ -432,7 +526,7 @@ class _MemoryManagement:
             "is slow and runs on every integrate() call that has no max_batch. To "
             "skip it, pass max_batch (your own value, or solver.get_max_batch() "
             "after an earlier run), or pass same_f=True to reuse both the "
-            "max_batch and the mesh of the previous call."
+            f"max_batch and the mesh of the previous call.{hidden_note}"
         )
         t0 = time.time()
 
@@ -448,38 +542,62 @@ class _MemoryManagement:
         # integration also backpropagates through every batch, which needs
         # roughly as much memory again, so the stored fit is scaled by s.
         s = _GRADIENT_MEMORY_SAFETY_FACTOR if take_gradient else 1.0
-        time_limit = 1.0  # seconds; no test call is planned to take longer
+        time_limit = 1.0  # seconds per call, once three readings are reliable
+        total_limit = 60.0  # seconds for the whole measurement
         # A call using more than this many times the memory that growth like
         # N^2 allows from the previous call raises (faster than N^2). Readings
-        # of 1 MiB and more were off by up to a factor 2 (0.5x to 1.4x of the
+        # above the floor were off by up to a factor 2 (0.5x to 1.4x of the
         # true size on a Mac), so a previous reading at 0.5x and this one at
         # 1.5x make N^2 growth look 3 times faster; N^2.5 over a 10x step
         # (316x instead of 100x) is still caught.
         growth_tolerance = 3.0
-        # How the memory of one call is read on this device; E (GB), the most
-        # the kernel's counters can make that reading too low; and whether the
-        # reading misses memory that f reuses (every CPU reading does).
-        reset_peak, read_memory, E, misses_reuse = self._peak_memory_reader()
 
         # Search state: the points, memory (GB) and wall time (s) of every call
-        # so far. c is the latest cost per point, s * (M + E) / N, and c_prev,
-        # c_prev2 those of the two calls before; they serve only the
-        # convergence stop. The stop that ends the search sets reason, which
-        # the end message reports; too_fast describes a call that used more
-        # memory than growth like N^2 allows (raised or warned after the loop).
+        # so far, and which readings are reliable. c is the latest cost per
+        # point, s * (M + E) / N, and c_prev, c_prev2 those of the two calls
+        # before; they serve only the convergence stop. reason ends the search
+        # and is reported by the end message; error, when set, is raised
+        # instead; cautious marks a fit made from fewer than three reliable
+        # readings.
         Ns: list[int] = []
         Ms: list[float] = []
         ts: list[float] = []
+        reliable: list[bool] = []
         N, c, c_prev, c_prev2 = 1, 0.0, 0.0, 0.0
         reason: str | None = None
-        too_fast: str | None = None
+        error: str | None = None
+
+        def memory_model() -> tuple[float, float, float]:
+            """
+            Return (a, b, d) of the memory of one call from the readings so far.
+
+            From three reliable readings on, the fit of those readings only;
+            before, the worst case a fit a + b N + d N^2 with a, b, d >= 0
+            allows through the reliable reading with the largest N (the latest
+            reading if none is reliable): y(k N) <= k^2 y(N). Used both to size
+            the next call and for the stored fit, so the two cannot disagree.
+
+            Returns
+            -------
+            tuple[float, float, float]
+                The coefficients in GB, without E.
+            """
+            kept = [i for i, r in enumerate(reliable) if r]
+            if len(kept) >= 3:
+                return _fit_up_to_quadratic(
+                    [Ns[i] for i in kept], [Ms[i] for i in kept]
+                )
+            # Ns increases, so the last reliable reading has the largest N.
+            j = kept[-1] if kept else len(Ns) - 1
+            return 0.0, 0.0, Ms[j] / Ns[j] ** 2
+
         try:
             while reason is None:
                 # Usable memory (after the total_mem_usage reserve) right before
                 # this call: what the next call must fit in.
                 usable = self._get_usable_memory(total_mem_usage)
                 measured = self._measure_call(
-                    f, f_args, node_test, N, reset_peak, read_memory, total_mem_usage
+                    f, f_args, node_test, N, reader.reset, reader.read, total_mem_usage
                 )
 
                 if measured is None:
@@ -487,8 +605,7 @@ class _MemoryManagement:
                     # The peak counters count only the allocations that
                     # succeeded, so the failed call is not a reading. Cap the
                     # batch below N for the rest of this integrate() call, as
-                    # the batch loop does after an out-of-memory error; the fit
-                    # from the calls that succeeded is kept.
+                    # the batch loop does after an out-of-memory error.
                     self._oom_max_batch = max(1, int(_OOM_BACKOFF * N))
                     reason = "an evaluation ran out of memory"
                     continue
@@ -497,54 +614,66 @@ class _MemoryManagement:
                 Ns.append(N)
                 Ms.append(M)
                 ts.append(seconds)
+                reliable.append(reader.floor <= M)
+                n_rel = sum(reliable)
                 c_prev2, c_prev, c = c_prev, c, s * (M + E) / N
+                elapsed = time.time() - t0
 
                 # Faster than N^2: with a, b, d >= 0, M(N) <= (N / N_prev)^2
-                # M(N_prev). A reading above growth_tolerance times that bound
-                # shows growth the fit cannot follow.
-                # The previous call is the one to compare with: an earlier one
-                # can be dominated by a fixed cost that hides the growth.
-                # Readings below 1 MiB are mostly noise (they read 0 when f
-                # reuses memory the process holds) and are not compared.
+                # M(N_prev). The previous call is the one to compare with: an
+                # earlier one can be dominated by a fixed cost that hides the
+                # growth. Only a reliable previous reading is compared.
                 bound = (
                     (N / Ns[-2]) ** 2 * (Ms[-2] + E)
-                    if len(Ns) >= 2 and Ms[-2] >= 2**20 / _GB
+                    if len(Ns) >= 2 and reliable[-2]
                     else 0.0
                 )
                 if bound > 0 and growth_tolerance * bound < M:
-                    too_fast = (
+                    error = (
                         f"The memory of one call of f grew to {M * _GB:.3g} "
-                        f"bytes at {N} points, more than {growth_tolerance:g} times the "
-                        f"{bound * _GB:.3g} bytes that growth like N^2 allows "
-                        f"from the {Ms[-2] * _GB:.3g} bytes at {Ns[-2]} points. "
+                        f"bytes at {N} points, more than {growth_tolerance:g} "
+                        f"times the {bound * _GB:.3g} bytes that growth like N^2 "
+                        f"allows from the {Ms[-2] * _GB:.3g} bytes at {Ns[-2]} "
+                        "points. Either the memory of f grows faster than N^2, "
+                        "which padaquad's fit cannot follow, or the earlier "
+                        "reading was too low because f reused memory the process "
+                        "already held (possible on a CPU); padaquad cannot tell "
+                        "which, so it cannot choose a batch size that fits."
                     )
                     reason = "a call used more memory than growth like N^2 allows"
                 # Stops, checked in order.
+                elif elapsed > total_limit:
+                    if n_rel < 3:
+                        error = (
+                            f"The memory measurement took longer than "
+                            f"{total_limit:g} s before three readings reached "
+                            f"the noise floor of {reader.floor * _GB:.3g} bytes."
+                        )
+                    reason = f"the measurement took longer than {total_limit:g} s"
                 elif (
                     len(Ns) >= 3
+                    and all(reliable[-3:])
                     and abs(c - c_prev) < 0.01 * c_prev
                     and abs(c_prev - c_prev2) < 0.01 * c_prev2
                 ):
                     # The cost per point changed by < 1 % over each of the last
-                    # two calls: the fixed per-call cost is spread out and the
-                    # growth is linear. The three readings make the stored fit a
-                    # full quadratic.
+                    # two calls, all three readings reliable: the fixed per-call
+                    # cost is spread out and the growth is linear.
                     reason = "the cost per evaluation stopped changing"
-                elif seconds > time_limit:
+                elif n_rel >= 3 and seconds > time_limit:
+                    # The backstop; before three readings are reliable, a call
+                    # may take longer (see the time extension below).
                     reason = f"an evaluation took longer than {time_limit} s"
                 elif N >= _MAX_N:
                     reason = "the 1e9 search limit was reached"
                 else:
-                    # Size the next call from the readings: min(10 N, n_mem, n_time).
-                    # Before three readings, use the worst case a fit
-                    # a + b N + d N^2 with a, b, d >= 0 allows through this
-                    # reading: y(k N) <= k^2 y(N), the coefficients (0, 0, y/N^2).
-                    if len(Ns) >= 3:
-                        a, b, d = _fit_up_to_quadratic(Ns, Ms)
-                        time_fit = _fit_up_to_quadratic(Ns, ts)
-                    else:
-                        a, b, d = 0.0, 0.0, M / N**2
-                        time_fit = (0.0, 0.0, seconds / N**2)
+                    # Size the next call: min(step N, n_mem, n_time).
+                    a, b, d = memory_model()
+                    time_fit = (
+                        _fit_up_to_quadratic(Ns, ts)
+                        if len(Ns) >= 3
+                        else (0.0, 0.0, seconds / N**2)
+                    )
                     # The test calls run forward only, so s is not applied. A
                     # call that does not fit would run out of memory on a GPU,
                     # and on a CPU the operating system could kill the process
@@ -555,19 +684,43 @@ class _MemoryManagement:
                         # One or two times say nothing about how time grows, and
                         # the worst case would end the search after one call of
                         # any f slower than 0.25 s. Allow doubling: that call
-                        # takes at most 4 times this one, and the 1 s stop ends
-                        # the search after it.
+                        # takes at most 4 times this one.
                         n_time = max(n_time, 2 * N)
-                    N_next = min(10 * N, n_mem, n_time)
-                    if N_next < 2 * N:
+                    remaining = total_limit - elapsed
+                    # Fewer than three reliable readings, and the 1 s limit
+                    # would end the search: extend it, by one doubling of N at
+                    # a time, as long as that call is predicted to finish within
+                    # the rest of the 60 s.
+                    if (
+                        n_rel < 3
+                        and n_time < 2 * N
+                        and _largest_n(time_fit, remaining) >= 2 * N
+                    ):
+                        n_time = 2 * N
+                    # Small steps once calls get slow, so a sudden jump in time
+                    # costs little; only where the reader counts reused memory,
+                    # because a 2x larger call would otherwise reuse unseen a
+                    # large share of this call's memory.
+                    step = 2 if reader.counts_reuse and seconds > 0.1 else 10
+                    N_next = min(step * N, n_mem, n_time)
+                    if N_next >= 2 * N:
+                        N = N_next
+                    elif n_rel < 3 and n_time < n_mem:
+                        error = (
+                            f"The next test call needed to reach three readings "
+                            f"above the noise floor of {reader.floor * _GB:.3g} "
+                            f"bytes is predicted to take longer than the "
+                            f"{remaining:.1f} s left of the {total_limit:g} s "
+                            "limit of the memory measurement."
+                        )
+                        reason = "the next test would take too long"
+                    else:
                         # A call barely larger than this one adds little.
                         reason = (
                             "the next test would not fit in memory"
                             if n_mem <= n_time
                             else f"the next test would take longer than {time_limit} s"
                         )
-                    else:
-                        N = N_next
         except torch.OutOfMemoryError:
             # A single evaluation of f does not fit (raised by _measure_call at
             # N = 1): memory really is too small, so pass the error through.
@@ -582,58 +735,59 @@ class _MemoryManagement:
             ) from e
 
         self._release_memory()
-        if too_fast is not None:
-            specify = (
+        n_rel = sum(reliable)
+        if error is None and n_rel == 0:
+            error = (
+                f"No test call of f used at least the noise floor of "
+                f"{reader.floor * _GB:.3g} bytes before the search ended "
+                f"({reason})."
+            )
+        if error is not None:
+            # Raised here, outside the try block, so it is not reported as a
+            # failed measurement. The readings let the user pick max_batch.
+            readings = ", ".join(
+                f"N={n}: {m * _GB / 2**20:.2f} MiB in {t:.2f} s"
+                + ("" if r else " (below the noise floor)")
+                for n, m, t, r in zip(Ns, Ms, ts, reliable, strict=True)
+            )
+            raise RuntimeError(
+                f"{error} Readings after {time.time() - t0:.1f} s: {readings}. "
                 "Specify max_batch (to integrate() or the solver): the largest "
                 "number of points per call of f that fits in memory."
-            )
-            if not misses_reuse:
-                # Raised here, outside the try block, so it is not reported as
-                # a failed measurement.
-                raise RuntimeError(
-                    f"{too_fast}padaquad fits the memory of f up to N^2, so it "
-                    "cannot choose a batch size that fits for this integrand. "
-                    f"{specify}"
-                )
-            # An earlier reading that missed reused memory, followed by one
-            # that did not, looks the same as growth faster than N^2. Either
-            # way the fit says nothing reliable beyond N, and the call at N
-            # ran: cap the batch there, as after an out-of-memory error.
-            self._oom_max_batch = N
-            logger.warning(
-                f"{too_fast}Either the memory of f grows faster than N^2, "
-                "which padaquad's fit cannot follow, or the earlier reading "
-                "was too low: on a CPU a reading misses the memory f reuses "
-                "from memory the process already holds. max_batch is capped "
-                f"at {N}, the largest call that ran, for this integrate() "
-                f"call. {specify}"
+                f"{hidden_note}"
             )
 
         # The memory of one call of B points during the integration:
-        # m(B) = s * ((a + E) + b B + d B^2), fitted to every
-        # reading. E is added once: it is a reading error, not a cost per point.
-        a, b, d = _fit_up_to_quadratic(Ns, Ms)
+        # m(B) = s * ((a + E) + b B + d B^2). E is added once: it is a reading
+        # error, not a cost per point. With one or two reliable readings (the
+        # memory budget, an out-of-memory error or N = 1e9 ended the search),
+        # the model is the cautious worst case.
+        cautious = n_rel < 3
+        a, b, d = memory_model()
         self.f_mem_coeffs = (s * (a + E), s * b, s * d)
 
         # The estimate depends on take_gradient: the fit includes the factor s
-        # only when it is True. get_max_batch applies the cap set above (an
-        # out-of-memory error, or a call that used more memory than growth like
-        # N^2 allows), so the message reports the batch actually used.
+        # only when it is True. get_max_batch applies the cap an out-of-memory
+        # error above set, so the message reports the batch actually used.
         usable = self._get_usable_memory(total_mem_usage)
         max_batch = self.get_max_batch(
             total_mem_usage, self._get_max_f_evals(total_mem_usage)
         )
         assert max_batch is not None
         a, b, d = self.f_mem_coeffs
-        quadratic = ""
-        # Name the N^2 growth only when it matters at the batch size: every
-        # fit of a linear f leaves a tiny d > 0. Strict, so a batch of 0 with
-        # no fixed cost (a = 0) is not flagged. Not after the too_fast cap:
-        # its warning already says that the fit does not describe f.
-        if too_fast is None and d * max_batch**2 > 0.1 * (
-            a + b * max_batch + d * max_batch**2
-        ):
-            quadratic = (
+        note = ""
+        if cautious:
+            note = (
+                f" Only {n_rel} of the readings reached the noise floor, so "
+                "max_batch assumes the worst case, memory growing like N^2 from "
+                "the largest of them, and can be smaller than what fits; pass "
+                "max_batch to choose it yourself."
+            )
+        elif d * max_batch**2 > 0.1 * (a + b * max_batch + d * max_batch**2):
+            # Name the N^2 growth only when it matters at the batch size: every
+            # fit of a linear f leaves a tiny d > 0. Strict, so a batch of 0
+            # with no fixed cost (a = 0) is not flagged.
+            note = (
                 " The memory grows like max_batch^2, so a batch larger than "
                 "this does not fit; on a CPU, a batch that does not fit can kill "
                 "the process without an error."
@@ -645,12 +799,10 @@ class _MemoryManagement:
             f"+ {d * _GB:.3g} bytes * N^2. With the {usable:.1f} GB usable now, "
             f"max_batch is about {max_batch} for take_gradient={take_gradient}; "
             f"pass max_batch={max_batch} to skip this measurement in later runs."
-            f"{quadratic}"
+            f"{note}"
         )
 
-    def _peak_memory_reader(
-        self,
-    ) -> tuple[Callable[[], None], Callable[[], int], float, bool]:
+    def _peak_memory_reader(self) -> _Reader:
         """
         Choose how the memory one test call uses (M) is measured on this device.
 
@@ -659,10 +811,11 @@ class _MemoryManagement:
 
         - CUDA: PyTorch's caching allocator tracks the peak of allocated memory
           per device. ``reset`` sets that peak to the memory allocated now, and
-          ``read`` returns the peak. Exact to its 512-byte allocation blocks.
-          Resetting also resets ``max_memory_reserved`` for ``self.device``.
-          Memory allocated outside PyTorch's allocator (custom ``cudaMalloc``,
-          CuPy, NCCL) is not counted.
+          ``read`` returns the peak. Exact to its 512-byte allocation blocks, so
+          the noise floor is 10 KB, and it counts every allocation, including
+          memory f reuses. Resetting also resets ``max_memory_reserved`` for
+          ``self.device``. Memory allocated outside PyTorch's allocator (custom
+          ``cudaMalloc``, CuPy, NCCL) is not counted.
         - CPU on Linux: writing 5 to ``/proc/self/clear_refs`` (Linux >= 4.0)
           resets the process's peak resident memory, ``VmHWM`` in
           ``/proc/self/status``, to its current value; ``read`` returns
@@ -671,32 +824,43 @@ class _MemoryManagement:
           is not read: it also includes the peak of the process this one was
           started from, so in a worker started by a larger process
           (``subprocess``, multiprocessing ``spawn``) it would stay at the
-          parent's peak. The kernel keeps each CPU core's share of the count
-          private until it reaches max(32, 2 * cores) pages, so the reading can
-          be low by up to E = cores * max(32, 2 * cores) pages
-          (``lib/percpu_counter.c``, ``compute_batch_value``).
+          parent's peak. Before the reset, glibc's ``malloc_trim(0)`` returns
+          the heap pages the process freed earlier to the system, so memory f
+          reuses raises resident memory again and is counted (glibc trims every
+          arena; it has no effect when another allocator such as jemalloc or
+          tcmalloc is preloaded, and C libraries without it, such as musl, skip
+          it). The trim runs before the call's clock starts; pages it returned
+          must be mapped again, so a test call can be slower than the same
+          batch during the integration (the time fit errs on the long side).
+          The kernel keeps each CPU's share of the resident-memory count
+          private until it reaches max(32, 2 * online CPUs) pages
+          (``lib/percpu_counter.c``, ``compute_batch_value``; the counters are
+          read without those shares, ``get_mm_counter``), and only CPUs the
+          process runs on hold a share; a reading is the difference of two
+          counts, so it can be low by up to
+          E = 2 * (CPUs the process may run on) * max(32, 2 * online CPUs)
+          pages (Linux >= 6.2 per-CPU counters; older kernels count per thread
+          instead, which this E does not describe). Noise floor 4 MiB.
         - Other CPUs (macOS, Windows, a locked ``/proc``): no resettable peak
           exists. ``read`` returns the current resident memory, so M is the
           memory still held after the call (its result is kept alive for the
           reading). Memory that f frees before returning, such as the
-          intermediates of a Jacobian, is missed, so c can be too low.
+          intermediates of a Jacobian, is missed. Noise floor 4 MiB.
 
-        Both CPU methods count resident memory, so they also miss memory that
-        f allocates inside pages the process already holds (freed earlier and
-        kept by the allocator): M is then too low by up to all of it, which E
-        does not cover. A popcornn-like integrand (per-point gradients, about
-        270 bytes N^2) that uses 255 MiB at N = 1000 in a fresh process read
-        51 MiB there in the third benchmark run in one process, and 0 MiB in
-        another run (macOS).
+        Both CPU methods count resident memory, so without the trim they miss
+        memory f allocates inside pages the process already holds (freed
+        earlier and kept by the allocator): M is then too low by up to all of
+        it, which E does not cover. On macOS a popcornn-like integrand
+        (per-point gradients, about 270 bytes N^2) that uses 255 MiB at
+        N = 1000 in a fresh process read 51 MiB there in the third benchmark
+        run in one process, and 0 MiB in another run; macOS's
+        ``malloc_zone_pressure_relief`` released nothing.
 
         Returns
         -------
-        tuple[Callable[[], None], Callable[[], int], float, bool]
-            The functions ``reset`` (starts a new peak measurement; a no-op for
-            the last method) and ``read`` (memory in bytes, as described above);
-            E, the GB to add to every M (the most the kernel's counters can
-            make the reading low); and whether the reading misses memory that
-            f reuses (True for both CPU methods, False for CUDA).
+        _Reader
+            The reset and read functions, E, the noise floor, and whether the
+            reading counts memory f reuses.
         """
         if self.device.type == "cuda":
 
@@ -715,7 +879,7 @@ class _MemoryManagement:
                 """
                 return torch.cuda.max_memory_allocated(self.device)
 
-            return reset_cuda, read_cuda, 0.0, False
+            return _Reader(reset_cuda, read_cuda, 0.0, _CUDA_NOISE_FLOOR_GB, True)
 
         clear_refs = Path("/proc/self/clear_refs")
         try:
@@ -737,10 +901,23 @@ class _MemoryManagement:
                 """
                 return psutil.Process().memory_info().rss
 
-            return no_reset, read_rss, 0.0, True
+            return _Reader(no_reset, read_rss, 0.0, _CPU_NOISE_FLOOR_GB, False)
+
+        # glibc's malloc_trim, looked up in the process's own C library; None
+        # where the library has none (musl) or cannot be opened.
+        malloc_trim: Callable[[int], int] | None
+        try:
+            malloc_trim = getattr(ctypes.CDLL(None), "malloc_trim", None)
+        except OSError:
+            malloc_trim = None
+        if malloc_trim is not None:
+            malloc_trim.argtypes = [ctypes.c_size_t]
+            malloc_trim.restype = ctypes.c_int
 
         def reset_linux() -> None:
-            """Reset the process's peak resident memory, VmHWM, to its current value."""
+            """Return freed heap memory to the system, then reset VmHWM."""
+            if malloc_trim is not None:
+                malloc_trim(0)
             clear_refs.write_text("5")
 
         def read_vmhwm() -> int:
@@ -756,9 +933,14 @@ class _MemoryManagement:
             status = Path("/proc/self/status").read_text()
             return int(status.split("VmHWM:")[1].split()[0]) * 1024
 
-        cores = os.cpu_count() or 1
-        E = cores * max(32, 2 * cores) * os.sysconf("SC_PAGE_SIZE") / _GB
-        return reset_linux, read_vmhwm, E, True
+        online = os.cpu_count() or 1
+        used = (
+            len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else online
+        )
+        E = 2 * used * max(32, 2 * online) * os.sysconf("SC_PAGE_SIZE") / _GB
+        return _Reader(
+            reset_linux, read_vmhwm, E, _CPU_NOISE_FLOOR_GB, malloc_trim is not None
+        )
 
     def _measure_call(
         self,
@@ -772,6 +954,12 @@ class _MemoryManagement:
     ) -> tuple[float, float] | None:
         """
         Call f once on N copies of node_test; return the memory and time it took.
+
+        The memory is the reader's difference, but never less than the bytes
+        of the input tile and of f's outputs on this device (``_tensor_bytes``):
+        those are alive when the call is read, so the call used at least that
+        much. This removes readings of 0 when f reuses memory the process
+        already holds, and is exact for an f that allocates nothing else.
 
         Parameters
         ----------
@@ -835,9 +1023,9 @@ class _MemoryManagement:
         seconds = time.time() - t0
         # Read while the result is still alive, so a before/after difference
         # (the third method) counts the output too.
-        M = max(read_memory() - before, 0) / _GB
+        M = max(read_memory() - before, _tensor_bytes((t_input, result), self.device))
         del result, t_input
-        return M, seconds
+        return M / _GB, seconds
 
     def _get_usable_memory(self, total_mem_usage: float) -> float:
         """

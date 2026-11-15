@@ -4,7 +4,8 @@ The benchmark fits the memory of one call of ``f`` on N points as
 a + b N + d N^2 (``f_mem_coeffs``, GB, scaled by the gradient safety factor s,
 with E, the Linux reading's error allowance, added to a). Only readings at or
 above the reader's noise floor (4 MiB on a CPU, 10 KB on a GPU) are fitted,
-and the search goes on until three are. It calls ``f`` on N = 1 point, then
+and the search goes on until the fit is ready: three of them, whose fitted
+memory grows by at least the floor. It calls ``f`` on N = 1 point, then
 sizes each next call from the fitted memory and time:
 N_next = min(step N, n_mem, n_time), so an ``f`` whose memory grows like N^2
 gets smaller steps instead of a call that cannot fit. The batch size is
@@ -39,7 +40,7 @@ import torch
 from _helpers import T_FINAL, T_INIT, make_solver_for_unit_test, needs_cuda
 
 import padaquad.quadrature.memory as qmem
-from padaquad import adaptive_quadrature, steps
+from padaquad import adaptive_quadrature, integrate, steps
 
 GB = 1024**3
 USABLE_GB = 100.0  # fixed usable memory for the CPU tests
@@ -218,6 +219,7 @@ def test_fit_recovers_quadratic_and_uses_fewer_terms_for_fewer_readings():
         ((0.0, 0.0, 2.0), 50.0, 5),  # quadratic: 2 n^2 <= 50
         ((1.0, 1.0, 1.0), 13.0, 3),  # 1 + 3 + 9 = 13 exactly
         ((0.0, 1e-12, 0.0), 1.0, qmem._MAX_N),  # capped at 1e9
+        ((0.0, 1.0, 1.0), math.inf, qmem._MAX_N),  # no limit (limit_benchmark_time)
     ],
 )
 def test_largest_n(coeffs, budget, expected):
@@ -259,14 +261,15 @@ def test_cost_converges(fake, caplog, take_gradient):
 
 
 def test_slow_call_stops_search(fake, caplog):
-    """A call slower than the 1 s limit ends the search at that N once three
-    readings are reliable (the backstop: the readings before it took no time,
-    so no call was predicted to be slow). The 8 MiB fixed cost puts every
-    reading above the 4 MiB floor and keeps c changing by > 1 %, so the
-    convergence stop cannot fire. The reason is checked: without the backstop,
-    the time fit through the three readings would stop the search at the same
-    N."""
-    a, b = 8 * 2**20, 4096
+    """A call slower than the 1 s limit ends the search at that N once the fit
+    is ready (the backstop: the readings before it took no time, so no call
+    was predicted to be slow). The 8 MiB fixed cost puts every reading above
+    the 4 MiB floor and keeps c changing by > 1 %, so the convergence stop
+    cannot fire; 64 KiB per point makes the readings grow by 6.2 MiB, more
+    than the floor, from N = 1 to 100. The reason is checked: without the
+    backstop, the time fit through the three readings would stop the search
+    at the same N."""
+    a, b = 8 * 2**20, 64 * 1024
     f = CostIntegrand(fake.memory, fake.clock, fixed=a, per_point=b, slow_from=100)
     with caplog.at_level(logging.WARNING, logger=qmem.__name__):
         fit = benchmark(fake.solver, f)
@@ -345,7 +348,7 @@ def test_heavy_quadratic_first_steps(fake, caplog):
     assert max(f.used) <= BUDGET
     assert fit == pytest.approx((0, 0, 2 * GB))
     assert fake.solver._get_max_f_evals(0.9) == 6
-    assert "Only 2 of the readings reached the noise floor" in caplog.text
+    assert "(2 reached the noise floor" in caplog.text
 
 
 def test_next_call_sized_by_time(fake, caplog):
@@ -356,14 +359,14 @@ def test_next_call_sized_by_time(fake, caplog):
         fake.clock,
         fixed=8 * 2**20,  # every reading above the 4 MiB floor
         per_point=0,
-        per_point_sq=1,
+        per_point_sq=1024,  # 10 MiB more at N = 100: the fit is ready there
         time_per_point_sq=2e-6,
     )
     with caplog.at_level(logging.WARNING, logger=qmem.__name__):
         benchmark(fake.solver, f)
     assert f.calls == [1, 10, 100, 707]
     assert max(f.seconds) <= 1.0
-    assert "the next test would take longer than 1.0 s" in caplog.text
+    assert "the next test would take too long" in caplog.text
 
 
 def test_one_small_change_does_not_stop(fake):
@@ -634,11 +637,13 @@ def test_no_reading_above_floor_raises(fake, monkeypatch):
 
 
 @pytest.mark.parametrize(("share", "noted"), [(0.05, False), (0.2, True)])
-def test_quadratic_note_threshold(fake, caplog, share, noted):
+def test_quadratic_note_threshold(fake, monkeypatch, caplog, share, noted):
     """The end message names the N^2 growth only when the N^2 term is more
     than 10 % of the memory of a batch. Memory b N + d N^2 is built so that
     the batch is B = 1e6 points with the N^2 term a share of 5 % or 20 % of
-    its memory."""
+    its memory. The reader counts reused memory, so the batch is not capped
+    at the largest test call (1e4 points)."""
+    set_reader(fake.solver, monkeypatch, counts_reuse=True)
     B = 10**6
     f = CostIntegrand(
         fake.memory,
@@ -655,34 +660,37 @@ def test_quadratic_note_threshold(fake, caplog, share, noted):
 @pytest.mark.parametrize(
     ("per_point_sq", "exponent", "E", "raises_at"),
     [
-        (2**20, 2.47, 0, None),  # 10^2.47 = 295 < 3 * 10^2 per tenfold step
+        (2**20, 2.2, 0, None),  # 174^0.2 = 2.8 < 3 over the whole search
+        (2**20, 2.47, 0, (1, 100)),  # 10^0.47 = 2.95 < 3, 100^0.47 = 8.7 > 3
         (2**20, 2.48, 0, (1, 10)),  # 10^2.48 = 302 > 300
-        (2**20, 2.48, 2**20, (10, 100)),  # E doubles the first bound
+        (2**20, 2.48, 2**20, (1, 100)),  # E doubles the bound from N = 1
         (2**20 - 1024, 3, 0, (10, 87)),  # 1023 KiB at N = 1: not compared
         (2**20, 3, 0, (1, 10)),  # 1 MiB at N = 1: compared
     ],
-    ids=["N^2.47", "N^2.48", "N^2.48+E", "N^3-below-1MiB", "N^3-at-1MiB"],
+    ids=["N^2.2", "N^2.47", "N^2.48", "N^2.48+E", "N^3-below-1MiB", "N^3-at-1MiB"],
 )
 def test_faster_than_n2_tolerance_floor_and_error_allowance(
     fake, monkeypatch, per_point_sq, exponent, E, raises_at
 ):
     """Memory d N^p with d about 1 MiB, with the reader's noise floor set to
     1 MiB (the rule is the same for every floor). A call raises when its
-    reading M
-    exceeds 3 (N / N_prev)^2 (M_prev + E), compared only with the latest
-    earlier reading of at least 1 MiB; ``raises_at`` is (N_prev, N) of the
-    call that raises, or None.
+    reading M exceeds 3 (N / N_i)^2 (M_i + E) for an earlier reading of at
+    least 1 MiB; the message names the one with the smallest bound.
+    ``raises_at`` is (N_i, N) of the call that raises, or None. N^p exceeds
+    the N^2 bound by (N / N_i)^(p - 2), so it is caught across a range of N
+    where this passes 3.
 
-    - p = 2.47 grows 295 times over the tenfold step from N = 1 and never
-      raises (smaller steps grow less); p = 2.48 grows 302 times and raises
-      at N = 10.
-    - With E = 1 MiB the bound at N = 10 is 300 * 2 MiB, so p = 2.48 passes
-      there; at N = 100, M = 10^4.96 MiB = 91,201 MiB exceeds
-      300 * (302 + 1) MiB = 90,900 MiB and raises.
+    - p = 2.2 is not caught: across the whole search (N = 1 to 174, the worst
+      case step through N = 100) it exceeds N^2 by 2.8 times.
+    - p = 2.47 exceeds it by 2.95 times from N = 1 to 10 (passes) and by 8.7
+      times from N = 1 to 100 (raises); p = 2.48 by 3.02 times at N = 10.
+    - With E = 1 MiB the bound from N = 1 doubles, so p = 2.48 passes at
+      N = 10 and raises at N = 100: 10^4.96 MiB = 91,201 MiB exceeds
+      3 * 10^4 * 2 MiB.
     - For p = 3 the reading at N = 1 decides: 1023 KiB is below the 1 MiB
       floor, so N = 10 is not compared and the search goes on to N = 87 (the
-      worst-case step), which is compared and raises; 1 MiB raises at
-      N = 10."""
+      worst-case step), which is compared with N = 10 and raises; 1 MiB
+      raises at N = 10."""
     set_reader(fake.solver, monkeypatch, E=E, floor=2**20)
     f = CostIntegrand(
         fake.memory,
@@ -830,7 +838,8 @@ def test_total_time_limit_raises_before_three_reliable_readings(fake):
     message = str(info.value)
     assert f.calls == [1, 2, 4, 8, 16, 32, 64, 128]
     assert fake.clock.now == 69
-    assert "took longer than 60 s before three readings reached" in message
+    assert "took longer than its 60 s limit before the readings allowed" in message
+    assert "limit_benchmark_time=False" in message
     assert "below the noise floor" in message
     assert "N=128: 0.01 MiB in 20.00 s" in message
     assert "Specify max_batch" in message
@@ -844,21 +853,31 @@ def test_next_call_predicted_too_long_raises(fake):
     60 s. When the next doubling is predicted to take longer, the benchmark
     raises before making it, so no call ran past the limit."""
     f = CostIntegrand(fake.memory, fake.clock, per_point=64, time_per_point_sq=0.05)
-    with pytest.raises(RuntimeError, match="is predicted to take longer than the"):
+    with pytest.raises(
+        RuntimeError, match="is predicted to take longer than the"
+    ) as info:
         benchmark(fake.solver, f)
+    assert "limit_benchmark_time=False" in str(info.value)
     assert fake.clock.now <= 60
     assert max(f.seconds) <= 60
 
 
-def test_total_time_limit_after_three_reliable_readings_uses_fit(fake, caplog):
-    """Calls of 21 s each, every reading reliable (8 MiB fixed cost): the
-    third call ends past 60 s with three reliable readings, so the benchmark
-    does not raise; it stops, says why, and uses the fit."""
-    a, b = 8 * 2**20, 1024
-    f = CostIntegrand(fake.memory, fake.clock, fixed=a, per_point=b, time_fixed=21.0)
+def test_total_time_limit_after_fit_ready_uses_fit(fake, caplog):
+    """Every reading reliable (8 MiB fixed cost) and growing (64 KiB per
+    point), so the fit is ready at N = 100. The call at N = 1000, predicted
+    to be instant, takes 70 s: the measurement ends past 60 s with the fit
+    ready, so the benchmark does not raise; it stops, says why, and uses the
+    fit."""
+    a, b = 8 * 2**20, 64 * 1024
+    f = CostIntegrand(fake.memory, fake.clock, fixed=a, per_point=b)
+
+    def timed(t, *args):
+        fake.clock.now += 70.0 if t.shape[0] == 1000 else 0.0
+        return f(t, *args)
+
     with caplog.at_level(logging.WARNING, logger=qmem.__name__):
-        fit = benchmark(fake.solver, f)
-    assert f.calls == [1, 2, 4]
+        fit = benchmark(fake.solver, timed)
+    assert f.calls == [1, 10, 100, 1000]
     assert "stopped because the measurement took longer than 60 s" in caplog.text
     assert fit[:2] == pytest.approx((a, b), rel=1e-6)
 
@@ -957,13 +976,16 @@ def test_real_linux_malloc_trim_recovers_reused_memory():
 # ---------------------------------------------------------------------------
 
 
-def test_oom_after_n_100_keeps_measured_fit(fake, caplog):
+def test_oom_after_n_100_keeps_measured_fit(fake, monkeypatch, caplog):
     """An out-of-memory error at N = 1000 after a successful N = 100 keeps
     the fit of the calls that succeeded and caps the batch at
     _OOM_BACKOFF * 1000 = 750 for the rest of the integrate() call. The end
-    message reports the capped batch, not the ~7.9e7 points the fit allows.
-    The 8 MiB fixed cost makes every reading reliable."""
-    a, b = 8 * 2**20, 1024
+    message reports the capped batch, not the ~1.2e6 points the fit allows.
+    The 8 MiB fixed cost makes every reading reliable, and 64 KiB per point
+    makes the fit ready at N = 100. The reader counts reused memory, so the
+    largest test call (100) does not cap the batch."""
+    set_reader(fake.solver, monkeypatch, counts_reuse=True)
+    a, b = 8 * 2**20, 64 * 1024
     f = CostIntegrand(fake.memory, fake.clock, fixed=a, per_point=b, oom_from=1000)
     with caplog.at_level(logging.WARNING, logger=qmem.__name__):
         fit = benchmark(fake.solver, f)
@@ -978,12 +1000,16 @@ def test_oom_after_n_100_keeps_measured_fit(fake, caplog):
 @pytest.mark.parametrize(
     ("time_fixed", "oom_from", "cap"), [(0.0, 10, 7), (0.5, 2, 1)], ids=["10", "2"]
 )
-def test_oom_at_small_n_caps_batch(fake, caplog, time_fixed, oom_from, cap):
+def test_oom_at_small_n_caps_batch(
+    fake, monkeypatch, caplog, time_fixed, oom_from, cap
+):
     """An out-of-memory error on the second call caps the batch at
     int(0.75 N): 7 points at N = 10, and 1 point at N = 2, reached by doubling
     because the first call takes 0.5 s. One reliable reading exists (8 MiB at
     N = 1), so the stored fit is the cautious one, the worst case N^2 through
-    it, and the end message says so."""
+    it, and the end message says so. The reader counts reused memory, so only
+    the out-of-memory error caps the batch."""
+    set_reader(fake.solver, monkeypatch, counts_reuse=True)
     a = 8 * 2**20
     f = CostIntegrand(
         fake.memory,
@@ -999,7 +1025,7 @@ def test_oom_at_small_n_caps_batch(fake, caplog, time_fixed, oom_from, cap):
     assert fit == pytest.approx((0, 0, safety(True) * (a + 1024)))
     assert fake.solver._oom_max_batch == cap
     assert fake.solver.get_max_batch() == cap
-    assert "Only 1 of the readings reached the noise floor" in caplog.text
+    assert "(1 reached the noise floor" in caplog.text
 
 
 def test_oom_without_reliable_reading_raises(fake):
@@ -1308,7 +1334,7 @@ def test_slow_integrand_gradient_path_completes(monkeypatch):
     ids=["N^2", "out-of-memory"],
 )
 def test_integrate_batches_within_measured_max_batch(
-    fake, caplog, cost, test_calls, max_batch
+    fake, monkeypatch, caplog, cost, test_calls, max_batch
 ):
     """Through integrate() without max_batch: f is called on one point (the
     warm-up), then by the benchmark, then by the integration in batches of at
@@ -1318,7 +1344,9 @@ def test_integrate_batches_within_measured_max_batch(
     reliable reading, 8 MiB at N = 1) it is the cap, 7. Both are below the 44 points (11 subintervals of bosh3's 4 nodes)
     the integration needs, so it takes several batches. The batch is stored
     as previous_max_batch, so a same_f=True call skips the benchmark and
-    keeps to it."""
+    keeps to it. The reader counts reused memory, so the largest test call
+    does not cap the batch."""
+    set_reader(fake.solver, monkeypatch, counts_reuse=True)
     f = CostIntegrand(fake.memory, fake.clock, **cost)
     bounds = {"mesh_init": T_INIT, "mesh_final": T_FINAL, "take_gradient": False}
     result = fake.solver.integrate(f, **bounds)
@@ -1551,7 +1579,7 @@ def test_memory_budget_ends_search_before_time_error(fake, monkeypatch, caplog):
     assert fit == pytest.approx((0, 0, 3 * 2**20))
     assert fake.solver._get_max_f_evals(0.9) == 6
     assert "stopped because the next test would not fit in memory" in caplog.text
-    assert "Only 2 of the readings reached the noise floor" in caplog.text
+    assert "(2 reached the noise floor" in caplog.text
 
 
 def test_growth_compared_with_previous_reliable_reading(fake, monkeypatch):
@@ -1578,9 +1606,11 @@ def test_growth_compared_with_previous_reliable_reading(fake, monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("seconds", "outcome"), [(1.5, "fit"), (5.0, "error")], ids=["1.5s", "5s"]
+    ("seconds", "limited", "outcome"),
+    [(1.5, True, "fit"), (5.0, True, "error"), (5.0, False, "fit")],
+    ids=["1.5s", "5s", "5s-unlimited"],
 )
-def test_slow_model_doubles_to_floor(fake, monkeypatch, seconds, outcome):
+def test_slow_model_doubles_to_floor(fake, monkeypatch, seconds, limited, outcome):
     """A slow model, as an ML potential on a CPU: every call takes the same
     time (longer than the 1 s limit) and uses 1 KiB per point, so readings
     reach the 4 MiB floor only at N = 4096. Before three readings are
@@ -1590,21 +1620,29 @@ def test_slow_model_doubles_to_floor(fake, monkeypatch, seconds, outcome):
     - 1.5 s per call: N = 1, 2, ..., 16384 (15 calls, 22.5 s); the readings
       at 4096, 8192 and 16384 are reliable and the cost per point is
       constant, so the fit is exact.
-    - 5 s per call: by N = 2048 (12 calls) the 60 s are used up with no
-      reliable reading, so the benchmark raises and asks for max_batch.
+    - 5 s per call: after N = 2048 (12 calls, 60 s) the next call is
+      predicted to end past the 60 s, with no reliable reading, so the
+      benchmark raises before making it; the message names
+      limit_benchmark_time and max_batch.
+    - 5 s per call with ``limit_benchmark_time=False``: the same 15 calls as
+      at 1.5 s, 75 s in all, and the exact fit.
 
     The second case pins a consequence of doubling: a model slower than about
     4 s per call with 1 KiB per point cannot be measured in 60 s. Catches:
-    removing the time extension (the 1.5 s case then raises after N = 2)."""
+    removing the time extension (the 1.5 s case then raises after N = 2);
+    ignoring limit_benchmark_time."""
     set_reader(fake.solver, monkeypatch, counts_reuse=True)
+    monkeypatch.setattr(fake.solver, "limit_benchmark_time", limited)
     f = CostIntegrand(fake.memory, fake.clock, per_point=1024, time_fixed=seconds)
     if outcome == "fit":
         fit = benchmark(fake.solver, f)
         assert f.calls == [2**k for k in range(15)]
+        assert fake.clock.now == pytest.approx(15 * seconds)
         assert fit[1] == pytest.approx(1024)
         return
-    with pytest.raises(RuntimeError, match="Specify max_batch"):
+    with pytest.raises(RuntimeError, match="Specify max_batch") as info:
         benchmark(fake.solver, f)
+    assert "limit_benchmark_time=False" in str(info.value)
     assert f.calls == [2**k for k in range(12)]
     assert fake.clock.now <= 60
 
@@ -1631,13 +1669,15 @@ def test_same_f_after_failed_benchmark_measures_again(fake):
     assert float(result.integral.sum()) == pytest.approx(1.0)
 
 
-def test_one_time_cost_of_first_call_absorbed_by_integrate(fake):
+def test_one_time_cost_of_first_call_absorbed_by_integrate(fake, monkeypatch):
     """A model that loads 48 MiB of weights on its first call and keeps them,
     then uses 1 KiB per point. integrate() calls f once on one point before
     the benchmark, so the benchmark measures 1 KiB per point and the batch is
-    about 75 GB / 1 KiB. Run directly, without that call, the 48 MiB is the
+    about 75 GB / 1 KiB (the reader counts reused memory, so the largest test
+    call does not cap it). Run directly, without that call, the 48 MiB is the
     only reliable reading and the cautious batch is 39 points. Catches:
     running the benchmark before integrate()'s one-point call of f."""
+    set_reader(fake.solver, monkeypatch, counts_reuse=True)
 
     def lazy(cost):
         loaded = []
@@ -1659,17 +1699,18 @@ def test_one_time_cost_of_first_call_absorbed_by_integrate(fake):
     assert fake.solver._get_max_f_evals(0.9) == 39
 
 
-def test_readings_that_do_not_grow_raise(fake, monkeypatch):
+def test_readings_that_do_not_grow_keep_doubling(fake, monkeypatch, caplog):
     """A slow model with a fixed 8 MiB workspace and 100 bytes per point,
     1.2 s per call, on a reader that counts reused memory (as Linux) and
-    reads whole 4 KiB pages: the calls at N = 1, 2 and 4 (2x steps after
-    slow calls) all read 8 MiB, three reliable readings, and the 1 s limit
-    ends the search. Their fit is flat, 8 MiB whatever N, and would allow
-    1e9 points per call (100 GB here). The benchmark raises and asks for
-    max_batch instead. When an out-of-memory error at N = 8 ends the search
-    instead, the batch is capped below that call (6 points), so the flat fit
-    is kept and nothing is raised. Catches: storing the flat fit (round 2
-    did, giving max_batch = 1e9); raising also after an out-of-memory error."""
+    reads whole 4 KiB pages: the calls at N = 1, 2 and 4 all read 8 MiB, three
+    reliable readings whose fit is flat and would allow 1e9 points per call.
+    The fit is not ready until its memory grows by the 4 MiB floor, so the
+    1 s limit does not end the search: N doubles up to 65536 (6.25 MiB more
+    than at N = 1), and the fit then gives about 100 bytes per point. When an
+    out-of-memory error at N = 8 ends the search instead, the stored fit is
+    the cautious worst case and the batch is capped below that call (6
+    points). Catches: ending the search with a flat fit (round 2 stored it,
+    giving max_batch = 1e9; round 3 raised)."""
     set_reader(fake.solver, monkeypatch, counts_reuse=True)
     page = 4096
     calls = stub_calls(
@@ -1678,10 +1719,13 @@ def test_readings_that_do_not_grow_raise(fake, monkeypatch):
         lambda n: (8 * 2**20 + 100 * n) // page * page,
         seconds=lambda n: 1.2,
     )
-    with pytest.raises(RuntimeError, match="did not grow with the number of points"):
-        benchmark(fake.solver, None)
-    assert calls == [1, 2, 4]
-    assert fake.solver.f_mem_coeffs is None
+    with caplog.at_level(logging.WARNING, logger=qmem.__name__):
+        fit = benchmark(fake.solver, None)
+    assert calls == [2**k for k in range(17)]
+    assert "stopped because an evaluation took longer than 1.0 s" in caplog.text
+    assert fit[1] == pytest.approx(100, rel=0.05)
+    true_batch = (BUDGET - 8 * 2**20) / 100
+    assert 0.9 * true_batch <= fake.solver._get_max_f_evals(0.9) <= 1.1 * true_batch
 
     def out_of_memory_at_8(f, f_args, node_test, N, *rest):
         calls.append(N)
@@ -1689,5 +1733,135 @@ def test_readings_that_do_not_grow_raise(fake, monkeypatch):
 
     monkeypatch.setattr(fake.solver, "_measure_call", out_of_memory_at_8)
     benchmark(fake.solver, None)
-    assert calls[3:] == [1, 2, 4, 8]
+    assert calls[17:] == [1, 2, 4, 8]
     assert fake.solver.get_max_batch() == 6
+
+
+def test_first_calls_obey_total_limit(fake, monkeypatch):
+    """Time 20 s * N^2: the first call takes 20 s, and doubling N would take
+    80 s in the worst case, past the 40 s left of the 60 s. The doubling
+    allowed for the first two calls does not override the total limit: the
+    benchmark raises after one call, naming limit_benchmark_time. With
+    limit_benchmark_time=False it doubles (N = 2 takes 80 s). Catches: the
+    first two calls ignoring the 60 s (one review case ran 210 s)."""
+    f = CostIntegrand(fake.memory, fake.clock, time_per_point_sq=20.0)
+    with pytest.raises(RuntimeError, match="limit_benchmark_time=False"):
+        benchmark(fake.solver, f)
+    assert f.calls == [1]
+    assert fake.clock.now == 20.0
+
+    monkeypatch.setattr(fake.solver, "limit_benchmark_time", False)
+    f = CostIntegrand(fake.memory, fake.clock, fixed=8 * 2**20, time_per_point_sq=20.0)
+    benchmark(fake.solver, f)
+    assert f.calls[:2] == [1, 2]
+
+
+def test_cubic_growth_caught_after_2x_steps(fake, monkeypatch):
+    """Memory 1 MiB * N^3 with 0.2 s per call on a reader that counts reused
+    memory, so steps are 2x: N = 1 (1 MiB, below the floor), 2 (8 MiB), 4
+    (64 MiB), 8 (512 MiB). Compared only with the previous reading, each
+    2x step allows 3 * 4 = 12 times more, and N^3 grows 8 times, so it was
+    never caught. Compared with every earlier reliable reading, the call at
+    N = 8 exceeds 3 * 16 * 8 MiB = 384 MiB, the bound from N = 2, and raises.
+    Catches: comparing only with the previous reliable reading."""
+    set_reader(fake.solver, monkeypatch, counts_reuse=True)
+    f = CostIntegrand(
+        fake.memory,
+        fake.clock,
+        per_point=0,
+        per_point_sq=2**20,
+        exponent=3,
+        time_fixed=0.2,
+    )
+    with pytest.raises(RuntimeError, match=r"growth like N\^2 allows") as info:
+        benchmark(fake.solver, f)
+    assert f.calls == [1, 2, 4, 8]
+    assert "bytes at 2 points" in str(info.value)
+
+
+@pytest.mark.parametrize("counts_reuse", [False, True], ids=["rss", "gpu-or-trim"])
+def test_batch_capped_at_largest_test_call_where_reuse_is_missed(
+    fake, monkeypatch, caplog, counts_reuse
+):
+    """Memory 1 MiB + 1 KiB N: the cost per point stops changing at N = 1e7,
+    where the search ends, while the fit allows about 7.9e7 points. On a
+    reader that misses reused memory (macOS, Windows) the readings can be far
+    too low, so the batch is capped at the largest test call, 1e7 (it ran);
+    the start warning says so. A reader that counts reused memory keeps the
+    batch the fit allows. Catches: no cap; capping on every reader."""
+    set_reader(fake.solver, monkeypatch, counts_reuse=counts_reuse)
+    a, b = 2**20, 1024
+    f = CostIntegrand(fake.memory, fake.clock, fixed=a, per_point=b)
+    with caplog.at_level(logging.WARNING, logger=qmem.__name__):
+        benchmark(fake.solver, f)
+    assert f.calls[-1] == 10**7
+    fitted = fake.solver._get_max_f_evals(0.9)
+    assert fitted == pytest.approx((BUDGET - a) / b, rel=1e-6)
+    expected = fitted if counts_reuse else 10**7
+    assert fake.solver.get_max_batch() == expected
+    assert f"max_batch is about {expected} " in caplog.text
+    assert ("capped at the largest call" in caplog.text) == (not counts_reuse)
+
+
+def test_batch_cap_at_least_one_subinterval(monkeypatch):
+    """A slow f whose search ends at N = 4 (three reliable readings, then the
+    1 s limit) on a reader that misses reused memory: the cap is not the
+    largest test call, 4, but the C = 23 nodes of one gk21 subinterval, the
+    smallest batch the take_gradient=True path can evaluate. Catches: a cap
+    below one subinterval, which made that path fail its assertion."""
+    solver = make_solver_for_unit_test(method_name="gk21")
+    monkeypatch.setattr(solver, "_get_usable_memory", lambda total_mem_usage: USABLE_GB)
+    set_reader(solver, monkeypatch, floor=0, counts_reuse=False)
+    calls = stub_calls(solver, monkeypatch, lambda n: 2**20 * n, seconds=lambda n: 2.0)
+    benchmark(solver, None)
+    assert calls == [1, 2, 4]
+    assert solver.get_max_batch() == solver.C == 23
+
+
+def test_limit_benchmark_time_is_a_solver_option():
+    """limit_benchmark_time is a constructor option (True by default), also
+    accepted by padaquad.integrate, which passes it to the constructor."""
+    assert adaptive_quadrature().limit_benchmark_time is True
+    assert adaptive_quadrature(limit_benchmark_time=False).limit_benchmark_time is False
+    result = integrate(
+        torch.cos,
+        mesh_init=T_INIT,
+        mesh_final=T_FINAL,
+        device="cpu",
+        max_batch=1000,
+        limit_benchmark_time=False,
+    )
+    assert result.converged
+
+
+@pytest.mark.parametrize("slow_at_8", [False, True], ids=["predicted", "elapsed"])
+def test_time_limit_raises_while_readings_do_not_grow(fake, monkeypatch, slow_at_8):
+    """Every reading is reliable (8 MiB fixed cost) but grows only 100 bytes
+    per point, so three or more reliable readings do not make the fit ready.
+    Calls of 5.5 s double N (the reader counts reused memory).
+
+    - predicted: after 10 calls (55 s) the next one is predicted to end at
+      60.5 s, so the benchmark raises before making it.
+    - elapsed: the call at N = 8 takes 60 s, so the measurement passes the
+      60 s with 4 reliable readings and no fit, and raises.
+
+    Both messages name limit_benchmark_time. Catches: testing the number of
+    reliable readings (three) instead of the fit in either time error, which
+    stored the cautious fit instead of raising."""
+    set_reader(fake.solver, monkeypatch, counts_reuse=True)
+    f = CostIntegrand(fake.memory, fake.clock, fixed=8 * 2**20, per_point=100)
+
+    def timed(t, *args):
+        fake.clock.now += 60.0 if slow_at_8 and t.shape[0] == 8 else 5.5
+        return f(t, *args)
+
+    with pytest.raises(RuntimeError, match="limit_benchmark_time=False") as info:
+        benchmark(fake.solver, timed)
+    if slow_at_8:
+        assert f.calls == [1, 2, 4, 8]
+        assert "took longer than its 60 s limit" in str(info.value)
+        assert "(4 reached the noise floor" in str(info.value)
+    else:
+        assert f.calls == [2**k for k in range(10)]
+        assert "is predicted to take longer than" in str(info.value)
+        assert "(10 readings reached the noise floor" in str(info.value)

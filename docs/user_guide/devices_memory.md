@@ -27,11 +27,15 @@ as a + b N + d N², so an integrand whose memory grows like N² (for example, on
 that computes a gradient per point inside itself) is measured too. Only
 readings of at least 10 KB on a GPU, or 4 MiB on a CPU, count (smaller CPU
 readings are mostly noise), and the benchmark keeps going until three readings
-do. Each next call is at most ten times larger (twice as large once calls take
-more than 0.1 s on a GPU or on Linux, whose readings count all the memory a
-call uses), and no larger than the fit predicts to fit in three quarters of the
-usable memory and to take at most 1 s; that 1 s limit is stretched only as far
-as needed to reach three readings, within 60 s for the whole benchmark. The
+do and the memory they show has grown by at least that much. Each next call is
+at most ten times larger (twice as large once calls take more than 0.1 s on a
+GPU or on Linux, whose readings count all the memory a call uses), and no
+larger than the fit predicts to fit in three quarters of the usable memory and
+to take at most 1 s; that 1 s limit is stretched only as far as needed to get
+those readings. No call is started that is predicted to end past 60 s for the
+whole benchmark; `limit_benchmark_time=False` (a constructor option, also
+accepted by `padaquad.integrate`) removes this limit for an integrand so slow
+that the benchmark needs longer. The
 batch size is then computed at every evaluation from the memory free at that
 moment: the largest batch whose fitted
 memory fits in three quarters of the usable memory, which is the free memory
@@ -40,14 +44,14 @@ minus `(1 - total_mem_usage)` times the total memory. With
 margin for the memory that backpropagation needs.
 
 The benchmark raises an error that lists what it measured and asks for
-`max_batch` when it cannot measure the memory: when three readings do not
-reach the noise floor within 60 s, when none does, when the readings do not
-grow with the number of points, or when a call uses more than three times the
-memory that growth like N² allows from the previous reading that reached the
+`max_batch` when it cannot measure the memory: when the readings do not
+allow a fit within 60 s (the error names `limit_benchmark_time`), when no
+reading reaches the noise floor, or when a call uses more than three times the
+memory that growth like N² allows from an earlier reading that reached the
 noise floor (memory growing faster than N², which the fit cannot follow).
-Faster growth that it does not catch (hidden by a large fixed cost, only
-slightly faster than N², or up to N³ when the calls are twice as large as the
-previous ones) is underestimated, so pass `max_batch` for such an integrand.
+Faster growth that it does not catch (growth only slightly faster than N², or
+N³ before two readings are more than three times apart in N) is
+underestimated, so pass `max_batch` for such an integrand.
 
 On a CPU, memory is measured as the memory the operating system has given the
 process. Memory the integrand takes from memory the process freed earlier
@@ -55,11 +59,13 @@ does not show up there. On Linux, padaquad first returns such memory with
 glibc's `malloc_trim`, so the readings count it (not with another C
 library, or with an allocator such as jemalloc loaded instead). On macOS and
 Windows that is not possible: in a process that has already evaluated the
-integrand, readings can be far too low, so both the benchmark's own calls and
-the batch size can need several times the usable memory (in repeated calls on
-a Mac, up to 7 times for the benchmark's calls and 35 times for the batch), or
-an error can appear for an integrand whose memory grows only like N². Pass
-`max_batch` there when the memory of a batch matters.
+integrand, readings can be far too low. The batch size is then capped at the
+largest call the benchmark made (it ran), which can be well below what fits
+for an integrand whose memory per point stops changing early. The benchmark's
+own calls are not bounded this way: in repeated calls on a Mac they needed up
+to 7 times the usable memory, and an error can appear for an integrand whose
+memory grows only like N². Pass `max_batch` there when the memory of a batch
+matters.
 
 The benchmark takes a few seconds and logs warnings, and it runs on every call
 without `max_batch`. To run it once, integrate once without `max_batch`, read

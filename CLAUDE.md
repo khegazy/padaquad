@@ -402,22 +402,26 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
   before/after difference (floor 4 MiB, misses reused memory). Every reading
   is at least the bytes of the input and output tensors (`_tensor_bytes`).
   Readings ≥ the floor are *reliable*; only they are fitted (a + b·N + d·N²,
-  a, b, d ≥ 0, `_fit_up_to_quadratic`, scipy `nnls`), from 3 of them on;
-  before, the worst case y(kN) ≤ k²·y(N) through the reliable reading with
-  the largest N (one local `memory_model`, used for sizing and the stored
-  fit). N_next = min(step·N, n_mem, n_time): step 2 after a call > 0.1 s on
-  a reader that counts reused memory, else 10; n_mem from 0.75 of usable
-  memory; n_time from 1 s (≥ 2N for the first two calls; with < 3 reliable
-  readings extended one doubling at a time within a 60 s total). Stops:
-  60 s with ≥ 3 reliable readings (warns), c = s·(M + E)/N changes < 1 %
-  twice with the last 3 readings reliable, a call > 1 s with ≥ 3 reliable,
-  N = 1e9, N_next < 2N. Raises `RuntimeError` (readings listed, asks for
-  `max_batch`) when M > 3·(N/N_prev)²·(M_prev + E), M_prev the previous
-  reliable reading (every reader), when < 3 readings are reliable at 60 s or
-  the next needed call fits in memory but is predicted past it, when none is
-  reliable at the end, or when the final fit is flat (b = d = 0, would allow
-  1e9; not after an OOM). With 1–2 reliable readings at the memory budget /
-  OOM / 1e9: the cautious worst-case fit. An OOM at N > 1 sets `_oom_max_batch = _OOM_BACKOFF·N`.
+  a, b, d ≥ 0, `_fit_up_to_quadratic`, scipy `nnls`). The fit is *ready*
+  with ≥ 3 reliable readings whose fitted memory grows by ≥ the floor from the
+  first to the last; before, the worst case y(kN) ≤ k²·y(N) through the
+  reliable reading with the largest N (one local `memory_model`, returning
+  the coefficients and `ready`, used for sizing and the stored fit).
+  N_next = min(step·N, n_mem, n_time): step 2 after a call > 0.1 s on a
+  reader that counts reused memory, else 10; n_mem from 0.75 of usable
+  memory; n_time from 1 s (≥ 2N for the first two calls and while not ready),
+  always capped by the time left of the 60 s total (`limit_benchmark_time`,
+  a constructor option; False makes the total infinite). Stops: 60 s with
+  the fit ready (warns), c = s·(M + E)/N changes < 1 % twice with the last 3
+  readings reliable, a call > 1 s with the fit ready, N = 1e9, N_next < 2N.
+  Raises `RuntimeError` (readings listed, asks for `max_batch`) when
+  M > 3·(N/N_i)²·(M_i + E) for the earlier reliable reading i with the
+  smallest bound (every reader), when the fit is not ready at 60 s or the
+  next needed call fits in memory but is predicted past the 60 s (both name
+  `limit_benchmark_time`), or when none is reliable at the end. Not ready at
+  the memory budget / OOM / 1e9: the cautious worst-case fit. An OOM at
+  N > 1 sets `_oom_max_batch = _OOM_BACKOFF·N`; on a reader that misses
+  reused memory `_oom_max_batch` is also capped at max(largest test N, C).
 - Unless `max_batch` or `same_f=True` fixes it, the batch size is
   computed at every evaluation from live memory: `get_max_batch` →
   `_get_max_f_evals` = `_largest_n(f_mem_coeffs, _MEMORY_BUDGET·usable)`

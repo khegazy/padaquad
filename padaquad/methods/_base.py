@@ -136,8 +136,8 @@ class MethodClass(ABC):
     error_exponent : int
         The power k such that the error estimate on a subinterval of width h
         shrinks like :math:`h^k`: k = d + 2, with d the degree of the embedded
-        method. Sets the merge cutoff of the optimal mesh
-        (see :ref:`the user guide <ug-optimal-mesh>`).
+        method. Sets the merge cutoff of the optimal mesh with
+        ``merge_rule="power_law"`` (see :ref:`the user guide <ug-optimal-mesh>`).
     references : tuple of str
         Keys of ``docs/references.bib`` for the sources of the method's
         nodes, weights and error weights; the documentation's methods table

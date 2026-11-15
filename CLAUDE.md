@@ -346,19 +346,31 @@ panel's error is at/below round-off. The scheme is set at construction
 `_error_ratios_failure_fraction`; `_accept_reject_masks` turns the result into
 keep/split masks consumed by `_adaptively_increase_mesh`.
 
-`error_ratios_2steps`: summed error ratio S of consecutive step pairs, used
-only by `_get_optimal_mesh` to merge pairs. A merged step of width 2h has an
-error of about 2^(k-1)·S (the method's error estimate scales as h^k, k =
-`error_exponent` on each method), so a pair is merged when
-`S < remove_cut / 2^(k-1)` (`remove_cut` default 0.1): the merged step's
-predicted ratio stays below `remove_cut`. S uses the tolerance the merged step
-gets: in cumulative mode the right step's `|cumsum|` (the merged step ends
-there). `_rec_remove` ensures no two adjacent pairs are both flagged, so one
-call merges at most one level. The merged step records the pair's summed error,
-so the add phase of `_get_optimal_mesh` does not split it (unless the rounding
-floor sets the tolerance). The prediction assumes
-the h^k regime; when the estimate is round-off (high-order methods, tight
-tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
+`error_ratios_2steps`: the pair ratio of consecutive step pairs, used only by
+`_get_optimal_mesh` to merge pairs: a pair error divided by the tolerance the
+merged step gets (in cumulative mode the right step's `|cumsum|`, where the
+merged step ends). `_merge_inputs` returns the pair error and the cutoff for the
+constructor option `merge_rule`:
+- `"predicted"` (default): pair error `_predict_merged_errors(...) + |e_i| +
+  |e_{i+1}|`, cutoff `remove_cut` (default 0.1). The prediction interpolates
+  each step's stored values (barycentric, through its distinct node fractions)
+  onto the merged step's nodes and applies the method's weights:
+  `max(|E_hat|, |Q_hat - Q_i - Q_{i+1}|)`, the predicted merged error estimate
+  and the halves-versus-whole difference. Both are linear in the stored
+  values, so `_merged_pair_weights` builds four weight vectors per width ratio
+  (log2 ratio quantized to 2^-48), cached on the solver
+  (`_merge_weight_cache`, reset in `_set_solver_dtype`). With T > 1 it falls
+  back to `"power_law"` with a warning.
+- `"power_law"` (padaquad 1.3.0): summed errors, cutoff `remove_cut / 2^(k-1)`
+  (assumes the estimate scales as h^k, k = `error_exponent`; on wide steps it
+  grows far less, so safe merges are refused).
+- `"sum"` (1.2.2): summed errors, cutoff `remove_cut`.
+`_rec_remove` (one pass: keep every other flag of each run) ensures no two
+adjacent pairs are both flagged, so one call merges at most one level. The
+merged step records the pair's summed error, at most the pair error, so the add
+phase of `_get_optimal_mesh` does not split it (unless the rounding floor sets
+the tolerance). Plan, evidence and the adversarial review:
+`docs/issues/predicted-merge-rule.md` and `predicted-merge-rule-review.md`.
 
 ### Uniform vs variable sampling
 

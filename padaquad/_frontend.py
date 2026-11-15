@@ -123,8 +123,8 @@ def integrate(
     ``mesh_init``, ``mesh_final``, ``mesh``, ``y0``, ``f_args``,
     ``take_gradient``, ``max_batch``, ``result_device``), and to the solver's
     constructor otherwise (for example ``atol``, ``rtol``, ``remove_cut``,
-    ``use_absolute_error_ratio``, ``device``). Defaults are those of the
-    solver class. A one-call solver has no previous mesh, so
+    ``merge_rule``, ``use_absolute_error_ratio``, ``device``). Defaults are
+    those of the solver class. A one-call solver has no previous mesh, so
     ``same_f=True`` has no effect here; use ``adaptive_quadrature`` for
     repeated calls.
 

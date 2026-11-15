@@ -1,12 +1,45 @@
 # Plan: decide mesh merges from a predicted merged error ("rule T")
 
-Status: plan, not started. Written 2026-11-14 against `main` at `2b04ea1`; revised the
-same day after the adversarial review in
+Status: implemented on branch `improve_pruning` (2026-11-14); see
+[Implementation notes](#implementation-notes). Written 2026-11-14 against `main` at
+`2b04ea1`; revised the same day after the adversarial review in
 [`predicted-merge-rule-review.md`](predicted-merge-rule-review.md) (see
-[Response to the review](#response-to-the-review)). Written so that someone who was not
-in the original session can execute it. Every number below was measured with the
-prototypes in `/pscratch/sd/k/khegazy/u028` (paths in [Files](#files)); nothing in the
-repository has been changed yet.
+[Response to the review](#response-to-the-review)). Every number in the Evidence
+sections was measured with the prototypes in `/pscratch/sd/k/khegazy/u028` (paths in
+[Files](#files)).
+
+## Implementation notes
+
+What the implementation on `improve_pruning` does differently from the plan, and why:
+
+- **Evidence carries over.** The library's prediction is bit-identical to the prototype
+  in float64 on every method of both registries (largest difference 0.0, through the
+  cached and uncached paths). In float32 it differs by about one float32 rounding step,
+  because each subinterval's width is taken from its own end nodes. So the counts in
+  Evidence A and B describe the library too.
+- **Memory is bounded for any mesh.** The vectors are built per chunk of 2^16 pairs,
+  for that chunk's width ratios only, and in blocks of 1,024 ratios. A caller's mesh
+  in which every pair has its own ratio would otherwise build temporaries of
+  ratios × C × U values (about 34 GB for cc65 at 10^6 ratios). Adaptive meshes have
+  few distinct ratios: at most 103 for 141,225 subintervals in a measurement on
+  `damped_sine`. `test_predicted_chunking_matches_one_pass` shrinks all three sizes
+  and gets the same result to within 1e-13 of each pair's rounding scale. The match
+  is not bit for bit, because the batched matrix products round differently for
+  different batch sizes.
+- **Cache.** At most 256 width ratios are kept per solver (`_merge_weight_cache`),
+  reset when the method is rebuilt and when the device changes. A chunk with more
+  ratios builds its vectors without caching.
+- **Small-mesh cost.** Building `mesh_optimal` on 2–64 subintervals now costs 0.2–0.5
+  ms more than under `"power_law"` (gk21 0.17–0.35, cc65 0.27–0.50, dopri5
+  0.30–0.38; `pred/overhead.py`), down from 0.6–1.0 ms before the cache. The plan's
+  target of 0.3 ms is met for gk21 and not quite for cc65 and dopri5.
+- **`_merge_excess_nodes` is unchanged** (review Finding 8).
+- **End-to-end tests skip the memory benchmark.** They pass an explicit `max_batch`:
+  on a login node that believes 280 GB are free, the test helper's one-time benchmark
+  (`cached_max_batch`) peaked at 25.5 GB.
+- **Mutation check of the kink test.** With the halves-versus-whole term removed from
+  the library, `test_kink_warm_starts_stay_accurate[predicted]` fails (error 3.3e-10
+  against a bound of 2.8e-10); with it, the test passes.
 
 ## Summary
 

@@ -9,9 +9,9 @@ depends on the memory one evaluation uses. This module holds:
   (``_setup_memory_checks``), queries free memory on the solver's device, and
   turns both into the batch size (``get_max_batch`` -> ``_get_max_f_evals`` =
   usable memory / c), recomputed at every evaluation from live memory.
-- ``_is_out_of_memory``: recognizes every form an out-of-memory error takes
-  (GPU, CPU allocator, CUDA libraries, numpy), used by the batch loop in
-  ``base.py`` and by the benchmark.
+- ``_is_out_of_memory``: recognizes the out-of-memory errors of the GPU, the
+  PyTorch CPU allocator, the CUDA libraries and numpy, used by the batch loop
+  in ``base.py`` and by the benchmark.
 """
 
 from __future__ import annotations
@@ -41,7 +41,7 @@ _GRADIENT_MEMORY_SAFETY_FACTOR = 2.1
 
 def _is_out_of_memory(e: BaseException) -> bool:
     """
-    True if e signals that an allocation did not fit in memory.
+    Return True if e signals that an allocation did not fit in memory.
 
     Covers a GPU out-of-memory error, a refused PyTorch CPU allocation (a plain
     RuntimeError naming DefaultCPUAllocator), a failed cudaMalloc or
@@ -50,6 +50,16 @@ def _is_out_of_memory(e: BaseException) -> bool:
     cuSOLVER, cuSPARSE and cuFFT equivalents; cuDNN 9's
     CUDNN_STATUS_INTERNAL_ERROR_*_ALLOCATION_FAILED), and Python's MemoryError
     (raised by numpy). The strings were checked in torch 2.8's libraries.
+
+    Parameters
+    ----------
+    e : BaseException
+        The exception raised by an allocation or by a call of the integrand.
+
+    Returns
+    -------
+    bool
+        True if ``e`` is one of the out-of-memory errors listed above.
     """
     return isinstance(e, (torch.OutOfMemoryError, MemoryError)) or any(
         s in str(e)
@@ -83,21 +93,33 @@ class _MemoryManagement:
         total_mem_usage: float | None = None,
         default_max_batch: int | None = None,
     ) -> int | None:
-        """Resolve the per-batch evaluation cap without re-benchmarking memory.
+        """
+        Return the largest number of integrand evaluations per batch.
 
-        Precedence: an explicit ``default_max_batch`` (e.g. the per-call
-        ``max_batch``), then the construction-time ``init_max_batch``, then the
-        dynamically computed budget from a prior memory benchmark
-        (``f_unit_mem_size``) and the memory free now, using
-        ``total_mem_usage`` (default: the solver's own). The result is clamped
-        by any ``_oom_max_batch`` discovered after an out-of-memory event; the
-        cap is cleared only at the start of the next ``integrate()`` call, so
-        it is still applied here when a call returns.
+        Does not run the memory benchmark. The first available of these is
+        used: ``default_max_batch``, the ``max_batch`` given at construction,
+        and the number of evaluations that fit in the memory free now, at the
+        cost per evaluation the last benchmark measured. After an out-of-memory
+        error, the result is capped at the reduced batch size chosen then,
+        until the next ``integrate`` call starts.
 
-        Tests and example loops use this to capture ``max_batch`` after a first
-        run (where the memory benchmark ran once) and pass it back to later
-        solvers/calls, or use ``integrate(..., same_f=True)``, so the
-        slow benchmark is skipped. See also ``previous_max_batch``.
+        Passing the result as ``max_batch`` to a later call or solver skips
+        the slow benchmark. See :ref:`ug-memory`.
+
+        Parameters
+        ----------
+        total_mem_usage : float or None
+            Fraction of the device's total memory that may be in use; the rest
+            is kept free. None uses the value given at construction.
+        default_max_batch : int or None
+            A batch size that takes precedence over the other sources. None
+            (default) skips it.
+
+        Returns
+        -------
+        int or None
+            The batch size, or None when no source is available (no
+            ``max_batch`` given and no benchmark run yet).
         """
         if total_mem_usage is None:
             total_mem_usage = self.init_total_mem_usage
@@ -121,7 +143,9 @@ class _MemoryManagement:
         """
         Query available and total CPU (system) memory in GB.
 
-        Returns:
+        Returns
+        -------
+        tuple[float, float]
             Tuple of (free_gb, total_gb).
         """
         mem = psutil.virtual_memory()
@@ -137,7 +161,9 @@ class _MemoryManagement:
         memory (reserved but not allocated). This gives a more accurate
         picture of how much memory is truly available for new allocations.
 
-        Returns:
+        Returns
+        -------
+        tuple[float, float]
             Tuple of (free_gb, total_gb).
         """
         mem_info = torch.cuda.mem_get_info(self.device)
@@ -161,7 +187,9 @@ class _MemoryManagement:
         Dispatches to _get_cuda_memory() or _get_cpu_memory() based on
         self.device.type.
 
-        Returns:
+        Returns
+        -------
+        tuple[float, float]
             Tuple of (free_gb, total_gb).
         """
         if self.device.type == "cuda":
@@ -228,17 +256,26 @@ class _MemoryManagement:
         at WARNING level, so they are silent if the application configures
         logging above WARNING.
 
-        Args:
-            f: The integrand function to benchmark.
-            node_test: A sample node point for benchmarking. Shape: [T] or [1, T].
-            take_gradient: Whether the integration will backpropagate per batch.
-            total_mem_usage: Fraction of total memory allowed (0 < value <= 1).
-            f_args: Extra arguments passed to f.
+        Parameters
+        ----------
+        f : Callable[..., Any]
+            The integrand function to benchmark.
+        node_test : torch.Tensor
+            A sample node point for benchmarking. Shape: [T] or [1, T].
+        take_gradient : bool
+            Whether the integration will backpropagate per batch.
+        total_mem_usage : float
+            Fraction of total memory allowed (0 < value <= 1).
+        f_args : tuple[Any, ...]
+            Extra arguments passed to f.
 
-        Raises:
-            torch.OutOfMemoryError: A single evaluation of f does not fit.
-            RuntimeError: The measurement failed for another reason; pass
-                ``max_batch`` to skip it.
+        Raises
+        ------
+        torch.OutOfMemoryError
+            A single evaluation of f does not fit.
+        RuntimeError
+            The measurement failed for another reason; pass
+            ``max_batch`` to skip it.
         """
         logger.warning(
             "PadaQuad is measuring how much memory one integrand (f) evaluation "
@@ -389,17 +426,28 @@ class _MemoryManagement:
           reading). Memory that f frees before returning, such as the
           intermediates of a Jacobian, is missed, so c can be too low.
 
-        Returns:
-            reset: Starts a new peak measurement (a no-op for the last method).
-            read: Memory in bytes, as described above.
-            E: GB to add to every M, the most the reading can be too low.
+        Returns
+        -------
+        tuple[Callable[[], None], Callable[[], int], float]
+            The functions ``reset`` (starts a new peak measurement; a no-op for
+            the last method) and ``read`` (memory in bytes, as described above),
+            and E, the GB to add to every M (the most the reading can be low).
         """
         if self.device.type == "cuda":
 
             def reset_cuda() -> None:
+                """Set the device's peak of allocated memory to its current value."""
                 torch.cuda.reset_peak_memory_stats(self.device)
 
             def read_cuda() -> int:
+                """
+                Read the device's peak of allocated memory.
+
+                Returns
+                -------
+                int
+                    The peak in bytes since the last reset.
+                """
                 return torch.cuda.max_memory_allocated(self.device)
 
             return reset_cuda, read_cuda, 0.0
@@ -411,17 +459,34 @@ class _MemoryManagement:
         except OSError:
 
             def no_reset() -> None:
-                pass
+                """Do nothing: no resettable peak exists on this system."""
 
             def read_rss() -> int:
+                """
+                Read the process's current resident memory.
+
+                Returns
+                -------
+                int
+                    The resident memory in bytes.
+                """
                 return psutil.Process().memory_info().rss
 
             return no_reset, read_rss, 0.0
 
         def reset_linux() -> None:
+            """Reset the process's peak resident memory, VmHWM, to its current value."""
             clear_refs.write_text("5")
 
         def read_vmhwm() -> int:
+            """
+            Read the process's peak resident memory, VmHWM.
+
+            Returns
+            -------
+            int
+                The peak in bytes since the last reset.
+            """
             # The line reads "VmHWM:   14336 kB", in KiB.
             status = Path("/proc/self/status").read_text()
             return int(status.split("VmHWM:")[1].split()[0]) * 1024
@@ -443,22 +508,33 @@ class _MemoryManagement:
         """
         Call f once on N copies of node_test; return the memory and time it took.
 
-        Args:
-            f, f_args: The integrand and its extra arguments.
-            node_test: One node as a [1, T] row on ``self.device``.
-            N: Number of points in this call.
-            reset_peak, read_memory: The measurement method from
-                ``_peak_memory_reader``.
-            total_mem_usage: Only quoted in the single-evaluation error.
+        Parameters
+        ----------
+        f, f_args : Callable[..., Any], tuple[Any, ...]
+            The integrand and its extra arguments.
+        node_test : torch.Tensor
+            One node as a [1, T] row on ``self.device``.
+        N : int
+            Number of points in this call.
+        reset_peak, read_memory : Callable[[], None], Callable[[], int]
+            The measurement method from
+            ``_peak_memory_reader``.
+        total_mem_usage : float
+            Only quoted in the single-evaluation error.
 
-        Returns:
+        Returns
+        -------
+        tuple[float, float] | None
             (M, seconds): the memory the call used (GB) and its wall time, or
             None if the call ran out of memory (N > 1).
 
-        Raises:
-            torch.OutOfMemoryError: N = 1 ran out of memory, so a single
-                evaluation of f does not fit.
-            Exception: any other error from f propagates unchanged.
+        Raises
+        ------
+        torch.OutOfMemoryError
+            N = 1 ran out of memory, so a single
+            evaluation of f does not fit.
+        Exception
+            any other error from f propagates unchanged.
         """
         # Read "before" first, then build the input: the N-point input tile is
         # memory the integration also needs per point, so it is counted in M.
@@ -505,10 +581,14 @@ class _MemoryManagement:
         Reserves a buffer of (1 - total_mem_usage) * total_memory to avoid
         out-of-memory errors from other system/PyTorch allocations.
 
-        Args:
-            total_mem_usage: Fraction of total memory allowed (0 < value <= 1).
+        Parameters
+        ----------
+        total_mem_usage : float
+            Fraction of total memory allowed (0 < value <= 1).
 
-        Returns:
+        Returns
+        -------
+        float
             Usable memory in GB (non-negative).
         """
         free, total = self._get_memory()
@@ -520,13 +600,23 @@ class _MemoryManagement:
         Compute the maximum number of integrand evaluations that fit in memory.
 
         Divides usable memory by the per-evaluation memory cost (measured by
-        _setup_memory_checks). A small epsilon (1e-12) prevents division by zero.
+        _setup_memory_checks). A small epsilon (1e-12 GB) prevents division by
+        zero.
 
-        Args:
-            total_mem_usage: Fraction of total memory allowed.
+        Parameters
+        ----------
+        total_mem_usage : float
+            Fraction of total memory allowed.
 
-        Returns:
+        Returns
+        -------
+        int
             Maximum number of evaluations (integer).
+
+        Raises
+        ------
+        RuntimeError
+            If the memory benchmark has not run (``f_unit_mem_size`` is None).
         """
         if self.f_unit_mem_size is None:
             raise RuntimeError(

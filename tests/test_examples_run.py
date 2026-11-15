@@ -19,9 +19,12 @@ The examples are also useful as integration smoke tests that exercise:
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES_DIR = REPO_ROOT / "examples"
@@ -96,3 +99,65 @@ def test_gradient_of_integral_runs_and_assertions_pass():
             f"gradient_of_integral.py output missing marker {marker!r}; "
             f"stdout=\n{out.stdout[:500]}"
         )
+
+
+VERIFICATION_DIR = EXAMPLES_DIR / "verification"
+
+
+def test_verification_scripts_pass():
+    """Every script in ``examples/verification/`` exits 0 and prints no
+    ``[FAIL]``. Each script exits 1 itself when one of its checks fails."""
+    scripts = sorted(VERIFICATION_DIR.glob("*.py"))
+    assert {s.name for s in scripts} >= {
+        "polynomial_degree.py",
+        "integral_accuracy.py",
+    }, f"missing verification scripts in {VERIFICATION_DIR}"
+    for script in scripts:
+        out = _run(script)
+        assert out.returncode == 0, (
+            f"{script.name} exited {out.returncode}; stdout=\n{out.stdout}\n"
+            f"stderr=\n{out.stderr}"
+        )
+        assert "[FAIL]" not in out.stdout, f"{script.name}: stdout=\n{out.stdout}"
+
+
+# Documents whose Python blocks are complete programs that must run.
+DOCUMENTS = ("README.md", "docs/development/adding_a_method.md")
+NOT_TESTED = "<!-- not-tested -->"
+
+
+def _python_blocks() -> list[tuple[str, str]]:
+    """("file:line", code) of every ```python block in ``DOCUMENTS`` that is not
+    preceded by the line ``<!-- not-tested -->`` (used for sketches that need
+    the reader's own model or data)."""
+    blocks = []
+    for document in DOCUMENTS:
+        lines = (REPO_ROOT / document).read_text().splitlines()
+        i = 0
+        while i < len(lines):
+            if lines[i].strip() == "```python":
+                start = i + 1
+                end = lines.index("```", start)
+                previous = next((x for x in reversed(lines[:i]) if x.strip()), "")
+                if previous.strip() != NOT_TESTED:
+                    blocks.append(
+                        (f"{document}:{start + 1}", "\n".join(lines[start:end]))
+                    )
+                i = end
+            i += 1
+    return blocks
+
+
+@pytest.mark.parametrize("where_and_code", _python_blocks(), ids=lambda b: b[0])
+def test_document_python_block_runs(where_and_code: tuple[str, str]) -> None:
+    """Each tested Python block of ``DOCUMENTS`` runs without error on the CPU."""
+    where, code = where_and_code
+    out = subprocess.run(
+        [PY, "-c", code],
+        capture_output=True,
+        text=True,
+        check=False,
+        cwd=REPO_ROOT,
+        env={**os.environ, "CUDA_VISIBLE_DEVICES": ""},
+    )
+    assert out.returncode == 0, f"{where} failed:\n{out.stderr[-2000:]}"

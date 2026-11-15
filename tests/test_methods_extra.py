@@ -128,7 +128,7 @@ class TestVariableMethodClass:
             return _equal_weights(c)
 
         rule = VariableMethodClass(
-            order=1, error_exponent=2, c=_C3, weight_function=spy
+            degree=0, error_exponent=2, c=_C3, weight_function=spy
         )
         nodes = torch.tensor([[[2.0], [2.6], [5.0]]], dtype=torch.float64)
         b, b_error = rule.weights(nodes)
@@ -148,7 +148,7 @@ class TestVariableMethodClass:
             return w, w
 
         rule = VariableMethodClass(
-            order=1, error_exponent=2, c=_C3, weight_function=broadcast_weights
+            degree=0, error_exponent=2, c=_C3, weight_function=broadcast_weights
         )
         nodes = _C3.view(1, 3, 1).expand(4, 3, 1)
         with pytest.raises(ValueError, match="weight_function must return"):
@@ -169,22 +169,69 @@ class TestVariableMethodClass:
         """Both generic rule classes reject malformed node fractions."""
         with pytest.raises(ValueError, match="node fractions"):
             VariableMethodClass(
-                order=1, error_exponent=2, c=c, weight_function=_equal_weights
+                degree=0, error_exponent=2, c=c, weight_function=_equal_weights
             )
         with pytest.raises(ValueError, match="node fractions"):
             UniformMethodClass(
-                order=1,
+                degree=0,
                 error_exponent=2,
                 tableau=_Tableau(
                     c=c, b=torch.ones_like(c), b_error=torch.zeros_like(c)
                 ),
             )
 
+    @pytest.mark.parametrize(
+        ("degree", "error_exponent", "bad"),
+        [
+            (-1, 2, "degree"),
+            (1.0, 2, "degree"),
+            (True, 2, "degree"),
+            (0, 1, "error_exponent"),
+            (0, 3.0, "error_exponent"),
+        ],
+        ids=[
+            "negative-degree",
+            "float-degree",
+            "bool-degree",
+            "exponent-1",
+            "float-exponent",
+        ],
+    )
+    def test_invalid_degree_or_error_exponent_raise(self, degree, error_exponent, bad):
+        """Both generic rule classes reject a degree < 0, an error exponent < 2,
+        and non-int values (bool included)."""
+        c = torch.tensor([0.0, 1.0], dtype=torch.float64)
+        with pytest.raises(ValueError, match=f"{bad} must be an int"):
+            VariableMethodClass(
+                degree=degree,
+                error_exponent=error_exponent,
+                c=c,
+                weight_function=_equal_weights,
+            )
+        with pytest.raises(ValueError, match=f"{bad} must be an int"):
+            UniformMethodClass(
+                degree=degree,
+                error_exponent=error_exponent,
+                tableau=_Tableau(
+                    c=c, b=torch.ones_like(c), b_error=torch.zeros_like(c)
+                ),
+            )
+
+    def test_order_is_degree_plus_one(self):
+        """``order`` is derived from ``degree`` and cannot be set separately."""
+        c = torch.tensor([0.0, 1.0], dtype=torch.float64)
+        rule = VariableMethodClass(
+            degree=3, error_exponent=2, c=c, weight_function=_equal_weights
+        )
+        assert rule.order == 4
+        with pytest.raises(AttributeError):
+            rule.order = 7  # type: ignore[misc]
+
     def test_repeated_node_fractions_accepted(self):
         """Repeated fractions are valid (dopri5 has two nodes at 1)."""
         c = torch.tensor([0.0, 0.5, 1.0, 1.0], dtype=torch.float64)
         rule = UniformMethodClass(
-            order=1,
+            degree=0,
             error_exponent=2,
             tableau=_Tableau(c=c, b=torch.ones_like(c), b_error=torch.zeros_like(c)),
         )

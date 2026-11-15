@@ -32,21 +32,30 @@ def _resolve_device(
     (``torch.device("cuda") != torch.device("cuda", 0)``). Only ``cpu`` and
     ``cuda`` are supported because the memory queries handle only those two.
 
-    Args:
-        device: Requested device, e.g. ``"cpu"``, ``"cuda"``, ``"cuda:1"``, or
-            ``torch.device("cuda", 1)``. None auto-detects (CUDA if available).
-        index_default: GPU index used when ``device`` carries no index.
-        distributed: If True, an explicit index must equal ``index_default``
-            (the GPU assigned to this rank).
+    Parameters
+    ----------
+    device : str | torch.device | None
+        Requested device, e.g. ``"cpu"``, ``"cuda"``, ``"cuda:1"``, or
+        ``torch.device("cuda", 1)``. None auto-detects (CUDA if available).
+    index_default : int
+        GPU index used when ``device`` carries no index.
+    distributed : bool
+        If True, an explicit index must equal ``index_default``
+        (the GPU assigned to this rank).
 
-    Returns:
+    Returns
+    -------
+    torch.device
         The resolved device.
 
-    Raises:
-        ValueError: If the device type is unsupported, CUDA is unavailable, the
-            index conflicts with this rank's GPU, or the index is not visible.
-        RuntimeError, TypeError: Raised by ``torch.device`` for an unparsable
-            string or an unsupported argument type.
+    Raises
+    ------
+    ValueError
+        If the device type is unsupported, CUDA is unavailable, the
+        index conflicts with this rank's GPU, or the index is not visible.
+    RuntimeError, TypeError
+        Raised by ``torch.device`` for an unparsable
+        string or an unsupported argument type.
     """
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
     if device.type == "cpu":
@@ -76,23 +85,34 @@ class DistributedEnvironment:
     Handles both single-process and multi-process (distributed) execution.
     In single-process mode, sets sensible defaults (rank=0, world_size=1).
     In distributed mode, initializes a PyTorch process group using environment
-    variables (RANK, LOCAL_RANK, WORLD_SIZE) or SLURM equivalents.
+    variables (RANK, LOCAL_RANK, WORLD_SIZE). The SLURM path (``is_slurm``)
+    currently raises ``ValueError`` in a multi-task job; see
+    ``init_slurm_environment``.
 
     This class is the root of the solver class hierarchy. All solvers inherit
     from it to get device management, even when not running distributed.
 
-    Attributes:
-        is_distributed: Whether running in a multi-process distributed setup.
-        is_slurm: Whether the job is running under SLURM workload manager.
-        is_master: Whether this process is the master (rank 0).
-        rank: Global rank of this process across all nodes.
-        local_rank: Rank of this process within its node (used for GPU assignment).
-        world_size: Total number of processes across all nodes.
-        seed_offset: Offset for random seeds to ensure different processes
-            use different random sequences (equals rank).
-        device: Resolved compute device, ``torch.device("cpu")`` or
-            ``torch.device("cuda", index)``; the single source of truth for
-            where the solver runs.
+    Attributes
+    ----------
+    is_distributed : bool
+        Whether running in a multi-process distributed setup.
+    is_slurm : bool
+        Whether the job is running under SLURM workload manager.
+    is_master : bool
+        Whether this process is the master (rank 0).
+    rank : int
+        Global rank of this process across all nodes.
+    local_rank : int
+        Rank of this process within its node (used for GPU assignment).
+    world_size : int
+        Total number of processes across all nodes.
+    seed_offset : int
+        Offset for random seeds to ensure different processes
+        use different random sequences (equals rank).
+    device : torch.device
+        Resolved compute device, ``torch.device("cpu")`` or
+        ``torch.device("cuda", index)``; the single source of truth for
+        where the solver runs.
     """
 
     is_distributed: bool
@@ -118,20 +138,27 @@ class DistributedEnvironment:
         Detects whether distributed execution is active, initializes the
         appropriate process group, and assigns a compute device.
 
-        Args:
-            backend: Communication backend for distributed training.
-                Options: 'nccl' (GPU), 'gloo' (CPU/GPU), 'mpi'.
-            device: Device to run on: 'cpu', 'cuda', an indexed 'cuda:N', a
-                torch.device, or None to auto-detect (CUDA if available). An
-                index-less 'cuda' uses this rank's GPU (local_rank when
-                distributed with several GPUs visible, else 0). In distributed
-                runs an explicit index must match that GPU.
-            master_addr: IP address of the master node. Required (along with
-                master_port) for distributed mode if not set via environment.
-            master_port: Port on the master node. Required (along with
-                master_addr) for distributed mode if not set via environment.
-            is_slurm: If True, reads rank/world_size from SLURM environment
-                variables instead of standard PyTorch distributed variables.
+        Parameters
+        ----------
+        backend : str
+            Communication backend for distributed training.
+            Options: 'nccl' (GPU), 'gloo' (CPU/GPU), 'mpi'.
+        device : str | torch.device | None
+            Device to run on: 'cpu', 'cuda', an indexed 'cuda:N', a
+            torch.device, or None to auto-detect (CUDA if available). An
+            index-less 'cuda' uses this rank's GPU (local_rank when
+            distributed with several GPUs visible, else 0). In distributed
+            runs an explicit index must match that GPU.
+        master_addr : str | None
+            IP address of the master node. Required (along with
+            master_port) for distributed mode if not set via environment.
+        master_port : str | None
+            Port on the master node. Required (along with
+            master_addr) for distributed mode if not set via environment.
+        is_slurm : bool
+            If True, detects a distributed run from SLURM_NTASKS instead of
+            RANK. A multi-task SLURM job then raises ``ValueError``, because
+            ``init_slurm_environment`` cannot yet resolve the master node.
         """
         self.is_slurm = is_slurm
         self.backend = backend.lower()
@@ -155,8 +182,21 @@ class DistributedEnvironment:
         distributed, checks if the RANK environment variable is set.
         Also validates that the requested communication backend is available.
 
-        Returns:
+        Returns
+        -------
+        bool
             True if running in distributed mode, False otherwise.
+
+        Raises
+        ------
+        RuntimeError
+            If distributed mode is detected but ``torch.distributed`` is not
+            available.
+        AssertionError
+            If the 'nccl', 'mpi' or 'gloo' backend is requested but not
+            available.
+        SyntaxWarning
+            If the backend is not one of those three (raised, not warned).
         """
         if self.is_slurm:
             self.is_distributed = int(os.environ["SLURM_NTASKS"]) > 1
@@ -197,13 +237,17 @@ class DistributedEnvironment:
         Translates SLURM_NTASKS -> WORLD_SIZE, SLURM_LOCALID -> LOCAL_RANK,
         SLURM_PROCID -> RANK, and determines the master node address.
 
-        Returns:
+        Returns
+        -------
+        tuple[str, str]
             Tuple of (master_addr, master_port).
 
-        Raises:
-            ValueError: Currently always raised because the hostlist package
-                dependency is deprecated. Needs a replacement for hostname
-                resolution from SLURM_JOB_NODELIST.
+        Raises
+        ------
+        ValueError
+            Currently always raised because the hostlist package
+            dependency is deprecated. Needs a replacement for hostname
+            resolution from SLURM_JOB_NODELIST.
         """
         # hostname = hostlist.expand_hostlist(os.environ['SLURM_JOB_NODELIST'])[0]
         hostname = "UNKNOWN"
@@ -227,15 +271,20 @@ class DistributedEnvironment:
         Optionally sets MASTER_ADDR and MASTER_PORT if provided. Then
         initializes the process group using the configured backend.
 
-        Args:
-            master_addr: IP address of the master node, or None to use
-                the existing MASTER_ADDR environment variable.
-            master_port: Port of the master node, or None to use
-                the existing MASTER_PORT environment variable.
+        Parameters
+        ----------
+        master_addr : str | None
+            IP address of the master node, or None to use
+            the existing MASTER_ADDR environment variable.
+        master_port : str | None
+            Port of the master node, or None to use
+            the existing MASTER_PORT environment variable.
 
-        Raises:
-            ValueError: If only one of master_addr/master_port is provided
-                (both or neither must be given).
+        Raises
+        ------
+        ValueError
+            If only one of master_addr/master_port is provided
+            (both or neither must be given).
         """
         if self.is_slurm:
             addr, port = self.init_slurm_environment()
@@ -279,11 +328,15 @@ class DistributedEnvironment:
         device, because NCCL collectives use the current device; single-process
         runs leave global torch state unchanged.
 
-        Args:
-            device: Requested device, as accepted by ``_resolve_device``.
+        Parameters
+        ----------
+        device : str | torch.device | None
+            Requested device, as accepted by ``_resolve_device``.
 
-        Raises:
-            ValueError: If the device is invalid (see ``_resolve_device``).
+        Raises
+        ------
+        ValueError
+            If the device is invalid (see ``_resolve_device``).
         """
         self.device = _resolve_device(
             device,
@@ -308,7 +361,9 @@ class DistributedEnvironment:
         """
         Query CUDA memory info for this process's device.
 
-        Returns:
+        Returns
+        -------
+        tuple[int, int] | int
             Tuple of (free_memory_bytes, total_memory_bytes) from
             torch.cuda.mem_get_info, or -1 if not running on CUDA.
         """

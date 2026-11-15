@@ -1,10 +1,11 @@
 """Integration accuracy tests for variable-sampling methods.
 
-Phase 4 restored the variable solver by implementing
-``_compute_nodes`` with uniformly-spaced initial node
-placement. The existing ``_evaluate_adaptive_nodes`` (which interleaves
-old and new nodes for split reuse) and ``_merge_excess_nodes`` (which
-subsamples merged panels back to C nodes) now run end-to-end.
+The variable solver places every subinterval's nodes with ``_compute_nodes``
+(at the method's node fractions) and, like the uniform solver, evaluates fresh
+nodes in both halves of a split: ``_evaluate_adaptive_nodes`` (which would
+interleave old and new nodes to reuse evaluations) is not called by the
+integration loop. ``_merge_excess_nodes`` runs when the optimal mesh is
+built.
 """
 
 from __future__ import annotations

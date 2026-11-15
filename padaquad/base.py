@@ -1,15 +1,17 @@
 """
-Base classes and data structures for the padaquad integration library.
+Base class and sampling modes shared by the padaquad solvers.
 
-Defines the core abstractions that all solvers build on:
+- ``steps``: the enum of sampling modes, and ``get_sampling_type``, which turns a
+  name such as ``"uniform"`` into a ``steps`` member.
+- ``DEFAULT_SAMPLING_TYPE`` and ``DEFAULT_METHODS``: the sampling mode, and the
+  method of each sampling mode, used when the caller names none.
+- ``SolverBase``: the abstract base class of the solvers. It keeps the dtype,
+  the device, the construction-time defaults and the warm-start mesh, and
+  declares the ``integrate()`` / ``_calculate_integral()`` interface that the
+  concrete solvers implement.
 
-- ``steps`` enum: the three integration step strategies (fixed, adaptive uniform,
-  adaptive variable).
-- ``IntegrationResult`` / ``MethodOutput``: dataclasses carrying results through the
-  integration pipeline.
-- ``SolverBase``: abstract base class providing dtype/device management, default
-  parameter handling, and the ``integrate()`` / ``_calculate_integral()`` interface
-  that concrete solvers must implement.
+The result dataclasses ``IntegrationResult`` and ``MethodOutput`` live in
+``results.py``.
 """
 
 from __future__ import annotations
@@ -31,14 +33,16 @@ if TYPE_CHECKING:
 
 class steps(Enum):
     """
-    Enumeration of integration step strategies.
+    Sampling modes, which select the solver class and its list of methods.
 
-    - FIXED: Fixed step sizes (not adaptive).
-    - ADAPTIVE_UNIFORM: Adaptive step sizes with quadrature points placed at
-      fixed fractional positions within each step (tableau c values are constant).
-    - ADAPTIVE_VARIABLE: Adaptive step sizes with quadrature points at arbitrary
-      positions. Tableau b weights are recomputed dynamically based on actual
-      point positions.
+    - ``FIXED``: a non-adaptive mode. No solver supports it:
+      ``adaptive_quadrature`` and ``integrate`` raise ``ValueError`` for it.
+    - ``ADAPTIVE_UNIFORM``: adaptive splitting, with the nodes of every
+      subinterval at the method's fixed node fractions and fixed weights
+      (``UniformAdaptiveQuadrature``, methods in ``UNIFORM_METHODS``).
+    - ``ADAPTIVE_VARIABLE``: adaptive splitting, with the weights computed from
+      the actual node positions (``VariableAdaptiveQuadrature``, methods in
+      ``VARIABLE_METHODS``).
     """
 
     FIXED = 0
@@ -49,23 +53,36 @@ class steps(Enum):
 # Sampling type used when the caller gives none (adaptive_quadrature, integrate).
 DEFAULT_SAMPLING_TYPE = "uniform"
 
+# Default quadrature method of each sampling mode, used by the solvers,
+# ``adaptive_quadrature()`` and ``padaquad.integrate()`` when ``method`` is None.
+DEFAULT_METHODS = {
+    steps.ADAPTIVE_UNIFORM: "gk21",
+    steps.ADAPTIVE_VARIABLE: "interpolatory3_variable",
+}
+
 
 def get_sampling_type(sampling_type: str) -> steps:
     """
-    Convert a string sampling type name into the corresponding ``steps`` enum.
+    Return the ``steps`` member named by a string.
 
-    Accepts both short names ('uniform', 'variable') and full names
-    ('adaptive_uniform', 'adaptive_variable').
+    Accepts the short names ('uniform', 'variable'), the full names
+    ('adaptive_uniform', 'adaptive_variable') and 'fixed', in any letter case.
 
-    Args:
-        sampling_type: One of 'fixed', 'uniform', 'adaptive_uniform',
-            'variable', or 'adaptive_variable'.
+    Parameters
+    ----------
+    sampling_type : str
+        One of 'fixed', 'uniform', 'adaptive_uniform', 'variable' or
+        'adaptive_variable'. No solver supports 'fixed'.
 
-    Returns:
+    Returns
+    -------
+    steps
         The corresponding ``steps`` enum value.
 
-    Raises:
-        ValueError: If sampling_type is not a recognized name.
+    Raises
+    ------
+    ValueError
+        If sampling_type is not a recognized name.
     """
     types = {
         "fixed": steps.FIXED,
@@ -74,38 +91,36 @@ def get_sampling_type(sampling_type: str) -> steps:
         "adaptive_variable": steps.ADAPTIVE_VARIABLE,
         "variable": steps.ADAPTIVE_VARIABLE,
     }
-    if sampling_type not in types:
+    name = sampling_type.lower() if isinstance(sampling_type, str) else sampling_type
+    if name not in types:
         raise ValueError(
             f"Unknown sampling_type {sampling_type!r}; valid names are {sorted(types)}."
         )
-    return types[sampling_type]
+    return types[name]
 
 
-# Result dataclasses live in ``results.py``; re-exported here for
-# backward-compatible imports.
+# Result dataclasses live in ``results.py``; this module imports them only for
+# type annotations, so they cannot be imported from here.
 
 
 class SolverBase(ABC, DistributedEnvironment):
     """
-    Abstract base class for all numerical integration solvers.
+    Abstract base class of the solvers: dtype, device, defaults and warm starts.
 
-    Provides common infrastructure inherited by both the serial solver
-    (which wraps torchdiffeq) and the parallel adaptive solvers. Handles:
+    - Dtype: keeps the tolerances and every stored tensor in one dtype
+      (float64 or float32), and sets looser tolerances for internal
+      consistency checks, such as the check that the nodes are in order.
+    - Device: inherited from ``DistributedEnvironment``.
+    - Defaults: ``f``, ``y0``, ``mesh_init`` and ``mesh_final`` given at
+      construction are used by every ``integrate`` call that does not pass
+      them.
+    - Warm starts: stores the optimal mesh of the last call that returned, in
+      ``mesh_previous``; ``integrate(..., same_f=True)`` starts from it. See
+      :ref:`ug-same-f`.
 
-    - Dtype management: converts all tensors to a consistent dtype, and sets
-      dtype-appropriate assertion tolerances (atol_assert, rtol_assert) used
-      for internal sanity checks (e.g., verifying time ordering).
-    - Device management: inherited from DistributedEnvironment.
-    - Default parameter storage: f, y0, mesh_init, mesh_final can be set at
-      construction and reused across multiple integrate() calls.
-    - Warm-start caching: stores mesh_previous, reused with
-      ``integrate(..., same_f=True)`` so that repeated integration of
-      the same function starts from the optimized time mesh of the prior run.
-
-    Subclasses must implement:
-        - ``_set_solver_dtype(dtype)``: update solver-specific state when dtype changes.
-        - ``_calculate_integral(t, y, y0)``: compute integral + error for a batch of steps.
-        - ``integrate(...)``: run the full integration procedure.
+    Subclasses implement the abstract methods: ``integrate``, the integral and
+    error estimate of a batch of subintervals, and the update of their own
+    tensors when the dtype changes.
     """
 
     # Set by ``_set_dtype`` (first called at the end of ``__init__``). Declared
@@ -115,54 +130,58 @@ class SolverBase(ABC, DistributedEnvironment):
 
     def __init__(
         self,
-        method: str = "gk21",
-        atol: float = 1e-5,
-        rtol: float = 1e-5,
-        y0: torch.Tensor | None = None,
-        f: Callable[..., Any] | None = None,
-        mesh_init: torch.Tensor | None = None,
-        mesh_final: torch.Tensor | None = None,
-        output_speed_info: bool = False,
-        dtype: torch.dtype = torch.float64,
-        device: str | torch.device | None = None,
-        *args: Any,
-        **kwargs: Any,
+        *,
+        method: str,
+        atol: float,
+        rtol: float,
+        y0: torch.Tensor | None,
+        f: Callable[..., Any] | None,
+        mesh_init: torch.Tensor | None,
+        mesh_final: torch.Tensor | None,
+        output_speed_info: bool,
+        dtype: torch.dtype,
+        device: str | torch.device | None,
+        **distributed_options: Any,
     ) -> None:
         """
         Initialize the solver base with integration parameters.
 
-        Args:
-            method: Name of the RK integration method (e.g. 'dopri5', 'bosh3').
-                Converted to lowercase.
-            atol: Absolute error tolerance for adaptive step control. Steps with
-                error below max(atol, rtol*|integral|) are accepted
-                (atol + rtol*|integral| for ``error_norm="failure_fraction"``).
-            rtol: Relative error tolerance for adaptive step control.
-            y0: Initial value of the integral (accumulator starting point).
-                Shape: [D].
-            f: The integrand function f(t) -> Tensor. Takes time points
-                of shape [N, T] and returns evaluations of shape [N, D].
-                Can also be provided at integrate() call time.
-            mesh_init: Lower bound of integration. Shape: [T].
-            mesh_final: Upper bound of integration. Shape: [T].
-            output_speed_info: If True, logs timing information for each
-                sub-operation during integration to a dedicated file
-                ``padaquad_speed.log``.
-            dtype: Floating point precision for all computations. Supported:
-                torch.float64 (default, academic-grade), torch.float32 (fast
-                on GPU). torch.float16 is refused: its ~1e-3 precision floor
-                sits above typical adaptive tolerances and cannot support
-                meaningful error control.
-            device: 'cpu', 'cuda', an indexed 'cuda:N', or a torch.device;
-                None auto-detects. Resolved by DistributedEnvironment.
-            *args: Additional arguments forwarded to DistributedEnvironment.
-            **kwargs: Additional keyword arguments forwarded to
-                DistributedEnvironment.
+        Every argument is required and keyword-only: the defaults live once, in
+        ``AdaptiveQuadrature.__init__``, the constructor users call.
+
+        Parameters
+        ----------
+        method : str
+            Name of the quadrature method, for example 'gk21' or 'dopri5', in
+            any letter case.
+        atol : float
+            Absolute tolerance. See :ref:`ug-error-control`.
+        rtol : float
+            Relative tolerance. See :ref:`ug-error-control`.
+        y0 : torch.Tensor or None
+            Value added to the integral, shape ``[D]``. None uses 0.
+        f : callable or None
+            The integrand: points of shape ``[N, T]`` in, values of shape
+            ``[N, D]`` out. None means ``integrate`` must be given one.
+        mesh_init : torch.Tensor or None
+            Lower bound, shape ``[T]``. None uses 0.
+        mesh_final : torch.Tensor or None
+            Upper bound, shape ``[T]``. None uses 1.
+        output_speed_info : bool
+            If True, writes the time each part of the integration takes to
+            the file ``padaquad_speed.log``.
+        dtype : torch.dtype
+            Either torch.float64 or torch.float32. torch.float16 raises
+            ``ValueError``: its rounding error (about 1e-3) exceeds typical
+            tolerances.
+        device : str or torch.device or None
+            'cpu', 'cuda', an indexed 'cuda:N', or a torch.device; None picks
+            CUDA when it is available.
+        **distributed_options : Any
+            Options for multi-process runs: backend, master_addr, master_port
+            and is_slurm.
         """
-        # ``device`` is a named parameter here, so it can never also be in
-        # ``kwargs``; pass it through kwargs so the call is statically checkable.
-        kwargs["device"] = device
-        super().__init__(*args, **kwargs)
+        super().__init__(device=device, **distributed_options)
 
         # Speed timing logger — writes to a dedicated file, no other output
         self.speed_logger: logging.Logger | None
@@ -217,10 +236,12 @@ class SolverBase(ABC, DistributedEnvironment):
 
         Called by ``_set_dtype()`` after converting base tensors, including
         its first call at the end of ``__init__``. Subclasses must implement
-        this to build or convert their own tensors (e.g., RK tableaux).
+        this to build or convert their own tensors (e.g. the method's tables).
 
-        Args:
-            dtype: The new dtype to convert to.
+        Parameters
+        ----------
+        dtype : torch.dtype
+            The new dtype to convert to.
         """
 
     @abstractmethod
@@ -231,23 +252,28 @@ class SolverBase(ABC, DistributedEnvironment):
         y0: torch.Tensor,
     ) -> MethodOutput:
         """
-        Compute the integral and error estimate for a batch of integration steps.
+        Compute the integral and error estimate for a batch of subintervals.
 
-        This is the core numerical method that subclasses must implement.
-        Given time points and integrand evaluations at those points, applies
-        the specific RK quadrature rule to produce integral contributions
-        and error estimates for each step.
+        Given the nodes of each subinterval and the integrand values there,
+        applies the method's weights to produce each subinterval's contribution
+        to the integral and its error estimate.
 
-        Args:
-            t: Time points for each step, with C quadrature points per step.
-                Shape: [N, C, T] where N=steps, C=quadrature points, T=time dims.
-            y: Integrand evaluations at the time points in t.
-                Shape: [N, C, D] where D=output dimensionality of the integrand.
-            y0: Starting value for the integral accumulator. Shape: [D].
+        Parameters
+        ----------
+        t : torch.Tensor
+            Nodes of each subinterval. Shape: [N, C, T] (N subintervals, C
+            nodes each, T coordinates of the integration variable t).
+        y : torch.Tensor
+            Integrand values at the nodes in t. Shape: [N, C, D] (D outputs
+            of the integrand).
+        y0 : torch.Tensor
+            Starting value for the integral accumulator. Shape: [D].
 
-        Returns:
-            MethodOutput containing the integral, error, per-step contributions,
-            per-step errors, and step sizes.
+        Returns
+        -------
+        MethodOutput
+            The integral, its error estimate, each subinterval's contribution
+            and error estimate, and the subinterval widths.
         """
 
     @abstractmethod
@@ -264,29 +290,36 @@ class SolverBase(ABC, DistributedEnvironment):
         """
         Integrate f from mesh_init to mesh_final.
 
-        This is the main entry point that users call. Every override must
-        accept these arguments (it may add more); see
-        ``AdaptiveQuadrature.integrate`` for the full parameter list.
-        ``f_args`` is keyword-only here so an override may place it after its
-        own extra parameters.
+        This is the entry point users call. Every override must accept these
+        arguments (it may add more); see ``AdaptiveQuadrature.integrate`` for
+        the full parameter list. ``f_args`` is keyword-only here so an override
+        may place it after its own extra parameters.
 
-        The integrand f is a function of time only: f(t, *f_args). It does
-        NOT depend on accumulated state y (this is numerical quadrature, not
-        ODE solving). This independence between steps is what enables
-        parallel evaluation.
+        The integrand depends only on the integration variable t and on
+        ``f_args``, as ``f(t, *f_args)``, never on the running value of the
+        integral (this is quadrature, not ODE solving). Because of this, the
+        subintervals are independent and can be evaluated in parallel.
 
-        Args:
-            f: The integrand. Takes time points of shape [N, T] and returns
-                values of shape [N, D]. None uses the construction-time f.
-            y0: Additive offset of the returned integral. Shape: [D].
-            mesh: Optional starting mesh of step barriers. Shape: [M, T].
-            mesh_init: Lower integration bound. Shape: [T].
-            mesh_final: Upper integration bound. Shape: [T].
-            f_args: Extra arguments passed to f after the time tensor.
+        Parameters
+        ----------
+        f : callable or None
+            The integrand: points of shape ``[N, T]`` in, values of shape
+            ``[N, D]`` out. None uses the one given at construction.
+        y0 : torch.Tensor or None
+            Value added to the returned integral. Shape: ``[D]``.
+        mesh : torch.Tensor or None
+            Starting mesh. Shape: ``[M, T]``.
+        mesh_init : torch.Tensor or None
+            Lower bound. Shape: ``[T]``.
+        mesh_final : torch.Tensor or None
+            Upper bound. Shape: ``[T]``.
+        f_args : tuple
+            Extra arguments passed to f after t.
 
-        Returns:
-            IntegrationResult containing the computed integral, error
-            estimates, mesh, and diagnostics.
+        Returns
+        -------
+        IntegrationResult
+            The integral, its error estimate, the mesh and diagnostics.
         """
 
     # -------------------------------------------------------------------------------- #
@@ -297,26 +330,31 @@ class SolverBase(ABC, DistributedEnvironment):
         """
         Set the floating-point precision for all solver tensors.
 
-        Converts y0, mesh_init, mesh_final, and cached barriers to the new dtype.
-        Also sets dtype-appropriate assertion tolerances used for internal
-        sanity checks (e.g., verifying that time points are monotonically
-        ordered despite floating-point rounding).
+        Converts atol, rtol, y0, mesh_init, mesh_final and the stored
+        warm-start mesh (``mesh_previous``) to the new dtype, then calls
+        ``_set_solver_dtype``. Also sets dtype-appropriate assertion tolerances
+        used for internal sanity checks (e.g. verifying that the nodes are in
+        increasing order despite floating-point rounding).
 
         The assertion tolerances by dtype are:
             - float64: atol_assert=1e-15, rtol_assert=1e-7
             - float32: atol_assert=1e-7,  rtol_assert=1e-5
 
-        float16 is refused (Bug B4): float16's ~1e-3 precision floor
-        sits *above* the typical adaptive integration tolerance, so
-        the solver cannot meaningfully verify "step error < tol" for
-        any user-relevant tolerance. Use float32 (still fast on GPU)
-        or float64 (academic-grade precision) instead.
+        float16 is refused (Bug B4): its rounding error, about 1e-3, sits
+        *above* typical tolerances, so the solver cannot verify that a
+        subinterval's error is below the tolerance. Use float32 (fast on GPU)
+        or float64 instead. Does nothing when ``dtype`` is already the
+        solver's dtype.
 
-        Args:
-            dtype: Target dtype. Must be float64 or float32.
+        Parameters
+        ----------
+        dtype : torch.dtype
+            Target dtype. Must be float64 or float32.
 
-        Raises:
-            ValueError: If dtype is float16 or any unsupported type.
+        Raises
+        ------
+        ValueError
+            If dtype is float16 or any unsupported type.
         """
         if hasattr(self, "dtype") and dtype == self.dtype:
             return
@@ -363,16 +401,27 @@ class SolverBase(ABC, DistributedEnvironment):
         mesh_final: torch.Tensor | None = None,
     ) -> None:
         """
-        Infer and set the solver dtype from the dtype of input tensors.
+        Switch the solver to the dtype of the given mesh or bounds.
 
-        Checks mesh first, then mesh_init, then mesh_final. The first
-        non-None tensor's dtype is used. This allows the solver to
-        automatically match the precision of user-provided inputs.
+        ``integrate`` calls this, so the solver follows the dtype of the mesh
+        or bounds passed to it. The first of ``mesh``, ``mesh_init`` and
+        ``mesh_final`` that is not None sets the dtype; if all are None, the
+        dtype is unchanged. The switch persists: later calls keep the new dtype
+        until another input changes it.
 
-        Args:
-            mesh: Optional mesh-of-barriers tensor.
-            mesh_init: Optional lower integration bound tensor.
-            mesh_final: Optional upper integration bound tensor.
+        Parameters
+        ----------
+        mesh : torch.Tensor or None
+            Starting mesh. Shape: ``[M, T]``.
+        mesh_init : torch.Tensor or None
+            Lower bound. Shape: ``[T]``.
+        mesh_final : torch.Tensor or None
+            Upper bound. Shape: ``[T]``.
+
+        Raises
+        ------
+        ValueError
+            If that tensor's dtype is not torch.float64 or torch.float32.
         """
         if mesh is not None:
             self._set_dtype(mesh.dtype)
@@ -395,18 +444,27 @@ class SolverBase(ABC, DistributedEnvironment):
         construction time. Tensor arguments are cast to the solver's dtype
         and moved to the solver's device.
 
-        Args:
-            f: Integrand function, or None to use self.init_f.
-            mesh_init: Lower integration bound, or None to use self.init_mesh_init.
-            mesh_final: Upper integration bound, or None to use self.init_mesh_final.
-            y0: Initial integral value, or None to use self.init_y0.
+        Parameters
+        ----------
+        f : Callable[..., Any] | None
+            Integrand function, or None to use self.init_f.
+        mesh_init : torch.Tensor | None
+            Lower integration bound, or None to use self.init_mesh_init.
+        mesh_final : torch.Tensor | None
+            Upper integration bound, or None to use self.init_mesh_final.
+        y0 : torch.Tensor | None
+            Initial integral value, or None to use self.init_y0.
 
-        Returns:
+        Returns
+        -------
+        tuple[Callable[..., Any], torch.Tensor, torch.Tensor, torch.Tensor]
             Tuple of (f, mesh_init, mesh_final, y0) with defaults filled
             in and tensors on the correct device/dtype.
 
-        Raises:
-            ValueError: If no integrand was given here or at construction.
+        Raises
+        ------
+        ValueError
+            If no integrand was given here or at construction.
         """
         f = self.init_f if f is None else f
         if f is None:
@@ -435,16 +493,25 @@ class SolverBase(ABC, DistributedEnvironment):
         **kwargs: Any,  # noqa: ARG002
     ) -> torch.Tensor:
         """
-        Default loss function: returns the integral value itself.
+        Default loss function: returns the integral itself.
 
-        Used when no custom loss_fxn is provided. Can be overridden or
-        replaced at integrate() call time to compute a custom loss for
-        gradient-based optimization.
+        Used when ``integrate`` gets no ``loss_fxn``. With
+        ``take_gradient=True`` the solver backpropagates this loss after every
+        batch; because the loss is linear in the integral, the gradients of the
+        batches add up to the gradient of the whole integral.
 
-        Args:
-            result: The current IntegrationResult from this batch.
+        Parameters
+        ----------
+        result : IntegrationResult
+            The result of the current batch.
+        *args : Any
+            Accepted and ignored; the solver passes only ``result``.
+        **kwargs : Any
+            Accepted and ignored.
 
-        Returns:
+        Returns
+        -------
+        torch.Tensor
             Loss tensor for backpropagation. Shape: same as result.integral.
         """
         return result.integral
@@ -454,5 +521,10 @@ class SolverBase(ABC, DistributedEnvironment):
     # -------------------------------------------------------------------------------- #
 
     def __del__(self) -> None:
-        """Destructor that cleans up the distributed process group."""
-        self.end_process()
+        """Destructor that cleans up the distributed process group.
+
+        Does nothing if construction failed before the distributed state was
+        set, so a constructor error is not followed by a second, unrelated one.
+        """
+        if hasattr(self, "is_distributed"):
+            self.end_process()

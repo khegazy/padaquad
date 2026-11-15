@@ -9,7 +9,7 @@ with code in this repository.
 quadrature**: it computes definite integrals
 $\int_a^b f(t)\,dt$ for a known integrand $f$ by evaluating many
 quadrature panels in parallel batches on GPU, with full autograd through
-the integration loop. v0.2.0 (Alpha), Python 3.11+.
+the integration loop. Version 1.3.0 in `pyproject.toml` (Alpha), Python 3.11+.
 
 **Critical distinction.** The integrand `f` depends only on `t` (and
 optional extra args), NOT on accumulated state `y`. This independence
@@ -25,8 +25,8 @@ python -m venv .venv
 .venv/bin/pip install -e ".[dev]"
 .venv/bin/pre-commit install
 
-# Run all tests (3242 pass and 138 skip on a CPU-only Mac; GPU-only tests skip there)
-.venv/bin/pytest tests/ -v
+# Run all tests and docstring examples (3396 pass and 129 skip on a CPU-only Mac; GPU-only tests skip there)
+.venv/bin/pytest -v
 
 # Run all tests with coverage
 .venv/bin/pytest --cov=padaquad --cov-report=xml
@@ -45,7 +45,47 @@ TPD_REGENERATE_SNAPSHOTS=1 .venv/bin/pytest tests/test_snapshots.py
 
 # Type check (enforced in CI by .github/workflows/tests.yaml; must report no issues)
 .venv/bin/mypy padaquad/
+
+# Docstring checks (pre-commit hook numpydoc-validation; config in pyproject.toml)
+numpydoc lint $(git ls-files 'padaquad/*.py')
+
+# Build the documentation (warnings are errors; CI: .github/workflows/docs.yaml)
+pip install -e ".[docs]"
+sphinx-build -W --keep-going -b html docs docs/_build/html
+sphinx-build -b linkcheck docs docs/_build/linkcheck
 ```
+
+`pytest` also runs the docstring Examples (`--doctest-modules`, testpaths
+include `padaquad/`); the repository-root `conftest.py` seeds torch and quiets
+the padaquad log for them.
+
+## Documentation
+
+- Sphinx + PyData theme in `docs/` (`conf.py`; pages in MyST Markdown). The
+  API reference is generated from the NumPy docstrings (autodoc, autosummary,
+  numpydoc; `autodoc_typehints = "none"`, so types come from the docstrings;
+  `autoclass_content = "both"`, so the solvers' constructor options, documented
+  in `AdaptiveQuadrature.__init__`, appear on the class pages).
+- Writing rules for docstrings and pages: `docs/development/docstrings.md`;
+  vocabulary: `docs/glossary.md` (subinterval, mesh, node, method; never
+  panel/barrier/step for a subinterval). `tests/test_docs_vocabulary.py`
+  checks the public docstrings and user pages.
+- One bibliography, `docs/references.bib`: only sources that were opened and
+  checked, each with a `checked` field saying what was checked (not printed on
+  the site). Each method's
+  `references` attribute holds its keys.
+- Generated at build time, never typed by hand: the methods table
+  (`docs/_ext/methods_table.py`, from the registries; tested by
+  `tests/test_docs_methods_table.py`) and the Performance table
+  (`docs/_ext/performance_table.py`, from `docs/performance/results_<device>.json`,
+  written by `examples/speed_test/torchdiffeq_comparison.py`; one section per
+  file, tested by `tests/test_docs_performance_table.py`).
+- README sections reused on the site are marked
+  `<!-- include-start: NAME -->` / `<!-- include-end: NAME -->`; the Python
+  blocks of the README and of `docs/development/adding_a_method.md`
+  (`DOCUMENTS` in `tests/test_examples_run.py`) run in that test unless
+  preceded by `<!-- not-tested -->`.
+- The gallery runs `examples/*.py` and `examples/verification/*.py`.
 
 mypy runs with every function annotated and every body checked
 (`disallow_untyped_defs`, `check_untyped_defs`, `disallow_any_generics`,
@@ -75,7 +115,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_tableau.py` | Weights sum to 1 (uniform tables and the position-dependent rule) |
 | `test_path_integral.py` | `integrate()` wrapper matches direct solver construction |
 | `test_chemistry.py` | Wolf-Schlegel 2D potential: parallel vs scipy.integrate.quad |
-| `test_exactness.py` | **Polynomial-exactness** for every method (each method is exact through its claimed degree, e.g. gk21 through degree 31) |
+| `test_exactness.py` | **Polynomial degree** of every method via `MethodClass.measure_degree` (Legendre polynomials): exact through `method.degree` and not one degree further; error-estimate degree = `error_exponent - 2`; stored float64 tables checked in 60 digits (mpmath) |
 | `test_scipy_agreement.py` | Cross-validation against `scipy.integrate.quad` on canonical smooth integrands |
 | `test_convergence_rate.py` | Empirical convergence-rate slope matches each method's theoretical rate |
 | `test_autodiff_consistency.py` | $\nabla_\theta\int f_\theta dt$ via backprop equals $\int \nabla_\theta f_\theta dt$ |
@@ -97,6 +137,19 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: `mesh_optimal` re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
 | `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
+| `test_error_integral_reference.py` | The `error_integral_reference` argument of `integrate()` |
+| `test_error_masks.py` | Vector-error machinery (norms, `failure_fraction`, rounding floor) in float32 and float64 |
+| `test_evaluate_f_on_mesh.py` | `_evaluate_f_on_mesh` and its evaluation paths |
+| `test_examples_run.py` | Runs `examples/*.py`, every script in `examples/verification/`, and every ```python block of the files in its `DOCUMENTS` (the README, `docs/development/adding_a_method.md`; except blocks preceded by `<!-- not-tested -->`) |
+| `test_max_adaptive_splits.py` | The `max_adaptive_splits` depth cap |
+| `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks` |
+| `test_methods_registry.py` | Registry consistency: table shapes and dtypes, `degree` / `error_exponent` types |
+| `test_multi_d_integrand.py` | Integrands with D > 1 outputs |
+| `test_oom_recovery.py` | The out-of-memory catch-and-retry path |
+| `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance |
+| `test_solver_isolation.py` | Solvers do not share method objects or state |
+| `test_tracked_variables.py` | The `tracked_variables` feature |
+| `test_docs_performance_table.py` | The Performance page's rendering of `docs/performance/results_*.json`: no file, one, two (name order, hardware headings), unreadable files named in the error |
 | `test_split_statistics.py` | `n_start_steps` / `n_start_steps_split` / `max_split_depth` on integrands with known answers; `converged` against a hand-computed tolerance check (absolute and cumulative, with `y0`), in `failure_fraction` mode (including a NaN component), against the final integral, and its warning (numbers, output component, remedies); `max_adaptive_splits` type check |
 
 **Snapshot tests** are the regression net for internal refactors: the
@@ -130,7 +183,7 @@ padaquad/
 │   │                        #   batch-size budget, OOM recognition
 │   ├── uniform.py           # UniformAdaptiveQuadrature
 │   └── variable.py          # VariableAdaptiveQuadrature
-├── integrate.py           # integrate() free function + adaptive_quadrature factory
+├── _frontend.py           # user-facing integrate() and adaptive_quadrature() (build a solver, run it)
 ├── examples.py            # integrand_dict (test integrands) + wolf_schlegel
 └── distributed.py         # multi-GPU / SLURM support (internal)
 ```
@@ -163,6 +216,16 @@ built from data (a `_Tableau`; or node fractions and a module-level
 `weight_function`), never of a rule-specific subclass; both classes reject
 malformed node fractions with `ValueError`. `adaptive_heun` is one object in
 both registries.
+
+Each method stores `degree` (highest polynomial degree integrated exactly,
+validated int >= 0) and `error_exponent` (k = degree of the lower-degree method
+in the error estimate + 2, validated int >= 2); `order` is the property
+`degree + 1`. `MethodClass.measure_degree(nodes=None)` measures both degrees
+from the weights (Legendre polynomials, float64, CPU) and is what
+`tests/test_exactness.py` and `examples/verification/polynomial_degree.py`
+call. `examples/verification/integral_accuracy.py` checks whole integrations
+against exact answers; `fehlberg2`'s error estimate ignores curvature and is a
+documented known limitation there.
 
 ### Public API
 
@@ -304,14 +367,19 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
     points at standard `c` positions in the new sub-panels.
   - *Merging*: re-interpolates C nodes at standard `c` positions
     spanning `[A.start, B.end]`.
-- **Variable** (`quadrature/variable.py`): nodes at arbitrary positions.
-  Weights computed from each panel's actual nodes by `method.weights(nodes)`
+- **Variable** (`quadrature/variable.py`): weights computed from each
+  panel's actual nodes by `method.weights(nodes)`
   (`VariableMethodClass.weight_function`; for `interpolatory3_variable`
   the Sanderse-Veldman weights, `_interpolatory3_weights`).
-  - *Splitting*: reuses existing evaluations by inserting new midpoints
-    between each pair of consecutive points and interleaving old + new
-    into a 2C-length array, reshaped into two C-point sub-panels.
-    Avoids redundant `f` calls.
+  - *Splitting*: the integration loop does NOT reuse evaluations. Like the
+    uniform solver it inserts the midpoint into the mesh and places fresh
+    nodes in both halves with `_compute_nodes`, at the node fractions, so
+    `interpolatory3_variable` always runs as Simpson's rule (a = 1/2).
+    `_evaluate_adaptive_nodes`, which would interleave old and new nodes into
+    two C-point halves, exists and is unit-tested but is never called by
+    `integrate()` (checked 2026-11-12: 0 calls on a run with 2495
+    subintervals). It also allocates its node array with last dimension D
+    instead of T (latent; wrong shape only when D != T).
   - *Merging*: concatenates points from both panels (C + C-1 = 2C-1,
     shared boundary not duplicated), then subsamples every other point
     to get C. `method.weights(nodes)` recomputes the right weights for

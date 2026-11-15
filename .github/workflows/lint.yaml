@@ -24,3 +24,16 @@ jobs:
 
       - name: Ruff format check
         run: ruff format --check padaquad/
+
+  numpydoc:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repo
+        uses: actions/checkout@v4
+
+      - name: Install numpydoc
+        run: pip install "numpydoc>=1.11"
+
+      # Reads the source files; it does not import padaquad, so torch is not needed.
+      - name: Docstring format (configuration in pyproject.toml)
+        run: numpydoc lint $(git ls-files 'padaquad/*.py')

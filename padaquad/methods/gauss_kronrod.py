@@ -1,14 +1,45 @@
 """
-Gauss-Kronrod embedded quadrature pairs.
+Gauss-Kronrod pairs: gk7, gk15, gk21 and gk31.
 
-A pair (G_n, K_{2n+1}) is an n-point Gauss-Legendre rule plus an
-(n+1)-point Kronrod extension. K_{2n+1} integrates polynomials of degree
-3n+1 exactly; the pair's error indicator is K_{2n+1} - G_n.
+A Gauss-Kronrod pair combines the n-point Gauss method (Gauss-Legendre) with
+its Kronrod extension, a (2n + 1)-point method that reuses the n Gauss nodes
+and adds n + 1 more. The (2n + 1)-point method gives the integral, and the
+error estimate is the difference between the (2n + 1)-point and the n-point
+results (Gonnet 2012, Eq. (24), Sec. 2.4 :cite:p:`gonnet2012`). QUADPACK
+starts from the same difference and then rescales it (dqk21.f, lines 176-180
+:cite:p:`quadpack_netlib`); padaquad does not rescale. ``gkN`` is the pair with
+2n + 1 = N points.
 
-Nodes / weights tabulated to ~30 decimal digits, sourced from QUADPACK
-(Piessens et al. 1983) and Laurie 1997 (Math. Comp. 66 #213). Truncated
-to float64 precision below. Polynomial-exactness tests in
-tests/test_exactness.py validate the values.
+Degrees: the (2n + 1)-point method has degree 3n + 1 (Gonnet 2012, Sec. 2.4,
+p. 10). For odd n this degree is even, and because the method is symmetric
+about the middle of the subinterval it also integrates the next, odd, degree
+exactly, so its degree is 3n + 2 (derivation). This gives gk7, gk15, gk21,
+gk31: 11, 23, 31, 47, and the n-point Gauss methods have degree 2n - 1 (5, 13,
+19, 29). ``tests/test_exactness.py`` measures all of these from the stored
+tables. Gonnet 2012, Sec. 2.4, p. 10, lists degree 11 for the 7-point
+extension of the 3-point Gauss method (gk7's method).
+
+Gauss-Kronrod nodes lie inside the subinterval. padaquad adds two nodes of
+weight zero at its ends (so gk21 evaluates 23 nodes per subinterval), because
+the solver measures a subinterval's width from its first and last node.
+
+References
+----------
+- gk15, gk21, gk31: the digits are those of the QUADPACK routines dqk15.f,
+  dqk21.f and dqk31.f on Netlib :cite:p:`quadpack_netlib`, whose comments say
+  they were "evaluated with 80 decimal digit arithmetic by L. W. Fullerton,
+  Bell Labs, Nov. 1981". Every 33-digit value below matches those files digit
+  for digit.
+- gk7: QUADPACK has no 7-point routine. The 30-digit values below agree with
+  an 80-digit computation of the Kronrod extension of the 3-point Gauss method
+  to all printed digits. Patterson 1968 (Math. Comp. 22(104):847-856) could
+  not be opened to compare.
+- The error estimate and the degrees: Gonnet 2012, Eq. (24) and Sec. 2.4
+  :cite:p:`gonnet2012`.
+
+Python rounds each 33-digit literal to the nearest float64 value. The Gauss
+parts agree with NumPy's Gauss-Legendre nodes and weights in
+``tests/test_tableau.py``.
 """
 
 from __future__ import annotations
@@ -27,35 +58,38 @@ def _build_gauss_kronrod_tableau(
 ) -> _Tableau:
     """Construct a Gauss-Kronrod _Tableau on [0, 1].
 
-    Inputs are tabulated for the canonical interval (-1, 1) with values
-    given for the positive half plus the center node (which is the last
-    entry of ``xgk_half_with_zero``). The full K_{2n+1} arrays are built
-    by mirroring the positive-half about 0.
+    The inputs are QUADPACK-style tables on (-1, 1): the positive nodes in
+    descending order followed by the center node 0 (the last entry of
+    ``xgk_half_with_zero``). The full K_{2n+1} arrays are built by mirroring
+    the positive half about 0.
 
-    Args:
-        xgk_half_with_zero: K_{2n+1} node positions in (-1, 1), positive
-            half (descending magnitude) followed by the center 0.0.
-            Length n + 1. For K21 this has 11 entries: 10 positive +
-            center.
-        wgk_half_with_zero: K_{2n+1} weights at the corresponding nodes.
-            Length n + 1.
-        wg_at_g_pos: G_n weights at the G_n positive-half nodes.
-            Length n // 2 (Kronrod's theorem: G_n has n nodes symmetric
-            about 0; for even n there are n // 2 distinct positive
-            magnitudes; for odd n there are (n - 1) // 2 distinct
-            positive magnitudes plus the center).
-        g_pos_indices_in_half: indices into the positive half of
-            ``xgk_half_with_zero`` where G_n nodes coincide with K
-            extension nodes. Length matches ``wg_at_g_pos``.
-        wg_at_center: G_n weight at the center node 0.0. Use 0.0 if
-            G_n has no center node (even n: G10, G14, ...). Use the
-            published center weight for odd n: G7, G15, ...
+    Parameters
+    ----------
+    xgk_half_with_zero : list[float]
+        K_{2n+1} node positions in (-1, 1), positive
+        half (descending magnitude) followed by the center 0.0.
+        Length n + 1. For K21 this has 11 entries: 10 positive +
+        center.
+    wgk_half_with_zero : list[float]
+        K_{2n+1} weights at the corresponding nodes.
+        Length n + 1.
+    wg_at_g_pos : list[float]
+        G_n weights at the positive G_n nodes. Length n // 2: the n Gauss
+        nodes are symmetric about 0, so for even n there are n // 2 positive
+        nodes, and for odd n (n - 1) // 2 positive nodes plus the center.
+    g_pos_indices_in_half : list[int]
+        Indices into the positive half of ``xgk_half_with_zero`` where the
+        G_n nodes are. Length matches ``wg_at_g_pos``.
+    wg_at_center : float
+        G_n weight at the center node 0.0: 0.0 for even n (G10 has no center
+        node), the tabulated weight for odd n (G3, G7, G15).
 
-    Returns:
-        _Tableau with c (K nodes mapped to [0, 1]), b (K weights, the
-        high-order estimate), and b_error (K - G_extended, where
-        G_extended has 0 at K-only nodes — the standard error
-        indicator for an embedded G-K pair).
+    Returns
+    -------
+    _Tableau
+        _Tableau with c (K nodes mapped to [0, 1], padded with 0 and 1), b
+        (K weights) and b_error (K weights minus G weights, with G weight 0
+        at the nodes only K has), so the error estimate is K - G.
     """
     # Every tensor is created as float64 explicitly: a tensor built from Python
     # floats without dtype= is float32, which would silently round the weights.
@@ -99,23 +133,22 @@ def _build_gauss_kronrod_tableau(
     b_unit = wgk_full / 2.0
     b_g_unit = wg_extended_full / 2.0
 
-    # The parallel solver's _RK_integral computes the per-panel step size
-    # as ``h = t[:, -1] - t[:, 0]`` and assumes ``c[0] == 0`` and
-    # ``c[-1] == 1``. Gauss-Kronrod nodes are interior (no endpoints) so
-    # without padding ``h`` would equal 0.99566... instead of 1.0 and the
-    # integral would be off by that factor. Standard fix: pad with two
-    # zero-weight nodes at 0 and 1; they're evaluated but contribute
-    # nothing to the integral or error estimate. The cost is 2 wasted
-    # f evaluations per panel — negligible for an N+2 = 23-node rule.
+    # The solver's _RK_integral computes a subinterval's width as
+    # ``h = t[:, -1] - t[:, 0]`` and node fractions must start at 0 and end
+    # at 1. Gauss-Kronrod nodes are interior, so without padding gk21's ``h``
+    # would be 0.99566... of the width and the integral off by that factor.
+    # padaquad pads with two zero-weight nodes at 0 and 1: they are evaluated
+    # but contribute nothing to the integral or the error estimate, at the cost
+    # of 2 extra integrand evaluations per subinterval (23 instead of 21).
     c_padded = torch.cat([zero, c_unit, one])
     b_padded = torch.cat([zero, b_unit, zero])
     b_g_padded = torch.cat([zero, b_g_unit, zero])
     return _Tableau(c=c_padded, b=b_padded, b_error=b_padded - b_g_padded)
 
 
-# G10-K21 (Gauss-Kronrod 21-point). K21 polynomial exactness = 31.
-# Source: QUADPACK / Laurie 1997. Positive half-axis nodes followed by
-# the center node 0.0.
+# G10-K21 (Gauss-Kronrod 21-point). K21 degree = 3n+1 = 31 (n = 10, even).
+# Digits from Netlib QUADPACK dqk21.f (xgk, wgk, wg; Fullerton 1981, 80-digit
+# arithmetic). Positive nodes followed by the center node 0.0.
 _GK21_XGK_HALF = [
     0.995657163025808080735527280689003,
     0.973906528517171720077964012084452,
@@ -132,7 +165,7 @@ _GK21_XGK_HALF = [
 _GK21_WGK_HALF = [
     0.011694638867371874278064396062192,
     0.032558162307964727478818972459390,
-    0.054755896574351996031381300244582,
+    0.054755896574351996031381300244580,
     0.075039674810919952767043140916190,
     0.093125454583697605535065465083366,
     0.109387158802297641899210590325805,
@@ -142,9 +175,8 @@ _GK21_WGK_HALF = [
     0.147739104901338491374841515972068,
     0.149445554002916905664936468389821,
 ]
-# G10 weights at G10 positive nodes. G10 nodes coincide with K21 nodes
-# at indices 1, 3, 5, 7, 9 of the positive half (the "G" rows in the
-# Patterson-style Kronrod construction).
+# G10 weights at the positive G10 nodes, which are K21 nodes 1, 3, 5, 7, 9 of
+# the positive half (dqk21.f wg).
 _GK21_WG = [
     0.066671344308688137593568809893332,
     0.149451349150580593145776339657697,
@@ -155,8 +187,9 @@ _GK21_WG = [
 _GK21_G_INDICES = [1, 3, 5, 7, 9]
 
 _GAUSS_KRONROD_21 = UniformMethodClass(
-    order=32,  # K21 polynomial exactness 31, global convergence rate 32
-    error_exponent=21,  # estimate dominated by G10, exactness 2n-1 = 19
+    references=("quadpack_netlib", "gonnet2012"),
+    degree=31,  # K21: 3n+1 with n = 10 (even); order (convergence rate) 32
+    error_exponent=21,  # estimate dominated by G10, degree 2n-1 = 19
     tableau=_build_gauss_kronrod_tableau(
         _GK21_XGK_HALF,
         _GK21_WGK_HALF,
@@ -167,13 +200,14 @@ _GAUSS_KRONROD_21 = UniformMethodClass(
 )
 
 
-# G3-K7 (Gauss-Kronrod 7-point). K7 polynomial exactness = 10.
-# G3 (odd n=3) has a center node — note wg_at_center below.
-# Source: Patterson 1968 Math. Comp. 22 #104 Table 1.
+# G3-K7 (Gauss-Kronrod 7-point). K7 degree = 3n+2 = 11 (n = 3, odd).
+# G3 (odd n=3) has a center node; note wg_at_center below.
+# Values agree with an 80-digit computation to all printed digits (see the
+# module docstring); Patterson 1968 could not be opened to compare.
 _GK7_XGK_HALF = [
     0.960491268708020283423507092629,
     0.774596669241483377035853079956,  # G3 node = sqrt(3/5)
-    0.434243749346802558002071502345,
+    0.434243749346802558002071502845,
     0.0,  # center, also a G3 node
 ]
 _GK7_WGK_HALF = [
@@ -189,8 +223,9 @@ _GK7_G_INDICES = [1]
 _GK7_WG_CENTER = 0.888888888888888888888888888889
 
 _GAUSS_KRONROD_7 = UniformMethodClass(
-    order=11,  # K7 polynomial exactness 10, global convergence rate 11
-    error_exponent=7,  # estimate dominated by G3, exactness 2n-1 = 5
+    references=("gonnet2012",),
+    degree=11,  # K7: 3n+2 with n = 3 (odd); order (convergence rate) 12
+    error_exponent=7,  # estimate dominated by G3, degree 2n-1 = 5
     tableau=_build_gauss_kronrod_tableau(
         _GK7_XGK_HALF,
         _GK7_WGK_HALF,
@@ -201,8 +236,10 @@ _GAUSS_KRONROD_7 = UniformMethodClass(
 )
 
 
-# G7-K15 (Gauss-Kronrod 15-point). K15 polynomial exactness = 22.
-# G7 (odd n=7) has a center node — note wg_at_center below.
+# G7-K15 (Gauss-Kronrod 15-point). K15 degree = 3n+2 = 23 (n = 7, odd).
+# G7 (odd n=7) has a center node; note wg_at_center below.
+# Digits from Netlib QUADPACK dqk15.f (xgk, wgk, wg; Fullerton 1981, 80-digit
+# arithmetic).
 _GK15_XGK_HALF = [
     0.991455371120812639206854697526329,
     0.949107912342758524526189684047851,  # G7 node
@@ -234,8 +271,9 @@ _GK15_G_INDICES = [1, 3, 5]
 _GK15_WG_CENTER = 0.417959183673469387755102040816327
 
 _GAUSS_KRONROD_15 = UniformMethodClass(
-    order=23,  # K15 polynomial exactness 22, global convergence rate 23
-    error_exponent=15,  # estimate dominated by G7, exactness 2n-1 = 13
+    references=("quadpack_netlib", "gonnet2012"),
+    degree=23,  # K15: 3n+2 with n = 7 (odd); order (convergence rate) 24
+    error_exponent=15,  # estimate dominated by G7, degree 2n-1 = 13
     tableau=_build_gauss_kronrod_tableau(
         _GK15_XGK_HALF,
         _GK15_WGK_HALF,
@@ -246,8 +284,10 @@ _GAUSS_KRONROD_15 = UniformMethodClass(
 )
 
 
-# G15-K31 (Gauss-Kronrod 31-point). K31 polynomial exactness = 46.
+# G15-K31 (Gauss-Kronrod 31-point). K31 degree = 3n+2 = 47 (n = 15, odd).
 # G15 (odd n=15) has a center node.
+# Digits from Netlib QUADPACK dqk31.f (xgk, wgk, wg; Fullerton 1981, 80-digit
+# arithmetic).
 _GK31_XGK_HALF = [
     0.998002298693397060285172840152271,
     0.987992518020485428489565718586613,  # G15 node
@@ -298,8 +338,9 @@ _GK31_G_INDICES = [1, 3, 5, 7, 9, 11, 13]
 _GK31_WG_CENTER = 0.202578241925561272880620199967519
 
 _GAUSS_KRONROD_31 = UniformMethodClass(
-    order=47,  # K31 polynomial exactness 46, global convergence rate 47
-    error_exponent=31,  # estimate dominated by G15, exactness 2n-1 = 29
+    references=("quadpack_netlib", "gonnet2012"),
+    degree=47,  # K31: 3n+2 with n = 15 (odd); order (convergence rate) 48
+    error_exponent=31,  # estimate dominated by G15, degree 2n-1 = 29
     tableau=_build_gauss_kronrod_tableau(
         _GK31_XGK_HALF,
         _GK31_WGK_HALF,

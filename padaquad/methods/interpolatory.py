@@ -1,19 +1,28 @@
 """
-Quadrature rules whose weights depend on the node positions.
+Methods of the variable-sampling solver, whose weights depend on the node positions.
 
-Unlike the fixed-table families (RK, Gauss-Kronrod, Clenshaw-Curtis),
-these rules accept arbitrary node placements within each panel and
-compute their weights from the actual positions with a weight function.
-Each is an instance of the generic ``VariableMethodClass``. They are the
-rules of the variable-sampling solver.
+The uniform methods (Runge-Kutta, Gauss-Kronrod, Clenshaw-Curtis) have fixed
+node fractions and fixed weights. The variable-sampling solver instead reuses
+integrand values when it splits a subinterval, so its nodes can sit anywhere
+inside a subinterval, and the weights are computed from where they are. Each
+method here is an instance of ``VariableMethodClass``.
 
-Variable-sampling registry (``INTERPOLATORY_METHODS``):
-  adaptive_heun:             the uniform ``_ADAPTIVE_HEUN`` object itself.
-      Its two nodes are the panel ends, so its weights cannot depend on
-      positions and one object serves both sampling modes.
-  interpolatory3_variable:   3 nodes, polynomial exactness 2 (degree 3
-      at a=1/2 — Simpson's rule reduction; Sanderse-Veldman weights
-      otherwise)
+The registry ``INTERPOLATORY_METHODS`` holds:
+
+- ``adaptive_heun``: the same object as the uniform ``adaptive_heun``. Its two
+  nodes are the ends of the subinterval, so its weights (the trapezoidal rule)
+  cannot depend on the node positions and one object serves both solvers.
+- ``interpolatory3_variable``: 3 nodes 0, a, 1 (as fractions of the
+  subinterval) with the interpolatory weights of Sanderse and Veldman 2019,
+  Eq. (119), Sec. 5.2, with their :math:`c_2` equal to a
+  :cite:p:`sanderse2019`. Degree 2 for general a; degree 3 at a = 1/2, where
+  the weights are Simpson's rule. The error estimate subtracts the trapezoidal
+  rule (degree 1); this pairing is padaquad's choice.
+
+References
+----------
+- Sanderse and Veldman 2019, Eq. (119), Sec. 5.2, p. 21 of arXiv:1809.06114v2
+  :cite:p:`sanderse2019`.
 """
 
 from __future__ import annotations
@@ -28,8 +37,10 @@ def _interpolatory3_weights(c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     """
     Sanderse-Veldman 3-node weights for normalized nodes [0, a, 1].
 
-    They are the interpolatory weights: the rule integrates 1, x and x^2
-    exactly on [0, 1], i.e. sum_i w_i x_i^k = 1/(k+1) for k = 0, 1, 2.
+    Sanderse and Veldman 2019, J. Comput. Phys. 384, Eq. (119), Sec. 5.2
+    (arXiv:1809.06114v2, p. 21), with their c2 = a. They are the
+    interpolatory weights: the method integrates 1, x and x^2 exactly on
+    [0, 1], i.e. sum_i w_i x_i^k = 1/(k+1) for k = 0, 1, 2. Derivation:
 
       1. k = 1 minus k = 2:  w_a (a - a^2) = 1/6  =>  w_a = 1/(6a(1-a))
       2. k = 1:              w_1 = 1/2 - a w_a    =>  w_1 = (2-3a)/(6(1-a))
@@ -37,14 +48,19 @@ def _interpolatory3_weights(c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
 
     At a = 1/2 this is Simpson's rule [1/6, 2/3, 1/6] (exact through
     degree 3). The error weights are b minus the trapezoidal rule
-    [1/2, 0, 1/2] on the end nodes (exact through degree 1), written out per
-    node so no constant tensor is built (or copied to the GPU) per call.
+    [1/2, 0, 1/2] on the end nodes (exact through degree 1; padaquad's
+    choice), written out per node so no constant tensor is built (or copied
+    to the GPU) per call.
 
-    Args:
-        c: Normalized node positions; the middle node is a = c[:, 1, 0].
-            Shape: [N, 3, T].
+    Parameters
+    ----------
+    c : torch.Tensor
+        Normalized node positions; the middle node is a = c[:, 1, 0].
+        Shape: [N, 3, T].
 
-    Returns:
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
         Tuple (b, b_error), each of shape [N, 3], in the dtype and on the
         device of ``c``.
     """
@@ -57,17 +73,19 @@ def _interpolatory3_weights(c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     return b, b_error
 
 
-# Interpolatory 3-node rule (exactness 2; 3 at a = 1/2), error estimate against
-# the trapezoidal rule (exact through degree 1).
+# Interpolatory 3-node method (degree 2; 3 at a = 1/2), weights from Sanderse and
+# Veldman 2019, Eq. (119); error estimate against the trapezoidal rule (degree 1,
+# padaquad's choice).
 _INTERPOLATORY_3 = VariableMethodClass(
-    order=3,
+    references=("sanderse2019",),
+    degree=2,
     error_exponent=3,
     c=torch.linspace(0.0, 1.0, 3, dtype=torch.float64),
     weight_function=_interpolatory3_weights,
 )
 
 
-# Registry of the variable-sampling solver, keyed by name: rules that are
+# Registry of the variable-sampling solver, keyed by name: methods that are
 # valid at the node positions that solver produces. Instances, cloned per
 # solver by ``_get_method``. ``adaptive_heun`` is the uniform heun object
 # (see the module docstring).

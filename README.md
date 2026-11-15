@@ -18,7 +18,7 @@ state-coupling.
 
 padaquad fills the gap: it is **adaptive quadrature**, not ODE
 solving, and it exploits the lack of state coupling to **evaluate many
-panels in parallel** on GPU. With full autograd through the integration
+subintervals in parallel** on GPU. With full autograd through the integration
 loop, it is suitable for:
 
 - training a learnable function $\phi_\theta(t)$ whose loss is a path
@@ -27,9 +27,12 @@ loop, it is suitable for:
   through the integral (option A) or by integrating $\nabla_\theta f$
   directly (option B);
 - one-shot definite integrals where you want batched parallel evaluation
-  of a smooth integrand — often two orders of magnitude faster than
-  sequential ODE-style integrators on the same problem.
+  of a smooth integrand; the
+  [Performance page](https://khegazy.github.io/padaquad/performance.html)
+  compares it with torchdiffeq, with the measurements and how to reproduce
+  them.
 
+<!-- include-start: what-for -->
 ## What this is for
 
 - ✅ Compute $\int_{a}^{b} f(t)\,dt$ where $f$ is given as a callable.
@@ -44,7 +47,7 @@ loop, it is suitable for:
 ## What this is **not** for
 
 - ❌ True ODE integration $\dot y = f(t, y)$ with state coupling — the
-  parallel trick relies on independence between panels. For state-
+  parallel trick relies on independence between subintervals. For state-
   coupled problems use [torchdiffeq](https://github.com/rtqichen/torchdiffeq),
   [torchode](https://github.com/martenlienen/torchode), or
   [diffrax](https://github.com/patrick-kidger/diffrax).
@@ -53,7 +56,9 @@ loop, it is suitable for:
 - ❌ Long-time symplectic / Hamiltonian integration. Use a dedicated
   geometric integrator.
 
+<!-- include-end: what-for -->
 ## Installation
+<!-- include-start: install -->
 
 ```bash
 pip install padaquad
@@ -69,7 +74,7 @@ pip install -e .
 
 Runtime dependencies: Python 3.11+, PyTorch, NumPy, SciPy, einops, psutil.
 
-### For developers
+**For developers:**
 
 ```bash
 pip install -e ".[dev]"
@@ -79,7 +84,9 @@ pre-commit install
 The dev extras add pytest, ruff, mypy, pre-commit, typos, and torchdiffeq
 (used by the speed-test benchmark only).
 
+<!-- include-end: install -->
 ## Quick start
+<!-- include-start: quickstart -->
 
 ```python
 import math
@@ -87,24 +94,25 @@ import torch
 from padaquad import integrate
 
 result = integrate(
-    f=lambda t: torch.sin(t),
-    method="gk21",  # default; Gauss-Kronrod 21-point pair (G10-K21)
-    mesh_init=torch.tensor([0.0]),
-    mesh_final=torch.tensor([math.pi]),
+    torch.sin,
+    mesh_init=torch.tensor([0.0], dtype=torch.float64),
+    mesh_final=torch.tensor([math.pi], dtype=torch.float64),
 )
-print(result.integral)  # tensor([2.0000])
-print(result.integral_error)  # estimated absolute error
+print(round(float(result.integral), 6))  # 2.0
+print(float(result.integral_error))  # estimated error: signed sum over subintervals
 print(result.converged)  # True
 ```
 
-The integrand `f` takes a tensor `t` of shape `[N, T]` (batched time
-points) and returns a tensor of shape `[N, D]` (batched output values).
-Because `f` depends only on `t`, the solver can evaluate many panels'
-quadrature points simultaneously on GPU.
+The integrand `f` takes a tensor `t` of shape `[N, T]` (a batch of points
+of the integration variable) and returns a tensor of shape `[N, D]` (its
+values there). Because `f` depends only on `t`, the solver can evaluate
+the nodes of many subintervals in one call, on a CPU or a GPU.
 
+<!-- include-end: quickstart -->
 ## Differentiable integration
+<!-- include-start: autodiff -->
 
-Every step of the integration is differentiable, so you can take
+Every operation of the integration is differentiable, so you can take
 gradients of the result with respect to anything the integrand depends
 on. There are two equivalent ways to compute
 $\nabla_\theta \int f_\theta(t)\,dt$:
@@ -115,7 +123,7 @@ from padaquad import adaptive_quadrature, steps
 
 theta = torch.tensor(1.7, dtype=torch.float64, requires_grad=True)
 mesh_init = torch.tensor([0.0])
-mesh_final = torch.tensor([torch.pi.item()])
+mesh_final = torch.tensor([torch.pi])
 
 
 # (A) Backprop through the integral.
@@ -146,9 +154,10 @@ consistency is verified in `tests/test_autodiff_consistency.py`.
 **Memory-bounded gradients.** Setting `take_gradient=True` makes the
 solver call `loss.backward()` after each accepted batch instead of
 holding the full autograd graph until the end. This is essential when
-the number of panel evaluations is large enough that the graph would
+the number of integrand evaluations is large enough that the graph would
 otherwise exceed GPU memory.
 
+<!-- include-end: autodiff -->
 ## Adaptive mesh and warm-starting
 
 Each call returns a `result.mesh_optimal` — the post-refinement,
@@ -156,8 +165,10 @@ post-pruning mesh that the integration converged to. This mesh is the
 ideal starting point for a *similar* integrand on the next call: when
 training a model, the integrand changes only slightly between iterations,
 so re-running adaptive refinement from a coarse random mesh wastes
-work.
+work. The sketch below assumes your own integrand `f_theta`, bounds and
+optimizer.
 
+<!-- not-tested -->
 ```python
 solver = adaptive_quadrature(method="gk21", atol=1e-8, rtol=1e-8)
 
@@ -180,203 +191,155 @@ for epoch in range(N_epochs):
 
 ## Available methods
 
-The library ships thirteen quadrature rules across three families:
+The library ships thirteen quadrature methods in three families:
+Gauss-Kronrod (`gk7`, `gk15`, `gk21`, `gk31`; `gk21` is the default),
+Clenshaw-Curtis (`cc5`, `cc9`, `cc17`, `cc33`, `cc65`) and Runge-Kutta
+(`adaptive_heun`, `fehlberg2`, `bosh3`, `dopri5`). The
+[methods page](https://khegazy.github.io/padaquad/user_guide/methods.html)
+gives each one's degree, order and sources, generated from the code.
+`fehlberg2`'s error estimate ignores curvature and can be far too small (see
+`examples/verification/integral_accuracy.py`).
 
-| Family | Methods | Polynomial exactness | Notes |
-|---|---|---|---|
-| Gauss-Kronrod | `gk7`, `gk15`, `gk21`, `gk31` | 10 / 22 / 31 / 46 | Embedded G_n / K_(2n+1) pair, the canonical adaptive-quadrature workhorse since 1965 (Laurie 1997). `gk21` is the default. `gk7` (G3-K7, 9 evaluation slots) fills the low-node end. |
-| Clenshaw-Curtis | `cc5`, `cc9`, `cc17`, `cc33`, `cc65` | 4 / 8 / 16 / 32 / 64 | Chebyshev nodes, **nested** by doubling. Excellent on analytic integrands (Trefethen 2008). |
-| Runge-Kutta | `adaptive_heun`, `fehlberg2`, `bosh3`, `dopri5` | 1 / 1 / 2 / 4 | Embedded RK pairs from the ODE-solver literature. |
-
-Plus two variable-node methods (`adaptive_heun` and
-`interpolatory3_variable`) that re-weight existing evaluations on mesh
-splits — useful when integrand evaluations are expensive.
+Plus two methods for the variable-sampling solver (`adaptive_heun` and
+`interpolatory3_variable`), whose weights are computed from the actual node
+positions. The integration loop currently places every subinterval's nodes at
+the method's standard positions and evaluates fresh nodes in both halves of a
+split, as the uniform solver does, so `interpolatory3_variable` always has
+its middle node at the center, where it is Simpson's rule.
 
 For smooth integrands at moderate-to-high accuracy, prefer `gk21` or
-`cc33`. The low-node methods (`gk7`, `cc5`, `cc9`) fill the gap between
-the RK rules and the headline `gk15`/`cc17`: useful when the adaptive
-controller refines aggressively and a high-node rule would waste
-evaluations on smooth regions. The RK methods are kept for
-backwards-compatibility and as baselines.
+`cc33`. The low-node methods (`gk7`, `cc5`, `cc9`) waste fewer evaluations on
+smooth regions while the mesh is refined around a rough feature. The
+Runge-Kutta methods are kept as baselines.
+
+A method's *degree* is the highest polynomial degree it integrates exactly;
+`UNIFORM_METHODS["gk21"].degree` gives it, and `order` is `degree + 1`.
+
+### Check the accuracy yourself
+
+Two scripts in [`examples/verification/`](examples/verification/) check the
+claims above on your machine, and the test suite runs them:
+
+- `polynomial_degree.py` measures every method's degree from its stored nodes
+  and weights, and checks that its error estimate has the strength the solver
+  assumes. You can do the same for one method with
+  `UNIFORM_METHODS["gk21"].measure_degree()`.
+- `integral_accuracy.py` integrates functions with known integrals using every
+  method at several tolerances, and checks each actual error against what the
+  tolerance allows.
 
 ## Use cases
+<!-- include-start: use-cases -->
 
-### Path integrals over learned functions
-
-Compute $\int f(t, \phi_\theta(t))\,dt$ where $\phi_\theta$ is a neural
+**Path integrals over learned functions.** Compute $\int f(t, \phi_\theta(t))\,dt$ where $\phi_\theta$ is a neural
 network parameterizing a path. Backprop through the integral updates
 $\theta$ to optimize the integrand against any objective.
 
-### PINN-style residual minimization
-
-Solve a differential equation by parameterizing the solution as
+**Physics-informed residual minimization.** Solve a differential equation by parameterizing the solution as
 $y_\theta(t)$, then minimizing
 $\int |\mathcal{L}\,y_\theta(t)|^2\,dt$ where $\mathcal{L}$ is the
 differential operator. The collocation residual at every $t$ is just a
 function of $t$, so it fits the quadrature framework exactly.
 
-### Expectation under a base measure
-
-Compute $\int f(t)\,p(t)\,dt$ where $p$ is a known density and $f$ is a
+**Expectation under a base measure.** Compute $\int f(t)\,p(t)\,dt$ where $p$ is a known density and $f$ is a
 quantity of interest. The integrand is the product `f(t) * p(t)`.
 
 The library does not bundle these as application APIs — they are simply
 uses of `integrate(f, ...)` with the right `f`.
 
+<!-- include-end: use-cases -->
 ## API reference
 
-### Free function
+The full reference, generated from the docstrings, is on the documentation
+site, <https://khegazy.github.io/padaquad/>; `help(padaquad.integrate)` shows
+the same text. In short:
 
-```text
-padaquad.integrate(
-    f, method="gk21", sampling="uniform",
-    atol=1e-5, rtol=1e-5,
-    mesh=None, mesh_init=None, mesh_final=None,
-    y0=None, remove_cut=0.1, total_mem_usage=0.9,
-    use_absolute_error_ratio=True, device=None,
-    **kwargs,
-) -> IntegrationResult
-```
-
-One-shot integration. Constructs an `AdaptiveQuadrature` and calls
-`integrate()` on it. For repeated calls (e.g. training loops),
-instantiate the class directly via `adaptive_quadrature(...)` so
-warm-start cache state persists across iterations. `device` accepts
-`"cpu"`, `"cuda"`, an indexed `"cuda:N"`, or a `torch.device`; `None`
-auto-detects.
-
-### Class API
-
-```text
-padaquad.adaptive_quadrature(
-    sampling_type, method="gk21", atol=1e-5, rtol=1e-5,
-    mesh_init=None, mesh_final=None, f=None,
-    remove_cut=0.1, max_batch=None, total_mem_usage=0.9,
-    max_adaptive_splits=None, use_absolute_error_ratio=True,
-    device=None, **kwargs,
-) -> UniformAdaptiveQuadrature | VariableAdaptiveQuadrature
-
-solver.integrate(
-    f=None, y0=None,
-    mesh=None, mesh_init=None, mesh_final=None,
-    take_gradient=True,
-    same_f=False, random_initial_mesh=True,
-    loss_fxn=None, total_mem_usage=None, max_batch=None,
-    N_init_steps=13, f_args=(),
-) -> IntegrationResult
-```
-
-### `IntegrationResult` fields
-
-`IntegrationResult` is a keyword-only dataclass. Every field is a tensor
-except where noted.
-
-- `integral` — the computed integral, shape `[D]`.
-- `integral_error` — estimated total error, shape `[D]`.
-- `mesh_optimal` — refined-and-pruned barriers from this run, shape
-  `[M, T]`. Pass back via `mesh=...` for explicit warm-start. Always a
-  tensor on a returned result; `None` in the per-batch result that
-  `loss_fxn` receives.
-- `mesh_init`, `mesh_final` — bounds used.
-- `nodes` — quadrature points, flattened across steps with shared step
-  boundaries deduplicated, shape `[P, T]`.
-- `h` — per-step widths, shape `[N, T]`.
-- `y` — integrand evaluations at `nodes`, shape `[P, D]`.
-- `tracked_variables` — extra outputs of the integrand at `nodes`, a tuple
-  of tensors, or `None` when the integrand returns none.
-- `mesh_quadratures`, `mesh_quadrature_errors`, `error_ratios` — per-step diagnostics.
-- `loss`, `gradient_taken` (`bool`), `y0` — training-loop diagnostics.
-- `converged: bool` — `True` when every accepted step meets the tolerance
-  judged against the final integral (in cumulative mode, the final running
-  integral through the step). Usually `False` when `max_adaptive_splits`
-  stopped the refinement of a failing step; `False` when a step's error
-  ratio is NaN/Inf, or when a step accepted against the running integral fails against the
-  final one (with `take_gradient=True` accepted steps are not re-checked).
-  A warning reporting the size of the error is logged when `False`.
-- `n_start_steps`, `n_start_steps_split` (`int`) — steps in the starting
-  mesh, and how many of them were split at least once;
-  `percent_start_steps_split` (property) is the second as a percentage of
-  the first. Splits made to build `mesh_optimal` are not counted.
-- `max_split_depth` (`int`) — the largest number of times any one step was
-  halved.
-
-The per-batch result that `loss_fxn` receives covers only that batch's
-accepted steps: `integral` is their contribution without `y0`, `y0` is
-zero, `mesh_optimal`, `loss`, `converged` and the split counts are `None`,
-and `nodes`, `y` and `tracked_variables` keep one row per step
-(`[N, C, T]`, `[N, C, D]`).
+- `integrate(f, method, sampling, **options)` computes one integral. Each
+  keyword option goes to the solver's `integrate` call if it is one of that
+  call's arguments (`mesh_init`, `mesh_final`, `mesh`, `y0`, `take_gradient`,
+  `f_args`, `max_batch`, ...), and to the solver constructor otherwise
+  (`atol`, `rtol`, `remove_cut`, `device`, ...).
+- `adaptive_quadrature(sampling_type, method, **options)` builds a solver to
+  reuse across calls, for example to warm-start with `same_f=True`. Every
+  constructor option is keyword-only.
+- Both return an `IntegrationResult`: the integral, its estimated error (a
+  signed sum over subintervals), the mesh, and diagnostics such as
+  `converged`, `mesh_optimal` and the split statistics.
 
 ## How it works
+<!-- include-start: how-it-works -->
 
-1. **Initial mesh.** When `mesh` is not given, the integration domain
-   $[a, b]$ is divided into ~$\sqrt{N_\text{init}}$ top-level segments
-   each subdivided into ~$\sqrt{N_\text{init}}+1$ sub-barriers; the
-   total mesh has ~$N_\text{init}$ barriers (default 13). Sub-barrier
-   placement is randomized by default — uniform spacing accidentally
-   aliases with periodic / polynomial-extremum integrands and the
-   adaptive controller cannot recover from that. (For deterministic
-   reproducibility, call `torch.manual_seed` before `integrate()`.)
+1. **Starting mesh.** When no `mesh` is given, $[a, b]$ is cut into a few
+   equal pieces, each split again at random points (`N_init_steps` sets the
+   size). The points are random because evenly spaced subintervals can line up
+   with the features of a periodic integrand, so that every error estimate
+   misses them. Call `torch.manual_seed` first for results that repeat
+   exactly.
 
-2. **Parallel batched evaluation.** All quadrature points across a
-   batch of panels are flattened into one tensor and evaluated in a
-   single forward pass of the integrand. Batch size is chosen to fit
-   a fraction `total_mem_usage` of GPU memory after a small
-   benchmarking run that measures the integrand's memory footprint.
+2. **Batched evaluation.** The nodes of a batch of subintervals are stacked
+   into one tensor and the integrand is called once on all of them. Unless
+   `max_batch` is given, the batch size is set from a short measurement of how
+   much memory one evaluation takes, so that batches fill the device memory
+   until a fraction `1 - total_mem_usage` of the total remains free.
 
-3. **Per-step error estimate.** Each method computes both a primary
-   integral and an embedded lower-order estimate; their difference is
-   the per-step error. The error ratio
-   $\text{step\\_error} / \max(\text{atol}, \text{rtol} \cdot |I|)$
-   (with $\text{atol} + \text{rtol} \cdot |I_d|$ per output element for
-   `error_norm="failure_fraction"`) controls acceptance: ratios $< 1$
-   accept; ratios $\geq 1$ reject and split the step at its midpoint.
+3. **Error estimate per subinterval.** Each method computes the integral of a
+   subinterval twice: with its own weights and with a lower-degree method on
+   the same nodes. The difference $e$ is the error estimate. The error ratio
+   $|e| / \max(\text{atol}, \text{rtol} \cdot |I|)$, where $I$ is the
+   integral (per output element, $|e_d| / (\text{atol} + \text{rtol} \cdot
+   |I_d|)$ with `error_norm="failure_fraction"`), decides: below 1 the
+   subinterval is accepted, otherwise it is split at its midpoint.
 
-4. **Adaptive refinement.** The solver alternates batched evaluation
-   with splitting (high-error steps subdivide) until every step's ratio
-   is below 1.
+4. **Refinement.** Batches of evaluation and splitting alternate until every
+   subinterval is accepted, or until `max_adaptive_splits` stops the
+   splitting (then `converged` is usually `False`).
 
-5. **Optimal mesh.** After convergence, a final pruning + refinement
-   pass produces `mesh_optimal`: consecutive low-error pairs merge and
-   high-error steps split. A pair merges only when the merged step's
-   predicted error ratio is below `remove_cut`; merging two steps of
-   width $h$ multiplies the summed error by about $2^{k-1}$, where the
-   method's error estimate scales as $h^k$. This is what
-   `same_f=True` starts from on the next call. Each call merges
-   at most one level, so an over-resolved stored mesh shrinks over
-   repeated calls. A call that did not converge (for example under
-   `max_adaptive_splits`) stores its `mesh_optimal` too, which splits the
-   failing steps, so repeated `same_f=True` calls refine further. (In
-   cumulative mode a failing step can instead be merged with a right
-   neighbour whose running integral, and so tolerance, is much larger.)
+5. **Optimal mesh.** After convergence, pairs of neighbouring subintervals with
+   a small combined error are merged into `mesh_optimal`, which `same_f=True`
+   starts from on the next call; `remove_cut` sets how small the merged error
+   must be.
 
+<!-- include-end: how-it-works -->
 ## Comparisons
+<!-- include-start: comparisons -->
 
-| Library | Adaptive | Differentiable | Parallel | Best for |
+| Library | Adaptive subdivision | Differentiable | Parallel | Best for |
 |---|---|---|---|---|
 | `scipy.integrate.quad` | ✓ | ✗ | ✗ | classical one-shot smooth quadrature |
-| `torchquad` | ✗ | ✓ | ✓ | uniform-grid Monte-Carlo / Trapezoidal |
-| `torchdiffeq` | ✓ | ✓ | ✗ | true state-coupled ODEs $\dot y = f(t, y)$ |
-| **padaquad** | ✓ | ✓ | ✓ | path integrals, learned-integrand integration, PINN-style residuals |
+| `torchquad` | ✗ | ✓ | ✓ | fixed-grid methods and Monte Carlo (including VEGAS), also in several dimensions |
+| `torchdiffeq` | adaptive step size | ✓ | ✗ | true state-coupled ODEs $\dot y = f(t, y)$ |
+| **padaquad** | ✓ | ✓ | ✓ | path integrals, learned-integrand integration, physics-informed residual losses |
 
-For one-shot scalar quadrature with no autograd, `scipy.integrate.quad`
-is fine. The library's value is when the integrand is a learnable
+torchquad's README (commit fc6f9cd, 2026-10-28) states that it does not
+implement adaptive subdivision. For one-shot scalar quadrature with no
+autograd, `scipy.integrate.quad` is fine. The library's value is when the integrand is a learnable
 PyTorch function and many evaluations are needed.
 
+<!-- include-end: comparisons -->
 ## References
 
-- Piessens, de Doncker-Kapenga, Überhuber, Kahaner. **QUADPACK: A
-  subroutine package for automatic integration**. Springer, 1983.
-- Laurie. **Calculation of Gauss-Kronrod quadrature rules**. *Math.
-  Comp.* 66 (1997), 1133-1145.
-- Trefethen. **Is Gauss quadrature better than Clenshaw-Curtis?**
-  *SIAM Review* 50:1 (2008), 67-87.
-- Sanderse and Veldman. **Constraint-consistent Runge-Kutta methods
-  for one-dimensional incompressible multiphase flow**. *J. Comput.
-  Phys.* 384 (2019).
-- Chen, Rubanova, Bettencourt, Duvenaud. **Neural Ordinary Differential
-  Equations**. *NeurIPS* 2018. (For comparison; this library is not an
-  ODE solver but is related.)
+Generated from `docs/references.bib`, which lists only sources that were
+opened and checked (`python docs/_ext/readme_references.py` rewrites this
+list).
+
+<!-- references-start -->
+- Chen, Ricky T. Q., Rubanova, Yulia, Bettencourt, Jesse, Duvenaud, David K. (2018). **Neural Ordinary Differential Equations.** *Advances in Neural Information Processing Systems 31 (NeurIPS 2018)*. <https://papers.nips.cc/paper_files/paper/2018/hash/69386f6bb1dfed68692a24c8686939b9-Abstract.html>
+- NIST (2026). **NIST Digital Library of Mathematical Functions.** *Online, accessed 2026-11-12*. <https://dlmf.nist.gov/18.9>
+- Fehlberg, Erwin (1969). **Low-Order Classical Runge-Kutta Formulas with Stepsize Control and Their Application to Some Heat Transfer Problems.** *NASA Marshall Space Flight Center, TR R-315*. <https://ntrs.nasa.gov/citations/19690021375>
+- Gonnet, Pedro (2012). **A Review of Error Estimation in Adaptive Quadrature.** *ACM Computing Surveys* 44(4), 22:1-22:36. arXiv:1003.4629. [doi:10.1145/2333112.2333117](https://doi.org/10.1145/2333112.2333117)
+- Piessens, Robert, de Doncker, Elise (1983). **QUADPACK routines dqk15, dqk21, dqk31 (double-precision Gauss-Kronrod quadrature).** *Netlib*. <https://netlib.org/quadpack/>
+- Sanderse, B., Veldman, A. E. P. (2019). **Constraint-Consistent Runge-Kutta Methods for One-Dimensional Incompressible Multiphase Flow.** *Journal of Computational Physics* 384, 170-199. arXiv:1809.06114. [doi:10.1016/j.jcp.2019.02.001](https://doi.org/10.1016/j.jcp.2019.02.001)
+- The SciPy community (2026). **SciPy source file scipy/integrate/_quad_vec.py and scipy/integrate/_ivp/rk.py.** *GitHub, tags v1.18.1 (tag object c2df8ace) and v1.17.0 (tag object e2f9e521)*. <https://github.com/scipy/scipy/blob/v1.18.1/scipy/integrate/_quad_vec.py>
+- Chen, Ricky T. Q. (2018). **torchdiffeq.** <https://github.com/rtqichen/torchdiffeq>
+- esa/torchquad contributors (2026). **torchquad.** <https://github.com/esa/torchquad>
+- Trefethen, Lloyd N. (2008). **Is Gauss Quadrature Better than Clenshaw-Curtis?** *SIAM Review* 50(1), 67-87. [doi:10.1137/060659831](https://doi.org/10.1137/060659831)
+<!-- references-end -->
+
+## Citing
+
+To cite padaquad, use [`CITATION.cff`](CITATION.cff) (GitHub shows it under
+"Cite this repository").
 
 ## License
 
-CC-BY-4.0. See `LICENSE` for details.
+CC-BY-4.0. See [`LICENSE.md`](LICENSE.md) for details.

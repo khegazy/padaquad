@@ -1281,7 +1281,9 @@ def test_messages_when_measuring(caplog, monkeypatch):
         solver.integrate(slow_sin, mesh_init=T_INIT, mesh_final=T_FINAL)
     text = caplog.text
     assert "PadaQuad is measuring how much memory" in text
-    assert "To skip it, pass max_batch" in text
+    assert "may result in an underutilization of your hardware" in text
+    assert "devices_memory.html#ug-memory-limitations" in text
+    assert "All of this is avoided by passing max_batch" in text
     assert "same_f=True" in text
     assert "Memory measurement finished in" in text
     assert "bytes per evaluation" in text

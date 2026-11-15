@@ -425,8 +425,10 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
   reused memory `_oom_max_batch` is also capped at max(largest test N, C).
   The benchmark is a heuristic for the common case (memory linear in N, or
   at most N²); its known limitations, with measured and simulated numbers,
-  are listed in the Notes of `_setup_memory_checks` (read them before
-  changing it).
+  are listed once, in `docs/user_guide/devices_memory.md` (section
+  "Limitations of the memory benchmark", label `ug-memory-limitations`;
+  the start warning links to it). Read them before changing the benchmark,
+  and update them when a change fixes or adds one.
   The batch loop's out-of-memory retry shrinks the batch that failed, not
   `_oom_max_batch` (which can be far above it).
 - Unless `max_batch` or `same_f=True` fixes it, the batch size is

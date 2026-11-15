@@ -321,9 +321,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # a + b B + d B^2 in GB; set by each _setup_memory_checks run and used
         # by get_max_batch to size batches from live free memory.
         self.f_mem_coeffs = None
-        # Cap discovered after an OOM during a take_gradient=False evaluation;
-        # None until one occurs. Cleared at the start of every integrate() call
-        # (same_f=True carries it over through previous_max_batch).
+        # Cap discovered after an OOM during a take_gradient=False evaluation,
+        # or set by the memory benchmark (an OOM there, or CPU readings that
+        # grew faster than its fit allows); None until one occurs. Cleared at
+        # the start of every integrate() call (same_f=True carries it over
+        # through previous_max_batch).
         self._oom_max_batch = None
 
         # Construction-time defaults; each integrate() call falls back to these

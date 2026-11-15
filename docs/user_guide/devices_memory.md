@@ -34,9 +34,17 @@ memory minus `(1 - total_mem_usage)` times the total memory. With
 `take_gradient=True` the fitted memory is multiplied by a safety factor, a
 margin for the memory that backpropagation needs. When a call uses more than
 three times the memory that growth like N² allows from the previous one, the
-benchmark raises an error asking for `max_batch`; faster growth that it does
-not catch (hidden by a large fixed cost, or only slightly faster than N²) is
-underestimated, so pass `max_batch` for such an integrand.
+benchmark stops. On a GPU it raises an error asking for `max_batch`. On a CPU
+a memory reading misses the memory the integrand reuses from memory the
+process already holds, so an earlier reading that was too low looks the same
+as growth faster than N²; there the benchmark logs a warning and caps the
+batch size at the number of points of that call, the largest call that ran,
+until the next `integrate` call. Faster growth that the benchmark does not
+catch (hidden by a large fixed cost, or only slightly faster than N²) is
+underestimated, so pass `max_batch` for such an integrand. On a CPU, readings
+can be far too low in a process that has evaluated the integrand before
+(measured on macOS); pass `max_batch` when the memory of a batch matters
+there.
 
 The benchmark takes a few seconds and logs warnings, and it runs on every call
 without `max_batch`. To run it once, integrate once without `max_batch`, read

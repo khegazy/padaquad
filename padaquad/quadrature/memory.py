@@ -192,7 +192,9 @@ class _MemoryManagement:
         and the number of evaluations that fit in the memory free now, with the
         memory per call the last benchmark measured. After an out-of-memory
         error, the result is capped at the reduced batch size chosen then,
-        until the next ``integrate`` call starts.
+        until the next ``integrate`` call starts; so is it after a benchmark
+        on a CPU whose readings grew faster than its fit allows (capped at
+        the largest call that ran).
 
         Passing the result as ``max_batch`` to a later call or solver skips
         the slow benchmark. See :ref:`ug-memory`.
@@ -359,16 +361,27 @@ class _MemoryManagement:
         4. N_next < 2 N: the next call would not fit in memory, or would take
            longer than 1 s, and a call barely larger than this one adds little.
 
-        It raises instead when the memory grows faster than N^2: when a call
-        uses more than 3 times the memory that growth like N^2 allows from the
-        previous call, M > 3 (N / N_prev)^2 (M_prev + E) (the factor 3 absorbs
-        readings off by up to a factor 2), counted only when the
-        previous reading is at least 1 MiB (smaller readings are mostly noise:
-        they read 0 when f reuses memory the process holds). Such
-        growth is caught only once it shows in two readings, so a call that
-        first shows it can already exceed the memory budget, and growth that
-        a large fixed cost hides, or growth only slightly faster than N^2, is
-        not caught.
+        The search also ends when a call uses more than 3 times the memory
+        that growth like N^2 allows from the previous call,
+        M > 3 (N / N_prev)^2 (M_prev + E) (the factor 3 absorbs readings off
+        by up to a factor 2), counted only when the previous reading is at
+        least 1 MiB (smaller readings are mostly noise). What happens then
+        depends on the reader (``_peak_memory_reader``):
+
+        - On a GPU the readings count every allocation, so the memory grows
+          faster than N^2, which the fit cannot follow: ``RuntimeError``.
+        - On a CPU a reading misses the memory f reuses from memory the
+          process already holds, so an earlier reading that was too low looks
+          the same as growth faster than N^2 (seen with an integrand whose
+          memory grows exactly like N^2, in a process that had run it
+          before). The fit cannot be trusted beyond N in either case, and the
+          call at N ran, so the batch size is capped at N for the rest of
+          this ``integrate`` call (``_oom_max_batch``) and a warning says so.
+
+        Such growth is caught only once it shows in two readings, so a call
+        that first shows it can already exceed the memory budget, and growth
+        that a large fixed cost hides, or growth only slightly faster than
+        N^2, is not caught.
 
         The stored fit is m(B) = s * ((a + E) + b B + d B^2), the memory of a
         batch of B points, with a, b, d fitted to every reading. s is
@@ -407,8 +420,9 @@ class _MemoryManagement:
         torch.OutOfMemoryError
             A single evaluation of f does not fit.
         RuntimeError
-            The memory grows faster than N^2, or the measurement failed for
-            another reason; pass ``max_batch`` to skip it.
+            The memory grows faster than N^2 (GPU readings only), or the
+            measurement failed for another reason; pass ``max_batch`` to skip
+            it.
         """
         logger.warning(
             "PadaQuad is measuring how much memory one integrand (f) evaluation "
@@ -442,15 +456,17 @@ class _MemoryManagement:
         # 1.5x make N^2 growth look 3 times faster; N^2.5 over a 10x step
         # (316x instead of 100x) is still caught.
         growth_tolerance = 3.0
-        # How the memory of one call is read on this device, and E (GB), the
-        # most that reading can be too low.
-        reset_peak, read_memory, E = self._peak_memory_reader()
+        # How the memory of one call is read on this device; E (GB), the most
+        # the kernel's counters can make that reading too low; and whether the
+        # reading misses memory that f reuses (every CPU reading does).
+        reset_peak, read_memory, E, misses_reuse = self._peak_memory_reader()
 
         # Search state: the points, memory (GB) and wall time (s) of every call
         # so far. c is the latest cost per point, s * (M + E) / N, and c_prev,
         # c_prev2 those of the two calls before; they serve only the
         # convergence stop. The stop that ends the search sets reason, which
-        # the end message reports; too_fast holds the reason to raise instead.
+        # the end message reports; too_fast describes a call that used more
+        # memory than growth like N^2 allows (raised or warned after the loop).
         Ns: list[int] = []
         Ms: list[float] = []
         ts: list[float] = []
@@ -501,13 +517,8 @@ class _MemoryManagement:
                         f"bytes at {N} points, more than {growth_tolerance:g} times the "
                         f"{bound * _GB:.3g} bytes that growth like N^2 allows "
                         f"from the {Ms[-2] * _GB:.3g} bytes at {Ns[-2]} points. "
-                        "padaquad fits the memory of f up to N^2, so it cannot "
-                        "choose a batch size that fits for this integrand. "
-                        "Specify max_batch (to integrate() or the solver): the "
-                        "largest number of points per call of f that fits in "
-                        "memory."
                     )
-                    reason = "the memory grows faster than N^2"
+                    reason = "a call used more memory than growth like N^2 allows"
                 # Stops, checked in order.
                 elif (
                     len(Ns) >= 3
@@ -572,9 +583,31 @@ class _MemoryManagement:
 
         self._release_memory()
         if too_fast is not None:
-            # Raised here, outside the try block, so it is not reported as a
-            # failed measurement.
-            raise RuntimeError(too_fast)
+            specify = (
+                "Specify max_batch (to integrate() or the solver): the largest "
+                "number of points per call of f that fits in memory."
+            )
+            if not misses_reuse:
+                # Raised here, outside the try block, so it is not reported as
+                # a failed measurement.
+                raise RuntimeError(
+                    f"{too_fast}padaquad fits the memory of f up to N^2, so it "
+                    "cannot choose a batch size that fits for this integrand. "
+                    f"{specify}"
+                )
+            # An earlier reading that missed reused memory, followed by one
+            # that did not, looks the same as growth faster than N^2. Either
+            # way the fit says nothing reliable beyond N, and the call at N
+            # ran: cap the batch there, as after an out-of-memory error.
+            self._oom_max_batch = N
+            logger.warning(
+                f"{too_fast}Either the memory of f grows faster than N^2, "
+                "which padaquad's fit cannot follow, or the earlier reading "
+                "was too low: on a CPU a reading misses the memory f reuses "
+                "from memory the process already holds. max_batch is capped "
+                f"at {N}, the largest call that ran, for this integrate() "
+                f"call. {specify}"
+            )
 
         # The memory of one call of B points during the integration:
         # m(B) = s * ((a + E) + b B + d B^2), fitted to every
@@ -583,8 +616,9 @@ class _MemoryManagement:
         self.f_mem_coeffs = (s * (a + E), s * b, s * d)
 
         # The estimate depends on take_gradient: the fit includes the factor s
-        # only when it is True. get_max_batch applies the cap an out-of-memory
-        # error above set, so the message reports the batch actually used.
+        # only when it is True. get_max_batch applies the cap set above (an
+        # out-of-memory error, or a call that used more memory than growth like
+        # N^2 allows), so the message reports the batch actually used.
         usable = self._get_usable_memory(total_mem_usage)
         max_batch = self.get_max_batch(
             total_mem_usage, self._get_max_f_evals(total_mem_usage)
@@ -594,8 +628,11 @@ class _MemoryManagement:
         quadratic = ""
         # Name the N^2 growth only when it matters at the batch size: every
         # fit of a linear f leaves a tiny d > 0. Strict, so a batch of 0 with
-        # no fixed cost (a = 0) is not flagged.
-        if d * max_batch**2 > 0.1 * (a + b * max_batch + d * max_batch**2):
+        # no fixed cost (a = 0) is not flagged. Not after the too_fast cap:
+        # its warning already says that the fit does not describe f.
+        if too_fast is None and d * max_batch**2 > 0.1 * (
+            a + b * max_batch + d * max_batch**2
+        ):
             quadratic = (
                 " The memory grows like max_batch^2, so a batch larger than "
                 "this does not fit; on a CPU, a batch that does not fit can kill "
@@ -613,7 +650,7 @@ class _MemoryManagement:
 
     def _peak_memory_reader(
         self,
-    ) -> tuple[Callable[[], None], Callable[[], int], float]:
+    ) -> tuple[Callable[[], None], Callable[[], int], float, bool]:
         """
         Choose how the memory one test call uses (M) is measured on this device.
 
@@ -644,12 +681,22 @@ class _MemoryManagement:
           reading). Memory that f frees before returning, such as the
           intermediates of a Jacobian, is missed, so c can be too low.
 
+        Both CPU methods count resident memory, so they also miss memory that
+        f allocates inside pages the process already holds (freed earlier and
+        kept by the allocator): M is then too low by up to all of it, which E
+        does not cover. A popcornn-like integrand (per-point gradients, about
+        270 bytes N^2) that uses 255 MiB at N = 1000 in a fresh process read
+        51 MiB there in the third benchmark run in one process, and 0 MiB in
+        another run (macOS).
+
         Returns
         -------
-        tuple[Callable[[], None], Callable[[], int], float]
+        tuple[Callable[[], None], Callable[[], int], float, bool]
             The functions ``reset`` (starts a new peak measurement; a no-op for
-            the last method) and ``read`` (memory in bytes, as described above),
-            and E, the GB to add to every M (the most the reading can be low).
+            the last method) and ``read`` (memory in bytes, as described above);
+            E, the GB to add to every M (the most the kernel's counters can
+            make the reading low); and whether the reading misses memory that
+            f reuses (True for both CPU methods, False for CUDA).
         """
         if self.device.type == "cuda":
 
@@ -668,7 +715,7 @@ class _MemoryManagement:
                 """
                 return torch.cuda.max_memory_allocated(self.device)
 
-            return reset_cuda, read_cuda, 0.0
+            return reset_cuda, read_cuda, 0.0, False
 
         clear_refs = Path("/proc/self/clear_refs")
         try:
@@ -690,7 +737,7 @@ class _MemoryManagement:
                 """
                 return psutil.Process().memory_info().rss
 
-            return no_reset, read_rss, 0.0
+            return no_reset, read_rss, 0.0, True
 
         def reset_linux() -> None:
             """Reset the process's peak resident memory, VmHWM, to its current value."""
@@ -711,7 +758,7 @@ class _MemoryManagement:
 
         cores = os.cpu_count() or 1
         E = cores * max(32, 2 * cores) * os.sysconf("SC_PAGE_SIZE") / _GB
-        return reset_linux, read_vmhwm, E
+        return reset_linux, read_vmhwm, E, True
 
     def _measure_call(
         self,

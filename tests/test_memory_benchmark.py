@@ -72,7 +72,10 @@ class CostIntegrand:
     Records every batch size in ``calls``, and the bytes and seconds of each
     call that succeeded in ``used`` and ``seconds``. Below ``unread_below``
     points the call uses no memory (as when f reuses memory the process already
-    holds, which the reading does not see). From ``slow_from`` points on, each
+    holds, which the reading does not see). ``held`` is the number of freed
+    bytes the process still holds and f reuses: a call raises the resident
+    memory only by what it uses beyond them, so its reading is low by up to
+    ``held`` (``used`` records the true bytes). From ``slow_from`` points on, each
     call takes 2 s more; from ``oom_from`` points on, it raises
     ``torch.OutOfMemoryError``; from ``bug_from`` points on, it raises
     ``ValueError`` (an error that is not about memory).
@@ -89,6 +92,7 @@ class CostIntegrand:
         time_fixed=0.0,
         time_per_point_sq=0.0,
         unread_below=None,
+        held=0,
         slow_from=None,
         oom_from=None,
         bug_from=None,
@@ -97,6 +101,7 @@ class CostIntegrand:
         self.fixed, self.per_point, self.per_point_sq = fixed, per_point, per_point_sq
         self.exponent, self.time_fixed = exponent, time_fixed
         self.time_per_point_sq, self.unread_below = time_per_point_sq, unread_below
+        self.held = held
         self.slow_from, self.oom_from, self.bug_from = slow_from, oom_from, bug_from
         self.calls: list[int] = []
         self.used: list[int] = []
@@ -116,7 +121,7 @@ class CostIntegrand:
         used = self.fixed + self.per_point * n + self.per_point_sq * n**self.exponent
         if self.unread_below is not None and n < self.unread_below:
             used = 0
-        self.memory.rss += used
+        self.memory.rss += max(0, used - self.held)
         self.used.append(used)
         self.seconds.append(seconds)
         return torch.ones((n, 1), dtype=t.dtype, device=t.device)
@@ -127,7 +132,8 @@ def fake(monkeypatch):
     """CPU solver with fake memory readings, a fake clock, and no Linux reader.
 
     ``clear_refs`` is made unwritable, so the benchmark uses the before/after
-    difference of the (fake) resident memory and E = 0.
+    difference of the (fake) resident memory and E = 0. Like every CPU reader,
+    it is taken to miss memory that f reuses (``set_reader`` changes both).
     """
 
     class NoClearRefs:
@@ -151,6 +157,16 @@ def fake(monkeypatch):
     monkeypatch.setattr(solver, "_get_usable_memory", lambda total_mem_usage: USABLE_GB)
     monkeypatch.setattr(solver, "_get_memory", lambda: (USABLE_GB, 2 * USABLE_GB))
     return types.SimpleNamespace(solver=solver, memory=memory, clock=clock)
+
+
+def set_reader(fake, monkeypatch, E=0, misses_reuse=True):
+    """Give the fake reader the error allowance ``E`` (bytes) of the Linux
+    reader, or (``misses_reuse=False``) make it count every allocation, as the
+    GPU reader does."""
+    reset, read = fake.solver._peak_memory_reader()[:2]
+    monkeypatch.setattr(
+        fake.solver, "_peak_memory_reader", lambda: (reset, read, E / GB, misses_reuse)
+    )
 
 
 def benchmark(solver, f, take_gradient=False):
@@ -465,19 +481,26 @@ def test_slow_integrand_not_stopped_after_one_call(fake):
     assert fake.solver._get_max_f_evals(0.9) == pytest.approx((BUDGET - a) / b, abs=1)
 
 
-@pytest.mark.parametrize(
+faster_than_n2 = pytest.mark.parametrize(
     ("fixed", "per_point_sq", "exponent", "slow_from"),
     [(0, 50, 2.5, None), (0, 2000, 3, None), (2**20, 0.01, 3, None), (0, 2000, 3, 100)],
     ids=["N^2.5", "N^3", "offset+N^3", "N^3-slow"],
 )
-def test_memory_faster_than_n2_raises(fake, fixed, per_point_sq, exponent, slow_from):
+
+
+@faster_than_n2
+def test_memory_faster_than_n2_raises(
+    fake, monkeypatch, fixed, per_point_sq, exponent, slow_from
+):
     """Memory that grows faster than N^2 cannot be sized by a fit up to N^2.
-    integrate() (which runs the benchmark when no max_batch is given) raises a
-    RuntimeError that says why and tells the user to specify max_batch, before
-    any test call exceeds the memory budget, and no fit is left stored (not
-    even one from an earlier run). The check comes before the other stops:
-    for N^3-slow, the call at N = 100 that shows the growth also takes longer
-    than 1 s, and the error is still raised."""
+    With readings that count every allocation (the GPU reader; set on the
+    fake reader here), integrate() (which runs the benchmark when no max_batch
+    is given) raises a RuntimeError that says why and tells the user to
+    specify max_batch, before any test call exceeds the memory budget, and no
+    fit is left stored (not even one from an earlier run). The check comes
+    before the other stops: for N^3-slow, the call at N = 100 that shows the
+    growth also takes longer than 1 s, and the error is still raised."""
+    set_reader(fake, monkeypatch, misses_reuse=False)
     f = CostIntegrand(
         fake.memory,
         fake.clock,
@@ -499,6 +522,85 @@ def test_memory_faster_than_n2_raises(fake, fixed, per_point_sq, exponent, slow_
     assert "could not measure" not in message  # not reported as a failure
     assert max(f.used) <= BUDGET
     assert fake.solver.f_mem_coeffs is None
+
+
+@faster_than_n2
+def test_memory_faster_than_n2_caps_batch_on_cpu(
+    fake, caplog, fixed, per_point_sq, exponent, slow_from
+):
+    """On a CPU the same readings do not raise: a CPU reading misses memory
+    that f reuses, so growth faster than N^2 cannot be told from an earlier
+    reading that was too low (test_low_reading_from_reused_memory_caps_batch).
+    The search stops at the call that shows the growth, a warning says so, and
+    the batch is capped at that call's N, which ran within the memory budget:
+    the integration (44 points, f = 1 on [0, 1]) completes within the cap,
+    which is stored for same_f=True. The cap is the largest call of f: no
+    later test call or batch exceeds it."""
+    f = CostIntegrand(
+        fake.memory,
+        fake.clock,
+        fixed=fixed,
+        per_point=0,
+        per_point_sq=per_point_sq,
+        exponent=exponent,
+        slow_from=slow_from,
+    )
+    with caplog.at_level(logging.WARNING, logger=qmem.__name__):
+        result = fake.solver.integrate(
+            f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
+        )
+    cap = max(f.calls)
+    assert cap >= 87  # the benchmark's call, not one of the 44-point batches
+    assert "growth like N^2 allows" in caplog.text
+    assert f"max_batch is capped at {cap}, the largest call that ran" in caplog.text
+    assert "Specify max_batch" in caplog.text
+    assert f"pass max_batch={cap} " in caplog.text
+    assert "grows like max_batch^2" not in caplog.text
+    assert max(f.used) <= BUDGET
+    assert fake.solver.get_max_batch() == fake.solver.previous_max_batch == cap
+    assert fake.solver.f_mem_coeffs is not None
+    assert float(result.integral.sum()) == pytest.approx(1.0)
+
+
+def test_low_reading_from_reused_memory_caps_batch(fake, caplog):
+    """Regression: memory 8250 B * N^2 exactly (popcornn's integrand), in a
+    process that already holds 95 % of the memory of a 100-point call as freed
+    memory, which f reuses. The readings are 0 at N = 1 and 10, 3.9 MiB at
+    N = 100 (5 % of the true 78.7 MiB) and nearly the true 7.7 GB at N = 1000:
+    2000 times more for 10 times the points. This used to raise "faster than
+    N^2" for an integrand that is not (popcornn's Linux run read 4 MiB at
+    N = 49 and 1870 MiB at N = 490, which raises with the error allowance of
+    a 4-core machine; on a Mac the error was reproduced with a real integrand).
+    Now the benchmark warns and caps the batch at 1000, the call that ran;
+    the fit alone (d = 8170 B from the last, slightly low reading) would give
+    3139 points, which need 1 % more than the budget."""
+    d = 8250
+    f = CostIntegrand(
+        fake.memory,
+        fake.clock,
+        per_point=0,
+        per_point_sq=d,
+        held=int(0.95 * d * 100**2),
+    )
+    with caplog.at_level(logging.WARNING, logger=qmem.__name__):
+        fit = benchmark(fake.solver, f)
+    assert f.calls == [1, 10, 100, 1000]
+    assert "or the earlier reading was too low" in caplog.text
+    assert "max_batch is capped at 1000" in caplog.text
+    assert fit[2] == pytest.approx(d - f.held / 1000**2, rel=1e-3)
+    assert fake.solver._get_max_f_evals(0.9) == 3139
+    assert d * 3139**2 > BUDGET
+    assert fake.solver.get_max_batch() == 1000
+
+
+def test_only_cuda_reader_counts_reused_memory(fake, monkeypatch):
+    """The CPU readers report that they miss memory f reuses, so the benchmark
+    warns and caps the batch where it would raise with the CUDA reader, which
+    counts every allocation. Building the CUDA reader calls no CUDA function,
+    so this runs without a GPU."""
+    assert fake.solver._peak_memory_reader()[2:] == (0.0, True)
+    monkeypatch.setattr(fake.solver, "device", torch.device("cuda:0"))
+    assert fake.solver._peak_memory_reader()[2:] == (0.0, False)
 
 
 def test_tiny_integrand_capped_at_search_limit(fake):
@@ -567,7 +669,8 @@ def test_quadratic_note_threshold(fake, caplog, share, noted):
 def test_faster_than_n2_tolerance_floor_and_error_allowance(
     fake, monkeypatch, per_point_sq, exponent, E, raises_at
 ):
-    """Memory d N^p with d about 1 MiB. A call raises when its reading M
+    """Memory d N^p with d about 1 MiB, with readings that count every
+    allocation (as on a GPU). A call raises when its reading M
     exceeds 3 (N / N_prev)^2 (M_prev + E), compared only with the previous
     reading and only when that reading is at least 1 MiB; ``raises_at`` is
     (N_prev, N) of the call that raises, or None.
@@ -582,10 +685,7 @@ def test_faster_than_n2_tolerance_floor_and_error_allowance(
       floor, so N = 10 is not compared and the search goes on to N = 87 (the
       worst-case step), which is compared and raises; 1 MiB raises at
       N = 10."""
-    reader = fake.solver._peak_memory_reader
-    monkeypatch.setattr(
-        fake.solver, "_peak_memory_reader", lambda: (*reader()[:2], E / GB)
-    )
+    set_reader(fake, monkeypatch, E=E, misses_reuse=False)
     f = CostIntegrand(
         fake.memory,
         fake.clock,
@@ -698,10 +798,7 @@ def test_error_allowance(
       s * (E + b B + d B^2) <= 75 GB.
 
     The test calls run f forward only, so they do not depend on s."""
-    reader = fake.solver._peak_memory_reader
-    monkeypatch.setattr(
-        fake.solver, "_peak_memory_reader", lambda: (*reader()[:2], E / GB)
-    )
+    set_reader(fake, monkeypatch, E=E)
     s = safety(take_gradient)
     f = CostIntegrand(
         fake.memory, fake.clock, per_point=per_point, per_point_sq=per_point_sq
@@ -755,6 +852,8 @@ def test_linux_reader_adds_error_allowance(fake, monkeypatch, cores):
     E = cores * max(32, 2 * cores) * os.sysconf("SC_PAGE_SIZE")
     assert f.calls == [1]
     assert fit == pytest.approx((E, 4096, 0))
+    # A peak of resident memory also misses memory that f reuses.
+    assert fake.solver._peak_memory_reader()[2:] == (E / GB, True)
 
 
 @pytest.mark.skipif(

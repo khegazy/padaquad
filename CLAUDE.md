@@ -406,8 +406,12 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
   before/after difference. Before 3 readings n_time ≥ 2N (doubling always
   allowed). Stops: c = s·(M + E)/N changes < 1 % over each of the last two
   calls (≥ 3 readings), call slower than 1 s, N = 1e9, or N_next < 2N.
-  Raises `RuntimeError` (asks for `max_batch`) when memory grows faster
-  than N²: M > 3·(N/N_prev)²·(M_prev + E) with M_prev ≥ 1 MiB. An OOM at
+  When M > 3·(N/N_prev)²·(M_prev + E) with M_prev ≥ 1 MiB (more than
+  growth like N² allows): on CUDA, whose readings count every allocation,
+  raises `RuntimeError` (asks for `max_batch`); on a CPU, whose readings
+  miss memory f reuses from memory the process already holds (so a low
+  earlier reading looks the same), warns and sets `_oom_max_batch = N`
+  (`_peak_memory_reader` returns this `misses_reuse` flag). An OOM at
   N > 1 sets `_oom_max_batch = _OOM_BACKOFF·N`.
 - Unless `max_batch` or `same_f=True` fixes it, the batch size is
   computed at every evaluation from live memory: `get_max_batch` →

@@ -2522,8 +2522,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Returns
         -------
         torch.Tensor
-            The prediction for each pair, in the dtype of ``y``. Shape:
-            [N-1, D].
+            The prediction for each pair, in the dtype of ``y``; infinite for
+            a pair whose width ratio is not finite. Shape: [N-1, D].
 
         Raises
         ------
@@ -2539,9 +2539,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         eps = torch.finfo(nodes.dtype).eps
         left_end = nodes[:, 0, 0].to(torch.float64)
         widths = nodes[:, -1, 0].to(torch.float64) - left_end
-        key = torch.round(
-            torch.log2(widths[1:] / widths[:-1]) * self._RATIO_QUANTUM
-        ).to(torch.int64)
+        log_ratio = torch.log2(widths[1:] / widths[:-1]) * self._RATIO_QUANTUM
+        # A non-finite ratio (zero, overflowing or NaN widths) has no int64 key
+        # (the conversion is undefined); such a pair is never merged (below).
+        finite = torch.isfinite(log_ratio)
+        key = torch.round(torch.where(finite, log_ratio, 0.0)).to(torch.int64)
         n_pairs = len(widths) - 1
         out = torch.empty(n_pairs, y.shape[-1], dtype=y.dtype, device=y.device)
         chunk_size = max(1, self._MERGE_CHUNK // y.shape[-1])
@@ -2574,6 +2576,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             out[lo:hi] = torch.maximum(
                 q_e_hat[:, 1].abs(), (q_e_hat[:, 0] - q_halves).abs()
             ).to(y.dtype)
+        out[~finite] = torch.inf
         return out
 
     def _cached_merged_pair_weights(

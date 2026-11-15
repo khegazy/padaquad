@@ -698,3 +698,20 @@ def test_predicted_chunks_shrink_with_the_number_of_outputs(monkeypatch):
     assert max(rows) <= 8 // 4 + 1
     scale = float(q.abs().max())
     assert torch.allclose(pieces, whole, rtol=0, atol=1e-14 * scale)
+
+
+def test_predicted_refuses_pairs_without_a_finite_width_ratio():
+    """A pair whose width ratio overflows (mesh [0, 1e-310, 1, 2]: ratio 1e310)
+    or is NaN has no int64 key: converting a non-finite float to int64 is
+    undefined and differs between platforms (on x86 CPUs it gives the most
+    negative int64, read back as a ratio of 0). Such a pair gets an infinite
+    prediction, so it is never merged; the other pairs are unaffected."""
+    solver = make_solver_for_unit_test("gk21")
+    edges = torch.tensor([[0.0], [1e-310], [1.0], [2.0]], dtype=torch.float64)
+    nodes = solver._compute_nodes(edges[:-1], edges[1:])
+    y = torch.exp(nodes)
+    b, _ = solver.method.weights(nodes)
+    q = (nodes[:, -1] - nodes[:, 0]) * (b * y).sum(1)
+    predicted = solver._predict_merged_errors(nodes, y, q)
+    assert torch.isposinf(predicted[0]).all()
+    assert torch.isfinite(predicted[1]).all()

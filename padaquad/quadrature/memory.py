@@ -340,8 +340,6 @@ class _MemoryManagement:
         Linux CPUs); it is a reading error, so it enters as a fixed amount, not
         one that grows with N.
 
-        The search stops when:
-
         Before three readings the time bound always allows doubling N: one
         point of a slow f says nothing about how its time grows, and the worst
         case k^2 would end the search after one call for any f slower than

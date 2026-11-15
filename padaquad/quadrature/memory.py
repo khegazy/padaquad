@@ -531,8 +531,9 @@ class _MemoryManagement:
         and simulated numbers behind them, are listed once, in the user guide:
         ``docs/user_guide/devices_memory.md``, section "Limitations of the
         memory benchmark" (label ``ug-memory-limitations``; on the website,
-        https://khegazy.github.io/padaquad/user_guide/devices_memory.html#ug-memory-limitations). Read them before changing this method, and update them when a
-        change fixes or adds one.
+        https://khegazy.github.io/padaquad/user_guide/devices_memory.html#ug-memory-limitations).
+        Read them before changing this method, and update them when a change
+        fixes or adds one.
         """
         # How the memory of one call is read on this device (see _Reader).
         reader = self._peak_memory_reader()
@@ -541,7 +542,7 @@ class _MemoryManagement:
             ""
             if reader.counts_reuse
             else (
-                " On this system a memory reading misses memory that f reuses "
+                "\nOn this system a memory reading misses memory that f reuses "
                 "from memory the process already holds, so in a process that "
                 "has already evaluated f the readings can be far too low. "
                 "max_batch is then capped at the largest call of f this "
@@ -555,17 +556,24 @@ class _MemoryManagement:
             "uses, to determine max_batch (the maximum number of evaluations per "
             "batch). This is needed because adaptive refinement changes the "
             "evaluation batch at each step during the integral. This measurement "
-            "is slow and runs on every integrate() call that has no max_batch. It "
-            "may not be optimized for your machine and may result in an "
-            "underutilization of your hardware (or, for some integrands, a batch "
-            "too large for memory); see "
+            "carries two penalties, in time and in evaluation efficiency:\n"
+            "\t - The measurement is slow and runs on every integrate() call that "
+            "has no max_batch. This is resolved by passing a known max_batch, "
+            "passing solver.get_max_batch() from an earlier run, or setting "
+            "same_f=True (which reuses the max_batch and the mesh of the previous "
+            "call).\n"
+            "\t - The memory cost measurement may not be optimized for your "
+            "machine and may result in an underutilization of your hardware (or, "
+            "for some integrands, a batch too large for memory); see "
             "https://khegazy.github.io/padaquad/user_guide/devices_memory.html#ug-memory-limitations "
-            "for more details. All of this is avoided by passing your own "
-            "max_batch, chosen for your integrand and machine. Passing "
-            "solver.get_max_batch() from an earlier run, or same_f=True (which "
-            "reuses the max_batch and the mesh of the previous call), only "
-            "skips the time of this measurement: they reuse its result, with "
-            f"the same limitations.{hidden_note}"
+            "for more details. The only way to guarantee "
+            "that max_batch makes full use of your hardware's memory is to measure "
+            "max_batch yourself. Passing solver.get_max_batch() from an earlier "
+            "run, or setting same_f=True, reuses the max_batch calculated by this "
+            "measurement and inherits these limitations. If you are not reusing "
+            "the integrator many times, this measurement will likely be "
+            "sufficiently accurate; it is meant to spare you determining "
+            f"max_batch yourself for every new f.{hidden_note}"
         )
         t0 = time.time()
 

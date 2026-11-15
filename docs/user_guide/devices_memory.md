@@ -32,8 +32,11 @@ every evaluation from the memory free at that moment: the largest batch whose
 fitted memory fits in three quarters of the usable memory, which is the free
 memory minus `(1 - total_mem_usage)` times the total memory. With
 `take_gradient=True` the fitted memory is multiplied by a safety factor, a
-margin for the memory that backpropagation needs. Memory that grows faster
-than N² is underestimated; pass `max_batch` for such an integrand.
+margin for the memory that backpropagation needs. When a call uses more than
+three times the memory that growth like N² allows from the previous one, the
+benchmark raises an error asking for `max_batch`; faster growth that it does
+not catch (hidden by a large fixed cost, or only slightly faster than N²) is
+underestimated, so pass `max_batch` for such an integrand.
 
 The benchmark takes a few seconds and logs warnings, and it runs on every call
 without `max_batch`. To run it once, integrate once without `max_batch`, read

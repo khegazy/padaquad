@@ -64,8 +64,10 @@ class FakeClock:
 
 
 class CostIntegrand:
-    """``f(t) = 1`` that "uses" ``fixed + per_point * N + per_point_sq * N^2``
-    bytes per call and takes ``time_per_point_sq * N^2`` s on the fake clock.
+    """``f(t) = 1`` that "uses" ``fixed + per_point * N + per_point_sq * N^p``
+    bytes per call (p = ``exponent``, 2 by default; larger for memory that
+    grows faster than N^2) and takes ``time_fixed + time_per_point_sq * N^2`` s
+    on the fake clock.
 
     Records every batch size in ``calls``, and the bytes and seconds of each
     call that succeeded in ``used`` and ``seconds``. Below ``unread_below``
@@ -83,6 +85,8 @@ class CostIntegrand:
         fixed=0,
         per_point=1024,
         per_point_sq=0,
+        exponent=2,
+        time_fixed=0.0,
         time_per_point_sq=0.0,
         unread_below=None,
         slow_from=None,
@@ -91,6 +95,7 @@ class CostIntegrand:
     ):
         self.memory, self.clock = memory, clock
         self.fixed, self.per_point, self.per_point_sq = fixed, per_point, per_point_sq
+        self.exponent, self.time_fixed = exponent, time_fixed
         self.time_per_point_sq, self.unread_below = time_per_point_sq, unread_below
         self.slow_from, self.oom_from, self.bug_from = slow_from, oom_from, bug_from
         self.calls: list[int] = []
@@ -104,11 +109,11 @@ class CostIntegrand:
             raise torch.OutOfMemoryError(f"simulated OOM at {n} points")
         if self.bug_from is not None and n >= self.bug_from:
             raise ValueError("f only handles one point")
-        seconds = self.time_per_point_sq * n**2
+        seconds = self.time_fixed + self.time_per_point_sq * n**2
         if self.slow_from is not None and n >= self.slow_from:
             seconds += 2.0
         self.clock.now += seconds
-        used = self.fixed + self.per_point * n + self.per_point_sq * n**2
+        used = self.fixed + self.per_point * n + self.per_point_sq * n**self.exponent
         if self.unread_below is not None and n < self.unread_below:
             used = 0
         self.memory.rss += used
@@ -211,14 +216,15 @@ def test_largest_n(coeffs, budget, expected):
 @pytest.mark.parametrize("take_gradient", [False, True])
 def test_cost_converges(fake, take_gradient):
     """For memory a + b N, c(N) = s * (a + b N) / N falls as the fixed cost a
-    is amortized. Going from 1e5 to 1e6 points changes it by 0.9 % < 1 %, so
-    the search stops at N = 1e6. The fit is s * (a, b, 0), and the batch is
-    the largest B with s * (a + b B) <= _MEMORY_BUDGET * usable."""
+    is amortized. It changes by 0.9 % from 1e5 to 1e6 points and by 0.09 %
+    from 1e6 to 1e7, two consecutive changes below 1 %, so the search stops at
+    N = 1e7. The fit is s * (a, b, 0), and the batch is the largest B with
+    s * (a + b B) <= _MEMORY_BUDGET * usable."""
     a, b = 2**20, 1024
     s = safety(take_gradient)
     f = CostIntegrand(fake.memory, fake.clock, fixed=a, per_point=b)
     fit = benchmark(fake.solver, f, take_gradient)
-    assert f.calls == [10**k for k in range(7)]
+    assert f.calls == [10**k for k in range(8)]
     assert fit[:2] == pytest.approx((s * a, s * b), rel=1e-6)
     assert fake.solver._get_max_f_evals(0.9) == pytest.approx(
         (BUDGET - s * a) / (s * b), rel=1e-6
@@ -329,6 +335,113 @@ def test_zero_readings_do_not_converge(fake):
     assert fit[2] > 0
 
 
+def largest_fitting(memory):
+    """The largest N with memory(N) <= BUDGET (memory nondecreasing)."""
+    lo, hi = 0, qmem._MAX_N
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        lo, hi = (mid, hi) if memory(mid) <= BUDGET else (lo, mid - 1)
+    return lo
+
+
+@pytest.mark.parametrize(
+    ("fixed", "per_point", "per_point_sq"),
+    [
+        (50 * 2**20, 50 * 1024, 50),  # all three terms matter near N = 1e3
+        (2 * GB, 1024, 20),  # the fixed cost dominates the small calls
+        (2**20, 4096, 0.004),  # the N^2 term matters only from N = 1e6 on
+    ],
+    ids=["comparable", "fixed-dominant", "late-quadratic"],
+)
+def test_offset_linear_quadratic_memory(fake, fixed, per_point, per_point_sq):
+    """Memory a + b N + d N^2 with all three terms: no test call exceeds the
+    budget, the fit recovers (a, b, d), and the batch is the largest N whose
+    true memory fits in the budget."""
+    f = CostIntegrand(
+        fake.memory,
+        fake.clock,
+        fixed=fixed,
+        per_point=per_point,
+        per_point_sq=per_point_sq,
+    )
+    fit = benchmark(fake.solver, f)
+    assert max(f.used) <= BUDGET
+    assert fit == pytest.approx((fixed, per_point, per_point_sq), rel=1e-6)
+
+    def memory(n):
+        return fixed + per_point * n + per_point_sq * n * n
+
+    assert fake.solver._get_max_f_evals(0.9) == largest_fitting(memory)
+
+
+def test_offset_linear_quadratic_memory_and_quadratic_time(fake):
+    """Memory 50 MiB + 50 KiB N + 50 B N^2 and time 0.01 s + 1e-7 s N^2: the
+    time bound sizes the calls (none takes more than 1 s, so they stop near
+    N = 3146), and the memory fit, measured far below the batch size, still
+    recovers (a, b, d) and gives the largest batch that fits."""
+    a, b, d = 50 * 2**20, 50 * 1024, 50
+    f = CostIntegrand(
+        fake.memory,
+        fake.clock,
+        fixed=a,
+        per_point=b,
+        per_point_sq=d,
+        time_fixed=0.01,
+        time_per_point_sq=1e-7,
+    )
+    fit = benchmark(fake.solver, f)
+    assert f.calls == [1, 9, 89, 890, 3146]
+    assert max(f.seconds) <= 1.0
+    assert max(f.used) <= BUDGET
+    assert fit == pytest.approx((a, b, d), rel=1e-6)
+    assert fake.solver._get_max_f_evals(0.9) == largest_fitting(
+        lambda n: a + b * n + d * n * n
+    )
+
+
+def test_slow_integrand_not_stopped_after_one_call(fake):
+    """An f that takes 0.5 s per call whatever N (a fixed cost): the worst
+    case k^2 bound alone would predict 2 s for two points and stop after one
+    call, leaving a fit through the origin whose b includes the 1 MiB fixed
+    cost. Before three readings doubling is always allowed, so the search
+    goes on and the batch is the largest that fits."""
+    a, b = 2**20, 1024
+    f = CostIntegrand(fake.memory, fake.clock, fixed=a, per_point=b, time_fixed=0.5)
+    benchmark(fake.solver, f)
+    assert f.calls[:3] == [1, 2, 4]
+    assert max(f.seconds) <= 1.0
+    assert fake.solver._get_max_f_evals(0.9) == pytest.approx((BUDGET - a) / b, abs=1)
+
+
+@pytest.mark.parametrize(
+    ("fixed", "per_point_sq", "exponent"),
+    [(0, 50, 2.5), (0, 2000, 3), (2**20, 0.01, 3)],
+    ids=["N^2.5", "N^3", "offset+N^3"],
+)
+def test_memory_faster_than_n2_raises(fake, fixed, per_point_sq, exponent):
+    """Memory that grows faster than N^2 cannot be sized by a fit up to N^2.
+    The benchmark raises a RuntimeError that says why and tells the user to
+    specify max_batch, before any test call exceeds the memory budget, and
+    stores no fit."""
+    f = CostIntegrand(
+        fake.memory,
+        fake.clock,
+        fixed=fixed,
+        per_point=0,
+        per_point_sq=per_point_sq,
+        exponent=exponent,
+    )
+    with pytest.raises(RuntimeError) as info:
+        benchmark(fake.solver, f)
+    message = str(info.value)
+    assert "more than 3 times" in message
+    assert "growth like N^2 allows" in message
+    assert "Specify max_batch" in message
+    assert "could not measure" not in message  # not reported as a failure
+    assert max(f.used) <= BUDGET
+    assert fake.solver.f_mem_coeffs is None
+
+
 def test_tiny_integrand_capped_at_search_limit(fake):
     """For an f that uses one byte per point, the cost per point is constant,
     so the search stops after three readings, and the batch size is capped at
@@ -345,17 +458,21 @@ def test_tiny_integrand_capped_at_search_limit(fake):
 # ---------------------------------------------------------------------------
 
 
-def test_oom_after_n_100_keeps_measured_fit(fake):
+def test_oom_after_n_100_keeps_measured_fit(fake, caplog):
     """An out-of-memory error at N = 1000 after a successful N = 100 keeps
     the fit of the calls that succeeded and caps the batch at
-    _OOM_BACKOFF * 1000 = 750 for the rest of the integrate() call."""
+    _OOM_BACKOFF * 1000 = 750 for the rest of the integrate() call. The end
+    message reports the capped batch, not the ~7.9e7 points the fit allows."""
     a, b = 2**20, 1024
     f = CostIntegrand(fake.memory, fake.clock, fixed=a, per_point=b, oom_from=1000)
-    fit = benchmark(fake.solver, f)
+    with caplog.at_level(logging.WARNING, logger=qmem.__name__):
+        fit = benchmark(fake.solver, f)
     assert f.calls == [1, 10, 100, 1000]
     assert fit[:2] == pytest.approx((a, b), rel=1e-6)
     assert fake.solver._oom_max_batch == 750
     assert fake.solver.get_max_batch() == 750
+    assert "max_batch is about 750 " in caplog.text
+    assert "pass max_batch=750 " in caplog.text
 
 
 def test_oom_at_small_n_caps_batch(fake):
@@ -485,9 +602,11 @@ def test_real_linux_reader_quadratic_memory(monkeypatch):
     usable, the old code measured 0.75 GiB at N = 10,000 and sized batches as
     usable / (cost per point), about 26,800 points needing 5.4 GiB. Now no
     test call and no batch exceeds the 1.5 GiB budget by more than the fit's
-    error: on a Mac, real readings put about 350 B per point into b and gave
-    d = 7.8 instead of 8, so the batch needed 2 % more than the budget, still
-    within the 25 % of usable memory the budget keeps free."""
+    error: in one run on a Mac (RSS reader, f keeping the N x N buffer alive),
+    real readings put about 350 B per point into b and gave d = 7.8 instead
+    of 8, so the batch needed 2 % more than the budget, still within the 25 %
+    of usable memory the budget keeps free (other runs: b = 150-210 B,
+    d = 7.98, 0.1 % over)."""
     usable_gb = 2.0
     solver = make_solver_for_unit_test()
     monkeypatch.setattr(solver, "_get_usable_memory", lambda total_mem_usage: usable_gb)

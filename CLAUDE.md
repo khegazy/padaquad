@@ -403,8 +403,11 @@ tolerances, float32) S does not shrink with h and pairs rarely reach the cut.
   N² (popcornn) gets smaller steps. M: CUDA peak counters; on Linux CPUs the
   resettable process peak (`/proc/self/clear_refs` + `VmHWM`) plus the
   kernel's counter error E (a fixed term of the fit); elsewhere an RSS
-  before/after difference. Stops: c = s·(M + E)/N changes < 1 % (≥ 3
-  readings), call slower than 1 s, N = 1e9, or N_next < 2N. An OOM at
+  before/after difference. Before 3 readings n_time ≥ 2N (doubling always
+  allowed). Stops: c = s·(M + E)/N changes < 1 % over each of the last two
+  calls (≥ 3 readings), call slower than 1 s, N = 1e9, or N_next < 2N.
+  Raises `RuntimeError` (asks for `max_batch`) when memory grows faster
+  than N²: M > 3·(N/N_prev)²·(M_prev + E) with M_prev ≥ 1 MiB. An OOM at
   N > 1 sets `_oom_max_batch = _OOM_BACKOFF·N`.
 - Unless `max_batch` or `same_f=True` fixes it, the batch size is
   computed at every evaluation from live memory: `get_max_batch` →

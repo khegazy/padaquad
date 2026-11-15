@@ -342,21 +342,44 @@ class _MemoryManagement:
 
         The search stops when:
 
-        1. c = s * (M + E) / N changes by less than 1 % from one call to the
-           next, with at least three readings (the cost per point is constant,
-           so the fit has seen the growth);
+        Before three readings the time bound always allows doubling N: one
+        point of a slow f says nothing about how its time grows, and the worst
+        case k^2 would end the search after one call for any f slower than
+        0.25 s. Such a doubled call takes at most 4 times the last one, and the
+        1 s stop below then ends the search.
+
+        The search stops when:
+
+        1. c = s * (M + E) / N changes by less than 1 % over each of the last
+           two calls (the cost per point is constant, so the growth is linear;
+           two changes, so noise in one reading does not end the search). An
+           N^2 term too small to show in the readings, or hidden by their
+           noise, is missed;
         2. a call takes longer than 1 s (a backstop: the step size normally
            prevents it);
         3. N reaches 1e9;
         4. N_next < 2 N: the next call would not fit in memory, or would take
            longer than 1 s, and a call barely larger than this one adds little.
 
+        It raises instead when the memory grows faster than N^2: when a call
+        uses more than 3 times the memory that growth like N^2 allows from the
+        previous call, M > 3 (N / N_prev)^2 (M_prev + E) (the factor 3 absorbs
+        readings off by up to a factor 2), counted only when the
+        previous reading is at least 1 MiB (smaller readings are mostly noise:
+        they read 0 when f reuses memory the process holds). Such
+        growth is caught only once it shows in two readings, so a call that
+        first shows it can already exceed the memory budget, and growth that
+        a large fixed cost hides, or growth only slightly faster than N^2, is
+        not caught.
+
         The stored fit is m(B) = s * ((a + E) + b B + d B^2), the memory of a
-        batch of B points, with a, b, d fitted to every reading. s is ``_GRADIENT_MEMORY_SAFETY_FACTOR`` (a heuristic for
-        backpropagation) when ``take_gradient`` and 1 otherwise. With fewer than
-        three readings the fit is linear, so a batch can be underestimated for
-        an f whose memory grows like N^2 that stopped after one or two calls.
-        Growth faster than N^2 is underestimated too.
+        batch of B points, with a, b, d fitted to every reading. s is
+        ``_GRADIENT_MEMORY_SAFETY_FACTOR`` (a heuristic for backpropagation)
+        when ``take_gradient`` and 1 otherwise. With fewer than three readings
+        the fit is linear, so the memory of a batch can be underestimated when
+        the search stopped after one or two calls: for an f whose memory grows
+        like N^2 and is heavy, or an f whose first call took longer than 1 s.
+        A single reading of 0 gives the largest batch, 1e9 points.
 
         After an out-of-memory error at N > 1, the batch size is capped at
         ``_OOM_BACKOFF`` * N for the rest of this ``integrate`` call
@@ -386,8 +409,8 @@ class _MemoryManagement:
         torch.OutOfMemoryError
             A single evaluation of f does not fit.
         RuntimeError
-            The measurement failed for another reason; pass
-            ``max_batch`` to skip it.
+            The memory grows faster than N^2, or the measurement failed for
+            another reason; pass ``max_batch`` to skip it.
         """
         logger.warning(
             "PadaQuad is measuring how much memory one integrand (f) evaluation "
@@ -414,18 +437,28 @@ class _MemoryManagement:
         # roughly as much memory again, so the stored fit is scaled by s.
         s = _GRADIENT_MEMORY_SAFETY_FACTOR if take_gradient else 1.0
         time_limit = 1.0  # seconds; no test call is planned to take longer
+        # A call using more than this many times the memory that growth like
+        # N^2 allows from the previous call raises (faster than N^2). Readings
+        # of 1 MiB and more were off by up to a factor 2 (0.5x to 1.4x of the
+        # true size on a Mac), so a previous reading at 0.5x and this one at
+        # 1.5x make N^2 growth look 3 times faster; N^2.5 over a 10x step
+        # (316x instead of 100x) is still caught.
+        growth_tolerance = 3.0
         # How the memory of one call is read on this device, and E (GB), the
         # most that reading can be too low.
         reset_peak, read_memory, E = self._peak_memory_reader()
 
         # Search state: the points, memory (GB) and wall time (s) of every call
-        # so far. c is the latest cost per point, s * (M + E) / N, and c_prev
-        # the previous call's; they serve only the convergence stop. The stop
-        # that ends the search sets reason, which the end message reports.
+        # so far. c is the latest cost per point, s * (M + E) / N, and c_prev,
+        # c_prev2 those of the two calls before; they serve only the
+        # convergence stop. The stop that ends the search sets reason, which
+        # the end message reports; too_fast holds the reason to raise instead.
         Ns: list[int] = []
         Ms: list[float] = []
         ts: list[float] = []
-        N, c, c_prev, reason = 1, 0.0, 0.0, None
+        N, c, c_prev, c_prev2 = 1, 0.0, 0.0, 0.0
+        reason: str | None = None
+        too_fast: str | None = None
         try:
             while reason is None:
                 # Usable memory (after the total_mem_usage reserve) right before
@@ -450,13 +483,43 @@ class _MemoryManagement:
                 Ns.append(N)
                 Ms.append(M)
                 ts.append(seconds)
-                c_prev, c = c, s * (M + E) / N
+                c_prev2, c_prev, c = c_prev, c, s * (M + E) / N
 
+                # Faster than N^2: with a, b, d >= 0, M(N) <= (N / N_prev)^2
+                # M(N_prev). A reading above growth_tolerance times that bound
+                # shows growth the fit cannot follow.
+                # The previous call is the one to compare with: an earlier one
+                # can be dominated by a fixed cost that hides the growth.
+                # Readings below 1 MiB are mostly noise (they read 0 when f
+                # reuses memory the process holds) and are not compared.
+                bound = (
+                    (N / Ns[-2]) ** 2 * (Ms[-2] + E)
+                    if len(Ns) >= 2 and Ms[-2] >= 2**20 / _GB
+                    else 0.0
+                )
+                if bound > 0 and growth_tolerance * bound < M:
+                    too_fast = (
+                        f"The memory of one call of f grew to {M * _GB:.3g} "
+                        f"bytes at {N} points, more than {growth_tolerance:g} times the "
+                        f"{bound * _GB:.3g} bytes that growth like N^2 allows "
+                        f"from the {Ms[-2] * _GB:.3g} bytes at {Ns[-2]} points. "
+                        "padaquad fits the memory of f up to N^2, so it cannot "
+                        "choose a batch size that fits for this integrand. "
+                        "Specify max_batch (to integrate() or the solver): the "
+                        "largest number of points per call of f that fits in "
+                        "memory."
+                    )
+                    reason = "the memory grows faster than N^2"
                 # Stops, checked in order.
-                if len(Ns) >= 3 and abs(c - c_prev) < 0.01 * c_prev:
-                    # More points changed the cost per point by < 1 %: the fixed
-                    # per-call cost is spread out and the growth is linear. The
-                    # three readings make the stored fit a full quadratic.
+                elif (
+                    len(Ns) >= 3
+                    and abs(c - c_prev) < 0.01 * c_prev
+                    and abs(c_prev - c_prev2) < 0.01 * c_prev2
+                ):
+                    # The cost per point changed by < 1 % over each of the last
+                    # two calls: the fixed per-call cost is spread out and the
+                    # growth is linear. The three readings make the stored fit a
+                    # full quadratic.
                     reason = "the cost per evaluation stopped changing"
                 elif seconds > time_limit:
                     reason = f"an evaluation took longer than {time_limit} s"
@@ -479,6 +542,13 @@ class _MemoryManagement:
                     # without an error. E is a fixed reading error.
                     n_mem = _largest_n((a + E, b, d), _MEMORY_BUDGET * usable)
                     n_time = _largest_n(time_fit, time_limit)
+                    if len(Ns) < 3:
+                        # One or two times say nothing about how time grows, and
+                        # the worst case would end the search after one call of
+                        # any f slower than 0.25 s. Allow doubling: that call
+                        # takes at most 4 times this one, and the 1 s stop ends
+                        # the search after it.
+                        n_time = max(n_time, 2 * N)
                     N_next = min(10 * N, n_mem, n_time)
                     if N_next < 2 * N:
                         # A call barely larger than this one adds little.
@@ -503,6 +573,10 @@ class _MemoryManagement:
             ) from e
 
         self._release_memory()
+        if too_fast is not None:
+            # Raised here, outside the try block, so it is not reported as a
+            # failed measurement.
+            raise RuntimeError(too_fast)
 
         # The memory of one call of B points during the integration:
         # m(B) = s * ((a + E) + b B + d B^2), fitted to every
@@ -511,14 +585,19 @@ class _MemoryManagement:
         self.f_mem_coeffs = (s * (a + E), s * b, s * d)
 
         # The estimate depends on take_gradient: the fit includes the factor s
-        # only when it is True.
+        # only when it is True. get_max_batch applies the cap an out-of-memory
+        # error above set, so the message reports the batch actually used.
         usable = self._get_usable_memory(total_mem_usage)
-        max_batch = self._get_max_f_evals(total_mem_usage)
+        max_batch = self.get_max_batch(
+            total_mem_usage, self._get_max_f_evals(total_mem_usage)
+        )
+        assert max_batch is not None
         a, b, d = self.f_mem_coeffs
         quadratic = ""
         # Name the N^2 growth only when it matters at the batch size: every
-        # fit of a linear f leaves a tiny d > 0.
-        if d * max_batch**2 >= 0.1 * (a + b * max_batch + d * max_batch**2):
+        # fit of a linear f leaves a tiny d > 0. Strict, so a batch of 0 with
+        # no fixed cost (a = 0) is not flagged.
+        if d * max_batch**2 > 0.1 * (a + b * max_batch + d * max_batch**2):
             quadratic = (
                 " The memory grows like max_batch^2, so a batch larger than "
                 "this does not fit; on a CPU, a batch that does not fit can kill "

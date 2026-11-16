@@ -692,7 +692,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         the optimal mesh, which a later call with ``same_f=True`` starts from.
 
         Every argument left as None falls back to the constructor's value,
-        except a bound under ``same_f`` (see ``mesh_init``).
+        except a bound or ``max_batch`` under ``same_f`` (see their entries).
 
         Parameters
         ----------

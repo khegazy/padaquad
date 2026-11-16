@@ -157,7 +157,6 @@ for sampling, name in runs:
 # float64 can certify, and sin(2 pi t) integrates to 0, so only the rounding
 # floors set its tolerance. Every chain starts from 64 equal subintervals.
 
-print()
 mesh = torch.linspace(0.0, 1.0, 65, dtype=torch.float64).unsqueeze(-1)
 rounding = {
     "sin(200 t)": (lambda t: torch.sin(200.0 * t), (1.0 - math.cos(200.0)) / 200.0),
@@ -184,7 +183,6 @@ for name in ("gk21", "cc33", "cc65"):
 # level, where ``"power_law"`` merges nothing; ``"predicted"`` must stay finite
 # and within the bound.
 
-print()
 mesh = torch.linspace(0.0, 1.0, 17, dtype=torch.float32).unsqueeze(-1)
 for name in ("gk21", "cc33"):
     for fname in ("exp", "kink"):
@@ -209,7 +207,6 @@ for name in ("gk21", "cc33"):
 # Result
 # ------
 
-print()
 if known:
     print(f"[KNOWN] {known} chain(s) of a method with a known limitation exceeded")
     print("        the bound (see the explanation at the top of this script).")

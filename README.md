@@ -258,7 +258,7 @@ the same text. In short:
   keyword option goes to the solver's `integrate` call if it is one of that
   call's arguments (`mesh_init`, `mesh_final`, `mesh`, `y0`, `take_gradient`,
   `f_args`, `max_batch`, ...), and to the solver constructor otherwise
-  (`atol`, `rtol`, `remove_cut`, `device`, ...).
+  (`atol`, `rtol`, `remove_cut`, `merge_rule`, `device`, ...).
 - `adaptive_quadrature(sampling_type, method, **options)` builds a solver to
   reuse across calls, for example to warm-start with `same_f=True`. Every
   constructor option is keyword-only.
@@ -294,10 +294,13 @@ the same text. In short:
    subinterval is accepted, or until `max_adaptive_splits` stops the
    splitting (then `converged` is usually `False`).
 
-5. **Optimal mesh.** After convergence, pairs of neighbouring subintervals with
-   a small combined error are merged into `mesh_optimal`, which `same_f=True`
-   starts from on the next call; `remove_cut` sets how small the merged error
-   must be.
+5. **Optimal mesh.** After convergence, pairs of neighbouring subintervals are
+   merged into `mesh_optimal`, which `same_f=True` starts from on the next
+   call, when the merged subinterval is predicted to pass with a margin. By
+   default the prediction interpolates the integrand values already stored for
+   the two neighbours onto the merged subinterval's nodes, so no new
+   evaluation is needed; `remove_cut` sets the margin and `merge_rule` the
+   prediction.
 
 <!-- include-end: how-it-works -->
 ## Comparisons
@@ -323,9 +326,11 @@ opened and checked (`python docs/_ext/readme_references.py` rewrites this
 list).
 
 <!-- references-start -->
+- Berrut, Jean-Paul, Trefethen, Lloyd N. (2004). **Barycentric Lagrange Interpolation.** *SIAM Review* 46(3), 501-517. [doi:10.1137/S0036144502417715](https://doi.org/10.1137/S0036144502417715)
 - Chen, Ricky T. Q., Rubanova, Yulia, Bettencourt, Jesse, Duvenaud, David K. (2018). **Neural Ordinary Differential Equations.** *Advances in Neural Information Processing Systems 31 (NeurIPS 2018)*. <https://papers.nips.cc/paper_files/paper/2018/hash/69386f6bb1dfed68692a24c8686939b9-Abstract.html>
 - NIST (2026). **NIST Digital Library of Mathematical Functions.** *Online, accessed 2026-11-12*. <https://dlmf.nist.gov/18.9>
 - Fehlberg, Erwin (1969). **Low-Order Classical Runge-Kutta Formulas with Stepsize Control and Their Application to Some Heat Transfer Problems.** *NASA Marshall Space Flight Center, TR R-315*. <https://ntrs.nasa.gov/citations/19690021375>
+- Gander, Walter, Gautschi, Walter (2000). **Adaptive Quadrature--Revisited.** *BIT Numerical Mathematics* 40(1), 84-101. [doi:10.1023/A:1022318402393](https://doi.org/10.1023/A:1022318402393)
 - Gonnet, Pedro (2012). **A Review of Error Estimation in Adaptive Quadrature.** *ACM Computing Surveys* 44(4), 22:1-22:36. arXiv:1003.4629. [doi:10.1145/2333112.2333117](https://doi.org/10.1145/2333112.2333117)
 - Piessens, Robert, de Doncker, Elise (1983). **QUADPACK routines dqk15, dqk21, dqk31 (double-precision Gauss-Kronrod quadrature).** *Netlib*. <https://netlib.org/quadpack/>
 - Sanderse, B., Veldman, A. E. P. (2019). **Constraint-Consistent Runge-Kutta Methods for One-Dimensional Incompressible Multiphase Flow.** *Journal of Computational Physics* 384, 170-199. arXiv:1809.06114. [doi:10.1016/j.jcp.2019.02.001](https://doi.org/10.1016/j.jcp.2019.02.001)

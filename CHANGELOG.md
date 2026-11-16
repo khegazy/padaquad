@@ -6,6 +6,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-11-15
+
+### Changed
+
+- **`mesh_optimal` merges neighbouring subintervals from a predicted merged error (new option `merge_rule`, default `"predicted"`).** 1.3.0 and 1.4.0 merged a pair only when its summed error ratio was below `remove_cut / 2**(error_exponent - 1)`, which assumes the error estimate grows `2**(k-1)`-fold when two subintervals merge. On wide subintervals it grows far less (about `2**8`–`2**9` where `2**20` was assumed for `gk21`, measured in a warm-started PINN training loop), so safe merges were refused and warm-started calls kept more subintervals than they needed: that training loop used 24–74 % more integrand evaluations under 1.3.0 than under 1.2.2. The integrals themselves were as accurate.
+  - **How it works.** padaquad interpolates the integrand values already stored for the two neighbours onto the nodes the merged subinterval would have, and applies the method's weights. That gives the merged subinterval's integral and error estimate without evaluating the integrand. The pair merges when the larger of that error estimate and the difference from the sum of the two neighbours (the halves-versus-whole test of adaptive Simpson quadrature, Gander & Gautschi 2000), plus the neighbours' own errors, is below `remove_cut` times the tolerance. The difference term stops merges whose own error estimate would be blind, such as a kink that the merged nodes skip over. The prediction is linear in the stored values, so it uses weight vectors built once per ratio of neighbour widths and cached on the solver.
+  - **Measured against 50-digit exact integrals** (14 methods, 17 integrands, 2.57 million pairs, tolerances down to the rounding level):
+    - pairs whose merge can cost accuracy: 86, against 12,058 for the 1.3.0 merge rule and 23,215 for the 1.2.2 one;
+    - none of the 86 are on a Gauss–Kronrod or Clenshaw–Curtis method;
+    - worst: 4.35 times the tolerance (1.3.0: 66);
+    - safe merges actually made on the high-order methods: 99 % (1.3.0: 50–74 %).
+  - **Warm-start chains** (306 chains, 6 warm calls each): 13.7 % fewer integrand evaluations; no starting subinterval had to be split again (1.3.0: 5); none ended less accurate than its cold start (1.3.0: 2).
+  - **Snapshots.** `n_optimal_mesh` changed in 90 of the 390 cases (86 smaller, 4 larger); `integral` and `integral_error` are unchanged in all of them.
+  - **Cost.** The weight vectors are built once per distinct ratio of neighbouring widths, about 2 µs each for `gk21` and 20 µs for `cc65` on 8 CPU threads. Meshes grown from equal starting subintervals have few distinct ratios: 0.2–0.5 ms more per call on meshes of up to 64 subintervals, and on 10^6 equal subintervals building `mesh_optimal` takes 0.40 s against 0.30 s (gk21) and 0.77 s against 0.38 s (cc65). A starting mesh of many random subintervals has one ratio per pair, and its warm-started meshes keep them: with `N_init_steps=10**4` and a cheap integrand, a cold call took 93 ms against 24 ms (gk21) and 245 ms against 27 ms (cc65), and a warm call 11 ms against 4 ms and 31 ms against 7 ms. For an integrand that is expensive to evaluate the difference is small in relative terms. The prediction works in chunks of pairs, so its temporary memory does not grow with the mesh (at most about 0.25 GB for gk21 and 0.7 GB for cc65). Open question: `docs/issues/predicted-merge-cost.md`.
+  - **The older merge rules stay available** as `merge_rule="power_law"` (1.3.0 and 1.4.0) and `merge_rule="sum"` (1.2.2). With a multi-coordinate integration variable (T > 1), `"predicted"` falls back to `"power_law"` with a warning.
+  - **Limit, shared by every merge rule:** a feature of the integrand that lies between the stored nodes cannot be seen.
+
+  Plan, evidence and its adversarial reviews: the commits of PR #69.
+
+### Fixed
+
+- **A node no longer lies past the end of its subinterval.** Node i of a subinterval was placed at `left + c_i * (right - left)`; when `right - left` rounds (float32, wide subintervals) the last node came out one rounding step past `right`, so it lay past the next subinterval's first node and, on the last subinterval, outside the integration interval. Nodes are now placed with `torch.lerp`, whose nodes at c = 0 and c = 1 are the mesh points bit for bit. The visible failure was an `AssertionError` in `_merge_excess_nodes` (node order after merging): the README's gradient example, which runs in float32, failed for 37 of 2,000 random starting meshes with `merge_rule="predicted"` and 1 of 1,000 on 1.4.0. Nodes with c ≥ 0.5 can move by a rounding step, so results can change at the rounding level.
+- **Building `mesh_optimal` no longer takes time quadratic in the number of subintervals.** `_rec_remove`, which picks which of the flagged neighbouring pairs are merged, un-flagged about two entries per pass over the whole mask, so a call in which most pairs qualified for merging spent almost all its time there: 9.1 s of a 9.5 s call with 10^5 subintervals, for gk21, cc65 and dopri5 alike (about 15 minutes expected at 10^6). It now computes the same result in one pass (within each run of flagged pairs, keep every other one starting from the first): 0.07–0.10 s for the same calls. The output is unchanged, checked against the old loop on 2,580 random masks in the test suite, and the mask passed in is no longer modified. Details: PR #69.
+
 ## [1.4.0] - 2026-11-15
 
 ### Removed
@@ -181,7 +205,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Changed
 
-- **Record ordering is now by mesh position (robust to vector-valued time).** Recorded panels are merged/sorted by each panel's position in the mesh (its left barrier looked up in a `mesh_indices` map) instead of by the first node's first time-coordinate. The previous coordinate-0 key is not a valid total order when `t` is a vector (`T > 1`, e.g. path integrals) and could mis-order the record; the mesh order is correct for any `T`. For scalar time (`T == 1`) the order is unchanged and results are byte-identical (snapshots unaffected).
+- **Record ordering is now by mesh position (robust to vector-valued time).** Recorded panels are merged/sorted by each panel's position in the mesh (its left barrier looked up in a `mesh_indices` map) instead of by the first node's first time-coordinate. The previous coordinate-0 key is not a valid total order when `t` is a vector (`T > 1`, e.g. path integrals) and could misorder the record; the mesh order is correct for any `T`. For scalar time (`T == 1`) the order is unchanged and results are byte-identical (snapshots unaffected).
 - **Default result device (notable for CUDA users):** with `result_device` defaulting to `'cpu'`, `integrate()` now returns the large result tensors on CPU by default; pass `result_device='cuda'` (or your device) to keep them on the GPU. The "mesh family" (`mesh_optimal`, `mesh_init`, `mesh_final`) always stays on the integration device because `mesh_optimal` is the warm-start mesh fed back into the solver and its endpoints are `mesh_init`/`mesh_final`. On a CPU-only solver `result_device` is a no-op.
 - **Device-consistent internals:** the error-ratio helpers and adaptive-mesh refinement (`_adaptively_increase_mesh`, `_get_optimal_mesh`) are now device-following (tolerances and allocations follow their inputs), and the merge/sort paths place index tensors on each field's device, so a record split across devices stays consistent.
 - **Coordinate-0 assumptions removed for multi-dimensional `t`:** post-refinement/record monotonicity assertions are reframed (the 1-D strictly-ascending checks are retained, guarded to `T == 1`), initial sub-barriers are generated along the segment vector, and the `reuse_mesh` warm-start filter uses an all-coordinate bounding box instead of a coordinate-0 range.

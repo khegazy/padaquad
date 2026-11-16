@@ -6,7 +6,7 @@ import math
 
 import pytest
 import torch
-from _helpers import make_solver_for_unit_test
+from _helpers import make_solver_for_unit_test, needs_cuda
 
 # ---------------------------------------------------------------------------
 # _reduce_norm
@@ -187,6 +187,58 @@ class TestRecRemove:
         result = self.solver._rec_remove(mask.clone())
         self._check_no_adjacent(result)
         assert result.sum() >= 10  # At least half remain
+
+    def test_input_not_modified(self):
+        """The mask passed in is left as it was."""
+        mask = torch.tensor([True, True, True, False, True, True])
+        before = mask.clone()
+        self.solver._rec_remove(mask)
+        assert torch.equal(mask, before)
+
+    @staticmethod
+    def _loop_reference(mask: torch.Tensor) -> torch.Tensor:
+        """The loop _rec_remove used up to padaquad 1.4.0, kept as the reference.
+
+        Each pass un-flags about two entries, so a mostly-True mask needs about
+        N/2 passes; the one-pass version must give the same output.
+        """
+        mask = mask.clone()
+        while True:
+            mask2 = mask[:-1] * mask[1:]
+            if not torch.any(mask2):
+                return mask
+            if mask2[0]:
+                mask[1] = False
+            if len(mask) <= 2:
+                return mask
+            mask = torch.concatenate(
+                [mask[:2], mask2[1:] * mask[:-2] + (~mask2[1:]) * mask[2:]]
+            )
+
+    @pytest.mark.parametrize("density", [0.0, 0.2, 0.5, 0.8, 0.95, 1.0])
+    def test_matches_former_loop(self, density):
+        """Same output as the former loop on random masks of length 0-40, 100
+        and 1000 (2,580 masks over the six densities)."""
+        generator = torch.Generator().manual_seed(0)
+        for length in [*range(41), 100, 1000]:
+            for _ in range(10):
+                mask = torch.rand(length, generator=generator) < density
+                expected = self._loop_reference(mask)
+                assert torch.equal(self.solver._rec_remove(mask), expected), (
+                    f"length {length}, mask {mask.int().tolist()}"
+                )
+
+    @needs_cuda
+    def test_matches_cpu_on_gpu(self):
+        """The one-pass version uses cummax, whose CUDA kernel differs from the
+        CPU one: same output on the GPU, which it stays on."""
+        generator = torch.Generator().manual_seed(0)
+        for length in [0, 1, 2, 3, 17, 1000, 100_000]:
+            for density in (0.2, 0.8, 1.0):
+                mask = torch.rand(length, generator=generator) < density
+                on_gpu = self.solver._rec_remove(mask.cuda())
+                assert on_gpu.device.type == "cuda"
+                assert torch.equal(on_gpu.cpu(), self.solver._rec_remove(mask))
 
 
 # ---------------------------------------------------------------------------

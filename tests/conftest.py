@@ -12,7 +12,13 @@ sys.path.insert(0, str(Path(__file__).parent))
 from _helpers import SEED
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def seed():
-    """Set a deterministic random seed for reproducibility."""
+    """Start every test from the same random seed.
+
+    padaquad's starting mesh is random. Without this, a test that does not seed
+    itself starts from whatever state the tests before it left, which changes
+    with the tests selected and their order, so a failure could not be
+    reproduced. Tests that request ``seed`` explicitly get the same seeding.
+    """
     torch.manual_seed(SEED)

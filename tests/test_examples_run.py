@@ -25,6 +25,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _helpers import SEED
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 EXAMPLES_DIR = REPO_ROOT / "examples"
@@ -150,10 +151,15 @@ def _python_blocks() -> list[tuple[str, str]]:
 
 @pytest.mark.parametrize("where_and_code", _python_blocks(), ids=lambda b: b[0])
 def test_document_python_block_runs(where_and_code: tuple[str, str]) -> None:
-    """Each tested Python block of ``DOCUMENTS`` runs without error on the CPU."""
+    """Each tested Python block of ``DOCUMENTS`` runs without error on the CPU.
+
+    The block runs after ``torch.manual_seed(SEED)`` (one line prepended, so a
+    traceback's line numbers are one higher than the block's): padaquad's
+    starting mesh is random, and an unseeded block would run on a different mesh
+    in every run, so a failure could not be reproduced."""
     where, code = where_and_code
     out = subprocess.run(
-        [PY, "-c", code],
+        [PY, "-c", f"import torch; torch.manual_seed({SEED})\n" + code],
         capture_output=True,
         text=True,
         check=False,

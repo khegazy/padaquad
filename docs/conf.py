@@ -81,7 +81,7 @@ sphinx_gallery_conf = {
     "gallery_dirs": "auto_examples",
     # Only the tutorial scripts and the verification scripts; examples/pode and
     # examples/speed_test are not part of the gallery.
-    "filename_pattern": r"/(quadrature_basics|gradient_of_integral|polynomial_degree|integral_accuracy)\.py$",
+    "filename_pattern": r"/(quadrature_basics|gradient_of_integral|polynomial_degree|integral_accuracy|merge_prediction)\.py$",
     "ignore_pattern": r"(pode|speed_test)",
     "download_all_examples": False,
     "remove_config_comments": True,

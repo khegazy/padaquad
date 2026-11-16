@@ -42,7 +42,7 @@ them. The exception is `fehlberg2`, whose error estimate ignores curvature
 
 ### Why the error estimate shrinks like $h^{d+2}$
 
-The solver's merge rule ({ref}`ug-optimal-mesh`) assumes that the error
+The merge rule `merge_rule="power_law"` ({ref}`ug-optimal-mesh`) assumes that the error
 estimate of a subinterval of width $h$ shrinks like $h^k$ with
 $k = d + 2$, where $d$ is the degree of the embedded method. This is a
 derivation (shown for Simpson's rule by {cite:t}`gonnet2012`, Eqs. (4)–(5)):

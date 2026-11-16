@@ -370,8 +370,8 @@ None) and the cutoff for the constructor option `merge_rule`:
 adjacent pairs are both flagged, so one call merges at most one level. The
 merged step records the pair's summed error, at most the pair error, so the add
 phase of `_get_optimal_mesh` does not split it (unless the rounding floor sets
-the tolerance). Plan, evidence and the adversarial review:
-`docs/issues/predicted-merge-rule.md` and `predicted-merge-rule-review.md`.
+the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
+#69; open: `docs/issues/predicted-merge-cost.md` (time per distinct width ratio).
 
 ### Uniform vs variable sampling
 

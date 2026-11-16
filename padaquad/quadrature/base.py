@@ -2331,7 +2331,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     #: points differ in their last bits, so a mesh of equal subintervals of
     #: [0, 1] still has a few tens of distinct ratios (29 at 10^5, measured).
     #: Half a step moves the prediction by at most 0.24 of a pair's rounding
-    #: floor (measured; docs/issues/predicted-merge-rule.md, "The rule").
+    #: floor (measured; PR #69).
     _RATIO_QUANTUM = 2.0**48
     #: Pairs per chunk in ``_predict_merged_errors`` at D = 1 (``_MERGE_CHUNK //
     #: D`` for D outputs); bounds its float64 temporaries for any record.
@@ -2341,7 +2341,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     _MERGE_CACHE_SIZE = 256
     #: Width ratios per block in ``_merged_pair_weights``. When every pair has
     #: its own ratio, the prediction's temporaries peak at about 0.25 GB for
-    #: gk21 and 0.7 GB for cc65 (measured; docs/issues/merge-rule-code-review.md).
+    #: gk21 and 0.7 GB for cc65 (measured; PR #69).
     _RATIO_BLOCK = 1024
 
     def _merge_inputs(
@@ -2840,8 +2840,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         the first entry of its run of flags is even. The earlier loop un-flagged
         about two entries per pass over the whole mask, so a mask whose entries
         were mostly True took about N/2 passes (9 s of a 9.5 s call at
-        N = 10**5); the output is the same (see
-        ``docs/issues/rec-remove-quadratic-cost.md``).
+        N = 10**5); the output is the same (PR #69).
 
         Parameters
         ----------

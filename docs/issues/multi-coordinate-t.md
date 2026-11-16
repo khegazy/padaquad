@@ -38,10 +38,15 @@ import torch
 from padaquad import adaptive_quadrature
 
 s = adaptive_quadrature("uniform", method="gk21", device="cpu", dtype=torch.float64)
-f = lambda t: t[:, :1] * t[:, 1:2]          # f(x, y) = x * y, D = 1
+f = lambda t: t[:, :1] * t[:, 1:2]  # f(x, y) = x * y, D = 1
 
 # Path 1: limits only
-s.integrate(f, mesh_init=torch.tensor([0., 0.]), mesh_final=torch.tensor([1., 2.]), max_batch=10000)
+s.integrate(
+    f,
+    mesh_init=torch.tensor([0.0, 0.0]),
+    mesh_final=torch.tensor([1.0, 2.0]),
+    max_batch=10000,
+)
 # RuntimeError: Boolean value of Tensor with more than one value is ambiguous   (base.py:1843)
 
 # Path 2: explicit mesh
@@ -76,6 +81,7 @@ $\int f\,dx = \int_0^1 2s^2\,ds = 2/3$ and $\int f\,dy = \int_0^1 4s^2\,ds = 4/3
 - `_RK_integral`'s docstring says `RK_steps` has shape `[N, D]`. For `T > 1` with `D = 1` it is `[N, T]`.
 - `_get_mesh_indices` keys barriers by their coordinate tuple, so a path that passes through the same point twice would collide.
 - The memory-benchmark path (no `max_batch`) has not been run with `T > 1`.
+- `merge_rule="predicted"` falls back to `"power_law"` with a warning when `T > 1` (`_merge_inputs`); only a unit test reaches that path, because `integrate()` fails first.
 
 ## What is needed
 

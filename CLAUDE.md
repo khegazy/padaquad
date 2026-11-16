@@ -502,7 +502,7 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   returned call's interval: `mesh_optimal` ends at its bounds bit for bit),
   even when the constructor was given bounds. No bounds are stored
   separately. Bounds that are not increasing raise `ValueError`.
-  `docs/issues/warm-start-bounds.md`.
+  Analysis and design decisions: `git show bbfa6bc:docs/issues/warm-start-bounds.md`.
 - The solver does not identify integrands (no `id(f)` matching); the
   caller says when the integrand is the same. Default is
   `same_f=False`.

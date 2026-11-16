@@ -12,7 +12,7 @@ Tests in this file:
     warm-started mesh ends at the new ``mesh_final``.
   - test_warm_start_without_bounds_repeats_previous_interval and the tests
     after it: a ``same_f=True`` call takes a bound it is not given from the
-    stored mesh, not from the constructor (docs/issues/warm-start-bounds.md).
+    stored mesh, not from the constructor.
   - test_normal_completion_has_converged_true: a normal call returns
     ``converged=True`` (Bug B6's early-exit path was removed with
     ``max_path_change``).
@@ -234,7 +234,7 @@ def test_warm_start_with_new_t_final_yields_correct_mesh(take_gradient):
 # interval ([0, 1] by default). After a call on another interval it discarded
 # every stored point and integrated an interval the caller never asked for,
 # with converged=True and no message. A bound not given now comes from the
-# stored mesh's ends (docs/issues/warm-start-bounds.md).
+# stored mesh's ends.
 # -----------------------------------------------------------------------------
 
 WARM_METHODS = [("uniform", "gk21"), ("variable", "interpolatory3_variable")]

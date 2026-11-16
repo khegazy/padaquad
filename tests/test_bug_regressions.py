@@ -347,6 +347,36 @@ def test_bounds_not_increasing_raise(bounds):
     assert solver.mesh_previous is None
 
 
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+@pytest.mark.parametrize("warm_bounds", [False, True], ids=["no_bounds", "bounds"])
+def test_stored_mesh_carries_no_autograd_graph(take_gradient, warm_bounds):
+    """A bound that requires grad gets its gradient in its own call, but its
+    autograd graph must not stay in the stored mesh: a later warm call then
+    backpropagated into the earlier call's bound (hi.grad changed although
+    hi was not passed), or, after a take_gradient=True call, raised "Trying
+    to backward through the graph a second time"."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu", max_batch=10_000)
+    hi = _bound(2.0).requires_grad_()
+    first = solver.integrate(
+        f=torch.exp, mesh_init=_bound(0.0), mesh_final=hi, take_gradient=take_gradient
+    )
+    if not take_gradient:
+        first.integral.sum().backward()
+    # d/dhi of the integral of e^t over [0, hi] is e^hi (the bound's gradient).
+    assert math.isclose(float(hi.grad), math.exp(2.0), rel_tol=1e-6)
+    assert not solver.mesh_previous.requires_grad
+    grad_before = hi.grad.clone()
+
+    bounds = (
+        {"mesh_init": _bound(0.0), "mesh_final": _bound(2.0)} if warm_bounds else {}
+    )
+    warm = solver.integrate(f=torch.exp, same_f=True, take_gradient=True, **bounds)
+
+    assert math.isclose(float(warm.integral), math.exp(2.0) - 1.0, rel_tol=1e-6)
+    assert not warm.mesh_final.requires_grad
+    assert torch.equal(hi.grad, grad_before)
+
+
 def test_same_f_with_mesh_takes_bounds_from_mesh():
     """Unchanged: with ``mesh`` and same_f=True the bounds are the mesh's ends,
     and the stored mesh on [2, 3] is cut to [2.5, 4] and padded."""

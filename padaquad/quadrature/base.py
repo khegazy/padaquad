@@ -1215,8 +1215,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             )
         # mesh_optimal is fed back into the integrator as the warm-start mesh on
         # the next call, so it must match the integration device (its endpoints
-        # are mesh_init/mesh_final, which live on self.device).
-        mesh_optimal = mesh_optimal.to(self.device)
+        # are mesh_init/mesh_final, which live on self.device). Detached: when a
+        # bound requires grad, the mesh points carry its autograd graph, and a
+        # later warm call would backpropagate into the earlier call's bound (or
+        # through a graph a take_gradient=True call already freed). The bound's
+        # gradient reaches it through this call's nodes, not through the mesh.
+        mesh_optimal = mesh_optimal.to(self.device).detach()
         # Stored together for same_f=True; only a returning call writes
         # them (converged or not), so both come from one call.
         self.mesh_previous = mesh_optimal

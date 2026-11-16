@@ -199,8 +199,8 @@ class SolverBase(ABC, DistributedEnvironment):
         self.atol = torch.tensor(atol, dtype=dtype, device=self.device)
         self.rtol = torch.tensor(rtol, dtype=dtype, device=self.device)
         # Construction-time defaults; each integrate() call falls back to these
-        # when its corresponding argument is None (the active value is the local
-        # resolved in _check_variables).
+        # when its corresponding argument is None (f and y0 are resolved in
+        # _check_variables, the bounds in _setup_integral_bounds).
         self.init_f: Callable[..., Any] | None = f
         self.init_y0 = (
             y0.to(self.device)
@@ -433,33 +433,28 @@ class SolverBase(ABC, DistributedEnvironment):
     def _check_variables(
         self,
         f: Callable[..., Any] | None = None,
-        mesh_init: torch.Tensor | None = None,
-        mesh_final: torch.Tensor | None = None,
         y0: torch.Tensor | None = None,
-    ) -> tuple[Callable[..., Any], torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[Callable[..., Any], torch.Tensor]:
         """
-        Fill in missing arguments with stored defaults and move to correct device.
+        Fill in a missing integrand and offset with stored defaults.
 
         Any argument that is None is replaced with the value stored at
-        construction time. Tensor arguments are cast to the solver's dtype
-        and moved to the solver's device.
+        construction time; ``y0`` is cast to the solver's dtype and moved to
+        the solver's device. The bounds are resolved by the solver's
+        ``_setup_integral_bounds``.
 
         Parameters
         ----------
         f : Callable[..., Any] | None
             Integrand function, or None to use self.init_f.
-        mesh_init : torch.Tensor | None
-            Lower integration bound, or None to use self.init_mesh_init.
-        mesh_final : torch.Tensor | None
-            Upper integration bound, or None to use self.init_mesh_final.
         y0 : torch.Tensor | None
             Initial integral value, or None to use self.init_y0.
 
         Returns
         -------
-        tuple[Callable[..., Any], torch.Tensor, torch.Tensor, torch.Tensor]
-            Tuple of (f, mesh_init, mesh_final, y0) with defaults filled
-            in and tensors on the correct device/dtype.
+        tuple[Callable[..., Any], torch.Tensor]
+            ``(f, y0)`` with defaults filled in and ``y0`` on the solver's
+            dtype and device.
 
         Raises
         ------
@@ -472,15 +467,8 @@ class SolverBase(ABC, DistributedEnvironment):
                 "No integrand given: pass f to integrate() or to the solver "
                 "constructor."
             )
-        mesh_init = self.init_mesh_init if mesh_init is None else mesh_init
-        mesh_final = self.init_mesh_final if mesh_final is None else mesh_final
         y0 = self.init_y0 if y0 is None else y0
-
-        mesh_init = mesh_init.to(self.dtype).to(self.device)
-        mesh_final = mesh_final.to(self.dtype).to(self.device)
-        y0 = y0.to(self.dtype).to(self.device)
-
-        return f, mesh_init, mesh_final, y0
+        return f, y0.to(self.dtype).to(self.device)
 
     # -------------------------------------------------------------------------------- #
     #                         TRAINING AND EVALUATION TOGGLING                         #

@@ -828,9 +828,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         )
 
         # Get variables or populate with default values, send to correct device
-        f, mesh_init, mesh_final, y0 = self._check_variables(
-            f, mesh_init, mesh_final, y0
-        )
+        f, y0 = self._check_variables(f, y0)
         # Coerce any tensor in f_args onto the solver device too (it is forwarded
         # to f(t, *f_args)); DistributedEnvironment owns the device and every
         # input is moved onto it.
@@ -849,7 +847,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # before the memory benchmark also warms f up, so one-time costs (CUDA
         # start-up, lazy model loading, cuBLAS workspace) stay out of it.
         # One point, shaped [1, T] like every batch f receives. mesh_init is
-        # already on the solver's dtype and device (_check_variables).
+        # already on the solver's dtype and device (_setup_integral_bounds).
         test_output = f(mesh_init.reshape(1, -1), *f_args)
         test_integrand, _ = self._split_f_output(test_output)
         assert len(test_integrand.shape) >= 2

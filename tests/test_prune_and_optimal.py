@@ -503,20 +503,18 @@ def test_preasymptotic_pair_merges(merge_rule, merged):
     assert torch.equal(result.mesh_optimal.cpu(), expected)
 
 
-def _warm_errors(solver, f, exact, mesh, n_warm, **bounds):
-    """Errors of a cold call from ``mesh`` and of ``n_warm`` same_f calls, with
-    the right-hand side of the warm-start check for each warm call:
-    max(tol, 1.05 * cold error, summed rounding floor 50 eps |Q_i|), eps of
-    the mesh's dtype. ``bounds`` (mesh_init, mesh_final) go to the warm
-    calls: after a call with only ``mesh``, a same_f call otherwise
-    integrates the solver's default interval."""
+def _warm_errors(solver, f, exact, mesh, n_warm):
+    """Errors of a cold call from ``mesh`` and of ``n_warm`` same_f calls
+    without bounds (they integrate the mesh's interval), with the right-hand
+    side of the warm-start check for each warm call: max(tol, 1.05 * cold
+    error, summed rounding floor 50 eps |Q_i|), eps of the mesh's dtype."""
     eps = torch.finfo(mesh.dtype).eps
     tol = max(float(solver.atol), float(solver.rtol) * abs(exact))
     cold = solver.integrate(f=f, mesh=mesh, take_gradient=False)
     cold_error = abs(float(cold.integral) - exact)
     rows = []
     for _ in range(n_warm):
-        warm = solver.integrate(f=f, same_f=True, take_gradient=False, **bounds)
+        warm = solver.integrate(f=f, same_f=True, take_gradient=False)
         floor = float((50 * eps * warm.mesh_quadratures.abs()).sum())
         bound = max(tol, 1.05 * cold_error, floor)
         rows.append((abs(float(warm.integral) - exact), bound, warm))
@@ -849,23 +847,20 @@ def test_predicted_far_from_the_origin(dtype, offset):
     """On [offset, offset + 1/2], widths far below |t| on either side of 0:
     the node check accepts the solver's own records (its scale is each
     subinterval's largest |node|), and four warm calls merge 64 subintervals
-    to fewer than 16 and pass the warm-start check."""
+    to fewer than 16 and pass the warm-start check. The warm calls pass no
+    bounds and stay on [offset, offset + 1/2]."""
     a, b = offset, offset + 0.5
     mesh = torch.linspace(a, b, 65, dtype=dtype).unsqueeze(-1)
     solver = make_uniform_solver(
         "gk21", atol=1e-7, rtol=1e-6, dtype=dtype, device="cpu", max_batch=SMALL_BATCH
     )
     _, rows = _warm_errors(
-        solver,
-        lambda t: torch.cos(3 * (t - offset)),
-        math.sin(1.5) / 3,
-        mesh,
-        4,
-        mesh_init=torch.tensor([a], dtype=dtype),
-        mesh_final=torch.tensor([b], dtype=dtype),
+        solver, lambda t: torch.cos(3 * (t - offset)), math.sin(1.5) / 3, mesh, 4
     )
-    for error, bound, _ in rows:
+    for error, bound, warm in rows:
         assert error <= bound, (error, bound)
+        assert torch.equal(warm.mesh_init.cpu(), mesh[0])
+        assert torch.equal(warm.mesh_final.cpu(), mesh[-1])
     assert len(rows[-1][2].h) < 16
 
 

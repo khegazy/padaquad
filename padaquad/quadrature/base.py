@@ -779,8 +779,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             result_device or self.device, self.device.index or 0
         )
 
-        # If mesh is given set mesh_init and mesh_final, else use input, else use saved values
-        mesh_init, mesh_final = self._setup_integral_bounds(mesh, mesh_init, mesh_final)
+        # The bounds: the mesh's ends, else the given bounds; a missing one is
+        # the stored mesh's end under same_f, else the constructor's.
+        mesh_init, mesh_final = self._setup_integral_bounds(
+            mesh, mesh_init, mesh_final, same_f
+        )
 
         # Replace max_batch if default it given
         force_max_batch = self.init_max_batch if max_batch is None else max_batch
@@ -1373,7 +1376,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 "use an error_integral_reference no larger than |integral| "
                 "(converged is judged against the final integral)"
             )
-        remedies.append("call again with same_f=True to start from mesh_optimal")
+        remedies.append(
+            "call the same solver again with same_f=True, or pass mesh=mesh_optimal, "
+            "to start from mesh_optimal"
+        )
         logger.warning(
             "The integral did not converge: %d of %d accepted steps (%.1f%%) do "
             "not meet the tolerance (atol=%.3g, rtol=%.3g) judged against %s. "
@@ -2880,13 +2886,17 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh: torch.Tensor | None,
         mesh_init: torch.Tensor | None,
         mesh_final: torch.Tensor | None,
+        same_f: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Resolve the integration bounds of a call in the solver's dtype and device.
 
         With a mesh, the bounds are its first and last points; a given
         ``mesh_init`` or ``mesh_final`` must match them. Without one, a missing
-        bound falls back to the constructor's value.
+        bound is the stored mesh's end (``mesh_previous[0]`` or
+        ``mesh_previous[-1]``, the interval of the last call that returned)
+        when ``same_f`` is True and a mesh is stored, and the constructor's
+        value otherwise.
 
         Parameters
         ----------
@@ -2896,12 +2906,18 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             The caller's lower bound. Shape: [T].
         mesh_final : torch.Tensor or None
             The caller's upper bound. Shape: [T].
+        same_f : bool
+            True when the call warm-starts from the stored mesh.
 
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor]
-            ``(mesh_init, mesh_final)``, each of shape [T], with
-            ``mesh_init < mesh_final`` asserted.
+            ``(mesh_init, mesh_final)``, each of shape [T].
+
+        Raises
+        ------
+        ValueError
+            If the resolved bounds do not satisfy ``mesh_init < mesh_final``.
         """
         if mesh is not None:
             assert len(mesh.shape) == 2
@@ -2918,18 +2934,30 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 )
             mesh_init = mesh[0]
             mesh_final = mesh[-1]
-            assert mesh_init < mesh_final, (
-                "Integrator requires mesh_init < mesh_final, consider switching them and multiplying the integral by -1. Please also consider effects to your f."
-            )
         else:
-            mesh_init = self.init_mesh_init if mesh_init is None else mesh_init
-            mesh_final = self.init_mesh_final if mesh_final is None else mesh_final
+            # Under same_f a missing bound repeats the last returned call's
+            # interval: mesh_optimal starts and ends at that call's bounds bit
+            # for bit (tests/test_prune_and_optimal.py,
+            # test_mesh_optimal_ends_are_the_bounds), so they are not stored twice.
+            stored = self.mesh_previous if same_f else None
+            if mesh_init is None:
+                mesh_init = self.init_mesh_init if stored is None else stored[0]
+            if mesh_final is None:
+                mesh_final = self.init_mesh_final if stored is None else stored[-1]
         mesh_init = mesh_init.to(self.dtype).to(self.device)
         mesh_final = mesh_final.to(self.dtype).to(self.device)
 
-        assert mesh_init < mesh_final, (
-            "Integrator requires mesh_init < mesh_final, consider switching them and multiplying the integral by -1. Please also consider the effects your loss function if one is provided."
-        )
+        # Bounds are user input: raise rather than assert, which python -O
+        # removes (a reversed call then returned a wrong integral).
+        if not mesh_init < mesh_final:
+            raise ValueError(
+                "The integration bounds must satisfy mesh_init < mesh_final; got "
+                f"{mesh_init.tolist()} and {mesh_final.tolist()}. Under "
+                "same_f=True with a stored mesh, a bound not given is the stored "
+                "mesh's (solver.mesh_previous); otherwise it is the constructor's. "
+                "To integrate from b to a, integrate from a to b and negate the "
+                "result."
+            )
         return mesh_init, mesh_final
 
     def _setup_initial_mesh(

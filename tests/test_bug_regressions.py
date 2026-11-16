@@ -10,6 +10,9 @@ Tests in this file:
     (that matching was bug B2's fix; ids are reused and closures get new ones).
   - test_warm_start_with_new_t_final_yields_correct_mesh: Bug B1, the
     warm-started mesh ends at the new ``mesh_final``.
+  - test_warm_start_without_bounds_repeats_previous_interval and the tests
+    after it: a ``same_f=True`` call takes a bound it is not given from the
+    stored mesh, not from the constructor (docs/issues/warm-start-bounds.md).
   - test_normal_completion_has_converged_true: a normal call returns
     ``converged=True`` (Bug B6's early-exit path was removed with
     ``max_path_change``).
@@ -33,7 +36,7 @@ from tests._helpers import (
     make_uniform_solver,
 )
 
-from padaquad import IntegrationResult, integrate
+from padaquad import IntegrationResult, adaptive_quadrature, integrate
 
 # -----------------------------------------------------------------------------
 # Anchor: the no-warm-start path is correct as-is. Phase 1 must not regress it.
@@ -224,6 +227,151 @@ def test_warm_start_with_new_t_final_yields_correct_mesh(take_gradient):
     assert torch.all(diffs >= 0), (
         f"warm-started mesh is not monotone: diffs.min()={diffs.min().item()}"
     )
+
+
+# -----------------------------------------------------------------------------
+# Warm-start bounds: a same_f=True call without bounds used the constructor's
+# interval ([0, 1] by default). After a call on another interval it discarded
+# every stored point and integrated an interval the caller never asked for,
+# with converged=True and no message. A bound not given now comes from the
+# stored mesh's ends (docs/issues/warm-start-bounds.md).
+# -----------------------------------------------------------------------------
+
+WARM_METHODS = [("uniform", "gk21"), ("variable", "interpolatory3_variable")]
+
+
+def _bound(x, dtype=torch.float64):
+    """An integration bound of shape [1]."""
+    return torch.tensor([x], dtype=dtype)
+
+
+def _warm_solver(sampling="uniform", method="gk21", **options):
+    """A CPU solver with a fixed max_batch (no memory benchmark), after a call
+    that gives its interval [2, 3] only through ``mesh``."""
+    solver = adaptive_quadrature(
+        sampling, method, device="cpu", max_batch=10_000, **options
+    )
+    mesh = torch.linspace(2.0, 3.0, 9, dtype=torch.float64).unsqueeze(-1)
+    solver.integrate(f=torch.exp, mesh=mesh, take_gradient=False)
+    return solver
+
+
+@pytest.mark.parametrize(
+    "ctor_bounds", [None, (0.0, 1.0)], ids=["ctor_default", "ctor_given"]
+)
+@pytest.mark.parametrize(("lo", "hi"), [(2.0, 3.0), (0.5, 1.5)])
+@pytest.mark.parametrize(("sampling", "method"), WARM_METHODS)
+def test_warm_start_without_bounds_repeats_previous_interval(
+    sampling, method, lo, hi, ctor_bounds
+):
+    """After a call that gives its interval only through ``mesh``, a
+    same_f=True call without bounds integrates that interval from the whole
+    stored mesh, whether the constructor's bounds were defaulted or given on
+    purpose. [2, 3] holds no point of [0, 1]; [0.5, 1.5] overlaps it (the
+    old warm call mixed the two)."""
+    ctor = {}
+    if ctor_bounds is not None:
+        ctor = {
+            "mesh_init": _bound(ctor_bounds[0]),
+            "mesh_final": _bound(ctor_bounds[1]),
+        }
+    solver = adaptive_quadrature(
+        sampling, method, device="cpu", max_batch=10_000, **ctor
+    )
+    mesh = torch.linspace(lo, hi, 9, dtype=torch.float64).unsqueeze(-1)
+    solver.integrate(f=torch.exp, mesh=mesh, take_gradient=False)
+    stored = solver.mesh_previous.clone()
+
+    warm = solver.integrate(f=torch.exp, same_f=True, take_gradient=False)
+
+    exact = math.exp(hi) - math.exp(lo)
+    assert math.isclose(float(warm.integral), exact, rel_tol=1e-6)
+    assert torch.equal(warm.mesh_init, stored[0])
+    assert torch.equal(warm.mesh_final, stored[-1])
+    assert warm.n_start_steps == len(stored) - 1  # every stored point reused
+
+
+@pytest.mark.parametrize(("sampling", "method"), WARM_METHODS)
+def test_warm_start_one_bound_takes_the_other_from_stored_mesh(sampling, method):
+    """With one bound given, the other is the stored mesh's end, not the
+    constructor's: [2, 3] extends to [2, 3.5], then is cut to [2.5, 3.5]."""
+    solver = _warm_solver(sampling, method)
+
+    longer = solver.integrate(
+        f=torch.exp, same_f=True, mesh_final=_bound(3.5), take_gradient=False
+    )
+    assert torch.equal(longer.mesh_init, _bound(2.0))
+    exact = math.exp(3.5) - math.exp(2.0)
+    assert math.isclose(float(longer.integral), exact, rel_tol=1e-6)
+
+    shorter = solver.integrate(
+        f=torch.exp, same_f=True, mesh_init=_bound(2.5), take_gradient=False
+    )
+    assert torch.equal(shorter.mesh_final, _bound(3.5))
+    exact = math.exp(3.5) - math.exp(2.5)
+    assert math.isclose(float(shorter.integral), exact, rel_tol=1e-6)
+
+
+def test_warm_start_given_bound_beyond_stored_mesh_raises():
+    """A given lower bound above the stored upper end leaves bounds that are
+    not increasing: a ValueError that says where the missing bound came from
+    (an assert would vanish under python -O and return a wrong integral)."""
+    solver = _warm_solver()
+    with pytest.raises(ValueError, match="mesh_previous"):
+        solver.integrate(
+            f=torch.exp, same_f=True, mesh_init=_bound(4.0), take_gradient=False
+        )
+
+
+def test_same_f_with_mesh_takes_bounds_from_mesh():
+    """Unchanged: with ``mesh`` and same_f=True the bounds are the mesh's ends,
+    and the stored mesh on [2, 3] is cut to [2.5, 4] and padded."""
+    solver = _warm_solver()
+    mesh = torch.linspace(2.5, 4.0, 4, dtype=torch.float64).unsqueeze(-1)
+    out = solver.integrate(f=torch.exp, mesh=mesh, same_f=True, take_gradient=False)
+    assert torch.equal(out.mesh_init, _bound(2.5))
+    assert torch.equal(out.mesh_final, _bound(4.0))
+    exact = math.exp(4.0) - math.exp(2.5)
+    assert math.isclose(float(out.integral), exact, rel_tol=1e-6)
+
+
+@pytest.mark.parametrize(
+    "ctor_bounds", [None, (2.0, 3.0)], ids=["ctor_default", "ctor_given"]
+)
+def test_first_same_f_call_uses_constructor_bounds(ctor_bounds):
+    """Unchanged: with nothing stored, same_f=True without bounds uses the
+    constructor's bounds, [0, 1] by default."""
+    lo, hi = (0.0, 1.0) if ctor_bounds is None else ctor_bounds
+    ctor = {}
+    if ctor_bounds is not None:
+        ctor = {"mesh_init": _bound(lo), "mesh_final": _bound(hi)}
+    solver = adaptive_quadrature(
+        "uniform", "gk21", device="cpu", max_batch=10_000, **ctor
+    )
+    out = solver.integrate(f=torch.exp, same_f=True, take_gradient=False)
+    assert torch.equal(out.mesh_init, _bound(lo))
+    assert torch.equal(out.mesh_final, _bound(hi))
+    exact = math.exp(hi) - math.exp(lo)
+    assert math.isclose(float(out.integral), exact, rel_tol=1e-6)
+
+
+def test_warm_start_one_bound_float32():
+    """A float32 ``mesh_final`` switches the solver to float32, which rounds
+    the stored float64 mesh; the missing lower bound is the stored end in
+    float32."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu", max_batch=10_000)
+    mesh = torch.linspace(0.1, 0.7, 9, dtype=torch.float64).unsqueeze(-1)
+    solver.integrate(f=torch.exp, mesh=mesh, take_gradient=False)
+
+    hi = _bound(0.9, torch.float32)
+    warm = solver.integrate(
+        f=torch.exp, same_f=True, mesh_final=hi, take_gradient=False
+    )
+    lo = _bound(0.1).to(torch.float32)
+    assert warm.integral.dtype == torch.float32
+    assert torch.equal(warm.mesh_init, lo)
+    exact = math.exp(float(hi)) - math.exp(float(lo))
+    assert math.isclose(float(warm.integral), exact, rel_tol=1e-5)
 
 
 # -----------------------------------------------------------------------------
@@ -507,7 +655,9 @@ def test_integrand_test_call_shape(T, monkeypatch):
     """
     solver = make_solver_for_unit_test()
     if T > 1:
-        monkeypatch.setattr(solver, "_setup_integral_bounds", lambda mesh, a, b: (a, b))
+        monkeypatch.setattr(
+            solver, "_setup_integral_bounds", lambda mesh, a, b, same_f: (a, b)
+        )
     shapes = []
 
     def f(t):

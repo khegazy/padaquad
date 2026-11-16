@@ -223,8 +223,10 @@ def test_numpy_integer_max_adaptive_splits_is_accepted():
 
 def test_capped_call_then_warm_starts_converge():
     """A cap of 1 stops refinement of sin(20 t) on [0, 4] short of the
-    tolerance; repeated same_f=True calls refine from mesh_optimal and reach
-    convergence, and an uncapped call on the same solver is accurate."""
+    tolerance; repeated same_f=True calls without bounds, as the
+    not-converged warning advises, stay on [0, 4], refine from mesh_optimal
+    and reach convergence, and an uncapped call on the same solver is
+    accurate."""
     bounds = {
         "mesh_init": T_INIT,
         "mesh_final": torch.tensor([4.0], dtype=torch.float64),
@@ -244,8 +246,10 @@ def test_capped_call_then_warm_starts_converge():
     results = [first]
     for _ in range(6):
         out = solver.integrate(
-            f=sharp, same_f=True, take_gradient=False, max_adaptive_splits=1, **bounds
+            f=sharp, same_f=True, take_gradient=False, max_adaptive_splits=1
         )
+        assert torch.equal(out.mesh_init.cpu(), bounds["mesh_init"])
+        assert torch.equal(out.mesh_final.cpu(), bounds["mesh_final"])
         results.append(out)
         if out.converged:
             break

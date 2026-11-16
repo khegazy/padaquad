@@ -290,6 +290,11 @@ def test_warm_start_without_bounds_repeats_previous_interval(
     assert torch.equal(warm.mesh_final, stored[-1])
     assert warm.n_start_steps == len(stored) - 1  # every stored point reused
 
+    # same_f=False ignores the stored mesh: the constructor's bounds again.
+    cold = solver.integrate(f=torch.exp, take_gradient=False)
+    assert torch.equal(cold.mesh_init, solver.init_mesh_init)
+    assert torch.equal(cold.mesh_final, solver.init_mesh_final)
+
 
 @pytest.mark.parametrize(("sampling", "method"), WARM_METHODS)
 def test_warm_start_one_bound_takes_the_other_from_stored_mesh(sampling, method):
@@ -315,7 +320,7 @@ def test_warm_start_one_bound_takes_the_other_from_stored_mesh(sampling, method)
 def test_warm_start_given_bound_beyond_stored_mesh_raises():
     """A given lower bound above the stored upper end leaves bounds that are
     not increasing: a ValueError that says where the missing bound came from
-    (an assert would vanish under python -O and return a wrong integral)."""
+    (an assert would vanish under python -O and the reversed call would run)."""
     solver = _warm_solver()
     with pytest.raises(ValueError, match="mesh_previous"):
         solver.integrate(
@@ -649,7 +654,7 @@ def test_integrand_test_call_shape(T, monkeypatch):
     The call used torch.tensor([[mesh_init]]), which only works when mesh_init
     holds one number: T=1 gave [1, 1], T=2 raised "only one element tensors
     can be converted to Python scalars". Through the public path T>1 is
-    stopped earlier by the scalar `mesh_init < mesh_final` assert in
+    stopped earlier by the scalar `mesh_init < mesh_final` check in
     _setup_integral_bounds (T>1 is not supported end to end yet), so for T=2
     that method is stubbed on this instance to reach the test call.
     """

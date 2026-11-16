@@ -113,8 +113,8 @@ class SolverBase(ABC, DistributedEnvironment):
     - Device: inherited from ``DistributedEnvironment``.
     - Defaults: ``f``, ``y0``, ``mesh_init`` and ``mesh_final`` given at
       construction are used by every ``integrate`` call that does not pass
-      them, except that a warm start (``same_f=True`` with a stored mesh)
-      takes a bound it is not given from the stored mesh.
+      them, except that a warm start (``same_f=True`` with a stored mesh and
+      no ``mesh``) takes a bound it is not given from the stored mesh.
     - Warm starts: stores the optimal mesh of the last call that returned, in
       ``mesh_previous``; ``integrate(..., same_f=True)`` starts from it. See
       :ref:`ug-same-f`.

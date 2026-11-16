@@ -2964,13 +2964,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_final = mesh_final.to(self.dtype).to(self.device)
 
         # Bounds are user input: raise rather than assert, which python -O
-        # removes (a reversed call then returned a wrong integral).
+        # removes (a reversed call then ran on and stored an out-of-order
+        # mesh_optimal with points outside the interval).
         if not mesh_init < mesh_final:
             raise ValueError(
                 "The integration bounds must satisfy mesh_init < mesh_final; got "
                 f"{mesh_init.tolist()} and {mesh_final.tolist()}. Under "
-                "same_f=True with a stored mesh, a bound not given is the stored "
-                "mesh's (solver.mesh_previous); otherwise it is the constructor's. "
+                "same_f=True with a stored mesh and no mesh, a bound not given is "
+                "the stored mesh's end (solver.mesh_previous[0] or [-1]); "
+                "otherwise it is the constructor's. "
                 "To integrate from b to a, integrate from a to b and negate the "
                 "result."
             )

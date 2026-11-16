@@ -219,6 +219,61 @@ class TestGetOptimalTStepBarriers:
         )
 
 
+@pytest.mark.parametrize(
+    ("device", "result_device"),
+    [
+        ("cpu", "cpu"),
+        pytest.param("cuda", "cpu", marks=needs_cuda),
+        pytest.param("cuda", None, marks=needs_cuda),
+    ],
+    ids=["cpu", "cuda-result_cpu", "cuda-result_cuda"],
+)
+@pytest.mark.parametrize("case", ["merge", "capped"])
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32], ids=["f64", "f32"])
+@pytest.mark.parametrize(
+    ("sampling", "method"),
+    [("uniform", name) for name in UNIFORM_METHOD_NAMES]
+    + [("variable", name) for name in VARIABLE_METHODS],
+)
+def test_mesh_optimal_ends_are_the_bounds(
+    sampling, method, dtype, case, device, result_device
+):
+    """mesh_optimal starts and ends at the call's bounds bit for bit, so a
+    same_f=True call without bounds, which takes them from the stored mesh,
+    integrates the previous call's interval. "merge" starts from an
+    over-resolved mesh, so the optimal mesh merges subintervals (not at both
+    ends in every cell); "capped" stops short of the tolerance, so the optimal
+    mesh splits failing subintervals. On a CUDA solver mesh_optimal is built
+    on result_device and moved back to the solver's device."""
+    tol = 1e-6 if dtype == torch.float64 else 1e-5
+    solver = adaptive_quadrature(
+        sampling,
+        method,
+        atol=tol,
+        rtol=tol,
+        device=device,
+        dtype=dtype,
+        max_batch=SMALL_BATCH,
+    )
+    if case == "merge":
+        mesh = torch.linspace(0.3, 1.7, 129, dtype=dtype).unsqueeze(-1)
+        out = solver.integrate(
+            torch.exp, mesh=mesh, take_gradient=False, result_device=result_device
+        )
+    else:
+        mesh = torch.tensor([[0.3], [4.0]], dtype=dtype)  # the bounds only
+        out = solver.integrate(
+            lambda t: torch.sin(20 * t),
+            mesh_init=mesh[0],
+            mesh_final=mesh[-1],
+            max_adaptive_splits=1,
+            take_gradient=False,
+            result_device=result_device,
+        )
+    assert torch.equal(out.mesh_optimal[0].cpu(), mesh[0])
+    assert torch.equal(out.mesh_optimal[-1].cpu(), mesh[-1])
+
+
 # ---------------------------------------------------------------------------
 # Merge cutoff end to end: a merged step must pass when it is re-evaluated.
 # ---------------------------------------------------------------------------

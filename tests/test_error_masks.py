@@ -399,19 +399,19 @@ class TestAcceptRejectMasksFailure:
 
 
 # ---------------------------------------------------------------------------
-# _compute_error_ratios: pair_errors (the numerator of the pair ratio)
+# _compute_error_ratios: merge_prediction (added to the pair ratio's numerator)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("dtype", DTYPES, ids=DTYPE_IDS)
 @pytest.mark.parametrize("error_norm", ["2", "max", "failure_fraction"])
 @pytest.mark.parametrize("absolute", [True, False], ids=["absolute", "cumulative"])
-def test_pair_errors_replace_the_pair_numerator(dtype, error_norm, absolute):
-    """A supplied pair_errors replaces abs(e[k]) + abs(e[k+1]) in the pair ratio
-    of both error-norm families, in absolute and cumulative mode, and nothing
-    else changes: the per-subinterval ratios and the pair tolerance (including
-    its rounding floor) are the same. Tripling the summed errors triples the
-    pair ratio exactly (every norm here scales with its argument)."""
+def test_merge_prediction_adds_to_the_pair_numerator(dtype, error_norm, absolute):
+    """A supplied merge_prediction is added to abs(e[k]) + abs(e[k+1]) in the
+    pair ratio of both error-norm families, in absolute and cumulative mode, and
+    nothing else changes: the per-subinterval ratios and the pair tolerance
+    (including its rounding floor) are the same. Adding twice the summed errors
+    triples the pair ratio (every norm here scales with its argument)."""
     s = _solver(
         dtype,
         error_norm=error_norm,
@@ -430,7 +430,7 @@ def test_pair_errors_replace_the_pair_numerator(dtype, error_norm, absolute):
     }
     ratio, pair, per_dim = s._compute_error_ratios(**kwargs)
     ratio3, pair3, per_dim3 = s._compute_error_ratios(
-        **kwargs, pair_errors=3 * (e[:-1].abs() + e[1:].abs())
+        **kwargs, merge_prediction=2 * (e[:-1].abs() + e[1:].abs())
     )
     assert torch.equal(ratio3, ratio)
     assert (per_dim3 is None) == (per_dim is None)

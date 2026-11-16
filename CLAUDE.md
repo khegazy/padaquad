@@ -9,7 +9,7 @@ with code in this repository.
 quadrature**: it computes definite integrals
 $\int_a^b f(t)\,dt$ for a known integrand $f$ by evaluating many
 quadrature panels in parallel batches on GPU, with full autograd through
-the integration loop. Version 1.4.0 in `pyproject.toml` (Alpha), Python 3.11+.
+the integration loop. Version 1.4.1 in `pyproject.toml` (Alpha), Python 3.11+.
 
 **Critical distinction.** The integrand `f` depends only on `t` (and
 optional extra args), NOT on accumulated state `y`. This independence
@@ -349,8 +349,9 @@ keep/split masks consumed by `_adaptively_increase_mesh`.
 `error_ratios_2steps`: the pair ratio of consecutive step pairs, used only by
 `_get_optimal_mesh` to merge pairs: a pair error divided by the tolerance the
 merged step gets (in cumulative mode the right step's `|cumsum|`, where the
-merged step ends). `_merge_inputs` returns the pair error and the cutoff for the
-constructor option `merge_rule`:
+merged step ends). The pair error is `|e_i| + |e_{i+1}|` plus, for
+`"predicted"`, the merge prediction; `_merge_inputs` returns that prediction (or
+None) and the cutoff for the constructor option `merge_rule`:
 - `"predicted"` (default): pair error `_predict_merged_errors(...) + |e_i| +
   |e_{i+1}|`, cutoff `remove_cut` (default 0.1). The prediction interpolates
   each step's stored values (barycentric, through its distinct node fractions)
@@ -361,7 +362,7 @@ constructor option `merge_rule`:
   (log2 ratio quantized to 2^-48), cached on the solver
   (`_merge_weight_cache`, reset in `_set_solver_dtype`). With T > 1 it falls
   back to `"power_law"` with a warning.
-- `"power_law"` (padaquad 1.3.0): summed errors, cutoff `remove_cut / 2^(k-1)`
+- `"power_law"` (padaquad 1.3.0 and 1.4.0): summed errors, cutoff `remove_cut / 2^(k-1)`
   (assumes the estimate scales as h^k, k = `error_exponent`; on wide steps it
   grows far less, so safe merges are refused).
 - `"sum"` (1.2.2): summed errors, cutoff `remove_cut`.

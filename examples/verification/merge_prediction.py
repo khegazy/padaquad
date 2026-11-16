@@ -8,9 +8,9 @@ neighbouring subintervals are merged when the merged subinterval is predicted to
 pass its tolerance with a margin. With ``merge_rule="predicted"`` (the default)
 the merged subinterval's integral and error estimate are computed from the
 integrand values already stored for the two neighbours, by interpolation; with
-``merge_rule="power_law"`` (padaquad 1.3.0) the neighbours' summed error is
-multiplied by ``2**(error_exponent - 1)``. See the user guide, "The optimal mesh
-and the merge rule".
+``merge_rule="power_law"`` (padaquad 1.3.0 and 1.4.0) the neighbours' summed
+error is multiplied by ``2**(error_exponent - 1)``. See the user guide, "The
+optimal mesh and the merge rule".
 
 What a warm start must not do is make the result less accurate than the call it
 started from. Each chain below is one call from an explicit starting mesh (the

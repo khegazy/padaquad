@@ -258,9 +258,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
               already stored for the two neighbors, by interpolating them onto
               the merged subinterval's nodes. Use this one.
             - ``"power_law"``: the neighbors' summed error times
-              ``2**(error_exponent - 1)``, the merge rule of padaquad 1.3.0. It
-              assumes the error shrinks like a power of the width and refuses
-              many safe merges on wide subintervals.
+              ``2**(error_exponent - 1)``, the merge rule of padaquad 1.3.0
+              and 1.4.0. It assumes the error shrinks like a power of the width
+              and refuses many safe merges on wide subintervals.
             - ``"sum"``: the neighbors' summed error, the merge rule of
               padaquad 1.2.2. Merged subintervals often fail when evaluated
               again.
@@ -2349,10 +2349,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         nodes: torch.Tensor,
         y: torch.Tensor,
         mesh_quadratures: torch.Tensor,
-        mesh_quadrature_errors: torch.Tensor,
     ) -> tuple[torch.Tensor | None, float]:
         """
-        Return the pair errors and the cutoff that decide which pairs merge.
+        Return the merge prediction and the cutoff that decide which pairs merge.
 
         A pair of neighboring subintervals is merged when its pair ratio (the
         pair error divided by the tolerance the merged subinterval would get,
@@ -2361,7 +2360,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         - ``"sum"`` (padaquad 1.2.2): pair error ``|e_i| + |e_{i+1}|``,
           cutoff ``remove_cut``.
-        - ``"power_law"`` (padaquad 1.3.0): the same pair error, cutoff
+        - ``"power_law"`` (padaquad 1.3.0 and 1.4.0): the same pair error, cutoff
           ``remove_cut / 2**(k - 1)`` with ``k = method.error_exponent``. If a
           subinterval's error estimate scaled as ``h**k`` with its width h,
           the merged subinterval of width 2h would have about ``2**(k - 1)``
@@ -2385,16 +2384,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Integrand values at the nodes. Shape: [N, C, D].
         mesh_quadratures : torch.Tensor
             Integral contribution of each subinterval. Shape: [N, D].
-        mesh_quadrature_errors : torch.Tensor
-            Error estimate of each subinterval. Shape: [N, D].
 
         Returns
         -------
         tuple[torch.Tensor | None, float]
-            ``(pair_errors, merge_cut)``: the error of each pair, shape
-            [N-1, D], or None for the summed errors that
-            ``_compute_error_ratios`` uses by default; and the cutoff on the
-            pair ratio.
+            ``(merge_prediction, merge_cut)``: ``_predict_merged_errors`` for
+            ``"predicted"``, shape [N-1, D], which ``_compute_error_ratios``
+            adds to the summed errors, or None; and the cutoff on the pair
+            ratio.
         """
         if self.merge_rule == "sum":
             return None, self.remove_cut
@@ -2409,13 +2406,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 nodes.shape[-1],
             )
             return None, power_law_cut
-        abs_err = torch.abs(mesh_quadrature_errors)
-        pair_errors = (
-            self._predict_merged_errors(nodes, y, mesh_quadratures)
-            + abs_err[:-1]
-            + abs_err[1:]
-        )
-        return pair_errors, self.remove_cut
+        return self._predict_merged_errors(nodes, y, mesh_quadratures), self.remove_cut
 
     def _merged_pair_weights(
         self, rho: torch.Tensor
@@ -2621,27 +2612,22 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             ``(weights, first)`` as in ``_merged_pair_weights``, with
             ``weights`` of shape [K, 2, 2, U] in the order of ``keys``.
         """
+        rho = torch.exp2(keys.to(torch.float64) / self._RATIO_QUANTUM)
         if len(keys) > self._MERGE_CACHE_SIZE:
-            return self._merged_pair_weights(
-                torch.exp2(keys.to(torch.float64) / self._RATIO_QUANTUM)
-            )
+            return self._merged_pair_weights(rho)
         cache = self._merge_weight_cache
         if cache and next(iter(cache.values())).device != keys.device:
             cache.clear()
         key_list = keys.tolist()
-        missing = [k for k in key_list if k not in cache]
+        # Positions in keys of the ratios not cached yet
+        missing = [i for i, k in enumerate(key_list) if k not in cache]
         if missing:
             if len(cache) + len(missing) > self._MERGE_CACHE_SIZE:
                 cache.clear()
-                missing = key_list
-            weights, first = self._merged_pair_weights(
-                torch.exp2(
-                    torch.tensor(missing, dtype=torch.float64, device=keys.device)
-                    / self._RATIO_QUANTUM
-                )
-            )
+                missing = list(range(len(key_list)))
+            weights, first = self._merged_pair_weights(rho[missing])
             cache[None] = first
-            cache.update(zip(missing, weights, strict=True))
+            cache.update(zip([key_list[i] for i in missing], weights, strict=True))
         return torch.stack([cache[k] for k in key_list]), cache[None]
 
     def _prune_excess_mesh(
@@ -2790,14 +2776,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             The optimal mesh. Shape: [M_opt, T].
         """
         # Merge pairs of over-resolved neighbors
-        pair_errors, merge_cut = self._merge_inputs(
-            nodes, y, mesh_quadratures, mesh_quadrature_errors
-        )
+        merge_prediction, merge_cut = self._merge_inputs(nodes, y, mesh_quadratures)
         _, error_ratios_2steps, _ = self._compute_error_ratios(
             mesh_quadrature_errors=mesh_quadrature_errors,
             mesh_quadratures=mesh_quadratures,
             integral=integral.detach(),
-            pair_errors=pair_errors,
+            merge_prediction=merge_prediction,
         )
         nodes_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned = (
             self._prune_excess_mesh(
@@ -3199,7 +3183,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadratures: torch.Tensor | None = None,
         cum_mesh_quadratures: torch.Tensor | None = None,
         integral: torch.Tensor | None = None,
-        pair_errors: torch.Tensor | None = None,
+        merge_prediction: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """
         Compute the error ratio of each subinterval, choosing by ``self.error_norm``.
@@ -3229,11 +3213,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             (cumulative mode only).
         integral : torch.Tensor or None
             Current total integral [D] (absolute mode only; required there).
-        pair_errors : torch.Tensor or None
-            Error of each pair of neighbors merged into one [N-1, D], the
-            numerator of ``error_ratios_2steps``. None (default) means the
-            pair's summed errors ``abs(e[k]) + abs(e[k+1])``
-            (see ``_merge_inputs``).
+        merge_prediction : torch.Tensor or None
+            Predicted error of merging each pair of neighbors [N-1, D]
+            (``merge_rule="predicted"``, see ``_merge_inputs``), added to the
+            pair's summed errors ``abs(e[k]) + abs(e[k+1])`` in the numerator
+            of ``error_ratios_2steps``. None (default) adds nothing.
 
         Returns
         -------
@@ -3259,6 +3243,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         if self.use_absolute_error_ratio and integral is None:
             raise ValueError("Must give integral when use_absolute_error_ratio=True")
         abs_err = torch.abs(mesh_quadrature_errors)
+        # Numerator of the pair ratio. Adding a Python 0 is exact, so both
+        # cases sum in the same order.
+        pair_errors = (
+            (0 if merge_prediction is None else merge_prediction)
+            + abs_err[:-1]
+            + abs_err[1:]
+        )
         if self._is_failure_fraction:
             return self._error_ratios_failure_fraction(
                 abs_err, mesh_quadratures, cum_mesh_quadratures, integral, pair_errors
@@ -3273,7 +3264,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadratures: torch.Tensor | None,
         cum_mesh_quadratures: torch.Tensor | None,
         integral: torch.Tensor | None,
-        pair_errors: torch.Tensor | None = None,
+        pair_errors: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, None]:
         """
         Error ratios of the norm family: reduce the error vector, then compare.
@@ -3296,9 +3287,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         error ratio.
 
         The pair ratio ``error_ratio_2steps[k] = R(p[k]) / tol_2steps[k]``,
-        with ``p[k] = abs(e[k]) + abs(e[k+1])`` or the given ``pair_errors``
-        (used only to merge subintervals, in ``_prune_excess_mesh``), uses
-        the tolerance the merged subinterval
+        with ``p`` the pair errors (used only to merge subintervals, in
+        ``_prune_excess_mesh``), uses the tolerance the merged subinterval
         would get: the same ``tol`` in absolute mode, subinterval k+1's (the
         merged subinterval's right end) in cumulative mode. Its rounding floor
         is ``R(floor[k]) + R(floor[k+1])``, at least the merged subinterval's
@@ -3323,10 +3313,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Shape: [N, D].
         integral : torch.Tensor | None
             Total integral (absolute mode). Shape: [D].
-        pair_errors : torch.Tensor | None
-            Error of each merged pair, in place of
-            ``abs(e[k]) + abs(e[k+1])`` (see ``_compute_error_ratios``).
-            Shape: [N-1, D].
+        pair_errors : torch.Tensor
+            Error of each pair of neighbors merged into one, the numerator of
+            the pair ratio (see ``_compute_error_ratios``). Shape: [N-1, D].
 
         Returns
         -------
@@ -3369,8 +3358,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             error_tol_2steps = torch.maximum(error_tol_2steps, floor[:-1] + floor[1:])
 
         error_ratio = err / error_tol
-        if pair_errors is None:
-            pair_errors = abs_err[:-1] + abs_err[1:]
         err_2steps = self._reduce_norm(pair_errors)
         error_ratio_2steps = err_2steps / error_tol_2steps
         return error_ratio, error_ratio_2steps, None
@@ -3381,7 +3368,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadratures: torch.Tensor | None,
         cum_mesh_quadratures: torch.Tensor | None,
         integral: torch.Tensor | None,
-        pair_errors: torch.Tensor | None = None,
+        pair_errors: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Error ratios of ``"failure_fraction"``: the fraction of failing components.
@@ -3418,10 +3405,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Shape: [N, D].
         integral : torch.Tensor | None
             Total integral (absolute mode). Shape: [D].
-        pair_errors : torch.Tensor | None
-            Error of each merged pair, in place of
-            ``abs(e[k]) + abs(e[k+1])`` (see ``_compute_error_ratios``).
-            Shape: [N-1, D].
+        pair_errors : torch.Tensor
+            Error of each pair of neighbors merged into one, the numerator of
+            the pair ratio (see ``_compute_error_ratios``). Shape: [N-1, D].
 
         Returns
         -------
@@ -3463,8 +3449,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # Merge/prune indicator: conservative max-norm of the combined 2-step
         # ratio (compared against remove_cut < 1, so a magnitude is needed here
         # rather than a fraction).
-        if pair_errors is None:
-            pair_errors = abs_err[:-1] + abs_err[1:]
         ratio_2steps = pair_errors / error_tol_2steps
         error_ratio_2steps = torch.amax(ratio_2steps, dim=-1)  # [N-1]
         return failure_fraction, error_ratio_2steps, ratio

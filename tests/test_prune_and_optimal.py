@@ -21,7 +21,7 @@ from _helpers import (
 from padaquad import VARIABLE_METHODS, adaptive_quadrature, integrand_dict, integrate
 
 #: The merge rules whose meshes are checked end to end: the default and the
-#: 1.3.0 one ("sum" merges pairs whose merged step fails, by design).
+#: 1.3.0 and 1.4.0 one ("sum" merges pairs whose merged step fails, by design).
 MERGE_RULES = ["predicted", "power_law"]
 #: max_batch for the end-to-end merge tests below: their meshes are small, and an
 #: explicit value skips the memory benchmark of make_uniform_solver.
@@ -122,10 +122,10 @@ class TestPruneExcessT:
 
     @pytest.mark.parametrize("method", ["bosh3", "dopri5", "gk21", "cc17"])
     def test_merge_inputs_per_rule(self, method):
-        """_merge_inputs returns the cutoff and pair errors of each merge_rule:
-        "sum" and "power_law" keep the summed errors (None) with the cutoffs
-        remove_cut and remove_cut / 2**(k - 1), k = error_exponent;
-        "predicted" returns the prediction plus the summed errors, with the
+        """_merge_inputs returns the merge prediction and cutoff of each
+        merge_rule: "sum" and "power_law" add no prediction (None) to the
+        summed errors, with the cutoffs remove_cut and remove_cut / 2**(k - 1),
+        k = error_exponent; "predicted" returns the prediction, with the
         cutoff remove_cut; the prediction is positive for sin(3t), so an
         implementation that dropped it would fail."""
         sizes = {}
@@ -133,19 +133,17 @@ class TestPruneExcessT:
             solver = make_solver_for_unit_test(method, merge_rule=rule)
             t = self._make_t(solver, 0.0, 1.0, 3)
             y = torch.sin(3 * t)
-            b, b_err = solver.method.weights(t)
-            h = t[:, -1] - t[:, 0]  # [N, 1]
-            q = h * (b * y).sum(1)
-            e = (h * (b_err * y).sum(1)).abs()
-            sizes[rule] = solver._merge_inputs(t, y, q, e)
+            b, _ = solver.method.weights(t)
+            q = (t[:, -1] - t[:, 0]) * (b * y).sum(1)
+            sizes[rule] = solver._merge_inputs(t, y, q)
         k = make_solver_for_unit_test(method).method.error_exponent
         assert sizes["sum"] == (None, REMOVE_CUT)
         assert sizes["power_law"] == (None, REMOVE_CUT / 2 ** (k - 1))
-        pair_errors, cut = sizes["predicted"]
+        merge_prediction, cut = sizes["predicted"]
         assert cut == REMOVE_CUT
         predicted = solver._predict_merged_errors(t, y, q)
         assert torch.all(predicted > 0)
-        assert torch.equal(pair_errors, predicted + e[:-1] + e[1:])
+        assert torch.equal(merge_prediction, predicted)
 
 
 # ---------------------------------------------------------------------------
@@ -561,8 +559,8 @@ def test_predicted_falls_back_to_power_law_for_vector_t(caplog):
     y = torch.ones(3, solver.C, 1, dtype=torch.float64)
     zeros = torch.zeros(3, 1, dtype=torch.float64)
     with caplog.at_level("WARNING", logger="padaquad"):
-        pair_errors, cut = solver._merge_inputs(nodes, y, zeros, zeros)
-    assert pair_errors is None
+        merge_prediction, cut = solver._merge_inputs(nodes, y, zeros)
+    assert merge_prediction is None
     assert cut == REMOVE_CUT / 2 ** (solver.method.error_exponent - 1)
     assert "merge_rule='power_law'" in caplog.text
 
@@ -716,7 +714,7 @@ def test_predicted_warm_starts_with_vector_output(error_norm, absolute):
     references: after a cold call from the seeded random start, warm calls
     re-split no starting subinterval and stay within tolerance in every
     component. Sensitive: with merge_rule="sum", or a "failure_fraction" that
-    ignored pair_errors, gk15 re-splits 2 starting subintervals here."""
+    ignored the merge prediction, gk15 re-splits 2 starting subintervals here."""
     names = ("damped_sine", "sine_squared")
 
     def f(t):

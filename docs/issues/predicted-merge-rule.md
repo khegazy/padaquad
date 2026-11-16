@@ -518,6 +518,12 @@ Code level: research-grade. Two commits: the `_rec_remove` fix, then rule T.
    - **`_compute_error_ratios(..., pair_errors=None)`** forwards to both helpers,
      which use it in place of `abs_err[:-1] + abs_err[1:]`. Tolerance, cumulative
      mode and rounding floor are unchanged.
+
+     *Note added 2026-11-15, before the pull request:* so that the summed errors
+     are written once, `_merge_inputs(nodes, y, mesh_quadratures)` now returns
+     only the prediction (or None), and `_compute_error_ratios(...,
+     merge_prediction=None)` adds it to `abs_err[:-1] + abs_err[1:]` (in the
+     same order, so the result is bit-identical) before calling both helpers.
    - **`_prune_excess_mesh(..., cut)`** replaces its internal `merge_cut` line. Keep
      the derivation of the `2**(k-1)` factor in the docstring, with the condition
      under which it holds.

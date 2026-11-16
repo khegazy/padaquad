@@ -74,7 +74,7 @@ and the cutoff is `remove_cut` itself.
   error is many times the tolerance.
 - $|e_1| + |e_2|$ keeps a margin for the neighbours' own errors.
 
-**`merge_rule="power_law"`** (padaquad 1.3.0). $P = |e_1| + |e_2|$ and the cutoff
+**`merge_rule="power_law"`** (padaquad 1.3.0 and 1.4.0). $P = |e_1| + |e_2|$ and the cutoff
 is $\texttt{remove\_cut} / 2^{k-1}$, with $k$ the method's `error_exponent`. If
 the error estimate of a subinterval of width $h$ scaled as $K h^k$ with the same
 $K$ for both halves, the merged subinterval of width $2h$ would have the error

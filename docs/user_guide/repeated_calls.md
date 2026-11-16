@@ -11,11 +11,23 @@ Pass `same_f=True` when the integrand is the same as in the previous call, or
 changes only slightly. The call then starts from the mesh and `max_batch`
 stored by the last call on this solver that returned, in place of the caller's
 `mesh` and `max_batch`, and skips the memory benchmark. The integration bounds
-still come from the caller: the stored mesh is cut to them, and their endpoints
-are added if missing. If nothing is stored yet, the caller's values or the
-defaults are used, so the flag can be passed from the first iteration. With
-`same_f=False` (the default) the caller's values are used, but the stored
-values are still updated.
+are set as follows:
+
+- Bounds given in the call (`mesh_init`, `mesh_final`, or the ends of a `mesh`)
+  are used; the stored mesh is cut to them, and their endpoints are added if
+  missing.
+- A bound not given is the stored mesh's end, so a call without bounds repeats
+  the interval of the last call that returned, even if the constructor was
+  given other bounds. With only `mesh_final` given, `mesh_init` is the stored
+  mesh's first point, and the other way round. Bounds that are not increasing
+  raise `ValueError`.
+- If nothing is stored yet, the caller's values or the constructor's are used,
+  so the flag can be passed from the first iteration.
+
+With `same_f=False` (the default) the caller's values are used, but the stored
+values are still updated. A `same_f=False` call on another interval, for
+example a validation call in a training loop, therefore sets the interval that
+the next `same_f=True` call without bounds integrates.
 
 The stored mesh is the previous call's `mesh_optimal` ({ref}`ug-optimal-mesh`),
 also available as `solver.mesh_previous`; the stored batch size is

@@ -496,6 +496,13 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   the caller's `mesh` / `max_batch`, and the memory benchmark is skipped.
   With nothing stored (first call), the caller's values or the defaults
   are used.
+- Bounds of a `same_f=True` call (`_setup_integral_bounds`): given bounds,
+  or a `mesh`'s ends, are used and cut the stored mesh; without a `mesh`, a
+  bound not given is `mesh_previous[0]` / `mesh_previous[-1]` (the last
+  returned call's interval: `mesh_optimal` ends at its bounds bit for bit),
+  even when the constructor was given bounds. No bounds are stored
+  separately. Bounds that are not increasing raise `ValueError`.
+  `docs/issues/warm-start-bounds.md`.
 - The solver does not identify integrands (no `id(f)` matching); the
   caller says when the integrand is the same. Default is
   `same_f=False`.

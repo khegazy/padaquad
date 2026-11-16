@@ -6,6 +6,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+### Changed
+
+- **Integration bounds that are not increasing raise `ValueError`** instead of `AssertionError`, with a message that says where a missing bound came from. The check was an `assert`, which `python -O` removes; a reversed call then returned a wrong integral with `converged=True`.
+- **The not-converged warning's last remedy** now reads "call the same solver again with same_f=True, or pass mesh=mesh_optimal, to start from mesh_optimal". The one-shot `padaquad.integrate()` builds a new solver on every call, so `same_f=True` does nothing there; `mesh=mesh_optimal` works for both.
+- **`SolverBase._check_variables` fills in `f` and `y0` only** and returns `(f, y0)` (internal). The bounds are resolved once, in `_setup_integral_bounds`.
+
+### Fixed
+
+- **A `same_f=True` call without bounds integrated the constructor's interval.** After a call that gave its interval only through `mesh=` (for example on [2, 3]), a warm call without bounds integrated [0, 1] (the default), or the constructor's bounds, threw away the stored points outside it, and returned `converged=True` with no message; the not-converged warning's advice to call again with `same_f=True` led straight into it. A bound a warm call does not give is now the stored mesh's end (`mesh_previous[0]` / `mesh_previous[-1]`), so a call without bounds repeats the previous call's interval. Given bounds still cut the stored mesh, a `mesh=` still sets the bounds, and a first call (nothing stored) still uses the constructor's bounds. See `docs/issues/warm-start-bounds.md`.
+
 ## [1.4.1] - 2026-11-15
 
 ### Changed

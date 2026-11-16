@@ -241,9 +241,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         rtol : float
             Relative tolerance; see ``atol``. Default 1e-5.
         mesh_init : torch.Tensor or None
-            Default lower integration bound, shape [T]. None means 0.
+            Default lower integration bound, shape [T]. None means 0. A
+            ``same_f=True`` call with a stored mesh and no ``mesh`` uses the
+            stored mesh's first point instead.
         mesh_final : torch.Tensor or None
-            Default upper integration bound, shape [T]. None means 1.
+            Default upper integration bound, shape [T]. None means 1. A
+            ``same_f=True`` call with a stored mesh and no ``mesh`` uses the
+            stored mesh's last point instead.
         y0 : torch.Tensor or None
             Default value added to the returned integral, shape [D]. None means 0.
         remove_cut : float
@@ -687,7 +691,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         others in half, until every subinterval is accepted. It then builds
         the optimal mesh, which a later call with ``same_f=True`` starts from.
 
-        Every argument left as None falls back to the constructor's value.
+        Every argument left as None falls back to the constructor's value,
+        except a bound under ``same_f`` (see ``mesh_init``).
 
         Parameters
         ----------
@@ -702,16 +707,22 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             (see :ref:`the user guide <ug-mesh>`). Replaced by the stored mesh under ``same_f``.
         mesh_init : torch.Tensor or None
             Lower integration bound, shape [T]. If ``mesh`` is given, it must
-            equal the mesh's first point. None uses ``mesh[0]`` or the
-            constructor's value.
+            equal the mesh's first point. None uses ``mesh[0]``; without a
+            mesh, under ``same_f`` with a stored mesh, the stored mesh's first
+            point (the lower bound of the last call that returned), and
+            otherwise the constructor's value.
         mesh_final : torch.Tensor or None
             Upper integration bound, shape [T]. If ``mesh`` is given, it must
-            equal the mesh's last point. None uses ``mesh[-1]`` or the
-            constructor's value.
+            equal the mesh's last point. None uses ``mesh[-1]``; without a
+            mesh, under ``same_f`` with a stored mesh, the stored mesh's last
+            point, and otherwise the constructor's value.
         same_f : bool
             True when f is the same integrand as in the previous call, or
             changed only slightly: start from the stored mesh and ``max_batch``
-            and skip the memory benchmark. Default False (see :ref:`the user guide <ug-same-f>`).
+            and skip the memory benchmark. Bounds that are given cut the stored
+            mesh; a bound not given is the stored mesh's end, so a call without
+            bounds repeats the previous call's interval. Default False (see
+            :ref:`the user guide <ug-same-f>`).
         random_initial_mesh : bool
             If True (default), the points of a fresh starting mesh are placed at
             random, so the mesh does not line up with evenly spaced features of
@@ -770,6 +781,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             The integral (plus ``y0``), its error estimate, whether it
             ``converged``, the optimal mesh, the nodes and integrand values of
             every subinterval, and split statistics (see :ref:`the user guide <ug-convergence>`).
+
+        Raises
+        ------
+        ValueError
+            If the bounds do not satisfy ``mesh_init < mesh_final``, if no
+            integrand was given here or at construction, or if an option such
+            as ``error_norm`` is invalid.
         """
         # Set dtype based on input
         self.set_dtype_by_input(mesh=mesh, mesh_init=mesh_init, mesh_final=mesh_final)

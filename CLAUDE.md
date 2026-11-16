@@ -9,7 +9,7 @@ with code in this repository.
 quadrature**: it computes definite integrals
 $\int_a^b f(t)\,dt$ for a known integrand $f$ by evaluating many
 quadrature panels in parallel batches on GPU, with full autograd through
-the integration loop. Version 1.3.0 in `pyproject.toml` (Alpha), Python 3.11+.
+the integration loop. Version 1.4.0 in `pyproject.toml` (Alpha), Python 3.11+.
 
 **Critical distinction.** The integrand `f` depends only on `t` (and
 optional extra args), NOT on accumulated state `y`. This independence
@@ -404,18 +404,51 @@ the tolerance). Plan, evidence and the adversarial review:
 - All of this lives in `quadrature/memory.py` (`_MemoryManagement` mixin,
   `_is_out_of_memory`); the batch loop `_evaluate_f_in_batches` stays in
   `quadrature/base.py`.
-- `_setup_memory_checks` measures only c = `f_unit_mem_size`, the memory
-  cost of ONE evaluation of `f`. It does not choose a batch size. It calls
-  `f` on N = 1, 10, 100, … points, measures M (memory that call used) and
-  sets c = s·(M + E)/N (s = `_GRADIENT_MEMORY_SAFETY_FACTOR` = 2.1 when
-  `take_gradient`, else 1). M: CUDA peak counters; on Linux CPUs the
-  resettable process peak (`/proc/self/clear_refs` + `VmHWM`) plus the
-  kernel's counter error E; elsewhere an RSS before/after difference.
-  Stops: c changes < 1 %, call slower than 1 s,
-  N = 1e9, or 10·M > usable memory.
+- `_setup_memory_checks` fits the memory of ONE call of `f` on N points,
+  `f_mem_coeffs` = s·((a + E) + b·N + d·N²) in GB (s =
+  `_GRADIENT_MEMORY_SAFETY_FACTOR` = 2.1 when `take_gradient`, else 1). It
+  does not choose a batch size. The reader (`_peak_memory_reader` →
+  `_Reader`: reset, read, E, noise floor, counts_reuse): CUDA peak counter
+  (floor 10 KB, counts reused memory); Linux `VmHWM` reset through
+  `/proc/self/clear_refs`, after glibc `malloc_trim(0)` when available
+  (floor 4 MiB; counts reused memory only with the trim; E = 2 × CPUs in the
+  affinity mask × max(32, 2 × online CPUs) pages); elsewhere an RSS
+  before/after difference (floor 4 MiB, misses reused memory). Every reading
+  is at least the bytes of the input and output tensors (`_tensor_bytes`).
+  Readings ≥ the floor are *reliable*; only they are fitted (a + b·N + d·N²,
+  a, b, d ≥ 0, `_fit_up_to_quadratic`, scipy `nnls`). The fit is *ready*
+  with ≥ 3 reliable readings whose fitted memory grows by ≥ the floor from the
+  first to the last; before, the worst case y(kN) ≤ k²·y(N) through the
+  reliable reading with the largest N (one local `memory_model`, returning
+  the coefficients and `ready`, used for sizing and the stored fit).
+  N_next = min(step·N, n_mem, n_time): step 2 after a call > 0.1 s on a
+  reader that counts reused memory, else 10; n_mem from 0.75 of usable
+  memory; n_time from 1 s (≥ 2N for the first two calls and while not ready),
+  always capped by the time left of the 60 s total (`limit_benchmark_time`,
+  a constructor option; False makes the total infinite). Stops: 60 s with
+  the fit ready (warns), c = s·(M + E)/N changes < 1 % twice with the last 3
+  readings reliable and the fit ready, a call > 1 s with the fit ready,
+  N = 1e9, N_next < 2N.
+  Raises `RuntimeError` (readings listed, asks for `max_batch`) when
+  M > 3·(N/N_i)²·(M_i + E) for the earlier reliable reading i with the
+  smallest bound (every reader), when the fit is not ready at 60 s or the
+  next needed call fits in memory but is predicted past the 60 s (both name
+  `limit_benchmark_time`), or when none is reliable at the end. Not ready at
+  the memory budget / OOM / 1e9: the cautious worst-case fit. An OOM at
+  N > 1 sets `_oom_max_batch = _OOM_BACKOFF·N`; on a reader that misses
+  reused memory `_oom_max_batch` is also capped at max(largest test N, C).
+  The benchmark is a heuristic for the common case (memory linear in N, or
+  at most N²); its known limitations, with measured and simulated numbers,
+  are listed once, in `docs/user_guide/devices_memory.md` (section
+  "Limitations of the memory benchmark", label `ug-memory-limitations`;
+  the start warning links to it). Read them before changing the benchmark,
+  and update them when a change fixes or adds one.
+  The batch loop's out-of-memory retry shrinks the batch that failed, not
+  `_oom_max_batch` (which can be far above it).
 - Unless `max_batch` or `same_f=True` fixes it, the batch size is
   computed at every evaluation from live memory: `get_max_batch` →
-  `_get_max_f_evals = usable_memory / c` (capped at 1e9).
+  `_get_max_f_evals` = `_largest_n(f_mem_coeffs, _MEMORY_BUDGET·usable)`
+  (capped at 1e9).
 - Out-of-memory errors are recognized by `_is_out_of_memory` (GPU OOM, CPU
   `DefaultCPUAllocator` refusal, CUDA "out of memory" and CUDA-library
   `*ALLOC*_FAILED` statuses, `MemoryError`);

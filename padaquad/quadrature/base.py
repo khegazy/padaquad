@@ -55,7 +55,11 @@ import torch
 from padaquad.base import DEFAULT_METHODS, SolverBase, steps
 from padaquad.distributed import DistributedEnvironment, _resolve_device
 from padaquad.methods import _get_method
-from padaquad.quadrature.memory import _is_out_of_memory, _MemoryManagement
+from padaquad.quadrature.memory import (
+    _OOM_BACKOFF,
+    _is_out_of_memory,
+    _MemoryManagement,
+)
 from padaquad.results import IntegrationResult, MethodOutput
 
 logger = logging.getLogger(__name__)
@@ -167,6 +171,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         The constructor's ``max_batch``.
     init_total_mem_usage : float
         The constructor's ``total_mem_usage``.
+    limit_benchmark_time : bool
+        The constructor's ``limit_benchmark_time``.
     use_absolute_error_ratio : bool
         True to judge the relative tolerance against the whole integral,
         False to judge it against the running integral.
@@ -201,6 +207,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         merge_rule: str = "predicted",
         max_batch: int | None = None,
         total_mem_usage: float = 0.9,
+        limit_benchmark_time: bool = True,
         max_adaptive_splits: int | None = None,
         use_absolute_error_ratio: bool = True,
         error_norm: str | Callable[[torch.Tensor], torch.Tensor] = "2",
@@ -267,6 +274,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Fraction of the device's total memory, in (0, 1], that batches may
             fill: the batch size leaves ``(1 - total_mem_usage)`` of it free.
             Used only when no ``max_batch`` is set. Default 0.9.
+        limit_benchmark_time : bool
+            If True (default), the memory benchmark raises ``RuntimeError``
+            when it cannot measure the memory of ``f`` within 60 s; False
+            removes the limit, for an ``f`` so slow that the measurement needs
+            longer (see :ref:`the user guide <ug-memory>`).
         max_adaptive_splits : int or None
             Default cap on how many times a subinterval may have been halved
             since the starting mesh; at the cap it is accepted even if it fails
@@ -344,12 +356,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # max_batch of the last integrate() call that returned; reused by
         # same_f=True.
         self.previous_max_batch: int | None = None
-        # Per-evaluation memory cost; set by each _setup_memory_checks run and
-        # used by get_max_batch to size batches from live free memory.
-        self.f_unit_mem_size = None
-        # Cap discovered after an OOM during a take_gradient=False evaluation;
-        # None until one occurs. Cleared at the start of every integrate() call
-        # (same_f=True carries it over through previous_max_batch).
+        # Fitted memory of one call of f on B points, (a, b, d) of
+        # a + b B + d B^2 in GB; set by each _setup_memory_checks run and used
+        # by get_max_batch to size batches from live free memory.
+        self.f_mem_coeffs = None
+        # Cap discovered after an OOM during a take_gradient=False evaluation,
+        # or during the memory benchmark; None until one occurs. Cleared at the
+        # start of every integrate() call (same_f=True carries it over through
+        # previous_max_batch).
         self._oom_max_batch = None
 
         # Construction-time defaults; each integrate() call falls back to these
@@ -371,6 +385,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         self.init_error_on_nonfinite = error_on_nonfinite
         self.error_on_nonfinite = error_on_nonfinite
         self.init_total_mem_usage = total_mem_usage
+        self.limit_benchmark_time = limit_benchmark_time
 
     #: String values accepted by ``error_norm`` (in addition to a callable).
     _VALID_ERROR_NORMS = ("2", "max", "rms", "failure_fraction")
@@ -1965,16 +1980,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 # traceback still holds f's tensors, so they cannot be freed.
                 free_mem, total_mem = self._get_memory()
                 self._release_memory()
-                # Seed from the live max_batch on the first OOM (_oom_max_batch
-                # starts as None), then shrink. min(..., prev - 1) guarantees a
-                # strict decrease -- plain round(0.75 * 2) == 2 would stick and
-                # retry forever.
-                prev = (
-                    self._oom_max_batch
-                    if self._oom_max_batch is not None
-                    else max_batch
+                # Shrink the batch that failed, not _oom_max_batch: a cap the
+                # memory benchmark set can be far above it, and shrinking that
+                # would retry a larger batch. min(..., max_batch - 1) guarantees
+                # a strict decrease -- plain round(_OOM_BACKOFF * 2) == 2 would
+                # stick and retry forever.
+                self._oom_max_batch = max(
+                    1, int(min(round(_OOM_BACKOFF * max_batch), max_batch - 1))
                 )
-                self._oom_max_batch = max(1, int(min(round(0.75 * prev), prev - 1)))
                 logger.warning(
                     f"Caught OOM with {free_mem} GB free of {total_mem} GB. "
                     f"Reducing max_batch from {max_batch} to {self._oom_max_batch}."

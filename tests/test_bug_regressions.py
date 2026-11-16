@@ -178,6 +178,36 @@ def test_stored_values_not_written_by_a_raising_call():
     assert torch.equal(solver.mesh_previous, stored_mesh)
 
 
+def test_stored_mesh_keeps_its_dtype_when_the_solver_switches():
+    """A float32 input switches the solver to float32 (documented, and it
+    persists even when the call then raises), but the stored float64 mesh is
+    not rounded: it was, so a later float64 warm call reused float32(0.1) =
+    0.10000000149011612 as its lower bound for good."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu", max_batch=10_000)
+    mesh = torch.linspace(0.1, 0.7, 9, dtype=torch.float64).unsqueeze(-1)
+    solver.integrate(f=torch.exp, mesh=mesh, take_gradient=False)
+    stored = solver.mesh_previous.clone()
+
+    with pytest.raises(ValueError, match="mesh_init < mesh_final"):
+        solver.integrate(
+            f=torch.exp,
+            same_f=True,
+            mesh_init=_bound(0.9, torch.float32),
+            take_gradient=False,
+        )
+    assert solver.dtype == torch.float32
+    assert torch.equal(solver.mesh_previous, stored)  # same dtype and values
+
+    warm = solver.integrate(
+        f=torch.exp, same_f=True, mesh_final=_bound(0.7), take_gradient=False
+    )
+    assert warm.integral.dtype == torch.float64
+    assert torch.equal(warm.mesh_init, stored[0])
+    assert warm.n_start_steps == len(stored) - 1  # every stored point reused
+    exact = math.exp(0.7) - math.exp(0.1)
+    assert math.isclose(float(warm.integral), exact, rel_tol=1e-6)
+
+
 # -----------------------------------------------------------------------------
 # B1: mesh_init/mesh_final swap in the warm-start path: a stored mesh reused
 # with a new mesh_final must end at the new mesh_final.

@@ -221,7 +221,8 @@ class SolverBase(ABC, DistributedEnvironment):
         # Stored time barriers from the last integration for warm-starting.
         # Used only when integrate(..., same_f=True) is passed;
         # otherwise ignored. They are the *optimal* mesh of the last call that
-        # returned (post-prune-and-refine).
+        # returned (post-prune-and-refine), in that call's dtype: _set_dtype
+        # does not convert them, so a dtype switch never rounds them.
         self.mesh_previous: torch.Tensor | None = None
 
         self._set_dtype(dtype)
@@ -331,9 +332,11 @@ class SolverBase(ABC, DistributedEnvironment):
         """
         Set the floating-point precision for all solver tensors.
 
-        Converts atol, rtol, y0, mesh_init, mesh_final and the stored
-        warm-start mesh (``mesh_previous``) to the new dtype, then calls
-        ``_set_solver_dtype``. Also sets dtype-appropriate assertion tolerances
+        Converts atol, rtol, y0, mesh_init and mesh_final to the new dtype,
+        then calls ``_set_solver_dtype``. The stored warm-start mesh
+        (``mesh_previous``) keeps the dtype of the call that stored it, so a
+        switch to float32 and back does not round it; it is converted where it
+        is used. Also sets dtype-appropriate assertion tolerances
         used for internal sanity checks (e.g. verifying that the nodes are in
         increasing order despite floating-point rounding).
 
@@ -376,8 +379,6 @@ class SolverBase(ABC, DistributedEnvironment):
         self.init_y0 = self.init_y0.to(self.dtype)
         self.init_mesh_init = self.init_mesh_init.to(self.dtype)
         self.init_mesh_final = self.init_mesh_final.to(self.dtype)
-        if self.mesh_previous is not None:
-            self.mesh_previous = self.mesh_previous.to(self.dtype)
 
         # Update integration control error tolerances
         self.atol = self.atol.to(self.dtype)

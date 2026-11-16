@@ -491,6 +491,10 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 - Every call that returns (converged or not) stores its mesh
   (`mesh_previous` = `mesh_optimal`) and its `max_batch`
   (`previous_max_batch`) together. A call that raises stores nothing.
+  `mesh_previous` keeps the dtype of the call that stored it (`_set_dtype`
+  does not convert it; `_setup_integral_bounds` and `_setup_initial_mesh`
+  convert a copy), so a dtype switch, even by a call that then raises, never
+  rounds it.
 - With `same_f=True` and stored values, the stored mesh (filtered
   to `[mesh_init, mesh_final]`, padded if needed) and `max_batch` replace
   the caller's `mesh` / `max_batch`, and the memory benchmark is skipped.

@@ -3028,13 +3028,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # Filter cached barriers to within the new [mesh_init, mesh_final]
             # box, comparing every time dimension (min/max handles either
             # integration direction). For 1-D forward integration this is the
-            # same set as the previous coordinate-0 range test.
+            # same set as the previous coordinate-0 range test. The stored mesh
+            # keeps the dtype of the call that stored it (_set_dtype leaves it
+            # alone), so a copy in this call's dtype is cut.
+            previous = self.mesh_previous.to(self.dtype)
             lo = torch.minimum(mesh_init, mesh_final)
             hi = torch.maximum(mesh_init, mesh_final)
-            mask = torch.all(
-                (self.mesh_previous >= lo) & (self.mesh_previous <= hi), dim=-1
-            )
-            mesh = self.mesh_previous[mask]
+            mask = torch.all((previous >= lo) & (previous <= hi), dim=-1)
+            mesh = previous[mask]
             # Ensure the warm-started mesh starts at mesh_init.
             if len(mesh) == 0 or not torch.all(mesh[0] == mesh_init):
                 mesh = torch.concatenate([mesh_init.unsqueeze(0), mesh], dim=0)

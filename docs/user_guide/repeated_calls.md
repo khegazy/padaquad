@@ -30,7 +30,8 @@ example a validation call in a training loop, therefore sets the interval that
 the next `same_f=True` call without bounds integrates.
 
 The stored mesh is the previous call's `mesh_optimal` ({ref}`ug-optimal-mesh`),
-also available as `solver.mesh_previous`; the stored batch size is
+also available as `solver.mesh_previous`, in the dtype of the call that stored
+it (a later call in another dtype converts a copy); the stored batch size is
 `solver.previous_max_batch`. The stored batch size was computed for the
 previous call's integrand and `take_gradient` setting. A value found with
 `take_gradient=False` leaves no memory for backpropagation, so pass

@@ -16,16 +16,25 @@ class TestComputeNodes:
     def _make_solver(self, method_name):
         return make_solver_for_unit_test(method_name=method_name)
 
-    def test_endpoints(self, method_name):
-        """First point equals mesh_left, last point equals mesh_right."""
-        solver = self._make_solver(method_name)
-        mesh_left = torch.tensor([[0.0]], dtype=torch.float64)
-        mesh_right = torch.tensor([[1.0]], dtype=torch.float64)
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+    def test_endpoints(self, method_name, dtype):
+        """First point equals mesh_left and last point equals mesh_right, bit
+        for bit, also on wide subintervals where mesh_right - mesh_left rounds.
+        Sensitive: with mesh_left + c * (mesh_right - mesh_left) the last point
+        of [0.10642713, 1.2113749] in float32 is one rounding step past
+        mesh_right, which broke the node-order check after a merge (CI, the
+        README gradient example)."""
+        solver = make_solver_for_unit_test(method_name=method_name, dtype=dtype)
+        generator = torch.Generator().manual_seed(0)
+        left = torch.rand(1000, 1, generator=generator, dtype=torch.float64)
+        right = left + 3 * torch.rand(1000, 1, generator=generator, dtype=torch.float64)
+        mesh_left = torch.cat([torch.tensor([[0.1064271330833435]]), left]).to(dtype)
+        mesh_right = torch.cat([torch.tensor([[1.2113748788833618]]), right]).to(dtype)
 
         result = solver._compute_nodes(mesh_left, mesh_right)
 
-        assert torch.allclose(result[:, 0, :], mesh_left)
-        assert torch.allclose(result[:, -1, :], mesh_right)
+        assert torch.equal(result[:, 0, :], mesh_left)
+        assert torch.equal(result[:, -1, :], mesh_right)
 
     def test_shape_single_step(self, method_name):
         """Output shape is [1, C, 1] for a single step."""

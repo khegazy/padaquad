@@ -512,6 +512,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         method (evenly spaced for ``interpolatory3_variable``). For example,
         with c = [0, 0.5, 1] the nodes are the start, the midpoint and the end.
 
+        ``torch.lerp`` computes this as ``mesh_right - (1 - c_i) * (mesh_right -
+        mesh_left)`` for ``c_i >= 0.5`` (``aten/src/ATen/native/Lerp.h``), so the
+        nodes at c = 0 and c = 1 are the mesh points bit for bit. With the
+        formula above, ``mesh_left + 1 * (mesh_right - mesh_left)`` is one rounding
+        step past ``mesh_right`` when the difference rounds (float32, wide
+        subintervals); the node then lay past the next subinterval's first node
+        and outside the integration interval.
+
         Parameters
         ----------
         mesh_left : torch.Tensor
@@ -524,8 +532,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         torch.Tensor
             Node positions. Shape: [N, C, T].
         """
-        dt = (mesh_right - mesh_left).unsqueeze(1)
-        return mesh_left.unsqueeze(1) + self.method.node_fractions().unsqueeze(-1) * dt
+        return torch.lerp(
+            mesh_left.unsqueeze(1),
+            mesh_right.unsqueeze(1),
+            self.method.node_fractions().unsqueeze(-1),
+        )
 
     def _calculate_integral(
         self, t: torch.Tensor, y: torch.Tensor, y0: torch.Tensor
@@ -3582,8 +3593,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         A subinterval's left mesh point is ``nodes[:, 0, :]``, its first node,
         which equals the mesh point bit for bit because every method's
-        ``node_fractions()`` start at 0 (so ``mesh_left + 0 * (...) ==
-        mesh_left`` exactly). ``mesh_indices`` maps each mesh point (keyed on
+        ``node_fractions()`` start at 0 and ``_compute_nodes`` places the node
+        at c = 0 exactly on ``mesh_left``. ``mesh_indices`` maps each mesh point (keyed on
         its full coordinate tuple) to its index in the ordered mesh, so this
         gives an order for any number of coordinates T without comparing
         coordinates.

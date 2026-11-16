@@ -328,6 +328,25 @@ def test_warm_start_given_bound_beyond_stored_mesh_raises():
         )
 
 
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        {"mesh_init": _bound(1.0), "mesh_final": _bound(0.0)},
+        {"mesh_init": _bound(1.0), "mesh_final": _bound(1.0)},
+        {"mesh": torch.tensor([[1.0], [0.5], [0.0]], dtype=torch.float64)},
+    ],
+    ids=["reversed", "equal", "reversed_mesh"],
+)
+def test_bounds_not_increasing_raise(bounds):
+    """Without a stored mesh too, bounds that are not increasing (given, or
+    the ends of a mesh) raise ValueError, which python -O keeps, and the
+    call stores nothing."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu", max_batch=10_000)
+    with pytest.raises(ValueError, match="mesh_init < mesh_final"):
+        solver.integrate(f=torch.exp, take_gradient=False, **bounds)
+    assert solver.mesh_previous is None
+
+
 def test_same_f_with_mesh_takes_bounds_from_mesh():
     """Unchanged: with ``mesh`` and same_f=True the bounds are the mesh's ends,
     and the stored mesh on [2, 3] is cut to [2.5, 4] and padded."""

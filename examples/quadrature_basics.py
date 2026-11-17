@@ -161,20 +161,26 @@ def example_warm_start_loop() -> None:
 
     This is the pattern of a training loop: the integrand changes a little at
     each iteration, so the mesh the previous call ended with is a good starting
-    mesh for the next one (``same_f=True``). The first call starts from a fresh
-    mesh and splits some of its subintervals; the later calls start from the
-    refined mesh and need fewer splits. The low-degree method ``bosh3`` is used so
+    mesh for the next one: pass ``mesh=result.mesh_optimal`` and
+    ``max_batch=result.max_batch`` (the latter skips the memory benchmark). The
+    same call works for every iteration: on the first, ``mesh`` is None and a
+    fresh mesh is built on the bounds. The first call splits some of its
+    subintervals; the later calls start from the refined mesh and need fewer
+    splits. The low-degree method ``bosh3`` is used so
     that the first call has to refine; ``gk21`` would need no split here.
     """
     print("warm-start loop over a scaled sin integrand:")
     solver = adaptive_quadrature("uniform", "bosh3", atol=1e-8, rtol=1e-8, **OPTIONS)
+    mesh = max_batch = None
     for k, scale in enumerate([1.0, 1.05, 1.1, 1.15]):
         result = solver.integrate(
             lambda t, s=scale: torch.sin(s * t),
+            mesh=mesh,
             mesh_init=torch.tensor([0.0], dtype=F64),
             mesh_final=torch.tensor([3 * math.pi], dtype=F64),
-            same_f=True,
+            max_batch=max_batch,
         )
+        mesh, max_batch = result.mesh_optimal, result.max_batch
         expected = (1 - math.cos(3 * math.pi * scale)) / scale
         print(
             f"  iter {k} (scale={scale:.2f}): error "

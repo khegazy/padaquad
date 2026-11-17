@@ -249,6 +249,27 @@ def test_bound_gradient_crosses_the_mesh_graph_once(kind, method):
     assert math.isclose(float(b.grad), float(f(b.detach())), rel_tol=1e-9)
 
 
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_bound_gradient_stays_none_when_the_loss_ignores_it(take_gradient):
+    """A bound that requires grad but that the loss does not depend on keeps
+    .grad None, autograd's convention for an unused leaf, with either
+    take_gradient (with True it got a gradient of zeros). Here f does not
+    depend on t and the loss sums the squares of f's values."""
+    w = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
+    b = _bound(1.0).requires_grad_()
+    out = _solver().integrate(
+        f=lambda t: w * torch.ones_like(t),
+        mesh_init=_bound(0.0),
+        mesh_final=b,
+        take_gradient=take_gradient,
+        loss_fxn=lambda result: (result.y**2).sum(),
+    )
+    if not take_gradient:
+        out.loss.backward()
+    assert w.grad is not None
+    assert b.grad is None
+
+
 @pytest.mark.parametrize(
     ("bounds", "message"),
     [

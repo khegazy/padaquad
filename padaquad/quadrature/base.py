@@ -919,15 +919,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # mesh's (its ends and the midpoints split from them), whose saved
         # indices the first backward frees. A batch is therefore evaluated on a
         # detached copy of the mesh, and the copy's gradient is added to
-        # mesh_grad, the gradient with respect to the current mesh, which is
-        # passed through the mesh's graph once, after the loop. Passing it once
-        # per batch crossed the whole graph, which grows with every split, each
-        # time: the time grew with the square of the number of batches.
-        mesh_grad = (
-            torch.zeros_like(mesh.detach())
-            if take_gradient and mesh.requires_grad
-            else None
-        )
+        # mesh_grad, the gradient with respect to the current mesh (None until
+        # a batch depends on the mesh), which is passed through the mesh's
+        # graph once, after the loop. Passing it once per batch crossed the
+        # whole graph, which grows with every split, each time: the time grew
+        # with the square of the number of batches.
+        collect_mesh_grad = take_gradient and mesh.requires_grad
+        mesh_grad: torch.Tensor | None = None
         # === Main integration loop ===
         # Continues until all steps have been evaluated and accepted
         # (mesh_trackers[i] == False for all i)
@@ -938,7 +936,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
             # The batch's mesh: a detached copy when mesh_grad collects the
             # gradient (see mesh_grad above).
-            mesh_eval = mesh if mesh_grad is None else mesh.detach().requires_grad_()
+            mesh_eval = mesh.detach().requires_grad_() if collect_mesh_grad else mesh
             (
                 nodes,
                 y_step_eval,
@@ -1170,14 +1168,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
             del y_step_eval
 
-            if mesh_grad is not None:
-                if mesh_eval.grad is not None:
-                    mesh_grad += mesh_eval.grad
-                # Carry the gradient to the split mesh, whose points include
-                # every point of the batch's mesh, with the same values.
-                moved = torch.zeros_like(mesh.detach())
-                moved[self._mesh_order(mesh_eval.detach(), mesh_indices)] = mesh_grad
-                mesh_grad = moved
+            if collect_mesh_grad:
+                grads = [g for g in (mesh_grad, mesh_eval.grad) if g is not None]
+                if grads:
+                    # Carry the gradient to the split mesh, whose points include
+                    # every point of the batch's mesh, with the same values.
+                    order = self._mesh_order(mesh_eval.detach(), mesh_indices)
+                    mesh_grad = torch.zeros_like(mesh.detach())
+                    mesh_grad[order] = sum(grads)
 
         if mesh_grad is not None:
             mesh.backward(mesh_grad)

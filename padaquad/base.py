@@ -111,9 +111,9 @@ class SolverBase(ABC, DistributedEnvironment):
       (float64 or float32), and sets looser tolerances for internal
       consistency checks, such as the check that the nodes are in order.
     - Device: inherited from ``DistributedEnvironment``.
-    - Defaults: ``f``, ``y0``, ``mesh_init`` and ``mesh_final`` given at
-      construction are used by every ``integrate`` call that does not pass
-      them.
+    - Defaults: ``f`` and ``y0`` given at construction are used by every
+      ``integrate`` call that does not pass them. The bounds have no default:
+      each call passes a mesh or both bounds.
     - No state between calls: a call reuses an earlier call's mesh and batch
       size only when they are passed to it (``result.mesh_optimal``,
       ``result.max_batch``). See :ref:`ug-same-f`.
@@ -136,8 +136,6 @@ class SolverBase(ABC, DistributedEnvironment):
         rtol: float,
         y0: torch.Tensor | None,
         f: Callable[..., Any] | None,
-        mesh_init: torch.Tensor | None,
-        mesh_final: torch.Tensor | None,
         output_speed_info: bool,
         dtype: torch.dtype,
         device: str | torch.device | None,
@@ -163,10 +161,6 @@ class SolverBase(ABC, DistributedEnvironment):
         f : callable or None
             The integrand: points of shape ``[N, T]`` in, values of shape
             ``[N, D]`` out. None means ``integrate`` must be given one.
-        mesh_init : torch.Tensor or None
-            Lower bound, shape ``[T]``. None uses 0.
-        mesh_final : torch.Tensor or None
-            Upper bound, shape ``[T]``. None uses 1.
         output_speed_info : bool
             If True, writes the time each part of the integration takes to
             the file ``padaquad_speed.log``.
@@ -199,23 +193,13 @@ class SolverBase(ABC, DistributedEnvironment):
         self.atol = torch.tensor(atol, dtype=dtype, device=self.device)
         self.rtol = torch.tensor(rtol, dtype=dtype, device=self.device)
         # Construction-time defaults; each integrate() call falls back to these
-        # when its corresponding argument is None (f and y0 are resolved in
-        # _check_variables, the bounds in _setup_integral_bounds).
+        # when its corresponding argument is None (resolved in _check_variables).
+        # The bounds have no default: each call gives its interval.
         self.init_f: Callable[..., Any] | None = f
         self.init_y0 = (
             y0.to(self.device)
             if y0 is not None
             else torch.tensor([0], dtype=dtype, device=self.device)
-        )
-        self.init_mesh_init = (
-            mesh_init.to(self.device)
-            if mesh_init is not None
-            else torch.tensor([0], dtype=dtype, device=self.device)
-        )
-        self.init_mesh_final = (
-            mesh_final.to(self.device)
-            if mesh_final is not None
-            else torch.tensor([1], dtype=dtype, device=self.device)
         )
         self._set_dtype(dtype)
 
@@ -324,7 +308,7 @@ class SolverBase(ABC, DistributedEnvironment):
         """
         Set the floating-point precision for all solver tensors.
 
-        Converts atol, rtol, y0, mesh_init and mesh_final to the new dtype,
+        Converts atol, rtol and y0 to the new dtype,
         then calls ``_set_solver_dtype``. Also sets dtype-appropriate assertion
         tolerances
         used for internal sanity checks (e.g. verifying that the nodes are in
@@ -367,8 +351,6 @@ class SolverBase(ABC, DistributedEnvironment):
 
         self.dtype = dtype
         self.init_y0 = self.init_y0.to(self.dtype)
-        self.init_mesh_init = self.init_mesh_init.to(self.dtype)
-        self.init_mesh_final = self.init_mesh_final.to(self.dtype)
 
         # Update integration control error tolerances
         self.atol = self.atol.to(self.dtype)

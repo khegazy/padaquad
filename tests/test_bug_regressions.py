@@ -169,6 +169,12 @@ def test_bounds_required_without_mesh(bounds):
         _solver().integrate(f=torch.exp, take_gradient=False, **bounds)
 
 
+def test_constructor_bounds_are_gone():
+    """The constructor no longer takes bounds; each call gives its interval."""
+    with pytest.raises(TypeError, match="mesh_init"):
+        adaptive_quadrature("uniform", "gk21", device="cpu", mesh_init=_bound(0.0))
+
+
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32], ids=["f64", "f32"])
 def test_bounds_inside_mesh_cut_it(dtype):
     """Bounds inside a given mesh cut it: the starting mesh is 1.2, 1.5, 2,

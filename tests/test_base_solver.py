@@ -101,17 +101,6 @@ class TestSetDtype:
         finally:
             _restore_tableau("bosh3", saved)
 
-    def test_converts_t_init_t_final(self):
-        """mesh_init and mesh_final dtype match after conversion."""
-        saved = _save_tableau("bosh3")
-        solver = make_solver_for_unit_test()
-        try:
-            solver._set_dtype(torch.float32)
-            assert solver.init_mesh_init.dtype == torch.float32
-            assert solver.init_mesh_final.dtype == torch.float32
-        finally:
-            _restore_tableau("bosh3", saved)
-
 
 # ---------------------------------------------------------------------------
 # set_dtype_by_input

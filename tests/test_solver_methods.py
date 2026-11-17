@@ -225,8 +225,6 @@ class TestConstructorSignature:
             method="DOPRI5",
             atol=1e-7,
             rtol=1e-6,
-            mesh_init=_LO,
-            mesh_final=_HI,
             y0=torch.tensor([2.0], dtype=torch.float64),
             remove_cut=0.05,
             max_batch=1000,

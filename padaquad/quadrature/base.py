@@ -200,8 +200,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         method: str | None = None,
         atol: float = 1e-5,
         rtol: float = 1e-5,
-        mesh_init: torch.Tensor | None = None,
-        mesh_final: torch.Tensor | None = None,
         y0: torch.Tensor | None = None,
         remove_cut: float = 0.1,
         merge_rule: str = "predicted",
@@ -240,14 +238,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             (see :ref:`the user guide <ug-error-control>`). Default 1e-5.
         rtol : float
             Relative tolerance; see ``atol``. Default 1e-5.
-        mesh_init : torch.Tensor or None
-            Default lower integration bound, shape [T]. None means 0. A
-            ``same_f=True`` call with a stored mesh and no ``mesh`` uses the
-            stored mesh's first point instead.
-        mesh_final : torch.Tensor or None
-            Default upper integration bound, shape [T]. None means 1. A
-            ``same_f=True`` call with a stored mesh and no ``mesh`` uses the
-            stored mesh's last point instead.
         y0 : torch.Tensor or None
             Default value added to the returned integral, shape [D]. None means 0.
         remove_cut : float
@@ -345,8 +335,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             rtol=rtol,
             y0=y0,
             f=f,
-            mesh_init=mesh_init,
-            mesh_final=mesh_final,
             output_speed_info=output_speed_info,
             dtype=dtype,
             device=device,

@@ -220,13 +220,12 @@ class TestCheckVariables:
     conversion."""
 
     def test_fills_defaults(self):
-        """All None arguments are replaced with the constructor's values."""
+        """None f and y0 are the constructor's; bounds have no default."""
         solver = make_solver_for_unit_test()
         _f, y0 = solver._check_variables(f=torch.sin)
-        mesh_init, mesh_final = solver._setup_integral_bounds(None, None, None, False)
-        assert torch.equal(mesh_init, solver.init_mesh_init)
-        assert torch.equal(mesh_final, solver.init_mesh_final)
         assert torch.equal(y0, solver.init_y0)
+        with pytest.raises(ValueError, match="mesh_init and mesh_final"):
+            solver._setup_integral_bounds(None, None, None)
 
     def test_overrides_with_args(self):
         """Explicit args override stored defaults."""
@@ -237,7 +236,7 @@ class TestCheckVariables:
 
         _, y0 = solver._check_variables(f=torch.sin, y0=custom_y0)
         mesh_init, mesh_final = solver._setup_integral_bounds(
-            None, custom_t_init, custom_t_final, False
+            None, custom_t_init, custom_t_final
         )
         assert torch.equal(mesh_init, custom_t_init)
         assert torch.equal(mesh_final, custom_t_final)
@@ -248,7 +247,9 @@ class TestCheckVariables:
         solver = make_solver_for_unit_test()
         t_init_f32 = torch.tensor([0.0], dtype=torch.float32)
         y0_f32 = torch.tensor([1.0], dtype=torch.float32)
-        mesh_init, _ = solver._setup_integral_bounds(None, t_init_f32, None, False)
+        mesh_init, _ = solver._setup_integral_bounds(
+            None, t_init_f32, torch.tensor([1.0], dtype=torch.float32)
+        )
         _, y0 = solver._check_variables(f=torch.sin, y0=y0_f32)
         assert mesh_init.dtype == torch.float64
         assert y0.dtype == torch.float64

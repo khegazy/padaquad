@@ -702,20 +702,22 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Value added to the returned integral, shape [D]. None uses the
             constructor's ``y0`` (0 by default).
         mesh : torch.Tensor or None
-            Starting mesh, shape [M, T], increasing; its first and last points
-            are the integration bounds. None builds a fresh starting mesh
-            (see :ref:`the user guide <ug-mesh>`). Replaced by the stored mesh under ``same_f``.
+            Starting mesh, shape [M, T], increasing, for example an earlier
+            result's ``mesh_optimal``. Its first and last points are the
+            integration bounds unless bounds are given, which must lie within it
+            and cut it. None builds a fresh starting mesh on the bounds, which
+            must then both be given (see :ref:`the user guide <ug-mesh>`).
+            Replaced by the stored mesh under ``same_f``.
         mesh_init : torch.Tensor or None
-            Lower integration bound, shape [T]. If ``mesh`` is given, it must
-            equal the mesh's first point. None uses ``mesh[0]``; without a
-            mesh, under ``same_f`` with a stored mesh, the stored mesh's first
-            point (the lower bound of the last call that returned), and
-            otherwise the constructor's value.
+            Lower integration bound, shape [T]. With a ``mesh``, it must lie
+            within the mesh (a value within rounding of ``mesh[0]`` is
+            ``mesh[0]``), and None uses ``mesh[0]``. Without a mesh it is
+            required.
         mesh_final : torch.Tensor or None
-            Upper integration bound, shape [T]. If ``mesh`` is given, it must
-            equal the mesh's last point. None uses ``mesh[-1]``; without a
-            mesh, under ``same_f`` with a stored mesh, the stored mesh's last
-            point, and otherwise the constructor's value.
+            Upper integration bound, shape [T]. With a ``mesh``, it must lie
+            within the mesh (a value within rounding of ``mesh[-1]`` is
+            ``mesh[-1]``), and None uses ``mesh[-1]``. Without a mesh it is
+            required.
         same_f : bool
             True when f is the same integrand as in the previous call, or
             changed only slightly: start from the stored mesh and ``max_batch``
@@ -797,11 +799,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             result_device or self.device, self.device.index or 0
         )
 
-        # The bounds: the mesh's ends, else the given bounds; a missing one is
-        # the stored mesh's end under same_f, else the constructor's.
-        mesh_init, mesh_final = self._setup_integral_bounds(
-            mesh, mesh_init, mesh_final, same_f
-        )
+        # The bounds: the given ones (inside the mesh, if any), else the mesh's
+        # ends; without a mesh both must be given.
+        mesh_init, mesh_final = self._setup_integral_bounds(mesh, mesh_init, mesh_final)
 
         # Replace max_batch if default it given
         force_max_batch = self.init_max_batch if max_batch is None else max_batch
@@ -2906,17 +2906,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh: torch.Tensor | None,
         mesh_init: torch.Tensor | None,
         mesh_final: torch.Tensor | None,
-        same_f: bool,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Resolve the integration bounds of a call in the solver's dtype and device.
 
-        With a mesh, the bounds are its first and last points; a given
-        ``mesh_init`` or ``mesh_final`` must match them. Without one, a missing
-        bound is the stored mesh's end (``mesh_previous[0]`` or
-        ``mesh_previous[-1]``, the interval of the last call that returned)
-        when ``same_f`` is True and a mesh is stored, and the constructor's
-        value otherwise.
+        With a mesh, a missing bound is the mesh's end, and a given bound must
+        lie within the mesh (``_setup_initial_mesh`` then cuts the mesh to the
+        bounds); a bound within rounding of a mesh end (the dtype's
+        ``atol_assert`` / ``rtol_assert``) is that end. Without a mesh, both
+        bounds must be given.
 
         Parameters
         ----------
@@ -2926,8 +2924,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             The caller's lower bound. Shape: [T].
         mesh_final : torch.Tensor or None
             The caller's upper bound. Shape: [T].
-        same_f : bool
-            True when the call warm-starts from the stored mesh.
 
         Returns
         -------
@@ -2937,33 +2933,39 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Raises
         ------
         ValueError
-            If the resolved bounds do not satisfy ``mesh_init < mesh_final``.
+            If there is no mesh and a bound is missing, if a bound lies outside
+            the given mesh, or if the bounds do not satisfy
+            ``mesh_init < mesh_final``.
         """
         if mesh is not None:
             assert len(mesh.shape) == 2
             mesh = mesh.to(self.dtype).to(self.device)
-            if mesh_init is not None:
-                mesh_init = mesh_init.to(self.dtype).to(self.device)
-                assert torch.allclose(
-                    mesh[0], mesh_init, atol=self.atol_assert, rtol=self.rtol_assert
-                )
-            if mesh_final is not None:
-                mesh_final = mesh_final.to(self.dtype).to(self.device)
-                assert torch.allclose(
-                    mesh[-1], mesh_final, atol=self.atol_assert, rtol=self.rtol_assert
-                )
-            mesh_init = mesh[0]
-            mesh_final = mesh[-1]
-        else:
-            # Under same_f a missing bound repeats the last returned call's
-            # interval: mesh_optimal starts and ends at that call's bounds bit
-            # for bit (tests/test_prune_and_optimal.py,
-            # test_mesh_optimal_ends_are_the_bounds), so they are not stored twice.
-            stored = self.mesh_previous if same_f else None
-            if mesh_init is None:
-                mesh_init = self.init_mesh_init if stored is None else stored[0]
-            if mesh_final is None:
-                mesh_final = self.init_mesh_final if stored is None else stored[-1]
+            resolved = []
+            for name, given, end in (
+                ("mesh_init", mesh_init, mesh[0]),
+                ("mesh_final", mesh_final, mesh[-1]),
+            ):
+                bound = None if given is None else given.to(self.dtype).to(self.device)
+                if bound is None or torch.allclose(
+                    bound, end, atol=self.atol_assert, rtol=self.rtol_assert
+                ):
+                    resolved.append(end)
+                elif torch.any(bound < mesh[0]) or torch.any(bound > mesh[-1]):
+                    raise ValueError(
+                        f"{name} = {bound.tolist()} is outside the mesh "
+                        f"[{mesh[0].tolist()}, {mesh[-1].tolist()}]. Pass a mesh "
+                        "that covers the interval (to extend result.mesh_optimal, "
+                        "concatenate the new end point), or pass only the bounds "
+                        "for a fresh mesh."
+                    )
+                else:
+                    resolved.append(bound)
+            mesh_init, mesh_final = resolved
+        elif mesh_init is None or mesh_final is None:
+            raise ValueError(
+                "Pass mesh=, or both mesh_init and mesh_final: a call needs an "
+                "interval to integrate."
+            )
         mesh_init = mesh_init.to(self.dtype).to(self.device)
         mesh_final = mesh_final.to(self.dtype).to(self.device)
 
@@ -2973,12 +2975,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         if not mesh_init < mesh_final:
             raise ValueError(
                 "The integration bounds must satisfy mesh_init < mesh_final; got "
-                f"{mesh_init.tolist()} and {mesh_final.tolist()}. Under "
-                "same_f=True with a stored mesh and no mesh, a bound not given is "
-                "the stored mesh's end (solver.mesh_previous[0] or [-1]); "
-                "otherwise it is the constructor's. "
-                "To integrate from b to a, integrate from a to b and negate the "
-                "result."
+                f"{mesh_init.tolist()} and {mesh_final.tolist()}. To integrate "
+                "from b to a, integrate from a to b and negate the result."
             )
         return mesh_init, mesh_final
 
@@ -3047,11 +3045,24 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 mesh = torch.concatenate([mesh, mesh_final.unsqueeze(0)], dim=0)
         elif mesh is not None:
             # The user-provided mesh enters the loop here; _setup_integral_bounds
-            # only moved a local copy for its assertions, so coerce it onto the
+            # only moved a local copy for its checks, so coerce it onto the
             # solver's device (DistributedEnvironment owns the device; inputs are
             # moved to it). Without this, the loop indexes a CPU mesh with
             # device-side indices and crashes on GPU.
             mesh = mesh.to(self.dtype).to(self.device)
+            # Cut the mesh to the bounds, which _setup_integral_bounds placed
+            # within it: keep the points in [mesh_init, mesh_final] other than
+            # the bounds themselves, then add the bounds. Bounds equal to the
+            # mesh's ends leave it unchanged. Every coordinate is compared
+            # (min/max allow either direction in a coordinate when T > 1).
+            lo = torch.minimum(mesh_init, mesh_final)
+            hi = torch.maximum(mesh_init, mesh_final)
+            keep = torch.all((mesh >= lo) & (mesh <= hi), dim=-1)
+            keep &= ~torch.all(mesh == mesh_init, dim=-1)
+            keep &= ~torch.all(mesh == mesh_final, dim=-1)
+            mesh = torch.concatenate(
+                [mesh_init.unsqueeze(0), mesh[keep], mesh_final.unsqueeze(0)], dim=0
+            )
         else:
             # Generate a fresh initial mesh of barriers across [mesh_init, mesh_final].
             # Layout: sqrt(N_init_steps) evenly-spaced top-level segments, each

@@ -197,19 +197,30 @@ def test_bound_gradients_through_a_given_mesh(lo, hi, given_mesh, take_gradient)
 
 
 @pytest.mark.parametrize(
-    "bounds",
+    ("bounds", "message"),
     [
-        {"mesh_init": torch.tensor(0.0), "mesh_final": torch.tensor(1.0)},
-        {"mesh_init": torch.tensor([[0.0]]), "mesh_final": torch.tensor([[1.0]])},
-        {"mesh_init": _bound(0.0), "mesh_final": torch.tensor([1.0, 1.0])},
-        {"mesh_init": 0.0, "mesh_final": 1.0},
+        (
+            {"mesh_init": torch.tensor(0.0), "mesh_final": torch.tensor(1.0)},
+            r"mesh_init must be a tensor of shape \[T\], like a point of the mesh; got Tensor \[\]\.",
+        ),
+        (
+            {"mesh_init": torch.tensor([[0.0]]), "mesh_final": torch.tensor([[1.0]])},
+            r"mesh_init must be a tensor of shape \[T\], like a point of the mesh; got Tensor \[1, 1\]\.",
+        ),
+        (
+            {"mesh_init": _bound(0.0), "mesh_final": torch.tensor([1.0, 1.0])},
+            r"mesh_final must be a tensor of shape \[1\], like a point of the mesh; got Tensor \[2\]\.",
+        ),
+        ({"mesh_init": 0.0, "mesh_final": 1.0}, "mesh_init must be a tensor"),
     ],
     ids=["zero_dim", "two_dim", "different_shapes", "python_floats"],
 )
-def test_bounds_without_mesh_must_have_shape_T(bounds):
+def test_bounds_without_mesh_must_have_shape_T(bounds, message):
     """Bounds are tensors of shape [T] on every call, with or without a mesh,
-    so a loop whose first call has no mesh fails there, not one call later."""
-    with pytest.raises(ValueError, match="shape"):
+    so a loop whose first call has no mesh fails there, not one call later.
+    The message states the shape expected: [T], or the other bound's [T]
+    (it gave the wrong bound's own shape, e.g. "([]); got Tensor []")."""
+    with pytest.raises(ValueError, match=message):
         _solver().integrate(f=torch.exp, take_gradient=False, **bounds)
 
 

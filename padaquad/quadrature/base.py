@@ -2994,9 +2994,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 or given.dim() != 1
                 or given.shape != shape
             ):
+                # The expected shape is known when the mesh or a 1-D mesh_init
+                # gives T; else it is [T].
                 raise ValueError(
-                    f"{name} must be a tensor of shape [T], like a point of the "
-                    f"mesh ({list(shape) if shape is not None else '[T]'}); got "
+                    f"{name} must be a tensor of shape "
+                    f"{list(shape) if shape is not None and len(shape) == 1 else '[T]'}"
+                    ", like a point of the mesh; got "
                     f"{type(given).__name__} {list(getattr(given, 'shape', []))}."
                 )
         if mesh is None:

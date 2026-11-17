@@ -693,19 +693,20 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh : torch.Tensor or None
             Starting mesh, shape [M, T], increasing, for example an earlier
             result's ``mesh_optimal``. Its first and last points are the
-            integration bounds unless bounds are given, which must lie within it
-            and cut it. None builds a fresh starting mesh on the bounds, which
+            integration bounds unless bounds are given: a bound inside the mesh
+            cuts it, one outside extends it (the integration refines the new
+            subinterval). None builds a fresh starting mesh on the bounds, which
             must then both be given (see :ref:`the user guide <ug-mesh>`).
         mesh_init : torch.Tensor or None
             Lower integration bound, a tensor of shape [T] (also when T is 1).
-            With a ``mesh``, it must lie within the mesh, up to rounding, and
-            becomes the starting mesh's first point (so it gets its gradient);
-            None uses ``mesh[0]``. Without a mesh it is required.
+            With a ``mesh``, it becomes the starting mesh's first point, inside
+            or outside the mesh (so it gets its gradient); None uses
+            ``mesh[0]``. Without a mesh it is required.
         mesh_final : torch.Tensor or None
             Upper integration bound, a tensor of shape [T] (also when T is 1).
-            With a ``mesh``, it must lie within the mesh, up to rounding, and
-            becomes the starting mesh's last point (so it gets its gradient);
-            None uses ``mesh[-1]``. Without a mesh it is required.
+            With a ``mesh``, it becomes the starting mesh's last point, inside
+            or outside the mesh (so it gets its gradient); None uses
+            ``mesh[-1]``. Without a mesh it is required.
         random_initial_mesh : bool
             If True (default), the points of a fresh starting mesh are placed at
             random, so the mesh does not line up with evenly spaced features of
@@ -771,8 +772,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         ValueError
             If there is no ``mesh`` and a bound is missing; if the ``mesh`` is
             not [M, T] with M >= 2 increasing points; if a bound is not a
-            tensor of shape [T] (with or without a mesh) or lies outside the
-            mesh; if the bounds do not satisfy ``mesh_init < mesh_final``; if
+            tensor of shape [T] (with or without a mesh); if the bounds do not
+            satisfy ``mesh_init < mesh_final``; if
             no integrand was given here or at construction, or it does not
             return values of shape [N, D]; or if an option such as
             ``error_norm`` or ``total_mem_usage`` is invalid.
@@ -2928,15 +2929,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Without a mesh, both bounds must be given. With a mesh, which must be
         [M, T] with M >= 2 increasing points, a missing bound is the mesh's
         end. Every given bound is a tensor of shape [T], and becomes an end
-        point of the mesh, so it gets its gradient as any mesh end does.
-        ``mesh_init`` is compared with ``mesh[0]`` and ``mesh_final`` with
-        ``mesh[-1]``, with a rounding tolerance relative to the value compared,
-        ``4 eps |x|`` (eps of the coarser of the mesh's and that bound's
-        dtypes): a bound further outside the mesh raises. Otherwise the mesh is
-        cut: its points between the bounds are kept and the bounds added; a
-        bound that differs from its end also drops the points within rounding
-        of it, including that end when the bound is within rounding of it,
-        which avoids subintervals a few rounding steps wide, on which variable
+        point of the mesh, so it gets its gradient as any mesh end does: the
+        mesh's points between the bounds are kept and the bounds added, which
+        cuts the mesh at a bound inside it and extends it to a bound outside it
+        (the integration refines the new subinterval). A bound that differs
+        from its end also drops the points within rounding of it, a tolerance
+        relative to the value compared, ``4 eps max(|p|, |bound|)`` (eps of the
+        coarser of the mesh's and that bound's dtypes), including that end when
+        the bound is within rounding of it, which avoids subintervals a few
+        rounding steps wide, on which variable
         sampling returns NaN. A mesh alone, or bounds equal to its ends, leave
         it unchanged.
 
@@ -2961,8 +2962,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             If the mesh is not [M, T] with M >= 2 increasing points, if there
             is no mesh and a bound is missing, if a bound is not a tensor of
             shape [T] (the mesh's T, or the other bound's shape without a
-            mesh), if a bound lies outside the mesh, or if the bounds do not
-            satisfy ``mesh_init < mesh_final``.
+            mesh), or if the bounds do not satisfy ``mesh_init < mesh_final``.
         """
         if mesh is not None:
             # Increasing for T = 1; distinct consecutive points for any T (the
@@ -3022,27 +3022,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 for given in (mesh_init, mesh_final)
             ]
             mesh = mesh.to(self.dtype).to(self.device)
-            resolved = []
-            for name, given, end, e in (
-                ("mesh_init", mesh_init, mesh[0], eps[0]),
-                ("mesh_final", mesh_final, mesh[-1], eps[1]),
-            ):
-                bound = None if given is None else given.to(self.dtype).to(self.device)
-                if bound is None:
-                    resolved.append(end)
-                elif torch.any(bound < mesh[0] - 4 * e * mesh[0].abs()) or torch.any(
-                    bound > mesh[-1] + 4 * e * mesh[-1].abs()
-                ):
-                    raise ValueError(
-                        f"{name} = {bound.tolist()} is outside the mesh "
-                        f"[{mesh[0].tolist()}, {mesh[-1].tolist()}]. Pass a mesh "
-                        "that covers the interval (to extend result.mesh_optimal, "
-                        "concatenate the new end point), or pass only the bounds "
-                        "for a fresh mesh."
-                    )
-                else:
-                    resolved.append(bound)
-            mesh_init, mesh_final = resolved
+            # A missing bound is the mesh's end; a given one, inside or outside
+            # the mesh, becomes the mesh's new end point (the cut below).
+            mesh_init, mesh_final = (
+                end if given is None else given.to(self.dtype).to(self.device)
+                for given, end in ((mesh_init, mesh[0]), (mesh_final, mesh[-1]))
+            )
 
         # Bounds are user input: raise rather than assert, which python -O
         # removes (a reversed call then ran on and stored an out-of-order

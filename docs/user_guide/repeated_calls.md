@@ -12,7 +12,7 @@
 |---|---|---|
 | `mesh` only | `mesh[0]` to `mesh[-1]` | `mesh`, as given |
 | `mesh` and bounds inside it | the bounds; a missing one is the mesh's end | `mesh` cut to the bounds: its points between them, plus the bounds |
-| `mesh` and a bound outside it | — | `ValueError` |
+| `mesh` and a bound outside it | the bounds; a missing one is the mesh's end | `mesh` extended: all its points between the bounds, plus the bounds; the integration refines the new subinterval |
 | both bounds, no `mesh` | the bounds | a fresh mesh (`N_init_steps`, `random_initial_mesh`) |
 | one bound or none, no `mesh` | — | `ValueError` |
 
@@ -22,8 +22,8 @@
 - A bound within a few rounding steps of its mesh end (4 machine epsilons of
   the coarser of the bound's and the mesh's dtypes, relative to that end)
   replaces that end, so a bound that differs from `mesh[-1]` only by float32
-  rounding neither raises nor adds a near-zero-width subinterval. For the same
-  reason, when a bound cuts the mesh, the mesh points within rounding of it
+  rounding does not add a near-zero-width subinterval. For the same reason,
+  the mesh points within rounding of a bound that cuts or extends the mesh
   are dropped.
 - A given mesh must have shape `[M, T]` with at least two increasing points.
   Bounds are tensors of shape `[T]` on every call, with or without a mesh
@@ -33,17 +33,17 @@
 
 ## Extending a mesh
 
-A bound outside the given mesh raises an error, because the call would
-otherwise integrate an interval you did not give. To integrate further, for
-example when the training interval grows, add the new end point to the mesh
-yourself, on the mesh's device and in its dtype:
+To integrate further, for example when the training interval grows, pass the
+new bound with the mesh: a bound outside the mesh becomes its new end point,
+and the integration refines the new subinterval like any other.
 
 <!-- not-tested -->
 ```python
-mesh = result.mesh_optimal
-new_end = torch.tensor([2.0]).to(mesh)  # same device and dtype as the mesh
 result = solver.integrate(
-    f, mesh=torch.cat([mesh, new_end.reshape(1, -1)]), max_batch=result.max_batch
+    f,
+    mesh=result.mesh_optimal,
+    mesh_final=torch.tensor([2.0], dtype=torch.float64),
+    max_batch=result.max_batch,
 )
 ```
 

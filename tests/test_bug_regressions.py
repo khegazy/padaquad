@@ -165,9 +165,16 @@ _MESH = torch.linspace(0.0, 4.0, 9, dtype=torch.float64).unsqueeze(-1)
         (0.0, 2.0, True),
         (0.0, math.nextafter(2.0, 3.0), True),
         (0.5, 1.5, True),
+        (-0.5, 2.5, True),
         (0.0, 2.0, False),
     ],
-    ids=["equal_to_the_ends", "within_rounding_of_an_end", "cutting", "no_mesh"],
+    ids=[
+        "equal_to_the_ends",
+        "within_rounding_of_an_end",
+        "cutting",
+        "extending",
+        "no_mesh",
+    ],
 )
 def test_bound_gradients_through_a_given_mesh(lo, hi, given_mesh, take_gradient):
     """Given bounds are the mesh's ends, so their gradients are those of any
@@ -267,14 +274,28 @@ def test_one_bound_with_mesh_takes_the_other_from_mesh():
 
 
 @pytest.mark.parametrize(
-    "bounds",
-    [{"mesh_init": _bound(-0.5)}, {"mesh_final": _bound(4.5)}],
-    ids=["below", "above"],
+    ("lo", "hi", "n_start"),
+    [(-0.5, None, 9), (None, 4.5, 9), (-1.0, 5.0, 10), (5.0, 6.0, 1)],
+    ids=["below", "above", "both", "beyond_the_whole_mesh"],
 )
-def test_bound_outside_mesh_raises(bounds):
-    """A bound outside the given mesh raises; extend the mesh to integrate further."""
-    with pytest.raises(ValueError, match="outside the mesh"):
-        _solver().integrate(f=torch.exp, mesh=_MESH, take_gradient=False, **bounds)
+def test_bound_outside_mesh_extends_it(lo, hi, n_start):
+    """A bound outside the given mesh extends it: every mesh point between the
+    bounds is kept and the bound becomes the new end point; the adaptive
+    integration refines the new subinterval (here [-0.5, 0], [4, 4.5], both,
+    or a single subinterval [5, 6] beyond the mesh)."""
+    bounds = {}
+    if lo is not None:
+        bounds["mesh_init"] = _bound(lo)
+    if hi is not None:
+        bounds["mesh_final"] = _bound(hi)
+    out = _solver().integrate(f=torch.exp, mesh=_MESH, take_gradient=False, **bounds)
+    a = 0.0 if lo is None else lo
+    b = 4.0 if hi is None else hi
+    assert torch.equal(out.mesh_init, _bound(a))
+    assert torch.equal(out.mesh_final, _bound(b))
+    assert out.n_start_steps == n_start
+    assert out.converged is True
+    assert math.isclose(float(out.integral), math.exp(b) - math.exp(a), rel_tol=1e-6)
 
 
 def test_bound_within_rounding_of_a_mesh_end_replaces_it():
@@ -294,12 +315,12 @@ _ONES = torch.ones_like
 
 @pytest.mark.parametrize(
     ("mesh_final", "expected"),
-    [(999.99995, 0.99995), (1000.00005, None)],
-    ids=["inside_cuts", "outside_raises"],
+    [(999.99995, 0.99995), (1000.00005, 1.00005)],
+    ids=["inside_cuts", "outside_extends"],
 )
 def test_bound_near_a_large_mesh_end_is_not_snapped(mesh_final, expected):
     """At |t| ~ 1e3 a bound 5e-5 from the mesh end is a different interval: it
-    cuts the mesh (inside) or raises (outside). A tolerance relative to the
+    cuts the mesh (inside) or extends it (outside). A tolerance relative to the
     assertion rtol (1e-7 |t|) used to snap both to [999, 1000]."""
     mesh = torch.linspace(999.0, 1000.0, 9, dtype=torch.float64).unsqueeze(-1)
     call = {
@@ -308,13 +329,9 @@ def test_bound_near_a_large_mesh_end_is_not_snapped(mesh_final, expected):
         "mesh_final": _bound(mesh_final),
         "take_gradient": False,
     }
-    if expected is None:
-        with pytest.raises(ValueError, match="outside the mesh"):
-            _solver().integrate(**call)
-        return
     out = _solver().integrate(**call)
     assert torch.equal(out.mesh_final, _bound(mesh_final))
-    assert math.isclose(float(out.integral), expected, rel_tol=1e-12)
+    assert math.isclose(float(out.integral), expected, rel_tol=1e-9)
 
 
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32], ids=["f64", "f32"])

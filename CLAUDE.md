@@ -510,18 +510,22 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   consecutive points (T > 1; unreachable end to end, the order check fails
   for T > 1); bounds are tensors of shape [T] on every call (with or without
   a mesh; checked in `_setup_integral_bounds`, non-tensors already in
-  `set_dtype_by_input`); every given bound becomes an end point of the
-  starting mesh, so it gets its gradient as any mesh end (replacing the bound
-  by the detached `mesh_optimal` end lost it); `mesh_init` is compared with
-  `mesh[0]` and `mesh_final` with `mesh[-1]` with a tolerance relative to the
-  value compared, `4 eps |x|` (eps of the coarser of the bound's and mesh's
-  dtypes; a tolerance scaled by the larger mesh end snapped 1e-13 to 0 on
-  [0, 1000]): further outside, the bound raises; otherwise it cuts the mesh,
-  and a bound that is not its end drops the points within
-  `4 eps max(|p|, |bound|)` of it, including that end when within rounding
+  `set_dtype_by_input`). With a mesh, a missing bound is its end, and every
+  given bound becomes an end point of the starting mesh, so it gets its
+  gradient as any mesh end (replacing the bound by the detached
+  `mesh_optimal` end lost it): the mesh's points between the bounds are kept
+  and the bounds added, which cuts the mesh at a bound inside it and extends
+  it to a bound outside it (the integration refines the new subinterval). A
+  bound that is not bit-equal to its end also drops the points within
+  `4 eps max(|p|, |bound|)` of it (eps of the coarser of the bound's and the
+  mesh's dtypes; relative, since a tolerance scaled by the larger mesh end
+  snapped 1e-13 to 0 on [0, 1000]), including that end when within rounding
   (a one-ULP subinterval made `interpolatory3_variable` return NaN). A mesh
-  alone, or bounds equal to its ends, leave it unchanged. Bounds not increasing raise
-  `ValueError`. `_setup_initial_mesh` only builds a fresh mesh.
+  alone, or bounds equal to its ends, leave it unchanged. Bounds not
+  increasing raise `ValueError`. `_setup_initial_mesh` only builds a fresh
+  mesh. With `take_gradient=True` and a mesh that requires grad (a bound
+  that requires grad), each batch is evaluated on a detached copy of the
+  mesh whose gradient is passed through the mesh's graph.
 - Every `integrate` argument after `mesh_final` is keyword-only.
 - A non-converged call (e.g. under `max_adaptive_splits`) returns a
   `mesh_optimal` that splits its failing steps, so repeated calls from it

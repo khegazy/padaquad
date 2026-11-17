@@ -169,7 +169,7 @@ print(round(float(result.integral), 4), round(float(half.integral), 4))  # 0.776
 | nothing | the bounds, or a mesh |
 
 A call needs a `mesh` or both bounds. Bounds inside the mesh cut it; a bound
-outside it raises an error (to integrate further, extend the mesh first).
+outside it extends it, and the integration refines the new subinterval.
 
 <!-- include-end: reuse -->
 More, including several integrals per step, checkpoints and when not to reuse

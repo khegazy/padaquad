@@ -2030,7 +2030,6 @@ def test_get_max_batch_with_f_ignores_constructor_max_batch(monkeypatch):
         {"f": torch.exp, "t": 0.0},
         {"f": torch.exp, "t": torch.tensor([0.0], dtype=torch.float16)},
         {"f": torch.exp, "t": torch.tensor([0])},
-        {"f": torch.exp, "t": _T, "default_max_batch": 5},
         {"f": torch.exp, "t": _T, "total_mem_usage": 1.5},
         {"f": lambda t: torch.exp(t)[:, 0], "t": _T},
     ],
@@ -2040,14 +2039,13 @@ def test_get_max_batch_with_f_ignores_constructor_max_batch(monkeypatch):
         "t_not_a_tensor",
         "t_float16",
         "t_integer",
-        "with_default_max_batch",
         "total_mem_usage_above_1",
         "output_not_2d",
     ],
 )
 def test_get_max_batch_with_f_validates_its_arguments(kwargs, monkeypatch):
     """f needs a float32 or float64 point t of shape [T] (the dtypes the solver
-    integrates in), cannot be combined with default_max_batch, needs
+    integrates in), needs
     0 < total_mem_usage <= 1, and must return values of shape [N, D]. The fake
     benchmark keeps a missing check from running the real one."""
     solver = adaptive_quadrature("uniform", "gk21", device="cpu")
@@ -2114,3 +2112,12 @@ def test_total_mem_usage_outside_0_1_raises(where, value):
             solver.integrate(torch.exp, total_mem_usage=value, **bounds)
         else:
             adaptive_quadrature("uniform", "gk21", device="cpu").get_max_batch(value)
+
+
+def test_get_max_batch_takes_no_default_max_batch():
+    """default_max_batch was removed: it only returned the value passed in
+    (lowered to the out-of-memory cap), which callers can pass to integrate
+    themselves."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu", max_batch=10_000)
+    with pytest.raises(TypeError, match="default_max_batch"):
+        solver.get_max_batch(default_max_batch=5)

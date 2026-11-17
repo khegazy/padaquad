@@ -451,9 +451,12 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   The batch loop's out-of-memory retry shrinks the batch that failed, not
   `_oom_max_batch` (which can be far above it).
 - Unless `max_batch` (call or constructor) fixes it, the batch size is
-  computed at every evaluation from live memory: `get_max_batch` →
-  `_get_max_f_evals` = `_largest_n(f_mem_coeffs, _MEMORY_BUDGET·usable)`
-  (capped at 1e9).
+  computed at every evaluation from live memory: `_get_max_f_evals` =
+  `_largest_n(f_mem_coeffs, _MEMORY_BUDGET·usable)` (capped at 1e9). Every
+  batch size (forced or computed), `result.max_batch`, the benchmark's result
+  and `get_max_batch()` go through one private cap, `_cap_max_batch`
+  (`min(value, _oom_max_batch)`); `get_max_batch` has no
+  `default_max_batch` (removed).
 - Out-of-memory errors are recognized by `_is_out_of_memory` (GPU OOM, CPU
   `DefaultCPUAllocator` refusal, CUDA "out of memory" and CUDA-library
   `*ALLOC*_FAILED` statuses, `MemoryError`);
@@ -502,7 +505,7 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   the bounds bit for bit) and `max_batch=result.max_batch`.
 - `result.max_batch`: the forced `max_batch` (call or constructor), else the
   value `_setup_memory_checks` returned for this call, lowered to
-  `_oom_max_batch` (through `get_max_batch(total_mem_usage, value)`). The
+  `_oom_max_batch` (through `_cap_max_batch`). The
   integration itself still sizes every batch from live memory.
 - Interval rules, all in `_setup_integral_bounds` (returns
   `(mesh, mesh_init, mesh_final)`): a call needs a mesh or both bounds; a

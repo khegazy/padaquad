@@ -297,10 +297,32 @@ class _MemoryManagement:
                 f"satisfy 0 < total_mem_usage <= 1; got {total_mem_usage}."
             )
 
+    def _cap_max_batch(self, max_batch: int) -> int:
+        """
+        Lower a batch size to the out-of-memory cap, if one is set.
+
+        The one place the cap ``_oom_max_batch`` (set after an out-of-memory
+        error, until the next ``integrate`` call starts) is applied: to every
+        batch of the integration, to ``result.max_batch``, to the benchmark's
+        result and to ``get_max_batch``.
+
+        Parameters
+        ----------
+        max_batch : int
+            The batch size to cap.
+
+        Returns
+        -------
+        int
+            ``min(max_batch, _oom_max_batch)``, or ``max_batch`` without a cap.
+        """
+        if self._oom_max_batch is None:
+            return max_batch
+        return min(max_batch, self._oom_max_batch)
+
     def get_max_batch(
         self,
         total_mem_usage: float | None = None,
-        default_max_batch: int | None = None,
         *,
         f: Callable[..., Any] | None = None,
         t: torch.Tensor | None = None,
@@ -320,13 +342,13 @@ class _MemoryManagement:
         and the solver's device, so measure with the settings of the calls that
         will use it.
 
-        Without ``f``, the benchmark is not run. The first available of these
-        is used: ``default_max_batch``, the ``max_batch`` given at
-        construction, and the number of evaluations that fit in the memory free
-        now, with the memory per call the last benchmark measured. After an
-        out-of-memory error, the result is capped at the reduced batch size
-        chosen then, until the next ``integrate`` call starts. To reuse the
-        batch size of a particular call, pass its ``result.max_batch`` instead.
+        Without ``f``, the benchmark is not run: the ``max_batch`` given at
+        construction is returned, else the number of evaluations that fit in
+        the memory free now, with the memory per call the last benchmark
+        measured. After an out-of-memory error, the result is capped at the
+        reduced batch size chosen then, until the next ``integrate`` call
+        starts. To reuse the batch size of a particular call, pass its
+        ``result.max_batch`` instead.
         See :ref:`ug-memory`.
 
         Parameters
@@ -334,9 +356,6 @@ class _MemoryManagement:
         total_mem_usage : float or None
             Fraction of the device's total memory that may be in use; the rest
             is kept free. None uses the value given at construction.
-        default_max_batch : int or None
-            A batch size that takes precedence over the other sources. None
-            (default) skips it. Not allowed together with ``f``.
         f : Callable or None
             The integrand to measure, called as ``f(t, *f_args)`` on points of
             shape [N, T]. None (default) measures nothing.
@@ -363,9 +382,8 @@ class _MemoryManagement:
         ------
         ValueError
             If ``total_mem_usage`` is outside (0, 1], if ``f`` is given without
-            a float32 or float64 point ``t`` of shape [T] or together with
-            ``default_max_batch``, or if ``f`` does not return values of shape
-            [N, D].
+            a float32 or float64 point ``t`` of shape [T], or if ``f`` does not
+            return values of shape [N, D].
 
         Examples
         --------
@@ -395,11 +413,6 @@ class _MemoryManagement:
                     "or float64 (the dtypes the solver integrates in), on which "
                     "f can be evaluated."
                 )
-            if default_max_batch is not None:
-                raise ValueError(
-                    "get_max_batch(f=...) measures f; do not also pass "
-                    "default_max_batch."
-                )
             # t keeps its dtype: the measurement is for calls in that dtype,
             # whatever dtype an earlier call left the solver in.
             t = t.to(self.device)
@@ -424,21 +437,11 @@ class _MemoryManagement:
                 total_mem_usage=total_mem_usage,
                 f_args=f_args,
             )
-        if default_max_batch is not None:
-            max_batch = default_max_batch
-        elif self.init_max_batch is not None:
-            max_batch = self.init_max_batch
-        elif self.f_mem_coeffs is not None:
-            max_batch = self._get_max_f_evals(total_mem_usage)
-        else:
-            max_batch = None
-        if (
-            self._oom_max_batch is not None
-            and max_batch is not None
-            and max_batch > self._oom_max_batch
-        ):
-            max_batch = self._oom_max_batch
-        return max_batch
+        if self.init_max_batch is not None:
+            return self._cap_max_batch(self.init_max_batch)
+        if self.f_mem_coeffs is not None:
+            return self._cap_max_batch(self._get_max_f_evals(total_mem_usage))
+        return None
 
     def _get_cpu_memory(self) -> tuple[float, float]:
         """
@@ -980,10 +983,7 @@ class _MemoryManagement:
         # only when it is True. get_max_batch applies the cap an out-of-memory
         # error above set, so the message reports the batch actually used.
         usable = self._get_usable_memory(total_mem_usage)
-        max_batch = self.get_max_batch(
-            total_mem_usage, self._get_max_f_evals(total_mem_usage)
-        )
-        assert max_batch is not None
+        max_batch = self._cap_max_batch(self._get_max_f_evals(total_mem_usage))
         a, b, d = self.f_mem_coeffs
         note = ""
         if not ready:

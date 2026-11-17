@@ -11,6 +11,7 @@ This release removes the solver's hidden warm-start state. A call reuses an earl
 ### Removed
 
 - **`same_f`, `solver.mesh_previous` and `solver.previous_max_batch`.** The solver no longer stores the mesh and batch size of its last call. Passing `same_f=` raises `TypeError`. To migrate, keep the result and pass its values: replace `solver.integrate(f, same_f=True, ...)` by `solver.integrate(f, mesh=result.mesh_optimal, max_batch=result.max_batch, ...)`, where `result` is the call to start from. On the first iteration pass the bounds instead of `mesh` (one call line works for both: start from `mesh = max_batch = None` and pass both bounds every time).
+- **`get_max_batch(default_max_batch=...)`.** It returned the value passed in, lowered to the out-of-memory cap, and existed only for the solver's own use; passing it raises `TypeError`. Pass a known batch size to `integrate(max_batch=...)` directly; `get_max_batch` now only measures (`f=`, `t=`) or estimates from what the solver knows.
 - **The constructor's `mesh_init` and `mesh_final`.** Passing them raises `TypeError`. Pass the bounds, or a mesh, to every `integrate` call.
 
 ### Added

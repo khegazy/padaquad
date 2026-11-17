@@ -85,13 +85,14 @@ def test_reuse_mesh_and_max_batch(device, monkeypatch):
     def fake_benchmark(*args, **kwargs):
         calls.append(1)
         solver.f_mem_coeffs = (0.0, 1e-6, 0.0)  # GB: 1e-6 per evaluation
+        return 1234  # the measured batch size, as _setup_memory_checks returns
 
     monkeypatch.setattr(solver, "_setup_memory_checks", fake_benchmark)
     first = solver.integrate(
         f=torch.exp, mesh_init=_bound(2.0), mesh_final=_bound(3.0), take_gradient=False
     )
     assert len(calls) == 1
-    assert isinstance(first.max_batch, int)
+    assert first.max_batch == 1234
 
     second = solver.integrate(
         f=torch.exp,

@@ -232,8 +232,8 @@ class TestSplitHandlersOOM:
         assert cap is not None
         # Every batch that actually fit (didn't OOM) is within the cap.
         assert all(b <= cap for b in oom.batch_sizes if b <= oom.limit)
-        # The get_max_batch clamp (quadrature/memory.py) refuses a larger request.
-        assert solver.get_max_batch(default_max_batch=10**9) == cap
+        # The cap (quadrature/memory.py, _cap_max_batch) lowers a larger request.
+        assert solver._cap_max_batch(10**9) == cap
 
     def test_unfittable_single_eval_raises(self, handler):
         """If even ``max_batch == 1`` OOMs (``limit=0``), the handler raises an

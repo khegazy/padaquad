@@ -879,17 +879,19 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             )
         del test_integrand
 
-        # The benchmark's batch size is only reported (result.max_batch): during
-        # the integration the batch is recomputed from live memory.
-        measured_max_batch = None
+        # The batch size reported as result.max_batch: the forced one, or the
+        # one the benchmark measures. Without a forced one the integration
+        # still recomputes every batch from live memory.
         if force_max_batch is None:
-            measured_max_batch = self._setup_memory_checks(
+            reported_max_batch = self._setup_memory_checks(
                 f,
                 mesh_init,
                 take_gradient=take_gradient,
                 total_mem_usage=total_mem_usage,
                 f_args=f_args,
             )
+        else:
+            reported_max_batch = force_max_batch
         loss_fxn = loss_fxn if loss_fxn is not None else self._integral_loss
 
         # Starting mesh: the caller's mesh cut to the bounds, or a fresh one.
@@ -1283,11 +1285,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             max_split_depth=max_split_depth,
             # The batch size to pass to a later call: the given max_batch, or
             # the one this call's benchmark measured; lowered to the cap an
-            # out-of-memory error in this call set (get_max_batch applies it).
-            max_batch=self.get_max_batch(
-                total_mem_usage,
-                measured_max_batch if force_max_batch is None else force_max_batch,
-            ),
+            # out-of-memory error in this call set.
+            max_batch=self._cap_max_batch(reported_max_batch),
         )
 
     def _record_error_check(
@@ -1837,11 +1836,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             state carried to the next call (all None unless ``conserve_memory``
             is True).
         """
-        # Determine how many f evaluations fit in one batch based on memory
-        max_batch = self.get_max_batch(total_mem_usage, force_max_batch)
-        # integrate() runs the memory benchmark whenever no max_batch is
-        # forced, so a budget always exists here.
-        assert max_batch is not None
+        # Determine how many f evaluations fit in one batch: the forced
+        # max_batch, else what fits in the memory free now (integrate() runs
+        # the memory benchmark whenever no max_batch is forced), lowered to
+        # the out-of-memory cap.
+        max_batch = self._cap_max_batch(
+            force_max_batch
+            if force_max_batch is not None
+            else self._get_max_f_evals(total_mem_usage)
+        )
 
         # Rescue a zero budget to the minimum workable value of 1 before
         # dispatching to either evaluation path. Placed ahead of the

@@ -351,6 +351,11 @@ class TestIntegrateOOMRecovery:
         assert n_oom >= 1
 
         assert first.max_batch == cap
+        # get_max_batch() lowers the constructor's max_batch to the cap too
+        # (None without one: no benchmark ran).
+        assert solver.get_max_batch() == (
+            cap if solver.init_max_batch is not None else None
+        )
 
         result = solver.integrate(
             oom,

@@ -918,6 +918,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # if y is not None:
             #    assert max_steps >= len(y), f"{max_steps}  {len(y)}"
 
+            # With take_gradient every batch runs its own backward, but all of
+            # them reach a bound that requires grad through one autograd graph,
+            # the mesh's (its ends and the midpoints split from them), whose
+            # saved indices the first backward frees. A batch is therefore
+            # evaluated on a detached copy of the mesh, and after its backward
+            # the copy's gradient is passed on through the mesh's graph, kept.
+            if take_gradient and mesh.requires_grad:
+                mesh_graph, mesh_eval = mesh, mesh.detach().requires_grad_()
+            else:
+                mesh_graph, mesh_eval = None, mesh
             (
                 nodes,
                 y_step_eval,
@@ -927,7 +937,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             ) = self._evaluate_f_on_mesh(
                 f,
                 f_args,
-                mesh,
+                mesh_eval,
                 mesh_trackers,
                 take_gradient,
                 conserve_memory,
@@ -1136,6 +1146,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 # Backpropagate gradients through the integration if requested
                 if take_gradient and loss.requires_grad:
                     loss.backward()
+                    if mesh_graph is not None and mesh_eval.grad is not None:
+                        mesh_graph.backward(mesh_eval.grad, retain_graph=True)
 
                 # Accumulate into the record
                 intermediate_results.loss = loss

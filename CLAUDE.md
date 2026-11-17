@@ -470,7 +470,10 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   batch. This is essential when the autograd graph for the entire
   integration would not fit in GPU memory; per-batch backward
   accumulates gradients into `theta.grad` without holding the full
-  graph.
+  graph. A bound that requires grad reaches every batch through the one
+  autograd graph of the mesh (its ends and the midpoints split from them),
+  so with it each batch is evaluated on a detached copy of the mesh and the
+  copy's gradient is passed through the mesh's graph (`retain_graph=True`).
 - `loss_fxn` defaults to returning the integral itself
   (`_integral_loss` in `base.py`). Linear in the integral, so the
   default path is correctness-safe under per-batch backward.

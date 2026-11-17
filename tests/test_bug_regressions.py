@@ -158,32 +158,39 @@ def _solver():
 _MESH = torch.linspace(0.0, 4.0, 9, dtype=torch.float64).unsqueeze(-1)
 
 
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 @pytest.mark.parametrize(
-    ("lo", "hi"),
+    ("lo", "hi", "given_mesh"),
     [
-        (0.0, 2.0),
-        (0.0, math.nextafter(2.0, 3.0)),
-        (0.5, 1.5),
+        (0.0, 2.0, True),
+        (0.0, math.nextafter(2.0, 3.0), True),
+        (0.5, 1.5, True),
+        (0.0, 2.0, False),
     ],
-    ids=["equal_to_the_ends", "within_rounding_of_an_end", "cutting"],
+    ids=["equal_to_the_ends", "within_rounding_of_an_end", "cutting", "no_mesh"],
 )
-def test_bound_gradients_through_a_given_mesh(lo, hi):
+def test_bound_gradients_through_a_given_mesh(lo, hi, given_mesh, take_gradient):
     """Given bounds are the mesh's ends, so their gradients are those of any
     mesh end: for the integral of w e^t over [a, b], d/da = -w e^a and
     d/db = w e^b, also when a bound equals the end of a detached
-    mesh_optimal (it used to be replaced by that end, and got no gradient)."""
+    mesh_optimal (it used to be replaced by that end, and got no gradient).
+    Two subintervals per batch: with take_gradient=True every batch runs its
+    own backward through the mesh's autograd graph, and the second one raised
+    "Trying to backward through the graph a second time"."""
     mesh = torch.linspace(0.0, 2.0, 9, dtype=torch.float64).unsqueeze(-1)
     w = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
     a = _bound(lo).requires_grad_()
     b = _bound(hi).requires_grad_()
     out = _solver().integrate(
         f=lambda t: w * torch.exp(t),
-        mesh=mesh,
+        mesh=mesh if given_mesh else None,
         mesh_init=a,
         mesh_final=b,
-        take_gradient=False,
+        take_gradient=take_gradient,
+        max_batch=2 * 23,  # gk21 has 23 nodes per subinterval
     )
-    out.integral.sum().backward()
+    if not take_gradient:
+        out.integral.sum().backward()
     assert math.isclose(float(a.grad), -2 * math.exp(lo), rel_tol=1e-9)
     assert math.isclose(float(b.grad), 2 * math.exp(hi), rel_tol=1e-9)
     assert math.isclose(float(w.grad), math.exp(hi) - math.exp(lo), rel_tol=1e-9)

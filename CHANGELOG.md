@@ -33,6 +33,7 @@ This release removes the solver's hidden warm-start state. A call reuses an earl
 ### Fixed
 
 - **A bound equal to the given mesh's end got no gradient.** With `mesh=result.mesh_optimal` and bounds equal to its ends (the reuse pattern), the bounds were replaced by the mesh's ends, which are detached from autograd, so `bound.grad` stayed `None` (and a bound within rounding of an end behaved the same). Every given bound is now an end point of the starting mesh, so it gets the gradient of any mesh end (d/db of the integral = f(b)).
+- **A bound that requires grad raised "Trying to backward through the graph a second time" with `take_gradient=True`** once the integration took several batches, with or without a mesh: every batch's backward ran through the mesh's autograd graph, which the first one freed. Each batch is now evaluated on a detached copy of the mesh, whose gradient is passed on through the mesh's graph.
 - **`mesh_optimal` carried the autograd graph of a bound that requires grad.** A later call started from it then backpropagated into the earlier call's bound (its `.grad` changed although it was not passed), and after a `take_gradient=True` call it raised "Trying to backward through the graph a second time". `mesh_optimal` is now detached, so passing it as `mesh=` is safe; a bound's gradient within its own call is unchanged.
 - **A cut could leave a subinterval one rounding step wide**, on which `interpolatory3_variable` returned NaN. Mesh points within the rounding tolerance of a bound are now dropped when the mesh is cut.
 

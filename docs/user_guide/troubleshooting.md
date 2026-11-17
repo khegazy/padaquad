@@ -62,9 +62,9 @@ subtracted from the signed sum, so `integral_error` is then approximate.
 ## Renamed and removed arguments
 
 - `reuse_mesh` was renamed `same_f` (1.3.0), and `same_f` was removed
-  (unreleased): pass `mesh=result.mesh_optimal` and
+  (2.0.0): pass `mesh=result.mesh_optimal` and
   `max_batch=result.max_batch` of the call to start from ({ref}`ug-reuse`).
-- The constructor's `mesh_init` and `mesh_final` were removed (unreleased):
+- The constructor's `mesh_init` and `mesh_final` were removed (2.0.0):
   pass the bounds, or a mesh, to every `integrate` call.
 - `max_path_change` was removed; use `max_adaptive_splits` to limit refinement
   and read the split statistics above.

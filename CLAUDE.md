@@ -122,7 +122,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_convergence_rate.py` | Empirical convergence-rate slope matches each method's theoretical rate |
 | `test_autodiff_consistency.py` | $\nabla_\theta\int f_\theta dt$ via backprop equals $\int \nabla_\theta f_\theta dt$ |
 | `test_error_indicator.py` | Behavior of absolute vs cumulative error indicators (Bug B8 investigation) |
-| `test_bug_regressions.py` | Regression tests for bugs B4, B6 fixed in Phase 1; reuse by passing `mesh_optimal` / `max_batch` (no state on the solver, `same_f` and constructor bounds gone); the interval rules (bounds required, cut, outside raises, rounding snap, one-ULP cut, mesh validation, keyword-only options) |
+| `test_bug_regressions.py` | Regression tests for bugs B4, B6 fixed in Phase 1; reuse by passing `mesh_optimal` / `max_batch` (no state on the solver, `same_f` and constructor bounds gone); the interval rules (bounds required, cut, outside extends, rounding snap, one-ULP cut, mesh validation, keyword-only options) |
 | `test_snapshots.py` | Golden-value regression net for the file-split refactor; CPU-only float64 |
 | `test_public_api.py` | Smoke test of every public symbol and `IntegrationResult` fields |
 | `test_rk_integral.py` | `_RK_integral`: constant / linear / multi-step / multi-dim / zero-width / variable-b inputs |

@@ -804,8 +804,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             result_device or self.device, self.device.index or 0
         )
 
-        # The bounds: the given ones (inside the mesh, if any), else the mesh's
-        # ends; without a mesh both must be given.
+        # The bounds: the given ones (they cut or extend a given mesh), else the
+        # mesh's ends; without a mesh both must be given.
         mesh, mesh_init, mesh_final = self._setup_integral_bounds(
             mesh, mesh_init, mesh_final
         )
@@ -1812,8 +1812,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         Evaluate the integrand at the nodes of the next unevaluated subintervals.
 
-        Chooses the batch size with ``get_max_batch`` (raised to 1 with a warning
-        if it is 0, capped at the number of evaluations left) and dispatches to
+        Chooses the batch size, ``force_max_batch`` or else ``_get_max_f_evals``,
+        lowered to the out-of-memory cap (``_cap_max_batch``), raised to 1 with a
+        warning if it is 0 and capped at the number of evaluations left; then
+        dispatches to
         ``_evaluate_f_on_full_nodes`` when ``take_gradient`` is True, else to
         ``_evaluate_f_on_split_residual_nodes`` when ``conserve_memory`` is True,
         else to ``_evaluate_f_on_split_nodes``.

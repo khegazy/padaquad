@@ -8,7 +8,7 @@ Tests in this file:
     size by passing them (this replaced ``same_f``, which replaced matching
     integrands by ``id(f)``, bug B2's fix).
   - test_bounds_required_without_mesh and the tests after it: the interval
-    rules (a mesh or both bounds; bounds inside a mesh cut it, outside raise).
+    rules (a mesh or both bounds; bounds inside a mesh cut it, outside extend it).
   - test_normal_completion_has_converged_true: a normal call returns
     ``converged=True`` (Bug B6's early-exit path was removed with
     ``max_path_change``).
@@ -140,7 +140,7 @@ def test_same_f_is_gone():
 
 # -----------------------------------------------------------------------------
 # Interval rules: a call needs a mesh or both bounds; bounds inside a given mesh
-# cut it; a bound outside it raises; a bound within rounding of a mesh end is
+# cut it; a bound outside it extends it; a bound within rounding of a mesh end is
 # that end. There are no constructor bounds and no stored warm-start mesh.
 # -----------------------------------------------------------------------------
 

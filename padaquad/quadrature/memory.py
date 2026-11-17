@@ -8,7 +8,7 @@ depends on the memory one evaluation uses. This module holds:
   (``base.py``). It measures how the memory of one call of f grows with the
   number of points N, as a fit a + b N + d N^2 (``_setup_memory_checks``),
   queries free memory on the solver's device, and turns both into the batch
-  size (``get_max_batch`` -> ``_get_max_f_evals``: the largest N whose fitted
+  size (``_get_max_f_evals``: the largest N whose fitted
   memory fits in ``_MEMORY_BUDGET`` of the usable memory), recomputed at every
   evaluation from live memory. The benchmark is a heuristic for the common
   case and cannot be right for every f; its known limitations are listed in
@@ -532,9 +532,9 @@ class _MemoryManagement:
         Fit the memory of one call of f on N points (``f_mem_coeffs``, GB).
 
         Returns the batch size the fit gives for the memory free at the end of
-        the measurement (capped as ``get_max_batch`` caps it). During an
-        integration the batch size is recomputed at every evaluation from the
-        memory free at that moment: ``get_max_batch`` -> ``_get_max_f_evals``.
+        the measurement (lowered to the out-of-memory cap, ``_cap_max_batch``).
+        During an integration the batch size is recomputed at every evaluation
+        from the memory free at that moment (``_get_max_f_evals``).
 
         f is called on N copies of ``node_test``, starting at N = 1. For each
         call, M is the memory the call used (``_measure_call``, with the reader
@@ -980,7 +980,7 @@ class _MemoryManagement:
             self._oom_max_batch = min(largest, self._oom_max_batch or largest)
 
         # The estimate depends on take_gradient: the fit includes the factor s
-        # only when it is True. get_max_batch applies the cap an out-of-memory
+        # only when it is True. _cap_max_batch applies the cap an out-of-memory
         # error above set, so the message reports the batch actually used.
         usable = self._get_usable_memory(total_mem_usage)
         max_batch = self._cap_max_batch(self._get_max_f_evals(total_mem_usage))

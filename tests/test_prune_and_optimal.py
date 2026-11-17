@@ -239,8 +239,8 @@ def test_mesh_optimal_ends_are_the_bounds(
     sampling, method, dtype, case, device, result_device
 ):
     """mesh_optimal starts and ends at the call's bounds bit for bit, so a
-    same_f=True call without bounds, which takes them from the stored mesh,
-    integrates the previous call's interval. "merge" starts from an
+    later call given mesh=mesh_optimal and no bounds integrates the previous
+    call's interval. "merge" starts from an
     over-resolved mesh, so the optimal mesh merges subintervals (not at both
     ends in every cell); "capped" stops short of the tolerance, so the optimal
     mesh splits failing subintervals. On a CUDA solver mesh_optimal is built
@@ -279,10 +279,12 @@ def test_mesh_optimal_ends_are_the_bounds(
 # ---------------------------------------------------------------------------
 
 
-def _warm_start_passes(solver, f) -> bool:
-    """Re-integrate f from the solver's stored mesh; True when no starting step
-    fails, i.e. none of the stored mesh's steps had to be split."""
-    out = solver.integrate(f=f, same_f=True, take_gradient=False)
+def _warm_start_passes(solver, f, cold) -> bool:
+    """Re-integrate f from the cold call's mesh_optimal; True when no starting
+    subinterval fails, i.e. none of that mesh's subintervals had to be split."""
+    out = solver.integrate(
+        f=f, mesh=cold.mesh_optimal, max_batch=cold.max_batch, take_gradient=False
+    )
     return out.n_start_steps_split == 0
 
 
@@ -305,8 +307,10 @@ def test_optimal_mesh_passes_when_reevaluated(
         method, atol=atol, rtol=rtol, device="cpu", merge_rule=merge_rule
     )
     torch.manual_seed(0)
-    solver.integrate(f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False)
-    assert _warm_start_passes(solver, f)
+    cold = solver.integrate(
+        f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
+    )
+    assert _warm_start_passes(solver, f, cold)
 
 
 @pytest.mark.parametrize(
@@ -335,8 +339,10 @@ def test_optimal_mesh_passes_when_reevaluated_cumulative(
         merge_rule=merge_rule,
     )
     torch.manual_seed(0)
-    solver.integrate(f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False)
-    assert _warm_start_passes(solver, f)
+    cold = solver.integrate(
+        f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
+    )
+    assert _warm_start_passes(solver, f, cold)
 
 
 @pytest.mark.parametrize("use_absolute_error_ratio", [True, False])
@@ -372,8 +378,8 @@ def test_pair_ratio_is_merged_step_ratio(use_absolute_error_ratio, error_norm):
 @pytest.mark.parametrize("merge_rule", MERGE_RULES)
 @pytest.mark.parametrize("method", ["dopri5", "gk7", "gk21", "cc17"])
 def test_repeated_warm_starts_prune_to_a_fixed_point(method, merge_rule):
-    """Starting from an over-resolved 128-step mesh, repeated same_f
-    calls halve the over-resolved steps (one merge level per call) until the
+    """Starting from an over-resolved 128-step mesh, repeated calls from the
+    previous mesh_optimal halve the over-resolved steps (one merge level per call) until the
     mesh stops changing; no call fails a starting step and every integral
     stays within tolerance of the exact value."""
     f, solution, _ = integrand_dict["damped_sine"]
@@ -385,7 +391,9 @@ def test_repeated_warm_starts_prune_to_a_fixed_point(method, merge_rule):
     out = solver.integrate(f=f, mesh=mesh, take_gradient=False)
     sizes = [len(mesh) - 1, len(out.mesh_optimal) - 1]
     for _ in range(8):
-        out = solver.integrate(f=f, same_f=True, take_gradient=False)
+        out = solver.integrate(
+            f=f, mesh=out.mesh_optimal, max_batch=out.max_batch, take_gradient=False
+        )
         assert out.n_start_steps_split == 0
         assert out.converged is True
         assert torch.allclose(out.integral.cpu(), exact, atol=1e-9, rtol=1e-6)
@@ -504,8 +512,8 @@ def test_preasymptotic_pair_merges(merge_rule, merged):
 
 
 def _warm_errors(solver, f, exact, mesh, n_warm):
-    """Errors of a cold call from ``mesh`` and of ``n_warm`` same_f calls
-    without bounds (they integrate the mesh's interval), with the right-hand
+    """Errors of a cold call from ``mesh`` and of ``n_warm`` warm calls, each
+    from the previous call's mesh_optimal and max_batch, with the right-hand
     side of the warm-start check for each warm call: max(tol, 1.05 * cold
     error, summed rounding floor 50 eps |Q_i|), eps of the mesh's dtype."""
     eps = torch.finfo(mesh.dtype).eps
@@ -513,8 +521,11 @@ def _warm_errors(solver, f, exact, mesh, n_warm):
     cold = solver.integrate(f=f, mesh=mesh, take_gradient=False)
     cold_error = abs(float(cold.integral) - exact)
     rows = []
+    warm = cold
     for _ in range(n_warm):
-        warm = solver.integrate(f=f, same_f=True, take_gradient=False)
+        warm = solver.integrate(
+            f=f, mesh=warm.mesh_optimal, max_batch=warm.max_batch, take_gradient=False
+        )
         floor = float((50 * eps * warm.mesh_quadratures.abs()).sum())
         bound = max(tol, 1.05 * cold_error, floor)
         rows.append((abs(float(warm.integral) - exact), bound, warm))
@@ -784,9 +795,13 @@ def test_predicted_warm_starts_with_vector_output(error_norm, absolute):
         max_batch=SMALL_BATCH,
     )
     torch.manual_seed(0)
-    solver.integrate(f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False)
+    warm = solver.integrate(
+        f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
+    )
     for _ in range(3):
-        warm = solver.integrate(f=f, same_f=True, take_gradient=False)
+        warm = solver.integrate(
+            f=f, mesh=warm.mesh_optimal, max_batch=warm.max_batch, take_gradient=False
+        )
         assert warm.n_start_steps_split == 0
         assert warm.converged is True
         error = (warm.integral.cpu() - exact).abs()
@@ -897,7 +912,7 @@ def test_nan_integrand_does_not_break_the_prediction():
 @needs_cuda
 def test_predicted_on_gpu_with_either_result_device():
     """A CUDA solver builds mesh_optimal on result_device. One solver alternates
-    between "cuda" and "cpu" with same_f warm starts: the weight cache must
+    between "cuda" and "cpu" with warm starts: the weight cache must
     follow the device it is used on, and the meshes must have the sizes of a
     CPU solver's, with no re-split and the integral within tolerance."""
 
@@ -912,13 +927,22 @@ def test_predicted_on_gpu_with_either_result_device():
         )
         for device in ("cuda", "cpu")
     )
-    gpu.integrate(f=f, mesh=mesh, take_gradient=False)
-    cpu.integrate(f=f, mesh=mesh, take_gradient=False)
+    out_gpu = gpu.integrate(f=f, mesh=mesh, take_gradient=False)
+    out_cpu = cpu.integrate(f=f, mesh=mesh, take_gradient=False)
     for result_device in ("cuda", "cpu", "cuda"):
         out_gpu = gpu.integrate(
-            f=f, same_f=True, take_gradient=False, result_device=result_device
+            f=f,
+            mesh=out_gpu.mesh_optimal,
+            max_batch=out_gpu.max_batch,
+            take_gradient=False,
+            result_device=result_device,
         )
-        out_cpu = cpu.integrate(f=f, same_f=True, take_gradient=False)
+        out_cpu = cpu.integrate(
+            f=f,
+            mesh=out_cpu.mesh_optimal,
+            max_batch=out_cpu.max_batch,
+            take_gradient=False,
+        )
         cached = [v for k, v in gpu._merge_weight_cache.items() if k is not None]
         assert cached
         assert all(v.device.type == result_device for v in cached)

@@ -82,8 +82,8 @@ INTEGRAND_NAMES = list(integrand_dict.keys())
 # Building a solver with ``max_batch=None`` makes the first ``.integrate()``
 # call benchmark the integrand's per-evaluation memory footprint
 # (``_setup_memory_checks``), which is slow. The solver only skips that
-# benchmark when an explicit ``max_batch`` is supplied or ``same_f=True``
-# reuses a stored one. The test suite does neither — every
+# benchmark when an explicit ``max_batch`` is supplied. The test suite does not
+# pass one — every
 # (method x integrand x ...) cell builds a fresh solver on a fresh integrand —
 # so the benchmark runs hundreds of times even though the answer is always the
 # same: all the analytic integrands share one per-evaluation footprint.
@@ -137,13 +137,12 @@ def cached_max_batch(device=None):
         # solver (e.g. the snapshot tests). Fork the RNG so the benchmark leaves
         # the global generator state untouched.
         torch_device = torch.device(device)
-        fork_devices = (
-            [torch_device.index or 0] if torch_device.type == "cuda" else []
-        )
+        fork_devices = [torch_device.index or 0] if torch_device.type == "cuda" else []
         with torch.random.fork_rng(devices=fork_devices):
             probe.integrate(f, mesh_init=T_INIT, mesh_final=T_FINAL)
         _MAX_BATCH_CACHE[key] = probe.get_max_batch()
     return _MAX_BATCH_CACHE[key]
+
 
 # ``take_gradient`` is a parameter of ``.integrate()`` (not the solver
 # constructor). The two modes share numerics in the current implementation

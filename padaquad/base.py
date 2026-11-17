@@ -6,7 +6,7 @@ Base class and sampling modes shared by the padaquad solvers.
 - ``DEFAULT_SAMPLING_TYPE`` and ``DEFAULT_METHODS``: the sampling mode, and the
   method of each sampling mode, used when the caller names none.
 - ``SolverBase``: the abstract base class of the solvers. It keeps the dtype,
-  the device, the construction-time defaults and the warm-start mesh, and
+  the device and the construction-time defaults (no state between calls), and
   declares the ``integrate()`` / ``_calculate_integral()`` interface that the
   concrete solvers implement.
 

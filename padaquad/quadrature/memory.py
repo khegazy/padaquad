@@ -292,9 +292,9 @@ class _MemoryManagement:
         as ``max_batch`` to every later call with the same ``f`` and settings,
         which then skip the benchmark. The constructor's ``max_batch`` is not
         used, and a cap left by an earlier out-of-memory error is cleared
-        first. The measurement depends on ``take_gradient``, the solver's dtype
-        and its device, so measure with the settings of the calls that will
-        use it.
+        first. The measurement depends on ``take_gradient``, the dtype of ``t``
+        and the solver's device, so measure with the settings of the calls that
+        will use it.
 
         Without ``f``, the benchmark is not run. The first available of these
         is used: ``default_max_batch``, the ``max_batch`` given at
@@ -318,8 +318,10 @@ class _MemoryManagement:
             shape [N, T]. None (default) measures nothing.
         t : torch.Tensor or None
             A point of the integration interval, shape [T], on which ``f`` is
-            evaluated. Converted to the solver's dtype and device (the solver's
-            dtype is not changed). Required with ``f``.
+            evaluated, in the dtype of the calls that will use the result (a
+            float64 point takes twice the memory of a float32 one). Moved to the
+            solver's device; the solver's dtype is not changed. Required with
+            ``f``.
         take_gradient : bool
             The ``take_gradient`` of the calls that will use the measurement;
             with True (default) the batch leaves memory for backpropagation.
@@ -336,8 +338,9 @@ class _MemoryManagement:
         Raises
         ------
         ValueError
-            If ``f`` is given without a point ``t`` of shape [T], or together
-            with ``default_max_batch``.
+            If ``f`` is given without a point ``t`` of shape [T], together with
+            ``default_max_batch``, or with ``total_mem_usage`` outside (0, 1],
+            or if ``f`` does not return values of shape [N, D].
 
         Examples
         --------
@@ -366,7 +369,14 @@ class _MemoryManagement:
                     "get_max_batch(f=...) measures f; do not also pass "
                     "default_max_batch."
                 )
-            t = t.to(self.dtype).to(self.device)
+            if not 0 < total_mem_usage <= 1:
+                raise ValueError(
+                    "total_mem_usage is a ratio and must be 0 < total_mem_usage "
+                    f"<= 1; got {total_mem_usage}."
+                )
+            # t keeps its dtype: the measurement is for calls in that dtype,
+            # whatever dtype an earlier call left the solver in.
+            t = t.to(self.device)
             f_args = tuple(
                 a.to(self.device) if torch.is_tensor(a) else a for a in f_args
             )

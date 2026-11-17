@@ -10,18 +10,20 @@
 
 | The call passes | Interval integrated | Starting mesh |
 |---|---|---|
-| `mesh` only | `mesh[0]` to `mesh[-1]` | `mesh` |
+| `mesh` only | `mesh[0]` to `mesh[-1]` | `mesh`, as given |
 | `mesh` and bounds inside it | the bounds; a missing one is the mesh's end | `mesh` cut to the bounds: its points between them, plus the bounds |
 | `mesh` and a bound outside it | — | `ValueError` |
 | both bounds, no `mesh` | the bounds | a fresh mesh (`N_init_steps`, `random_initial_mesh`) |
 | one bound or none, no `mesh` | — | `ValueError` |
 
-- A bound within a few rounding steps of a mesh end (4 machine epsilons of the
-  coarser dtype, relative to the larger end) is that end, so a bound that
+- A bound within a few rounding steps of its mesh end (4 machine epsilons of
+  the coarser dtype, relative to that end) is that end, so a bound that
   differs from `mesh[-1]` only by float32 rounding does not raise or add a
-  near-zero-width subinterval. For the same reason, mesh points within that
-  distance of a bound are dropped when the mesh is cut.
-- A given mesh must have shape `[M, T]` with at least two increasing points.
+  near-zero-width subinterval. For the same reason, when a bound cuts the
+  mesh, the mesh points within rounding of it are dropped.
+- A given mesh must have shape `[M, T]` with at least two increasing points,
+  and a bound given with it must be a tensor of shape `[T]`, like a point of
+  the mesh.
 - The given mesh's dtype is the call's dtype (see {doc}`devices_memory`), so bounds
   of another dtype are converted to it.
 
@@ -75,12 +77,14 @@ take_gradient=...)`) when any of these changes:
 
 ## `result.max_batch` and `solver.get_max_batch()`
 
-- `result.max_batch` is the batch size a call used: the `max_batch` it was
-  given, or the one its memory measurement found, lowered if the call ran out
-  of memory and retried with smaller batches. Passing it on carries that
+- `result.max_batch` is the `max_batch` a call was given, or the one its
+  memory measurement found (the integration itself sizes each batch from the
+  memory free at that moment), lowered if the call ran out of memory and
+  retried with smaller batches. Passing it on carries that
   reduction to the next call.
 - `solver.get_max_batch(f=f, t=t, ...)` runs the memory measurement for `f`
   now and returns the batch size, so it can be chosen before any integral.
+  Pass `t` in the dtype of the calls that will use the result.
 - `solver.get_max_batch()` without `f` estimates a batch size from the last
   measurement this solver ran and the memory free now. Any call that measures
   changes it, so prefer `result.max_batch` of the call you want to repeat.

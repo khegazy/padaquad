@@ -15,15 +15,15 @@ This release removes the solver's hidden warm-start state. A call reuses an earl
 
 ### Added
 
-- **`IntegrationResult.max_batch`**: the batch size the call used, the `max_batch` it was given, or the one its memory benchmark measured, lowered after an out-of-memory error. Pass it as `max_batch` to a later call of the same integrand to skip the benchmark.
-- **`solver.get_max_batch(f=f, t=t, take_gradient=..., f_args=...)`** runs the memory benchmark for `f` and returns the batch size to pass as `max_batch`, so it can be measured once before any integral. Without `f`, `get_max_batch()` behaves as before.
+- **`IntegrationResult.max_batch`**: the `max_batch` the call was given, or the one its memory benchmark measured, lowered after an out-of-memory error (the integration itself still sizes each batch from the memory free at that moment). Pass it as `max_batch` to a later call of the same integrand to skip the benchmark.
+- **`solver.get_max_batch(f=f, t=t, take_gradient=..., f_args=...)`** runs the memory benchmark for `f`, in `t`'s dtype, and returns the batch size to pass as `max_batch`, so it can be measured once before any integral. Without `f`, `get_max_batch()` behaves as before.
 - **Bounds inside a given mesh cut it.** `integrate(f, mesh=m, mesh_final=c)` with `c` inside `m` integrates up to `c`, starting from the points of `m` before `c`; previously the bounds had to equal the mesh's ends.
 
 ### Changed
 
 - **A call needs a mesh or both bounds.** Without a mesh, `mesh_init` and `mesh_final` are required (`ValueError`); there are no default bounds. With a mesh, a missing bound is its end.
-- **A bound outside the given mesh raises `ValueError`.** A bound within a few rounding steps of a mesh end (4 machine epsilons of the coarser dtype, relative to the larger end) is that end.
-- **A given mesh is validated:** shape `[M, T]` with at least two increasing points, else `ValueError` (it was a bare `AssertionError`).
+- **A bound outside the given mesh raises `ValueError`.** A bound within a few rounding steps of its mesh end (4 machine epsilons of the coarser dtype, relative to that end) is that end. This is stricter than before: a bound passed with a mesh used to be accepted, and replaced by the mesh's end, when it was within the assertion tolerance (relative 1e-7 in float64, 1e-5 in float32); now a bound further than rounding from the end cuts the mesh or raises. A bound given with a mesh must be a tensor of shape `[T]`.
+- **A given mesh is validated:** shape `[M, T]` with at least two increasing points, else `ValueError` (it was a bare `AssertionError`). An integrand that does not return values of shape `[N, D]` also raises `ValueError` (it was an `assert`).
 - **Integration bounds that are not increasing raise `ValueError`** instead of `AssertionError`. The check was an `assert`, which `python -O` removes; a reversed call then ran on, stored an out-of-order `mesh_optimal` with points outside the interval, and returned `converged=True`.
 - **Every `integrate` argument after `mesh_final` is keyword-only**, so the removal of `same_f` cannot silently shift positional arguments.
 - **The not-converged warning's last remedy** now reads "call again with mesh=result.mesh_optimal and max_batch=result.max_batch", which works for a solver and for the one-shot `padaquad.integrate()`.

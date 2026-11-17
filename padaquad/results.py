@@ -26,8 +26,8 @@ class IntegrationResult:
 
     Every field is required and passed by keyword (``kw_only=True``), except
     ``mesh_optimal``, ``tracked_variables``, ``loss``, ``converged``,
-    ``n_start_steps``, ``n_start_steps_split`` and ``max_split_depth``, which
-    default to ``None``. Below, ``N`` is the number of accepted subintervals,
+    ``n_start_steps``, ``n_start_steps_split``, ``max_split_depth`` and
+    ``max_batch``, which default to ``None``. Below, ``N`` is the number of accepted subintervals,
     ``C`` the number of nodes per subinterval, ``P = C + (N - 1)(C - 1)`` the
     number of distinct nodes, and ``M`` the number of mesh points (see
     :ref:`ug-shapes`).
@@ -39,7 +39,7 @@ class IntegrationResult:
     The solver also builds one result per batch of accepted subintervals and
     passes it to ``loss_fxn``. That result covers only the batch: ``integral``
     is the batch's contribution, ``y0`` is zero, ``mesh_optimal``, ``loss``,
-    ``converged`` and the split counts are ``None``, and ``nodes``, ``y`` and
+    ``converged``, the split counts and ``max_batch`` are ``None``, and ``nodes``, ``y`` and
     ``tracked_variables`` keep one row per subinterval (shapes ``[N, C, T]``,
     ``[N, C, D]`` and ``[N, C, ...]``) instead of the flattened shapes below.
 
@@ -109,10 +109,10 @@ class IntegrationResult:
     max_batch : int or None
         The batch size to pass as ``max_batch`` to a later call of the same
         integrand, which then skips the memory benchmark: the ``max_batch``
-        this call was given, or else the one its benchmark gives for the
-        memory free at the end of the call; after an out-of-memory error, the
-        reduced size. None only in the per-batch results given to
-        ``loss_fxn``.
+        this call was given, or else the value its memory benchmark measured
+        (the integration itself sizes each batch from the memory free at that
+        moment); after an out-of-memory error, the reduced size. None only in
+        the per-batch results given to ``loss_fxn``.
 
     Examples
     --------

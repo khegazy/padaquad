@@ -50,8 +50,8 @@ def adaptive_quadrature(
         ``"gk21"`` (uniform) or ``"interpolatory3_variable"`` (variable).
     **options : Any
         Keyword arguments of the solver's constructor (for example ``atol``,
-        ``rtol``, ``f``, ``mesh_init``, ``mesh_final``, ``max_batch``,
-        ``device``).
+        ``rtol``, ``f``, ``max_batch``, ``device``). The bounds are not
+        constructor options: pass them, or a mesh, to every ``integrate`` call.
 
     Returns
     -------

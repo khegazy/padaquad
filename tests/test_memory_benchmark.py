@@ -2037,3 +2037,45 @@ def test_get_max_batch_with_f_validates_its_arguments(kwargs):
     solver = adaptive_quadrature("uniform", "gk21", device="cpu")
     with pytest.raises(ValueError, match="get_max_batch"):
         solver.get_max_batch(**kwargs)
+
+
+def test_get_max_batch_measures_in_the_dtype_of_t(monkeypatch):
+    """The benchmark runs in t's dtype, not in whatever dtype an earlier call
+    left the solver in, and the solver's dtype is not changed."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+    f32 = {"dtype": torch.float32}
+    solver.integrate(
+        torch.exp,
+        mesh_init=torch.tensor([0.0], **f32),
+        mesh_final=torch.tensor([1.0], **f32),
+        max_batch=10_000,
+        take_gradient=False,
+    )
+    assert solver.dtype == torch.float32
+    seen = []
+
+    def fake(f, node_test, take_gradient, total_mem_usage, f_args=()):
+        seen.append(node_test.dtype)
+        return 1234
+
+    monkeypatch.setattr(solver, "_setup_memory_checks", fake)
+    solver.get_max_batch(f=torch.exp, t=_T)
+    assert seen == [torch.float64]
+    assert solver.dtype == torch.float32
+
+
+def test_integrate_sizes_batches_from_live_memory(monkeypatch):
+    """The measured batch size is only reported: during the integration each
+    batch is sized from the memory free then (here the fit allows far more than
+    the 50 the fake benchmark reports)."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+    _fake_benchmark(solver, monkeypatch, measured=50)
+    sizes = []
+
+    def f(t):
+        sizes.append(len(t))
+        return torch.exp(t)
+
+    out = solver.integrate(f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False)
+    assert max(sizes) > 50
+    assert out.max_batch == 50

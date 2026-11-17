@@ -23,8 +23,9 @@ estimate can be small while the integral is wrong. Call `torch.manual_seed`
 before integrating to get the same mesh, and so the same result to the last
 digit, on every run.
 
-A given `mesh` must be a tensor of shape `[M, T]` with increasing values from
-`mesh_init` to `mesh_final`.
+A given `mesh` must be a tensor of shape `[M, T]` with at least two increasing
+points. Its ends are the bounds, unless bounds inside it are given, which cut
+it ({ref}`ug-reuse`).
 
 (ug-optimal-mesh)=
 ## The optimal mesh and the merge rule

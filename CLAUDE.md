@@ -504,12 +504,16 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 - Interval rules, all in `_setup_integral_bounds` (returns
   `(mesh, mesh_init, mesh_final)`): a call needs a mesh or both bounds; a
   given mesh must be `[M, T]`, M >= 2, increasing (T = 1) or with distinct
-  consecutive points (T > 1); `mesh_init` is compared with `mesh[0]` and
-  `mesh_final` with `mesh[-1]` using `tol = 4 eps max(|mesh[0]|, |mesh[-1]|)`
-  (eps of the coarser of the bound's and mesh's dtypes): within `tol` it is
-  that end, further outside it raises, inside it cuts the mesh (points within
-  `tol` of a bound are dropped: a one-ULP subinterval made
-  `interpolatory3_variable` return NaN). Bounds not increasing raise
+  consecutive points (T > 1; unreachable end to end, the order check fails
+  for T > 1); a bound given with a mesh must be a tensor of shape [T];
+  `mesh_init` is compared with `mesh[0]` and `mesh_final` with `mesh[-1]`
+  with a tolerance relative to the value compared, `4 eps |x|` (eps of the
+  coarser of the bound's and mesh's dtypes; a tolerance scaled by the
+  larger mesh end snapped 1e-13 to 0 on [0, 1000]): within it, the bound is
+  that end; further outside, it raises; inside, it cuts the mesh, and a
+  cutting bound drops the points within `4 eps max(|p|, |bound|)` of it (a
+  one-ULP subinterval made `interpolatory3_variable` return NaN). A mesh
+  alone is used as given. Bounds not increasing raise
   `ValueError`. `_setup_initial_mesh` only builds a fresh mesh.
 - Every `integrate` argument after `mesh_final` is keyword-only.
 - A non-converged call (e.g. under `max_adaptive_splits`) returns a

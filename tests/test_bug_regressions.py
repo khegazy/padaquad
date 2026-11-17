@@ -272,6 +272,50 @@ def test_bound_one_ulp_from_a_mesh_point_drops_that_point(sampling, method, dtyp
     assert math.isclose(float(out.integral), exact, rel_tol=1e-5)
 
 
+def test_bound_near_zero_is_not_snapped():
+    """The tolerance scales with the value compared, not with the mesh's
+    largest end: a bound 1e-13 from the end 0 of a mesh reaching 1000 is a
+    different interval (it was snapped to 0, where t^(-1/2) is infinite)."""
+    mesh = torch.linspace(0.0, 1000.0, 11, dtype=torch.float64).unsqueeze(-1)
+    out = _solver().integrate(
+        f=_ONES, mesh=mesh, mesh_init=_bound(1e-13), take_gradient=False
+    )
+    assert torch.equal(out.mesh_init, _bound(1e-13))
+    assert out.n_start_steps == 10
+    assert math.isclose(float(out.integral), 1000.0 - 1e-13, rel_tol=1e-12)
+
+
+def test_mesh_points_near_zero_are_kept():
+    """A mesh alone is used as given: its point 1e-13 next to the end 0 is not
+    dropped (5 subintervals)."""
+    mesh = torch.tensor(
+        [[0.0], [1e-13], [1e-6], [1.0], [500.0], [1000.0]], dtype=torch.float64
+    )
+    out = _solver().integrate(f=_ONES, mesh=mesh, take_gradient=False)
+    assert out.n_start_steps == 5
+
+
+@pytest.mark.parametrize(
+    "bound",
+    [torch.tensor(2.0, dtype=torch.float64), torch.tensor([[2.0]]), 2.0],
+    ids=["zero_dim", "two_dim", "python_float"],
+)
+def test_bound_of_wrong_shape_with_mesh_raises(bound):
+    """With a mesh, a bound must be a tensor of shape [T]; other shapes raised
+    an unrelated error from torch.concatenate."""
+    with pytest.raises(ValueError, match="shape"):
+        _solver().integrate(f=torch.exp, mesh=_MESH, mesh_final=bound)
+
+
+def test_integrand_output_must_be_two_dimensional():
+    """An integrand returning shape [N] instead of [N, D] raises ValueError
+    (the check was an assert, which python -O removes)."""
+    with pytest.raises(ValueError, match="shape"):
+        _solver().integrate(
+            f=lambda t: torch.exp(t)[:, 0], mesh=_MESH, take_gradient=False
+        )
+
+
 def test_float32_bound_at_a_float64_mesh_end_is_that_end():
     """float32(0.3) differs from the float64 mesh end 0.3 only by float32
     rounding, so it is that end (the coarser dtype sets the tolerance)."""

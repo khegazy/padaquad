@@ -729,8 +729,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         max_batch : int or None
             Largest number of integrand evaluations per call of f. If this and
             the constructor's value are None, the memory benchmark sets it
-            (see :ref:`the user guide <ug-memory>`). The value a call used is
-            returned as ``result.max_batch``.
+            (see :ref:`the user guide <ug-memory>`). The given value, or the
+            one the benchmark measured, is returned as ``result.max_batch``.
         max_adaptive_splits : int or None
             Cap on how many times a subinterval may have been halved since the
             starting mesh; at the cap it is accepted even if it fails the
@@ -768,9 +768,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Raises
         ------
         ValueError
-            If the bounds do not satisfy ``mesh_init < mesh_final``, if no
-            integrand was given here or at construction, or if an option such
-            as ``error_norm`` is invalid.
+            If there is no ``mesh`` and a bound is missing; if the ``mesh`` is
+            not [M, T] with M >= 2 increasing points; if a bound given with a
+            mesh is not of shape [T] or lies outside the mesh; if the bounds do
+            not satisfy ``mesh_init < mesh_final``; if no integrand was given
+            here or at construction, or it does not return values of shape
+            [N, D]; or if an option such as ``error_norm`` is invalid.
 
         Examples
         --------
@@ -867,10 +870,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # start-up, lazy model loading, cuBLAS workspace) stay out of it.
         # One point, shaped [1, T] like every batch f receives. mesh_init is
         # already on the solver's dtype and device (_setup_integral_bounds).
-        test_output = f(mesh_init.reshape(1, -1), *f_args)
-        test_integrand, _ = self._split_f_output(test_output)
-        assert len(test_integrand.shape) >= 2
-        del test_output, test_integrand
+        test_integrand, _ = self._split_f_output(f(mesh_init.reshape(1, -1), *f_args))
+        if test_integrand.dim() < 2:
+            raise ValueError(
+                "f must return values of shape [N, D] for points of shape "
+                f"[N, T]; got shape {list(test_integrand.shape)}."
+            )
+        del test_integrand
 
         # The benchmark's batch size is only reported (result.max_batch): during
         # the integration the batch is recomputed from live memory.
@@ -2909,14 +2915,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         Without a mesh, both bounds must be given. With a mesh, which must be
         [M, T] with M >= 2 increasing points, a missing bound is the mesh's
-        end; ``mesh_init`` is compared with ``mesh[0]`` and ``mesh_final`` with
-        ``mesh[-1]``, and with ``tol = 4 eps max(|mesh[0]|, |mesh[-1]|)`` (eps of
-        the coarser of the two dtypes) a bound within ``tol`` of its end is
-        that end, one further outside the mesh raises, and one inside cuts the
-        mesh: the points between the bounds are kept, except those within
-        ``tol`` of a bound, and the bounds are added. Dropping those points
-        avoids subintervals a few rounding steps wide, on which variable
-        sampling returns NaN.
+        end, and a given bound must be a tensor of shape [T]. ``mesh_init`` is
+        compared with ``mesh[0]`` and ``mesh_final`` with ``mesh[-1]``, with a
+        rounding tolerance relative to the value compared, ``4 eps |x|`` (eps
+        of the coarser of the mesh's and the bounds' dtypes): a bound within it
+        of its end is that end, one further outside the mesh raises, and one
+        inside cuts the mesh. The points between the bounds are kept and the
+        bounds added; a bound that cuts also drops the points within rounding of
+        it, which avoids subintervals a few rounding steps wide, on which
+        variable sampling returns NaN. A mesh alone is used as given.
 
         Parameters
         ----------
@@ -2937,8 +2944,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         ------
         ValueError
             If the mesh is not [M, T] with M >= 2 increasing points, if there
-            is no mesh and a bound is missing, if a bound lies outside the
-            mesh, or if the bounds do not satisfy ``mesh_init < mesh_final``.
+            is no mesh and a bound is missing, if a bound given with a mesh is
+            not a tensor of shape [T] or lies outside the mesh, or if the bounds
+            do not satisfy ``mesh_init < mesh_final``.
         """
         if mesh is None:
             if mesh_init is None or mesh_final is None:
@@ -2950,7 +2958,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh_final = mesh_final.to(self.dtype).to(self.device)
         else:
             # Increasing for T = 1; distinct consecutive points for any T (the
-            # order of a path in T > 1 dimensions is its own).
+            # order of a path in T > 1 dimensions is its own). T > 1 is not
+            # supported end to end yet: the order check below fails for it.
             if mesh.dim() != 2 or len(mesh) < 2:
                 valid = False
             elif mesh.shape[-1] == 1:
@@ -2962,23 +2971,36 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     "mesh must be a tensor of shape [M, T] with M >= 2 increasing "
                     f"points; got shape {list(mesh.shape)}."
                 )
+            for name, given in (("mesh_init", mesh_init), ("mesh_final", mesh_final)):
+                if given is not None and (
+                    not isinstance(given, torch.Tensor) or given.shape != mesh.shape[1:]
+                ):
+                    raise ValueError(
+                        f"{name} must be a tensor of shape [T] = "
+                        f"{list(mesh.shape[1:])}, like a point of the mesh; got "
+                        f"{type(given).__name__} "
+                        f"{list(getattr(given, 'shape', []))}."
+                    )
+            # Rounding tolerance relative to the value compared, eps of the
+            # coarser of the mesh's and the bounds' dtypes: 4 eps |x|.
             eps = max(
                 torch.finfo(x.dtype).eps
                 for x in (mesh, mesh_init, mesh_final)
                 if x is not None and x.is_floating_point()
             )
             mesh = mesh.to(self.dtype).to(self.device)
-            tol = 4 * eps * torch.maximum(mesh[0].abs(), mesh[-1].abs())
             resolved = []
             for name, given, end in (
                 ("mesh_init", mesh_init, mesh[0]),
                 ("mesh_final", mesh_final, mesh[-1]),
             ):
                 bound = None if given is None else given.to(self.dtype).to(self.device)
-                if bound is None or torch.all(torch.abs(bound - end) <= tol):
+                if bound is None or torch.all(
+                    torch.abs(bound - end) <= 4 * eps * end.abs()
+                ):
                     resolved.append(end)
-                elif torch.any(bound < mesh[0] - tol) or torch.any(
-                    bound > mesh[-1] + tol
+                elif torch.any(bound < mesh[0] - 4 * eps * mesh[0].abs()) or torch.any(
+                    bound > mesh[-1] + 4 * eps * mesh[-1].abs()
                 ):
                     raise ValueError(
                         f"{name} = {bound.tolist()} is outside the mesh "
@@ -3002,14 +3024,18 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             )
 
         if mesh is not None:
-            # Cut to the bounds: keep the points in [mesh_init, mesh_final] in
-            # every coordinate that are more than tol from both bounds, then add
-            # the bounds. Bounds equal to the mesh's ends leave it unchanged.
-            lo = torch.minimum(mesh_init, mesh_final)
-            hi = torch.maximum(mesh_init, mesh_final)
-            keep = torch.all((mesh >= lo) & (mesh <= hi), dim=-1)
-            for bound in (mesh_init, mesh_final):
-                keep &= torch.amax(torch.abs(mesh - bound), dim=-1) > tol.max()
+            # Cut to the bounds: keep the points in [mesh_init, mesh_final] other
+            # than the bounds, then add the bounds. A bound that cuts the mesh
+            # (is not its end) also drops the points within rounding of it, which
+            # would leave a subinterval a few rounding steps wide (variable
+            # sampling returns NaN on one). Bounds equal to the mesh's ends leave
+            # it unchanged.
+            keep = torch.all((mesh >= mesh_init) & (mesh <= mesh_final), dim=-1)
+            for bound, end in ((mesh_init, mesh[0]), (mesh_final, mesh[-1])):
+                keep &= ~torch.all(mesh == bound, dim=-1)
+                if not torch.equal(bound, end):
+                    tol = 4 * eps * torch.maximum(mesh.abs(), bound.abs())
+                    keep &= ~torch.all(torch.abs(mesh - bound) <= tol, dim=-1)
             mesh = torch.concatenate(
                 [mesh_init.unsqueeze(0), mesh[keep], mesh_final.unsqueeze(0)], dim=0
             )

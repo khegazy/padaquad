@@ -37,8 +37,9 @@ even when subintervals fail; read `converged` instead.
 
 ## The first call is slow and logs warnings
 
-That is the memory benchmark ({ref}`ug-memory`). Pass `max_batch`, or
-`same_f=True` from the second call on.
+That is the memory benchmark ({ref}`ug-memory`). Pass `max_batch`: a value of
+your own, one measured once with `solver.get_max_batch(f=f, t=t)`, or the
+`result.max_batch` of an earlier call ({ref}`ug-reuse`).
 
 ## Out of memory
 
@@ -60,7 +61,11 @@ subtracted from the signed sum, so `integral_error` is then approximate.
 
 ## Renamed and removed arguments
 
-- `reuse_mesh` was renamed `same_f` (1.3.0).
+- `reuse_mesh` was renamed `same_f` (1.3.0), and `same_f` was removed
+  (unreleased): pass `mesh=result.mesh_optimal` and
+  `max_batch=result.max_batch` of the call to start from ({ref}`ug-reuse`).
+- The constructor's `mesh_init` and `mesh_final` were removed (unreleased):
+  pass the bounds, or a mesh, to every `integrate` call.
 - `max_path_change` was removed; use `max_adaptive_splits` to limit refinement
   and read the split statistics above.
 - Solver options are keyword-only, and `integrate()` accepts every option of

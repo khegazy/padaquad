@@ -19,8 +19,8 @@ makes the integration run in float32.
 padaquad evaluates the nodes of many subintervals in one call of the
 integrand. The number of points per call is the batch size, `max_batch`.
 
-When no `max_batch` is given (to `integrate` or to the constructor) and no
-stored value is used ({ref}`ug-same-f`), a **memory benchmark** measures how
+When no `max_batch` is given (to `integrate` or to the constructor), a
+**memory benchmark** measures how
 the memory of one call of the integrand grows with the number of points N. It
 calls the integrand on 1 point, then on more, and fits the memory of the calls
 as a + b N + d N², so an integrand whose memory grows like N² (for example, one
@@ -64,12 +64,15 @@ what this costs and what it leaves unbounded; pass `max_batch` there when the
 memory of a batch matters.
 
 The benchmark takes a few seconds and logs warnings, and it runs on every call
-without `max_batch`. To run it once, integrate once without `max_batch`, read
-`max_batch = solver.get_max_batch()`, and pass that value to later calls or
-new solvers; or pass `same_f=True`. `get_max_batch()` returns the batch size
-the solver would use now, without running the benchmark. Both reuse the
-benchmark's result, so they save its time but keep its limitations
-({ref}`ug-memory-limitations`).
+without `max_batch`. To run it once, either measure before any integral with
+`max_batch = solver.get_max_batch(f=f, t=t, take_gradient=...)`, or integrate
+once without `max_batch` and read `result.max_batch`; then pass that value to
+later calls or new solvers ({ref}`ug-reuse`). The measurement depends on
+`take_gradient`, the dtype and the device, so measure with the settings of the
+calls that will use it. `solver.get_max_batch()` without `f` returns the batch
+size the solver would use now, from its last measurement, without running the
+benchmark. All of these reuse the benchmark's result, so they save its time
+but keep its limitations ({ref}`ug-memory-limitations`).
 
 With `take_gradient=False`, if an evaluation runs out of memory, the batch is
 shrunk to three quarters and retried; the smaller size stays in force until
@@ -88,7 +91,7 @@ fits, which leaves the hardware underused, and for some integrands a batch
 larger than what fits. **Passing your own `max_batch`, chosen for the
 integrand and the machine, avoids all of this**: the benchmark does not run,
 and the batch is the value given. Reusing the benchmark's result, through
-`solver.get_max_batch()` or `same_f=True`, only skips the time it takes; the
+`result.max_batch` or `solver.get_max_batch()`, only skips the time it takes; the
 batch keeps the limitations below. The known
 limitations follow. Numbers marked "simulated" come from fake memory readings
 and a fake clock (`tests/test_memory_benchmark.py` and review scripts);

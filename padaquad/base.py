@@ -116,7 +116,7 @@ class SolverBase(ABC, DistributedEnvironment):
       each call passes a mesh or both bounds.
     - No state between calls: a call reuses an earlier call's mesh and batch
       size only when they are passed to it (``result.mesh_optimal``,
-      ``result.max_batch``). See :ref:`ug-same-f`.
+      ``result.max_batch``). See :ref:`ug-reuse`.
 
     Subclasses implement the abstract methods: ``integrate``, the integral and
     error estimate of a batch of subintervals, and the update of their own

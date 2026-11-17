@@ -676,7 +676,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         others in half, until every subinterval is accepted. It then builds
         the optimal mesh. To reuse it and the batch size in a later call, pass
         ``mesh=result.mesh_optimal`` and ``max_batch=result.max_batch`` (see
-        :ref:`the user guide <ug-same-f>`); the solver itself keeps nothing
+        :ref:`the user guide <ug-reuse>`); the solver itself keeps nothing
         between calls.
 
         Every argument left as None falls back to the constructor's value,
@@ -771,6 +771,24 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             If the bounds do not satisfy ``mesh_init < mesh_final``, if no
             integrand was given here or at construction, or if an option such
             as ``error_norm`` is invalid.
+
+        Examples
+        --------
+        Start a second call from the first one's mesh and batch size:
+
+        >>> import torch
+        >>> from padaquad import adaptive_quadrature
+        >>> _ = torch.manual_seed(0)  # the first starting mesh is random
+        >>> solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+        >>> a = torch.tensor([0.0], dtype=torch.float64)
+        >>> first = solver.integrate(
+        ...     torch.exp, mesh_init=a, mesh_final=a + 1, max_batch=10_000
+        ... )
+        >>> second = solver.integrate(
+        ...     torch.exp, mesh=first.mesh_optimal, max_batch=first.max_batch
+        ... )
+        >>> print(round(float(second.integral), 6), second.max_batch)
+        1.718282 10000
         """
         # Set dtype based on input
         self.set_dtype_by_input(mesh=mesh, mesh_init=mesh_init, mesh_final=mesh_final)

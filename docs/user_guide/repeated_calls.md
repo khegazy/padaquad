@@ -1,55 +1,93 @@
-# Repeated calls
+(ug-reuse)=
+# Reusing the mesh and batch size
 
-A solver built with `adaptive_quadrature` keeps the mesh and batch size of its
-last call, so later calls on a similar integrand, for example in a training
-loop, can start where the last one ended.
-
-(ug-same-f)=
-## Warm starts with `same_f`
-
-Pass `same_f=True` when the integrand is the same as in the previous call, or
-changes only slightly. The call then starts from the mesh and `max_batch`
-stored by the last call on this solver that returned, in place of the caller's
-`mesh` and `max_batch`, and skips the memory benchmark. The integration bounds
-are set as follows:
-
-- Bounds given in the call (`mesh_init`, `mesh_final`, or the ends of a `mesh`)
-  are used; the stored mesh is cut to them, and their endpoints are added if
-  missing.
-- A bound not given is the stored mesh's end, so a call without bounds repeats
-  the interval of the last call that returned, even if the constructor was
-  given other bounds. With only `mesh_final` given, `mesh_init` is the stored
-  mesh's first point, and the other way round. Bounds that are not increasing
-  raise `ValueError`.
-- If nothing is stored yet, the caller's values or the constructor's are used,
-  so the flag can be passed from the first iteration.
-
-With `same_f=False` (the default) the caller's values are used, but the stored
-values are still updated. A `same_f=False` call on another interval, for
-example a validation call in a training loop, therefore sets the interval that
-the next `same_f=True` call without bounds integrates.
-
-The stored mesh is the previous call's `mesh_optimal` ({ref}`ug-optimal-mesh`),
-also available as `solver.mesh_previous`, in the dtype of the call that stored
-it (a later call in another dtype converts a copy); the stored batch size is
-`solver.previous_max_batch`. The stored batch size was computed for the
-previous call's integrand and `take_gradient` setting. A value found with
-`take_gradient=False` leaves no memory for backpropagation, so pass
-`same_f=False` on a call that changes `take_gradient`.
-
-```python
-import torch
-from padaquad import adaptive_quadrature
-
-solver = adaptive_quadrature("uniform", "gk21", device="cpu", max_batch=10_000)
-bounds = {
-    "mesh_init": torch.tensor([0.0], dtype=torch.float64),
-    "mesh_final": torch.tensor([1.0], dtype=torch.float64),
-}
-for scale in (1.0, 1.1, 1.2):
-    result = solver.integrate(lambda t: torch.cos(scale * t), same_f=True, **bounds)
-    print(round(float(result.integral), 6))
+```{include} ../../README.md
+:start-after: "<!-- include-start: reuse -->"
+:end-before: "<!-- include-end: reuse -->"
 ```
+
+## How a call chooses its interval
+
+| The call passes | Interval integrated | Starting mesh |
+|---|---|---|
+| `mesh` only | `mesh[0]` to `mesh[-1]` | `mesh` |
+| `mesh` and bounds inside it | the bounds; a missing one is the mesh's end | `mesh` cut to the bounds: its points between them, plus the bounds |
+| `mesh` and a bound outside it | — | `ValueError` |
+| both bounds, no `mesh` | the bounds | a fresh mesh (`N_init_steps`, `random_initial_mesh`) |
+| one bound or none, no `mesh` | — | `ValueError` |
+
+- A bound within a few rounding steps of a mesh end (4 machine epsilons of the
+  coarser dtype, relative to the larger end) is that end, so a bound that
+  differs from `mesh[-1]` only by float32 rounding does not raise or add a
+  near-zero-width subinterval. For the same reason, mesh points within that
+  distance of a bound are dropped when the mesh is cut.
+- A given mesh must have shape `[M, T]` with at least two increasing points.
+- The given mesh's dtype is the call's dtype (see {doc}`devices_memory`), so bounds
+  of another dtype are converted to it.
+
+## Extending a mesh
+
+A bound outside the given mesh raises an error, because the call would
+otherwise integrate an interval you did not give. To integrate further, for
+example when the training interval grows, add the new end point to the mesh
+yourself, on the mesh's device and in its dtype:
+
+<!-- not-tested -->
+```python
+mesh = result.mesh_optimal
+new_end = torch.tensor([2.0]).to(mesh)  # same device and dtype as the mesh
+result = solver.integrate(
+    f, mesh=torch.cat([mesh, new_end.reshape(1, -1)]), max_batch=result.max_batch
+)
+```
+
+## Several integrals per step
+
+Keep one result per integral, for example one per loss term or per interval,
+and pass each its own `mesh_optimal`. A batch size can be shared between
+integrals of the same integrand.
+
+## Checkpoints
+
+The two values are ordinary tensors and integers, so they can be saved with a
+model and loaded to resume training:
+
+<!-- not-tested -->
+```python
+torch.save({"mesh": result.mesh_optimal, "max_batch": result.max_batch}, path)
+state = torch.load(path, map_location=device)
+result = solver.integrate(f, mesh=state["mesh"], max_batch=state["max_batch"])
+```
+
+## When not to reuse `max_batch`
+
+A batch size depends on the integrand and on how the call is run. Measure a
+new one (pass no `max_batch`, or call `solver.get_max_batch(f=f, t=t,
+take_gradient=...)`) when any of these changes:
+
+- `take_gradient`: with `take_gradient=True` a batch keeps its autograd graph
+  until it is backpropagated, so the measurement leaves room for it (a factor
+  2.1, `_GRADIENT_MEMORY_SAFETY_FACTOR`). A batch size measured with
+  `take_gradient=False` is too large for `take_gradient=True`; the other way
+  round it is only smaller than needed.
+- the dtype: a float64 point takes twice the memory of a float32 one;
+- the device.
+
+## `result.max_batch` and `solver.get_max_batch()`
+
+- `result.max_batch` is the batch size a call used: the `max_batch` it was
+  given, or the one its memory measurement found, lowered if the call ran out
+  of memory and retried with smaller batches. Passing it on carries that
+  reduction to the next call.
+- `solver.get_max_batch(f=f, t=t, ...)` runs the memory measurement for `f`
+  now and returns the batch size, so it can be chosen before any integral.
+- `solver.get_max_batch()` without `f` estimates a batch size from the last
+  measurement this solver ran and the memory free now. Any call that measures
+  changes it, so prefer `result.max_batch` of the call you want to repeat.
+
+A call that raises an error returns nothing to reuse. It can still have
+switched the solver's dtype, which follows the dtype of the last `mesh` or
+bounds passed (see {doc}`devices_memory`).
 
 ## Offsets and extra arguments
 

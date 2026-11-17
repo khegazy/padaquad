@@ -222,6 +222,110 @@ def test_bound_within_rounding_of_a_mesh_end_is_that_end():
     assert out.n_start_steps == 8
 
 
+#: An integrand whose integral is the interval's length.
+_ONES = torch.ones_like
+
+
+@pytest.mark.parametrize(
+    ("mesh_final", "expected"),
+    [(999.99995, 0.99995), (1000.00005, None)],
+    ids=["inside_cuts", "outside_raises"],
+)
+def test_bound_near_a_large_mesh_end_is_not_snapped(mesh_final, expected):
+    """At |t| ~ 1e3 a bound 5e-5 from the mesh end is a different interval: it
+    cuts the mesh (inside) or raises (outside). A tolerance relative to the
+    assertion rtol (1e-7 |t|) used to snap both to [999, 1000]."""
+    mesh = torch.linspace(999.0, 1000.0, 9, dtype=torch.float64).unsqueeze(-1)
+    call = {
+        "f": _ONES,
+        "mesh": mesh,
+        "mesh_final": _bound(mesh_final),
+        "take_gradient": False,
+    }
+    if expected is None:
+        with pytest.raises(ValueError, match="outside the mesh"):
+            _solver().integrate(**call)
+        return
+    out = _solver().integrate(**call)
+    assert torch.equal(out.mesh_final, _bound(mesh_final))
+    assert math.isclose(float(out.integral), expected, rel_tol=1e-12)
+
+
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32], ids=["f64", "f32"])
+@pytest.mark.parametrize(
+    ("sampling", "method"),
+    [("uniform", "gk21"), ("variable", "interpolatory3_variable")],
+)
+def test_bound_one_ulp_from_a_mesh_point_drops_that_point(sampling, method, dtype):
+    """A bound one ULP above the interior point 3 would leave a one-ULP
+    subinterval, for which variable sampling returned NaN; the point is
+    dropped instead, so the starting mesh is 0, 0.5, ..., 2.5 and the bound."""
+    mesh = torch.linspace(0.0, 4.0, 9, dtype=dtype).unsqueeze(-1)
+    bound = torch.nextafter(mesh[6], mesh[7])
+    solver = adaptive_quadrature(sampling, method, device="cpu", max_batch=10_000)
+    out = solver.integrate(
+        f=torch.exp, mesh=mesh, mesh_final=bound, take_gradient=False
+    )
+    assert out.n_start_steps == 6
+    assert out.converged is True
+    exact = math.exp(float(bound)) - 1.0
+    assert math.isclose(float(out.integral), exact, rel_tol=1e-5)
+
+
+def test_float32_bound_at_a_float64_mesh_end_is_that_end():
+    """float32(0.3) differs from the float64 mesh end 0.3 only by float32
+    rounding, so it is that end (the coarser dtype sets the tolerance)."""
+    mesh = torch.linspace(0.0, 0.3, 4, dtype=torch.float64).unsqueeze(-1)
+    out = _solver().integrate(
+        f=torch.exp,
+        mesh=mesh,
+        mesh_final=_bound(0.3, torch.float32),
+        take_gradient=False,
+    )
+    assert torch.equal(out.mesh_final, mesh[-1])
+    assert out.n_start_steps == 3
+
+
+@pytest.mark.parametrize(
+    "mesh",
+    [
+        torch.tensor([[1.0], [0.5], [0.0]], dtype=torch.float64),
+        torch.tensor([[0.0], [0.5], [0.5], [1.0]], dtype=torch.float64),
+        torch.tensor([[0.0]], dtype=torch.float64),
+        torch.linspace(0.0, 1.0, 3, dtype=torch.float64),
+    ],
+    ids=["reversed", "duplicate_point", "one_point", "one_dimensional"],
+)
+def test_invalid_mesh_raises(mesh):
+    """A given mesh must be [M, T] with M >= 2 increasing points: ValueError
+    (it was a bare AssertionError, which python -O removes)."""
+    with pytest.raises(ValueError, match="mesh must be"):
+        _solver().integrate(f=torch.exp, mesh=mesh, take_gradient=False)
+
+
+def test_integrate_options_after_the_bounds_are_keyword_only():
+    """Removing same_f (the 6th parameter) must not shift later positional
+    arguments: everything after mesh_final is keyword-only."""
+    with pytest.raises(TypeError, match="positional"):
+        _solver().integrate(torch.exp, None, _MESH, None, None, True)
+
+
+def test_solver_usable_after_a_raising_call():
+    """A call whose integrand raises leaves the solver usable: the next call
+    gives the exact integral."""
+
+    def broken(t):
+        if len(t) > 1:
+            raise RuntimeError("boom")
+        return torch.exp(t)
+
+    solver = _solver()
+    with pytest.raises(RuntimeError, match="boom"):
+        solver.integrate(f=broken, mesh=_MESH, take_gradient=False)
+    out = solver.integrate(f=torch.exp, mesh=_MESH, take_gradient=False)
+    assert math.isclose(float(out.integral), math.exp(4.0) - 1.0, rel_tol=1e-6)
+
+
 def test_bounds_equal_to_mesh_ends_leave_it_unchanged():
     """Bounds equal to the mesh's ends give the same call as the mesh alone."""
     alone = _solver().integrate(f=torch.exp, mesh=_MESH, take_gradient=False)
@@ -242,13 +346,12 @@ def test_bounds_equal_to_mesh_ends_leave_it_unchanged():
     [
         {"mesh_init": _bound(1.0), "mesh_final": _bound(0.0)},
         {"mesh_init": _bound(1.0), "mesh_final": _bound(1.0)},
-        {"mesh": torch.tensor([[1.0], [0.5], [0.0]], dtype=torch.float64)},
     ],
-    ids=["reversed", "equal", "reversed_mesh"],
+    ids=["reversed", "equal"],
 )
 def test_bounds_not_increasing_raise(bounds):
-    """Bounds that are not increasing (given, or the ends of a mesh) raise
-    ValueError, which python -O keeps."""
+    """Bounds that are not increasing raise ValueError, which python -O
+    keeps."""
     solver = adaptive_quadrature("uniform", "gk21", device="cpu", max_batch=10_000)
     with pytest.raises(ValueError, match="mesh_init < mesh_final"):
         solver.integrate(f=torch.exp, take_gradient=False, **bounds)
@@ -567,7 +670,9 @@ def test_integrand_test_call_shape(T, monkeypatch):
     """
     solver = make_solver_for_unit_test()
     if T > 1:
-        monkeypatch.setattr(solver, "_setup_integral_bounds", lambda mesh, a, b: (a, b))
+        monkeypatch.setattr(
+            solver, "_setup_integral_bounds", lambda mesh, a, b: (mesh, a, b)
+        )
     shapes = []
 
     def f(t):

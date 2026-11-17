@@ -272,6 +272,7 @@ def test_mesh_optimal_ends_are_the_bounds(
         )
     assert torch.equal(out.mesh_optimal[0].cpu(), mesh[0])
     assert torch.equal(out.mesh_optimal[-1].cpu(), mesh[-1])
+    assert torch.all(torch.diff(out.mesh_optimal[:, 0]) > 0)
 
 
 # ---------------------------------------------------------------------------

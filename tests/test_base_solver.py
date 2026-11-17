@@ -210,7 +210,7 @@ class TestCheckVariables:
         custom_y0 = torch.tensor([10.0], dtype=torch.float64)
 
         _, y0 = solver._check_variables(f=torch.sin, y0=custom_y0)
-        mesh_init, mesh_final = solver._setup_integral_bounds(
+        _, mesh_init, mesh_final = solver._setup_integral_bounds(
             None, custom_t_init, custom_t_final
         )
         assert torch.equal(mesh_init, custom_t_init)
@@ -222,7 +222,7 @@ class TestCheckVariables:
         solver = make_solver_for_unit_test()
         t_init_f32 = torch.tensor([0.0], dtype=torch.float32)
         y0_f32 = torch.tensor([1.0], dtype=torch.float32)
-        mesh_init, _ = solver._setup_integral_bounds(
+        _, mesh_init, _ = solver._setup_integral_bounds(
             None, t_init_f32, torch.tensor([1.0], dtype=torch.float32)
         )
         _, y0 = solver._check_variables(f=torch.sin, y0=y0_f32)

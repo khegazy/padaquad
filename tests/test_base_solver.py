@@ -112,21 +112,6 @@ class TestSetDtype:
         finally:
             _restore_tableau("bosh3", saved)
 
-    def test_keeps_stored_mesh_dtype(self):
-        """mesh_previous keeps the dtype of the call that stored it, so a
-        float64 -> float32 -> float64 round trip does not round it; its users
-        convert a copy."""
-        saved = _save_tableau("bosh3")
-        solver = make_solver_for_unit_test()
-        stored = torch.linspace(0.1, 0.7, 5, dtype=torch.float64).unsqueeze(-1)
-        solver.mesh_previous = stored.clone()
-        try:
-            solver._set_dtype(torch.float32)
-            solver._set_dtype(torch.float64)
-            assert torch.equal(solver.mesh_previous, stored)
-        finally:
-            _restore_tableau("bosh3", saved)
-
 
 # ---------------------------------------------------------------------------
 # set_dtype_by_input

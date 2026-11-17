@@ -3,16 +3,12 @@
 Tests in this file:
 
   - test_no_warm_start_path_correctness: anchors the no-warm-start path.
-  - test_same_f_prefers_stored_mesh_and_max_batch,
-    test_same_f_skips_memory_benchmark,
-    test_stored_values_not_written_by_a_raising_call: the explicit
-    ``same_f`` flag, which replaced matching integrands by ``id(f)``
-    (that matching was bug B2's fix; ids are reused and closures get new ones).
-  - test_warm_start_with_new_t_final_yields_correct_mesh: Bug B1, the
-    warm-started mesh ends at the new ``mesh_final``.
-  - test_warm_start_without_bounds_repeats_previous_interval and the tests
-    after it: a ``same_f=True`` call takes a bound it is not given from the
-    stored mesh, not from the constructor.
+  - test_reuse_mesh_and_max_batch and the tests after it: the solver keeps
+    no warm-start state; a call reuses an earlier result's mesh and batch
+    size by passing them (this replaced ``same_f``, which replaced matching
+    integrands by ``id(f)``, bug B2's fix).
+  - test_bounds_required_without_mesh and the tests after it: the interval
+    rules (a mesh or both bounds; bounds inside a mesh cut it, outside raise).
   - test_normal_completion_has_converged_true: a normal call returns
     ``converged=True`` (Bug B6's early-exit path was removed with
     ``max_path_change``).
@@ -24,7 +20,6 @@ from __future__ import annotations
 
 import math
 import threading
-import warnings
 
 import pytest
 import torch
@@ -34,6 +29,7 @@ from tests._helpers import (
     cached_max_batch,
     make_solver_for_unit_test,
     make_uniform_solver,
+    needs_cuda,
 )
 
 from padaquad import IntegrationResult, adaptive_quadrature, integrate
@@ -71,66 +67,19 @@ def test_no_warm_start_path_correctness(take_gradient):
 
 
 # -----------------------------------------------------------------------------
-# same_f: stored mesh and max_batch replace the caller's.
+# Reuse by passing: the solver keeps no warm-start state. A later call reuses an
+# earlier result's mesh and batch size by passing mesh=r.mesh_optimal and
+# max_batch=r.max_batch (this replaced same_f, mesh_previous and
+# previous_max_batch).
 # -----------------------------------------------------------------------------
 
 
-def _record_initial_mesh(solver, monkeypatch):
-    """Wrap _setup_initial_mesh to record a copy of each call's starting mesh."""
-    recorded = []
-    real = solver._setup_initial_mesh
-
-    def wrapper(*args, **kwargs):
-        out = real(*args, **kwargs)
-        recorded.append(out[0].cpu().clone())
-        return out
-
-    monkeypatch.setattr(solver, "_setup_initial_mesh", wrapper)
-    return recorded
-
-
-@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
-def test_same_f_prefers_stored_mesh_and_max_batch(take_gradient, monkeypatch):
-    """With ``same_f=True`` the stored mesh and max_batch of the last
-    call replace the caller's; with nothing stored, or with
-    ``same_f=False``, the caller's values are used."""
-    solver = make_uniform_solver("dopri5", atol=1e-6, rtol=1e-6)
-    recorded = _record_initial_mesh(solver, monkeypatch)
-    user_mesh = torch.linspace(0.0, math.pi, 5, dtype=torch.float64).unsqueeze(-1)
-
-    def call(same_f, max_batch):
-        return solver.integrate(
-            f=lambda t, *_: torch.sin(10 * t),
-            mesh=user_mesh,
-            same_f=same_f,
-            max_batch=max_batch,
-            take_gradient=take_gradient,
-        )
-
-    # 1. Nothing stored: the caller's mesh and max_batch, and no warning.
-    with warnings.catch_warnings():
-        warnings.simplefilter("error", UserWarning)
-        call(same_f=True, max_batch=300)
-    assert torch.equal(recorded[-1], user_mesh)
-    assert solver.previous_max_batch == 300
-
-    # 2. Stored values replace the caller's.
-    stored = solver.mesh_previous.cpu().clone()
-    assert not torch.equal(stored, user_mesh)  # else step 2 proves nothing
-    call(same_f=True, max_batch=50)
-    assert torch.equal(recorded[-1], stored)
-    assert solver.previous_max_batch == 300
-
-    # 3. same_f=False: the caller's values again.
-    call(same_f=False, max_batch=50)
-    assert torch.equal(recorded[-1], user_mesh)
-    assert solver.previous_max_batch == 50
-
-
-def test_same_f_skips_memory_benchmark(monkeypatch):
-    """The memory benchmark runs once for two ``same_f=True`` calls and
-    on every call otherwise, even for the same f object (no id(f) matching)."""
-    solver = make_solver_for_unit_test("dopri5")
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
+def test_reuse_mesh_and_max_batch(device, monkeypatch):
+    """The first call benchmarks and returns max_batch; passing it and the
+    optimal mesh to the next call skips the benchmark and starts from every
+    point of that mesh."""
+    solver = adaptive_quadrature("uniform", "gk21", device=device)
     calls = []
 
     def fake_benchmark(*args, **kwargs):
@@ -138,125 +87,54 @@ def test_same_f_skips_memory_benchmark(monkeypatch):
         solver.f_mem_coeffs = (0.0, 1e-6, 0.0)  # GB: 1e-6 per evaluation
 
     monkeypatch.setattr(solver, "_setup_memory_checks", fake_benchmark)
-    f = lambda t, *_: torch.sin(t)  # noqa: E731
-    bounds = {
-        "mesh_init": torch.tensor([0.0], dtype=torch.float64),
-        "mesh_final": torch.tensor([1.0], dtype=torch.float64),
-    }
-    for _ in range(2):
-        solver.integrate(f=f, same_f=True, take_gradient=False, **bounds)
+    first = solver.integrate(
+        f=torch.exp, mesh_init=_bound(2.0), mesh_final=_bound(3.0), take_gradient=False
+    )
     assert len(calls) == 1
-    for _ in range(2):
-        solver.integrate(f=f, same_f=False, take_gradient=False, **bounds)
-    assert len(calls) == 3
+    assert isinstance(first.max_batch, int)
+
+    second = solver.integrate(
+        f=torch.exp,
+        mesh=first.mesh_optimal,
+        max_batch=first.max_batch,
+        take_gradient=False,
+    )
+    assert len(calls) == 1
+    assert second.n_start_steps == len(first.mesh_optimal) - 1
+    exact = math.exp(3.0) - math.exp(2.0)
+    assert math.isclose(float(second.integral), exact, rel_tol=1e-6)
 
 
-def test_stored_values_not_written_by_a_raising_call():
-    """A call that raises leaves the stored mesh and max_batch of the last
-    returning call untouched, so same_f never mixes two calls."""
-    solver = make_uniform_solver("dopri5", atol=1e-6, rtol=1e-6)
-    bounds = {
-        "mesh_init": torch.tensor([0.0], dtype=torch.float64),
-        "mesh_final": torch.tensor([math.pi], dtype=torch.float64),
-    }
-    solver.integrate(f=torch.sin, max_batch=300, take_gradient=False, **bounds)
-    stored_mesh = solver.mesh_previous.clone()
-    n_calls = []
-
-    def fails_on_second_batch(t, *_):
-        n_calls.append(1)
-        if len(n_calls) > 2:  # 1st call: integrate()'s output check
-            raise ValueError("boom")
-        return torch.sin(10 * t)
-
-    with pytest.raises(ValueError, match="boom"):
-        solver.integrate(
-            f=fails_on_second_batch, max_batch=50, take_gradient=False, **bounds
-        )
-    assert len(n_calls) > 2
-    assert solver.previous_max_batch == 300
-    assert torch.equal(solver.mesh_previous, stored_mesh)
+def test_result_max_batch_is_the_batch_used():
+    """result.max_batch is the max_batch the call used: the constructor's, or
+    the call's own."""
+    bounds = {"mesh_init": _bound(0.0), "mesh_final": _bound(1.0)}
+    out = _solver().integrate(f=torch.exp, take_gradient=False, **bounds)
+    assert out.max_batch == 10_000
+    out = _solver().integrate(f=torch.exp, max_batch=500, take_gradient=False, **bounds)
+    assert out.max_batch == 500
 
 
-def test_stored_mesh_keeps_its_dtype_when_the_solver_switches():
-    """A float32 input switches the solver to float32 (documented, and it
-    persists even when the call then raises), but the stored float64 mesh is
-    not rounded: it was, so a later float64 warm call reused float32(0.1) =
-    0.10000000149011612 as its lower bound for good."""
-    solver = adaptive_quadrature("uniform", "gk21", device="cpu", max_batch=10_000)
-    mesh = torch.linspace(0.1, 0.7, 9, dtype=torch.float64).unsqueeze(-1)
+def test_solver_keeps_no_warm_start_state():
+    """No stored mesh or batch size: a call after one on [2, 3] starts from a
+    fresh mesh (13 points by default give 11 subintervals)."""
+    solver = _solver()
+    mesh = torch.linspace(2.0, 3.0, 9, dtype=torch.float64).unsqueeze(-1)
     solver.integrate(f=torch.exp, mesh=mesh, take_gradient=False)
-    stored = solver.mesh_previous.clone()
+    assert not hasattr(solver, "mesh_previous")
+    assert not hasattr(solver, "previous_max_batch")
+    out = solver.integrate(
+        f=torch.exp, mesh_init=_bound(0.0), mesh_final=_bound(1.0), take_gradient=False
+    )
+    assert out.n_start_steps == 11
 
-    with pytest.raises(ValueError, match="mesh_init < mesh_final"):
-        solver.integrate(
-            f=torch.exp,
-            same_f=True,
-            mesh_init=_bound(0.9, torch.float32),
-            take_gradient=False,
+
+def test_same_f_is_gone():
+    """same_f was removed; passing it raises TypeError."""
+    with pytest.raises(TypeError, match="same_f"):
+        _solver().integrate(
+            f=torch.exp, same_f=True, mesh_init=_bound(0.0), mesh_final=_bound(1.0)
         )
-    assert solver.dtype == torch.float32
-    assert torch.equal(solver.mesh_previous, stored)  # same dtype and values
-
-    warm = solver.integrate(
-        f=torch.exp, same_f=True, mesh_final=_bound(0.7), take_gradient=False
-    )
-    assert warm.integral.dtype == torch.float64
-    assert torch.equal(warm.mesh_init, stored[0])
-    assert warm.n_start_steps == len(stored) - 1  # every stored point reused
-    exact = math.exp(0.7) - math.exp(0.1)
-    assert math.isclose(float(warm.integral), exact, rel_tol=1e-6)
-
-
-# -----------------------------------------------------------------------------
-# B1: mesh_init/mesh_final swap in the warm-start path: a stored mesh reused
-# with a new mesh_final must end at the new mesh_final.
-# -----------------------------------------------------------------------------
-
-
-@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
-def test_warm_start_with_new_t_final_yields_correct_mesh(take_gradient):
-    """Calling the solver a second time with ``same_f=True`` and a
-    *different* ``mesh_final`` than the first call must still produce a
-    monotone mesh that ends at the new ``mesh_final``. This exercises the
-    warm-start path (Bug B1).
-    """
-    solver = make_uniform_solver("dopri5", atol=1e-6, rtol=1e-6)
-
-    def f(t, *args):
-        return torch.sin(t)
-
-    mesh_init = torch.tensor([0.0], dtype=torch.float64)
-    out_first = solver.integrate(
-        f=f,
-        mesh_init=mesh_init,
-        mesh_final=torch.tensor([1.0], dtype=torch.float64),
-        take_gradient=take_gradient,
-    )
-    expected_first = 1.0 - math.cos(1.0)
-    assert abs(out_first.integral.item() - expected_first) < 1e-5
-
-    out_second = solver.integrate(
-        f=f,
-        mesh_init=mesh_init,
-        mesh_final=torch.tensor([1.5], dtype=torch.float64),
-        same_f=True,
-        take_gradient=take_gradient,
-    )
-    assert out_second is not None
-    expected_second = 1.0 - math.cos(1.5)
-    assert abs(out_second.integral.item() - expected_second) < 1e-5
-
-    # Bug B1 fix: the warm-started mesh ends at the new mesh_final
-    # (previously the buggy concatenation appended mesh_init here,
-    # producing non-monotone barriers).
-    assert abs(out_second.mesh_optimal[-1].item() - 1.5) < 1e-12
-
-    # Mesh is monotone non-decreasing.
-    diffs = out_second.mesh_optimal[1:, 0] - out_second.mesh_optimal[:-1, 0]
-    assert torch.all(diffs >= 0), (
-        f"warm-started mesh is not monotone: diffs.min()={diffs.min().item()}"
-    )
 
 
 # -----------------------------------------------------------------------------
@@ -363,20 +241,18 @@ def test_bounds_equal_to_mesh_ends_leave_it_unchanged():
     ids=["reversed", "equal", "reversed_mesh"],
 )
 def test_bounds_not_increasing_raise(bounds):
-    """Without a stored mesh too, bounds that are not increasing (given, or
-    the ends of a mesh) raise ValueError, which python -O keeps, and the
-    call stores nothing."""
+    """Bounds that are not increasing (given, or the ends of a mesh) raise
+    ValueError, which python -O keeps."""
     solver = adaptive_quadrature("uniform", "gk21", device="cpu", max_batch=10_000)
     with pytest.raises(ValueError, match="mesh_init < mesh_final"):
         solver.integrate(f=torch.exp, take_gradient=False, **bounds)
-    assert solver.mesh_previous is None
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 @pytest.mark.parametrize("warm_bounds", [False, True], ids=["no_bounds", "bounds"])
-def test_stored_mesh_carries_no_autograd_graph(take_gradient, warm_bounds):
+def test_mesh_optimal_carries_no_autograd_graph(take_gradient, warm_bounds):
     """A bound that requires grad gets its gradient in its own call, but its
-    autograd graph must not stay in the stored mesh: a later warm call then
+    autograd graph must not stay in mesh_optimal: a later call starting from it
     backpropagated into the earlier call's bound (hi.grad changed although
     hi was not passed), or, after a take_gradient=True call, raised "Trying
     to backward through the graph a second time"."""
@@ -389,13 +265,15 @@ def test_stored_mesh_carries_no_autograd_graph(take_gradient, warm_bounds):
         first.integral.sum().backward()
     # d/dhi of the integral of e^t over [0, hi] is e^hi (the bound's gradient).
     assert math.isclose(float(hi.grad), math.exp(2.0), rel_tol=1e-6)
-    assert not solver.mesh_previous.requires_grad
+    assert not first.mesh_optimal.requires_grad
     grad_before = hi.grad.clone()
 
     bounds = (
         {"mesh_init": _bound(0.0), "mesh_final": _bound(2.0)} if warm_bounds else {}
     )
-    warm = solver.integrate(f=torch.exp, same_f=True, take_gradient=True, **bounds)
+    warm = solver.integrate(
+        f=torch.exp, mesh=first.mesh_optimal, take_gradient=True, **bounds
+    )
 
     assert math.isclose(float(warm.integral), math.exp(2.0) - 1.0, rel_tol=1e-6)
     assert not warm.mesh_final.requires_grad

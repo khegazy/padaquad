@@ -331,11 +331,10 @@ class TestIntegrateOOMRecovery:
         ],
         ids=["constructor", "per_call"],
     )
-    def test_oom_max_batch_kept_for_same_f(self, solver_kwargs, call_kwargs):
-        """With ``same_f=True`` the cap learned on one call (stored as
-        ``previous_max_batch``) clamps the next call even when an explicit
-        ``max_batch`` (constructor or per call) asks for more: no OOM is
-        re-triggered and no batch exceeds the cap."""
+    def test_result_max_batch_carries_the_oom_cap(self, solver_kwargs, call_kwargs):
+        """The cap learned on one call is its ``result.max_batch``; passed to
+        the next call (with the mesh), it overrides a larger constructor
+        ``max_batch``: no OOM is re-triggered and no batch exceeds the cap."""
         solver = make_uniform_solver(
             "gk21", atol=1e-6, rtol=1e-6, device="cpu", **solver_kwargs
         )
@@ -344,19 +343,24 @@ class TestIntegrateOOMRecovery:
             mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False, **call_kwargs
         )
 
-        solver.integrate(oom, **call)
+        first = solver.integrate(oom, **call)
         cap = solver._oom_max_batch
         n_oom, n_before = oom.n_oom, len(oom.batch_sizes)
         assert cap is not None
         assert n_oom >= 1
 
-        assert solver.previous_max_batch == cap
+        assert first.max_batch == cap
 
-        result = solver.integrate(oom, same_f=True, **call)
+        result = solver.integrate(
+            oom,
+            mesh=first.mesh_optimal,
+            max_batch=first.max_batch,
+            take_gradient=False,
+        )
 
         assert math.isclose(float(result.integral.sum()), 1.0, abs_tol=1e-5)
         assert oom.n_oom == n_oom, "cap was forgotten: the second call OOM'd again"
         # Only the second call's batches: the first call's record also holds
         # the OOM attempts above the cap.
         assert all(b <= cap for b in oom.batch_sizes[n_before:])
-        assert solver.previous_max_batch == cap
+        assert result.max_batch == cap

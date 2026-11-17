@@ -113,11 +113,10 @@ class SolverBase(ABC, DistributedEnvironment):
     - Device: inherited from ``DistributedEnvironment``.
     - Defaults: ``f``, ``y0``, ``mesh_init`` and ``mesh_final`` given at
       construction are used by every ``integrate`` call that does not pass
-      them, except that a warm start (``same_f=True`` with a stored mesh and
-      no ``mesh``) takes a bound it is not given from the stored mesh.
-    - Warm starts: stores the optimal mesh of the last call that returned, in
-      ``mesh_previous``; ``integrate(..., same_f=True)`` starts from it. See
-      :ref:`ug-same-f`.
+      them.
+    - No state between calls: a call reuses an earlier call's mesh and batch
+      size only when they are passed to it (``result.mesh_optimal``,
+      ``result.max_batch``). See :ref:`ug-same-f`.
 
     Subclasses implement the abstract methods: ``integrate``, the integral and
     error estimate of a batch of subintervals, and the update of their own
@@ -218,13 +217,6 @@ class SolverBase(ABC, DistributedEnvironment):
             if mesh_final is not None
             else torch.tensor([1], dtype=dtype, device=self.device)
         )
-        # Stored time barriers from the last integration for warm-starting.
-        # Used only when integrate(..., same_f=True) is passed;
-        # otherwise ignored. They are the *optimal* mesh of the last call that
-        # returned (post-prune-and-refine), in that call's dtype: _set_dtype
-        # does not convert them, so a dtype switch never rounds them.
-        self.mesh_previous: torch.Tensor | None = None
-
         self._set_dtype(dtype)
 
     # -------------------------------------------------------------------------------- #
@@ -333,10 +325,8 @@ class SolverBase(ABC, DistributedEnvironment):
         Set the floating-point precision for all solver tensors.
 
         Converts atol, rtol, y0, mesh_init and mesh_final to the new dtype,
-        then calls ``_set_solver_dtype``. The stored warm-start mesh
-        (``mesh_previous``) keeps the dtype of the call that stored it, so a
-        switch to float32 and back does not round it; it is converted where it
-        is used. Also sets dtype-appropriate assertion tolerances
+        then calls ``_set_solver_dtype``. Also sets dtype-appropriate assertion
+        tolerances
         used for internal sanity checks (e.g. verifying that the nodes are in
         increasing order despite floating-point rounding).
 

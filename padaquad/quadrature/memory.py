@@ -559,18 +559,17 @@ class _MemoryManagement:
             "carries two penalties, in time and in evaluation efficiency:\n"
             "\t - The measurement is slow and runs on every integrate() call that "
             "has no max_batch. This is resolved by passing a known max_batch, "
-            "passing solver.get_max_batch() from an earlier run, or setting "
-            "same_f=True (which reuses the max_batch and the mesh of the previous "
-            "call).\n"
+            "or the result.max_batch of an earlier call of the same integrand "
+            "(with mesh=result.mesh_optimal to reuse its mesh too).\n"
             "\t - The memory cost measurement may not be optimized for your "
             "machine and may result in an underutilization of your hardware (or, "
             "for some integrands, a batch too large for memory); see "
             "https://khegazy.github.io/padaquad/user_guide/devices_memory.html#ug-memory-limitations "
             "for more details. The only way to guarantee "
             "that max_batch makes full use of your hardware's memory is to measure "
-            "max_batch yourself. Passing solver.get_max_batch() from an earlier "
-            "run, or setting same_f=True, reuses the max_batch calculated by this "
-            "measurement and inherits these limitations. If you are not reusing "
+            "max_batch yourself. Passing result.max_batch from an earlier call "
+            "reuses the max_batch calculated by this measurement and inherits "
+            "these limitations. If you are not reusing "
             "the integrator many times, this measurement will likely be "
             "sufficiently accurate; it is meant to spare you determining "
             f"max_batch yourself for every new f.{hidden_note}"
@@ -846,7 +845,7 @@ class _MemoryManagement:
             # below one subinterval's C nodes, the smallest batch the
             # take_gradient=True path can evaluate (the fit still limits it).
             # The cap lasts this integrate() call, like the out-of-memory cap
-            # (same_f=True carries it over through previous_max_batch).
+            # (result.max_batch carries it over when the caller passes it on).
             largest = max(*Ns, self.C)
             self._oom_max_batch = min(largest, self._oom_max_batch or largest)
 

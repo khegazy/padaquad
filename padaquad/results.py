@@ -53,9 +53,10 @@ class IntegrationResult:
         ``take_gradient=False``, subintervals accepted and later split again
         can leave it off by their error estimates. See :ref:`ug-error-control`.
     mesh_optimal : torch.Tensor or None
-        Mesh to start the next integration of the same integrand from (with
-        ``same_f=True``): the final mesh with low-error subintervals merged and
-        failing ones split. Shape ``[M, T]``. See :ref:`ug-optimal-mesh`.
+        Mesh to start the next integration of the same, or a slightly changed,
+        integrand from: pass it as ``mesh=``. The final mesh with low-error
+        subintervals merged and failing ones split; on the solver's device and
+        detached from autograd. Shape ``[M, T]``. See :ref:`ug-optimal-mesh`.
     mesh_init : torch.Tensor
         Lower integration bound. Shape ``[T]``.
     mesh_final : torch.Tensor
@@ -97,14 +98,21 @@ class IntegrationResult:
         integral through it); otherwise ``False``, with a logged warning.
         See :ref:`ug-convergence`.
     n_start_steps : int or None
-        Number of subintervals in the starting mesh (the given ``mesh``, the
-        mesh stored by ``same_f=True``, or a new random one).
+        Number of subintervals in the starting mesh (the given ``mesh``, cut to
+        the bounds, or a new random one).
     n_start_steps_split : int or None
         Number of starting subintervals that were split at least once during
         the integration (splits made to build ``mesh_optimal`` do not count).
     max_split_depth : int or None
         Largest number of times one starting subinterval was halved: 0 if
         none was split, at most ``max_adaptive_splits``.
+    max_batch : int or None
+        The batch size to pass as ``max_batch`` to a later call of the same
+        integrand, which then skips the memory benchmark: the ``max_batch``
+        this call was given, or else the one its benchmark gives for the
+        memory free at the end of the call; after an out-of-memory error, the
+        reduced size. None only in the per-batch results given to
+        ``loss_fxn``.
 
     Examples
     --------
@@ -148,6 +156,7 @@ class IntegrationResult:
     n_start_steps: int | None = None
     n_start_steps_split: int | None = None
     max_split_depth: int | None = None
+    max_batch: int | None = None
 
     @property
     def percent_start_steps_split(self) -> float | None:

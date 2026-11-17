@@ -1285,7 +1285,7 @@ def test_messages_when_measuring(caplog, monkeypatch):
     assert "devices_memory.html#ug-memory-limitations" in text
     assert "The only way to guarantee" in text
     assert "inherits these limitations" in text
-    assert "same_f=True" in text
+    assert "result.max_batch" in text
     assert "Memory measurement finished in" in text
     assert "bytes per evaluation" in text
     assert "stopped because" in text
@@ -1345,8 +1345,8 @@ def test_integrate_batches_within_measured_max_batch(
     For memory BUDGET / 400 * N^2 the batch is the largest that fits,
     sqrt(400) = 20 points; for an out-of-memory error at N = 10 (after one
     reliable reading, 8 MiB at N = 1) it is the cap, 7. Both are below the 44 points (11 subintervals of bosh3's 4 nodes)
-    the integration needs, so it takes several batches. The batch is stored
-    as previous_max_batch, so a same_f=True call skips the benchmark and
+    the integration needs, so it takes several batches. The batch is returned
+    as result.max_batch, so a call that passes it skips the benchmark and
     keeps to it. The reader counts reused memory, so the largest test call
     does not cap the batch."""
     set_reader(fake.solver, monkeypatch, counts_reuse=True)
@@ -1358,12 +1358,12 @@ def test_integrate_batches_within_measured_max_batch(
     assert len(batches) >= 2
     assert max(batches) <= max_batch
     assert float(result.integral.sum()) == pytest.approx(1.0)
-    assert fake.solver.previous_max_batch == max_batch
+    assert result.max_batch == max_batch
 
     n_first = len(f.calls)
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=qmem.__name__):
-        result = fake.solver.integrate(f, same_f=True, **bounds)
+        result = fake.solver.integrate(f, max_batch=result.max_batch, **bounds)
     assert "PadaQuad is measuring" not in caplog.text
     assert max(f.calls[n_first:]) <= max_batch
     assert float(result.integral.sum()) == pytest.approx(1.0)
@@ -1650,25 +1650,22 @@ def test_slow_model_doubles_to_floor(fake, monkeypatch, seconds, limited, outcom
     assert fake.clock.now <= 60
 
 
-def test_same_f_after_failed_benchmark_measures_again(fake):
+def test_call_after_failed_benchmark_measures_again(fake):
     """A first integrate() whose benchmark fails (an out-of-memory error at
-    N = 10, the only reading, 1 KiB at N = 1, below the floor) raises and
-    stores nothing, but leaves the out-of-memory cap of 7 points on the
-    solver. A later same_f=True call has no stored batch, so it runs the
-    benchmark again, and the cap of the failed call does not limit its batch.
+    N = 10, the only reading, 1 KiB at N = 1, below the floor) raises, but
+    leaves the out-of-memory cap of 7 points on the solver. A later call
+    without max_batch runs the benchmark again, and the cap of the failed
+    call does not limit its batch.
     Catches: not clearing ``_oom_max_batch`` at the start of integrate()."""
     bounds = {"mesh_init": T_INIT, "mesh_final": T_FINAL, "take_gradient": False}
     bad = CostIntegrand(fake.memory, fake.clock, per_point=1024, oom_from=10)
     with pytest.raises(RuntimeError, match="No test call of f used at least"):
         fake.solver.integrate(bad, **bounds)
     assert fake.solver._oom_max_batch == 7
-    assert fake.solver.previous_max_batch is None
     good = CostIntegrand(fake.memory, fake.clock, fixed=8 * 2**20, per_point=1024)
-    result = fake.solver.integrate(good, same_f=True, **bounds)
+    result = fake.solver.integrate(good, **bounds)
     assert good.calls[1:4] == [1, 10, 100]  # after the one-point check
-    assert fake.solver.previous_max_batch == pytest.approx(
-        (BUDGET - 8 * 2**20) / 1024, abs=1
-    )
+    assert result.max_batch == pytest.approx((BUDGET - 8 * 2**20) / 1024, abs=1)
     assert float(result.integral.sum()) == pytest.approx(1.0)
 
 

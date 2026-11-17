@@ -318,8 +318,9 @@ class _MemoryManagement:
             shape [N, T]. None (default) measures nothing.
         t : torch.Tensor or None
             A point of the integration interval, shape [T], on which ``f`` is
-            evaluated, in the dtype of the calls that will use the result (a
-            float64 point takes twice the memory of a float32 one). Moved to the
+            evaluated, in the dtype of the calls that will use the result,
+            float32 or float64 (a float64 point takes twice the memory of a
+            float32 one). Moved to the
             solver's device; the solver's dtype is not changed. Required with
             ``f``.
         take_gradient : bool
@@ -338,9 +339,10 @@ class _MemoryManagement:
         Raises
         ------
         ValueError
-            If ``f`` is given without a point ``t`` of shape [T], together with
-            ``default_max_batch``, or with ``total_mem_usage`` outside (0, 1],
-            or if ``f`` does not return values of shape [N, D].
+            If ``f`` is given without a float32 or float64 point ``t`` of shape
+            [T], together with ``default_max_batch``, or with
+            ``total_mem_usage`` outside (0, 1], or if ``f`` does not return
+            values of shape [N, D].
 
         Examples
         --------
@@ -359,9 +361,14 @@ class _MemoryManagement:
         if total_mem_usage is None:
             total_mem_usage = self.init_total_mem_usage
         if f is not None:
-            if t is None or t.dim() != 1:
+            if (
+                not isinstance(t, torch.Tensor)
+                or t.dim() != 1
+                or t.dtype not in (torch.float32, torch.float64)
+            ):
                 raise ValueError(
-                    "get_max_batch(f=...) needs a point t of shape [T] on which "
+                    "get_max_batch(f=...) needs a point t of shape [T], float32 "
+                    "or float64 (the dtypes the solver integrates in), on which "
                     "f can be evaluated."
                 )
             if default_max_batch is not None:

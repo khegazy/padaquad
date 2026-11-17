@@ -2027,14 +2027,26 @@ def test_get_max_batch_with_f_ignores_constructor_max_batch(monkeypatch):
     [
         {"f": torch.exp},
         {"f": torch.exp, "t": torch.tensor([[0.0]])},
+        {"f": torch.exp, "t": 0.0},
+        {"f": torch.exp, "t": torch.tensor([0.0], dtype=torch.float16)},
+        {"f": torch.exp, "t": torch.tensor([0])},
         {"f": torch.exp, "t": _T, "default_max_batch": 5},
     ],
-    ids=["no_t", "t_not_1d", "with_default_max_batch"],
+    ids=[
+        "no_t",
+        "t_not_1d",
+        "t_not_a_tensor",
+        "t_float16",
+        "t_integer",
+        "with_default_max_batch",
+    ],
 )
-def test_get_max_batch_with_f_validates_its_arguments(kwargs):
-    """f needs a point t of shape [T], and cannot be combined with
-    default_max_batch."""
+def test_get_max_batch_with_f_validates_its_arguments(kwargs, monkeypatch):
+    """f needs a float32 or float64 point t of shape [T] (the dtypes the solver
+    integrates in), and cannot be combined with default_max_batch. The fake
+    benchmark keeps a missing check from running the real one."""
     solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+    _fake_benchmark(solver, monkeypatch)
     with pytest.raises(ValueError, match="get_max_batch"):
         solver.get_max_batch(**kwargs)
 

@@ -320,9 +320,8 @@ class _MemoryManagement:
             A point of the integration interval, shape [T], on which ``f`` is
             evaluated, in the dtype of the calls that will use the result,
             float32 or float64 (a float64 point takes twice the memory of a
-            float32 one). Moved to the
-            solver's device; the solver's dtype is not changed. Required with
-            ``f``.
+            float32 one). Moved to the solver's device; the solver's dtype is
+            not changed. Required with ``f``.
         take_gradient : bool
             The ``take_gradient`` of the calls that will use the measurement;
             with True (default) the batch leaves memory for backpropagation.

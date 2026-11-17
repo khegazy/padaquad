@@ -295,6 +295,16 @@ def test_mesh_points_near_zero_are_kept():
     assert out.n_start_steps == 5
 
 
+def test_mesh_point_within_rounding_of_an_end_is_kept():
+    """A mesh alone is used as given even where a cut would drop a point: the
+    point one float64 step above the end 1 stays (2 subintervals). Only a bound
+    that cuts the mesh drops the points within rounding of it."""
+    one = _bound(1.0)
+    mesh = torch.stack([one, torch.nextafter(one, one + 1), _bound(2.0)])
+    out = _solver().integrate(f=_ONES, mesh=mesh, take_gradient=False)
+    assert out.n_start_steps == 2
+
+
 @pytest.mark.parametrize(
     "bound",
     [torch.tensor(2.0, dtype=torch.float64), torch.tensor([[2.0]]), 2.0],

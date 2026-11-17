@@ -373,6 +373,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # self.error_on_nonfinite and is (re)set each integrate() call.
         self.init_error_on_nonfinite = error_on_nonfinite
         self.error_on_nonfinite = error_on_nonfinite
+        self._check_total_mem_usage(total_mem_usage)
         self.init_total_mem_usage = total_mem_usage
         self.limit_benchmark_time = limit_benchmark_time
 
@@ -858,9 +859,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         total_mem_usage = (
             self.init_total_mem_usage if total_mem_usage is None else total_mem_usage
         )
-        MEM_ERROR = "total_mem_usage is a ratio and must be 0 < total_mem_usage <= 1"
-        assert total_mem_usage <= 1.0, MEM_ERROR
-        assert total_mem_usage > 0, MEM_ERROR
+        self._check_total_mem_usage(total_mem_usage)
         # The OOM cap lasts one call; result.max_batch carries it over when the
         # caller passes it to the next call.
         self._oom_max_batch = None

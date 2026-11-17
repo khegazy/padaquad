@@ -2097,3 +2097,20 @@ def test_integrate_sizes_batches_from_live_memory(monkeypatch):
     out = solver.integrate(f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False)
     assert max(sizes) > 50
     assert out.max_batch == 50
+
+
+@pytest.mark.parametrize("value", [0.0, -0.5, 1.5], ids=["zero", "negative", "above_1"])
+@pytest.mark.parametrize("where", ["constructor", "integrate", "get_max_batch"])
+def test_total_mem_usage_outside_0_1_raises(where, value):
+    """total_mem_usage is a fraction in (0, 1]: every entry point raises
+    ValueError (integrate used an assert, which python -O removes; the
+    constructor and get_max_batch() did not check it)."""
+    bounds = {"mesh_init": T_INIT, "mesh_final": T_FINAL, "max_batch": 10_000}
+    with pytest.raises(ValueError, match="total_mem_usage"):
+        if where == "constructor":
+            adaptive_quadrature("uniform", "gk21", device="cpu", total_mem_usage=value)
+        elif where == "integrate":
+            solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+            solver.integrate(torch.exp, total_mem_usage=value, **bounds)
+        else:
+            adaptive_quadrature("uniform", "gk21", device="cpu").get_max_batch(value)

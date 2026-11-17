@@ -273,6 +273,30 @@ class _MemoryManagement:
     init_total_mem_usage: float
     limit_benchmark_time: bool
 
+    @staticmethod
+    def _check_total_mem_usage(total_mem_usage: float) -> None:
+        """
+        Validate that ``total_mem_usage`` is a fraction in (0, 1].
+
+        Called by the constructor, ``integrate`` and ``get_max_batch``, so
+        every entry point rejects the same values.
+
+        Parameters
+        ----------
+        total_mem_usage : float
+            The value to check.
+
+        Raises
+        ------
+        ValueError
+            If the value is not in (0, 1].
+        """
+        if not 0 < total_mem_usage <= 1:
+            raise ValueError(
+                "total_mem_usage is a fraction of the device's memory and must "
+                f"satisfy 0 < total_mem_usage <= 1; got {total_mem_usage}."
+            )
+
     def get_max_batch(
         self,
         total_mem_usage: float | None = None,
@@ -338,10 +362,10 @@ class _MemoryManagement:
         Raises
         ------
         ValueError
-            If ``f`` is given without a float32 or float64 point ``t`` of shape
-            [T], together with ``default_max_batch``, or with
-            ``total_mem_usage`` outside (0, 1], or if ``f`` does not return
-            values of shape [N, D].
+            If ``total_mem_usage`` is outside (0, 1], if ``f`` is given without
+            a float32 or float64 point ``t`` of shape [T] or together with
+            ``default_max_batch``, or if ``f`` does not return values of shape
+            [N, D].
 
         Examples
         --------
@@ -359,6 +383,7 @@ class _MemoryManagement:
         """
         if total_mem_usage is None:
             total_mem_usage = self.init_total_mem_usage
+        self._check_total_mem_usage(total_mem_usage)
         if f is not None:
             if (
                 not isinstance(t, torch.Tensor)
@@ -374,11 +399,6 @@ class _MemoryManagement:
                 raise ValueError(
                     "get_max_batch(f=...) measures f; do not also pass "
                     "default_max_batch."
-                )
-            if not 0 < total_mem_usage <= 1:
-                raise ValueError(
-                    "total_mem_usage is a ratio and must be 0 < total_mem_usage "
-                    f"<= 1; got {total_mem_usage}."
                 )
             # t keeps its dtype: the measurement is for calls in that dtype,
             # whatever dtype an earlier call left the solver in.

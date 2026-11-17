@@ -2918,7 +2918,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         end, and a given bound must be a tensor of shape [T]. ``mesh_init`` is
         compared with ``mesh[0]`` and ``mesh_final`` with ``mesh[-1]``, with a
         rounding tolerance relative to the value compared, ``4 eps |x|`` (eps
-        of the coarser of the mesh's and the bounds' dtypes): a bound within it
+        of the coarser of the mesh's and that bound's dtypes): a bound within it
         of its end is that end, one further outside the mesh raises, and one
         inside cuts the mesh. The points between the bounds are kept and the
         bounds added; a bound that cuts also drops the points within rounding of
@@ -2981,26 +2981,30 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                         f"{type(given).__name__} "
                         f"{list(getattr(given, 'shape', []))}."
                     )
-            # Rounding tolerance relative to the value compared, eps of the
-            # coarser of the mesh's and the bounds' dtypes: 4 eps |x|.
-            eps = max(
-                torch.finfo(x.dtype).eps
-                for x in (mesh, mesh_init, mesh_final)
-                if x is not None and x.is_floating_point()
-            )
+            # Rounding tolerance relative to the value compared, 4 eps |x|, with
+            # eps of the coarser of the mesh's and that bound's dtypes (a float32
+            # mesh_init must not widen the tolerance of a float64 mesh_final).
+            eps = [
+                max(
+                    torch.finfo(x.dtype).eps
+                    for x in (mesh, given)
+                    if x is not None and x.is_floating_point()
+                )
+                for given in (mesh_init, mesh_final)
+            ]
             mesh = mesh.to(self.dtype).to(self.device)
             resolved = []
-            for name, given, end in (
-                ("mesh_init", mesh_init, mesh[0]),
-                ("mesh_final", mesh_final, mesh[-1]),
+            for name, given, end, e in (
+                ("mesh_init", mesh_init, mesh[0], eps[0]),
+                ("mesh_final", mesh_final, mesh[-1], eps[1]),
             ):
                 bound = None if given is None else given.to(self.dtype).to(self.device)
                 if bound is None or torch.all(
-                    torch.abs(bound - end) <= 4 * eps * end.abs()
+                    torch.abs(bound - end) <= 4 * e * end.abs()
                 ):
                     resolved.append(end)
-                elif torch.any(bound < mesh[0] - 4 * eps * mesh[0].abs()) or torch.any(
-                    bound > mesh[-1] + 4 * eps * mesh[-1].abs()
+                elif torch.any(bound < mesh[0] - 4 * e * mesh[0].abs()) or torch.any(
+                    bound > mesh[-1] + 4 * e * mesh[-1].abs()
                 ):
                     raise ValueError(
                         f"{name} = {bound.tolist()} is outside the mesh "
@@ -3031,10 +3035,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # sampling returns NaN on one). Bounds equal to the mesh's ends leave
             # it unchanged.
             keep = torch.all((mesh >= mesh_init) & (mesh <= mesh_final), dim=-1)
-            for bound, end in ((mesh_init, mesh[0]), (mesh_final, mesh[-1])):
+            for bound, end, e in (
+                (mesh_init, mesh[0], eps[0]),
+                (mesh_final, mesh[-1], eps[1]),
+            ):
                 keep &= ~torch.all(mesh == bound, dim=-1)
                 if not torch.equal(bound, end):
-                    tol = 4 * eps * torch.maximum(mesh.abs(), bound.abs())
+                    tol = 4 * e * torch.maximum(mesh.abs(), bound.abs())
                     keep &= ~torch.all(torch.abs(mesh - bound) <= tol, dim=-1)
             mesh = torch.concatenate(
                 [mesh_init.unsqueeze(0), mesh[keep], mesh_final.unsqueeze(0)], dim=0

@@ -330,6 +330,22 @@ def test_float32_bound_at_a_float64_mesh_end_is_that_end():
     assert out.n_start_steps == 3
 
 
+def test_float32_bound_leaves_the_other_bounds_tolerance_unchanged():
+    """Each bound's tolerance comes from its own dtype and the mesh's: a float32
+    mesh_init must not snap the float64 mesh_final 999.9996, 4e-4 inside the
+    end 1000 (far beyond float64 rounding), to that end."""
+    mesh = torch.linspace(0.0, 1000.0, 11, dtype=torch.float64).unsqueeze(-1)
+    out = _solver().integrate(
+        f=_ONES,
+        mesh=mesh,
+        mesh_init=_bound(0.5, torch.float32),
+        mesh_final=_bound(999.9996),
+        take_gradient=False,
+    )
+    assert torch.equal(out.mesh_final, _bound(999.9996))
+    assert math.isclose(float(out.integral), 999.4996, rel_tol=1e-12)
+
+
 @pytest.mark.parametrize(
     "mesh",
     [

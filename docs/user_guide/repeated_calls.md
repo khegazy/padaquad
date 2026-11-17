@@ -17,10 +17,11 @@
 | one bound or none, no `mesh` | — | `ValueError` |
 
 - A bound within a few rounding steps of its mesh end (4 machine epsilons of
-  the coarser dtype, relative to that end) is that end, so a bound that
-  differs from `mesh[-1]` only by float32 rounding does not raise or add a
-  near-zero-width subinterval. For the same reason, when a bound cuts the
-  mesh, the mesh points within rounding of it are dropped.
+  the coarser of the bound's and the mesh's dtypes, relative to that end) is
+  that end, so a bound that differs from `mesh[-1]` only by float32 rounding
+  does not raise or add a near-zero-width subinterval. For the same reason,
+  when a bound cuts the mesh, the mesh points within rounding of it are
+  dropped.
 - A given mesh must have shape `[M, T]` with at least two increasing points,
   and a bound given with it must be a tensor of shape `[T]`, like a point of
   the mesh.

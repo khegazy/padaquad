@@ -770,11 +770,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         ------
         ValueError
             If there is no ``mesh`` and a bound is missing; if the ``mesh`` is
-            not [M, T] with M >= 2 increasing points; if a bound given with a
-            mesh is not of shape [T] or lies outside the mesh; if the bounds do
-            not satisfy ``mesh_init < mesh_final``; if no integrand was given
-            here or at construction, or it does not return values of shape
-            [N, D]; or if an option such as ``error_norm`` is invalid.
+            not [M, T] with M >= 2 increasing points; if a bound is not a
+            tensor of shape [T] (with or without a mesh) or lies outside the
+            mesh; if the bounds do not satisfy ``mesh_init < mesh_final``; if
+            no integrand was given here or at construction, or it does not
+            return values of shape [N, D]; or if an option such as
+            ``error_norm`` or ``total_mem_usage`` is invalid.
 
         Examples
         --------

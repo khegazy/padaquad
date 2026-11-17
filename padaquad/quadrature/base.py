@@ -914,6 +914,20 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         split_counts: torch.Tensor | None = torch.zeros(
             len(mesh), dtype=torch.long, device=self.device
         )
+        # With take_gradient every batch runs its own backward, but all of them
+        # reach a bound that requires grad through one autograd graph, the
+        # mesh's (its ends and the midpoints split from them), whose saved
+        # indices the first backward frees. A batch is therefore evaluated on a
+        # detached copy of the mesh, and the copy's gradient is added to
+        # mesh_grad, the gradient with respect to the current mesh, which is
+        # passed through the mesh's graph once, after the loop. Passing it once
+        # per batch crossed the whole graph, which grows with every split, each
+        # time: the time grew with the square of the number of batches.
+        mesh_grad = (
+            torch.zeros_like(mesh.detach())
+            if take_gradient and mesh.requires_grad
+            else None
+        )
         # === Main integration loop ===
         # Continues until all steps have been evaluated and accepted
         # (mesh_trackers[i] == False for all i)
@@ -922,16 +936,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # if y is not None:
             #    assert max_steps >= len(y), f"{max_steps}  {len(y)}"
 
-            # With take_gradient every batch runs its own backward, but all of
-            # them reach a bound that requires grad through one autograd graph,
-            # the mesh's (its ends and the midpoints split from them), whose
-            # saved indices the first backward frees. A batch is therefore
-            # evaluated on a detached copy of the mesh, and after its backward
-            # the copy's gradient is passed on through the mesh's graph, kept.
-            if take_gradient and mesh.requires_grad:
-                mesh_graph, mesh_eval = mesh, mesh.detach().requires_grad_()
-            else:
-                mesh_graph, mesh_eval = None, mesh
+            # The batch's mesh: a detached copy when mesh_grad collects the
+            # gradient (see mesh_grad above).
+            mesh_eval = mesh if mesh_grad is None else mesh.detach().requires_grad_()
             (
                 nodes,
                 y_step_eval,
@@ -1150,8 +1157,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 # Backpropagate gradients through the integration if requested
                 if take_gradient and loss.requires_grad:
                     loss.backward()
-                    if mesh_graph is not None and mesh_eval.grad is not None:
-                        mesh_graph.backward(mesh_eval.grad, retain_graph=True)
 
                 # Accumulate into the record
                 intermediate_results.loss = loss
@@ -1164,6 +1169,18 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 )
 
             del y_step_eval
+
+            if mesh_grad is not None:
+                if mesh_eval.grad is not None:
+                    mesh_grad += mesh_eval.grad
+                # Carry the gradient to the split mesh, whose points include
+                # every point of the batch's mesh, with the same values.
+                moved = torch.zeros_like(mesh.detach())
+                moved[self._mesh_order(mesh_eval.detach(), mesh_indices)] = mesh_grad
+                mesh_grad = moved
+
+        if mesh_grad is not None:
+            mesh.backward(mesh_grad)
 
         # === Post-convergence: sort results and optimize the mesh ===
         record = self._sort_record(record, mesh_indices)

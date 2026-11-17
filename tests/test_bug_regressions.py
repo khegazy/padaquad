@@ -205,6 +205,51 @@ def test_bound_gradients_through_a_given_mesh(lo, hi, given_mesh, take_gradient)
 
 
 @pytest.mark.parametrize(
+    ("kind", "method"),
+    [("uniform", "gk21"), ("variable", "interpolatory3_variable")],
+    ids=["uniform", "variable"],
+)
+def test_bound_gradient_crosses_the_mesh_graph_once(kind, method):
+    """With take_gradient=True, a bound's gradient goes back through the mesh's
+    autograd graph (the bounds, and the midpoints split from them) once per
+    call, after the loop. Once per batch, each backward crossed the whole
+    graph, which grows with every split: 1000 batches took 71 s instead of
+    7 s. The integrand's peak at 0.3 makes the integration split deeply over
+    many batches, and the gradients stay exact: d/da = -f(a), d/db = f(b)."""
+    crossings = []
+
+    class CountBackward(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x):
+            return x.clone()
+
+        @staticmethod
+        def backward(ctx, grad):
+            crossings.append(1)
+            return grad
+
+    def f(t):
+        return torch.exp(t) + 1e-3 / (1e-3 + (t - 0.3) ** 2)
+
+    a = _bound(0.0).requires_grad_()
+    b = _bound(1.0).requires_grad_()
+    out = adaptive_quadrature(
+        kind, method, device="cpu", atol=1e-10, rtol=1e-10
+    ).integrate(
+        f=f,
+        mesh_init=a,
+        mesh_final=CountBackward.apply(b),
+        take_gradient=True,
+        max_batch=60,
+        random_initial_mesh=False,
+    )
+    assert out.max_split_depth >= 1
+    assert len(crossings) == 1
+    assert math.isclose(float(a.grad), -float(f(a.detach())), rel_tol=1e-9)
+    assert math.isclose(float(b.grad), float(f(b.detach())), rel_tol=1e-9)
+
+
+@pytest.mark.parametrize(
     ("bounds", "message"),
     [
         (

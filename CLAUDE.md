@@ -475,8 +475,11 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   accumulates gradients into `theta.grad` without holding the full
   graph. A bound that requires grad reaches every batch through the one
   autograd graph of the mesh (its ends and the midpoints split from them),
-  so with it each batch is evaluated on a detached copy of the mesh and the
-  copy's gradient is passed through the mesh's graph (`retain_graph=True`).
+  so with it each batch is evaluated on a detached copy of the mesh; the
+  copies' gradients are summed on the mesh points (`mesh_grad`, carried to
+  the split mesh after every batch) and passed through the mesh's graph once,
+  after the loop (once per batch, the time grew with the square of the number
+  of batches).
 - `loss_fxn` defaults to returning the integral itself
   (`_integral_loss` in `base.py`). Linear in the integral, so the
   default path is correctness-safe under per-batch backward.
@@ -528,7 +531,8 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   increasing raise `ValueError`. `_setup_initial_mesh` only builds a fresh
   mesh. With `take_gradient=True` and a mesh that requires grad (a bound
   that requires grad), each batch is evaluated on a detached copy of the
-  mesh whose gradient is passed through the mesh's graph.
+  mesh, and the summed gradient is passed through the mesh's graph once,
+  after the loop.
 - Every `integrate` argument after `mesh_final` is keyword-only.
 - A non-converged call (e.g. under `max_adaptive_splits`) returns a
   `mesh_optimal` that splits its failing steps, so repeated calls from it

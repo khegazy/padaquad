@@ -6,17 +6,33 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [Unreleased]
 
+This release removes the solver's hidden warm-start state. A call reuses an earlier call's mesh and batch size only when they are passed to it, so no call can change what another call reuses, and every call says which interval it integrates. See "Reusing the mesh and batch size" in the README and the user guide.
+
+### Removed
+
+- **`same_f`, `solver.mesh_previous` and `solver.previous_max_batch`.** The solver no longer stores the mesh and batch size of its last call. Passing `same_f=` raises `TypeError`. To migrate, keep the result and pass its values: replace `solver.integrate(f, same_f=True, ...)` by `solver.integrate(f, mesh=result.mesh_optimal, max_batch=result.max_batch, ...)`, where `result` is the call to start from. On the first iteration pass the bounds instead of `mesh` (one call line works for both: start from `mesh = max_batch = None` and pass both bounds every time).
+- **The constructor's `mesh_init` and `mesh_final`.** Passing them raises `TypeError`. Pass the bounds, or a mesh, to every `integrate` call.
+
+### Added
+
+- **`IntegrationResult.max_batch`**: the batch size the call used, the `max_batch` it was given, or the one its memory benchmark measured, lowered after an out-of-memory error. Pass it as `max_batch` to a later call of the same integrand to skip the benchmark.
+- **`solver.get_max_batch(f=f, t=t, take_gradient=..., f_args=...)`** runs the memory benchmark for `f` and returns the batch size to pass as `max_batch`, so it can be measured once before any integral. Without `f`, `get_max_batch()` behaves as before.
+- **Bounds inside a given mesh cut it.** `integrate(f, mesh=m, mesh_final=c)` with `c` inside `m` integrates up to `c`, starting from the points of `m` before `c`; previously the bounds had to equal the mesh's ends.
+
 ### Changed
 
-- **Integration bounds that are not increasing raise `ValueError`** instead of `AssertionError`, with a message that says where a missing bound came from. The check was an `assert`, which `python -O` removes; a reversed call then ran on, stored an out-of-order `mesh_optimal` with points outside the interval, and returned `converged=True`.
-- **The not-converged warning's last remedy** now reads "call the same solver again with same_f=True, or pass mesh=mesh_optimal, to start from mesh_optimal". The one-shot `padaquad.integrate()` builds a new solver on every call, so `same_f=True` does nothing there; `mesh=mesh_optimal` works for both.
+- **A call needs a mesh or both bounds.** Without a mesh, `mesh_init` and `mesh_final` are required (`ValueError`); there are no default bounds. With a mesh, a missing bound is its end.
+- **A bound outside the given mesh raises `ValueError`.** A bound within a few rounding steps of a mesh end (4 machine epsilons of the coarser dtype, relative to the larger end) is that end.
+- **A given mesh is validated:** shape `[M, T]` with at least two increasing points, else `ValueError` (it was a bare `AssertionError`).
+- **Integration bounds that are not increasing raise `ValueError`** instead of `AssertionError`. The check was an `assert`, which `python -O` removes; a reversed call then ran on, stored an out-of-order `mesh_optimal` with points outside the interval, and returned `converged=True`.
+- **Every `integrate` argument after `mesh_final` is keyword-only**, so the removal of `same_f` cannot silently shift positional arguments.
+- **The not-converged warning's last remedy** now reads "call again with mesh=result.mesh_optimal and max_batch=result.max_batch", which works for a solver and for the one-shot `padaquad.integrate()`.
 - **`SolverBase._check_variables` fills in `f` and `y0` only** and returns `(f, y0)` (internal). The bounds are resolved once, in `_setup_integral_bounds`.
 
 ### Fixed
 
-- **A dtype switch rounded the stored mesh for good.** A call with float32 bounds or `mesh` switches the solver to float32 (documented), and the switch converted the stored mesh `mesh_previous` too, even when that call then raised. A later float64 call could not recover the lost digits: after a float64 call on [0.1, 0.7] and a float32 call that raised, the next float64 warm call started at 0.10000000149011612. The stored mesh now keeps the dtype of the call that stored it and is converted where it is used.
-- **The stored mesh kept the autograd graph of a bound that requires grad.** `mesh_optimal`, which is also the mesh a `same_f=True` call starts from, was built from the bounds and so carried their graph. A later warm call then backpropagated into the earlier call's bound (its `.grad` changed although it was not passed), and after a `take_gradient=True` call it raised "Trying to backward through the graph a second time". `mesh_optimal` is now detached; a bound's gradient within its own call is unchanged.
-- **A `same_f=True` call without bounds integrated the constructor's interval.** After a call that gave its interval only through `mesh=` (for example on [2, 3]), a warm call without bounds integrated [0, 1] (the default), or the constructor's bounds, threw away the stored points outside it, and returned `converged=True` with no message; the not-converged warning's advice to call again with `same_f=True` led straight into it. A bound a warm call does not give is now the stored mesh's end (`mesh_previous[0]` / `mesh_previous[-1]`), so a call without bounds repeats the previous call's interval. Given bounds still cut the stored mesh, a `mesh=` still sets the bounds, and a first call (nothing stored) still uses the constructor's bounds. Once a mesh is stored, a `same_f=True` call without bounds no longer uses the constructor's bounds, even if they were set; a `same_f=False` call on another interval (for example a validation call) changes the interval of later `same_f=True` calls without bounds.
+- **`mesh_optimal` carried the autograd graph of a bound that requires grad.** A later call started from it then backpropagated into the earlier call's bound (its `.grad` changed although it was not passed), and after a `take_gradient=True` call it raised "Trying to backward through the graph a second time". `mesh_optimal` is now detached, so passing it as `mesh=` is safe; a bound's gradient within its own call is unchanged.
+- **A cut could leave a subinterval one rounding step wide**, on which `interpolatory3_variable` returned NaN. Mesh points within the rounding tolerance of a bound are now dropped when the mesh is cut.
 
 ## [1.4.1] - 2026-11-15
 

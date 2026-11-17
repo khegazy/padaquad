@@ -122,7 +122,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_convergence_rate.py` | Empirical convergence-rate slope matches each method's theoretical rate |
 | `test_autodiff_consistency.py` | $\nabla_\theta\int f_\theta dt$ via backprop equals $\int \nabla_\theta f_\theta dt$ |
 | `test_error_indicator.py` | Behavior of absolute vs cumulative error indicators (Bug B8 investigation) |
-| `test_bug_regressions.py` | Regression tests for bugs B1, B4, B6 fixed in Phase 1, and the `same_f` flag |
+| `test_bug_regressions.py` | Regression tests for bugs B4, B6 fixed in Phase 1; reuse by passing `mesh_optimal` / `max_batch` (no state on the solver, `same_f` and constructor bounds gone); the interval rules (bounds required, cut, outside raises, rounding snap, one-ULP cut, mesh validation, keyword-only options) |
 | `test_snapshots.py` | Golden-value regression net for the file-split refactor; CPU-only float64 |
 | `test_public_api.py` | Smoke test of every public symbol and `IntegrationResult` fields |
 | `test_rk_integral.py` | `_RK_integral`: constant / linear / multi-step / multi-dim / zero-width / variable-b inputs |
@@ -136,7 +136,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed error ratios, midpoint placement |
 | `test_record_and_sort.py` | `_record_results` and `_sort_record` |
 | `test_evaluate_and_merge.py` | `_evaluate_adaptive_nodes` + `_merge_excess_nodes` for both uniform and variable solvers |
-| `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: `mesh_optimal` re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point |
+| `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: `mesh_optimal` re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
 | `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
 | `test_error_integral_reference.py` | The `error_integral_reference` argument of `integrate()` |
@@ -144,7 +144,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_evaluate_f_on_mesh.py` | `_evaluate_f_on_mesh` and its evaluation paths |
 | `test_examples_run.py` | Runs `examples/*.py`, every script in `examples/verification/`, and every ```python block of the files in its `DOCUMENTS` (the README, `docs/development/adding_a_method.md`; except blocks preceded by `<!-- not-tested -->`) |
 | `test_max_adaptive_splits.py` | The `max_adaptive_splits` depth cap |
-| `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks` |
+| `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks`; `get_max_batch(f=..., t=...)` (measurement, argument checks) and the measured `result.max_batch` |
 | `test_methods_registry.py` | Registry consistency: table shapes and dtypes, `degree` / `error_exponent` types |
 | `test_multi_d_integrand.py` | Integrands with D > 1 outputs |
 | `test_oom_recovery.py` | The out-of-memory catch-and-retry path |
@@ -284,9 +284,9 @@ is a boolean array where `True` means the panel still needs evaluation.
 1. **Initialize barriers.** When `mesh=None`, generate
    ~$\sqrt{N_\text{init}}$ evenly-spaced top-level segments with random
    sub-barriers (random by default — uniform aliases on
-   uniform-feature integrands). When `same_f=True` and a mesh is
-   stored, seed from the stored `mesh_optimal` of the last call that
-   returned.
+   uniform-feature integrands). With a `mesh` (for example an earlier
+   result's `mesh_optimal`), start from it, cut to any bounds inside it
+   (`_setup_integral_bounds`).
 2. **Main loop.** While any `mesh_trackers` are `True`:
    - Determine `max_steps` from GPU memory budget or explicit `max_batch`.
    - Select up to `max_steps` unevaluated panels.
@@ -308,7 +308,7 @@ is a boolean array where `True` means the panel still needs evaluation.
    `converged`, logging `_warn_not_converged` when it is `False` (a NaN/Inf
    error counts as failing); then compute `mesh_optimal` via
    `_get_optimal_mesh` (prune low-error pairs, refine
-   high-error gaps), cache for reuse on the next call.
+   high-error gaps), returned for the caller to pass to a later call.
 
 ### Error computation modes
 
@@ -407,8 +407,12 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   `quadrature/base.py`.
 - `_setup_memory_checks` fits the memory of ONE call of `f` on N points,
   `f_mem_coeffs` = s·((a + E) + b·N + d·N²) in GB (s =
-  `_GRADIENT_MEMORY_SAFETY_FACTOR` = 2.1 when `take_gradient`, else 1). It
-  does not choose a batch size. The reader (`_peak_memory_reader` →
+  `_GRADIENT_MEMORY_SAFETY_FACTOR` = 2.1 when `take_gradient`, else 1), and
+  returns the batch size that fit gives for the memory free at its end
+  (`result.max_batch`). Its only callers: `integrate` (after its one-point
+  output check) and the public `get_max_batch(f=..., t=...)`, which makes the
+  same one-point call first, clears `_oom_max_batch`, and lets a user measure
+  before any integral. The reader (`_peak_memory_reader` →
   `_Reader`: reset, read, E, noise floor, counts_reuse): CUDA peak counter
   (floor 10 KB, counts reused memory); Linux `VmHWM` reset through
   `/proc/self/clear_refs`, after glibc `malloc_trim(0)` when available
@@ -446,7 +450,7 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   and update them when a change fixes or adds one.
   The batch loop's out-of-memory retry shrinks the batch that failed, not
   `_oom_max_batch` (which can be far above it).
-- Unless `max_batch` or `same_f=True` fixes it, the batch size is
+- Unless `max_batch` (call or constructor) fixes it, the batch size is
   computed at every evaluation from live memory: `get_max_batch` →
   `_get_max_f_evals` = `_largest_n(f_mem_coeffs, _MEMORY_BUDGET·usable)`
   (capped at 1e9).
@@ -486,33 +490,31 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 - `f_args` is a tuple forwarded positionally to the integrand:
   `f(t, *f_args)`. Used by `examples/pode/` for path parameters.
 
-### Warm-starting (`same_f=True`)
+### Reusing the mesh and batch size
 
-- Every call that returns (converged or not) stores its mesh
-  (`mesh_previous` = `mesh_optimal`) and its `max_batch`
-  (`previous_max_batch`) together. A call that raises stores nothing.
-  `mesh_previous` keeps the dtype of the call that stored it (`_set_dtype`
-  does not convert it; `_setup_integral_bounds` and `_setup_initial_mesh`
-  convert a copy), so a dtype switch, even by a call that then raises, never
-  rounds it.
-- With `same_f=True` and stored values, the stored mesh (filtered
-  to `[mesh_init, mesh_final]`, padded if needed) and `max_batch` replace
-  the caller's `mesh` / `max_batch`, and the memory benchmark is skipped.
-  With nothing stored (first call), the caller's values or the defaults
-  are used.
-- Bounds of a `same_f=True` call (`_setup_integral_bounds`): given bounds,
-  or a `mesh`'s ends, are used and cut the stored mesh; without a `mesh`, a
-  bound not given is `mesh_previous[0]` / `mesh_previous[-1]` (the last
-  returned call's interval: `mesh_optimal` ends at its bounds bit for bit),
-  even when the constructor was given bounds. No bounds are stored
-  separately. Bounds that are not increasing raise `ValueError`.
-  Analysis and design decisions: `git show bbfa6bc:docs/issues/warm-start-bounds.md`.
-- The solver does not identify integrands (no `id(f)` matching); the
-  caller says when the integrand is the same. Default is
-  `same_f=False`.
-- A non-converged call (e.g. under `max_adaptive_splits`) stores a
-  `mesh_optimal` that splits its failing steps, so repeated `same_f=True`
-  calls refine further. In cumulative mode `_prune_excess_mesh` can instead
+- The solver keeps no warm-start state between calls (`same_f`,
+  `mesh_previous`, `previous_max_batch` and the constructor's bounds were
+  removed). A call reuses an earlier one only through what it is passed:
+  `mesh=result.mesh_optimal` (detached, on the solver's device; its ends are
+  the bounds bit for bit) and `max_batch=result.max_batch`.
+- `result.max_batch`: the forced `max_batch` (call or constructor), else the
+  value `_setup_memory_checks` returned for this call, lowered to
+  `_oom_max_batch` (through `get_max_batch(total_mem_usage, value)`). The
+  integration itself still sizes every batch from live memory.
+- Interval rules, all in `_setup_integral_bounds` (returns
+  `(mesh, mesh_init, mesh_final)`): a call needs a mesh or both bounds; a
+  given mesh must be `[M, T]`, M >= 2, increasing (T = 1) or with distinct
+  consecutive points (T > 1); `mesh_init` is compared with `mesh[0]` and
+  `mesh_final` with `mesh[-1]` using `tol = 4 eps max(|mesh[0]|, |mesh[-1]|)`
+  (eps of the coarser of the bound's and mesh's dtypes): within `tol` it is
+  that end, further outside it raises, inside it cuts the mesh (points within
+  `tol` of a bound are dropped: a one-ULP subinterval made
+  `interpolatory3_variable` return NaN). Bounds not increasing raise
+  `ValueError`. `_setup_initial_mesh` only builds a fresh mesh.
+- Every `integrate` argument after `mesh_final` is keyword-only.
+- A non-converged call (e.g. under `max_adaptive_splits`) returns a
+  `mesh_optimal` that splits its failing steps, so repeated calls from it
+  refine further. In cumulative mode `_prune_excess_mesh` can instead
   merge a failing step with a right neighbour whose running integral (and so
   tolerance) is much larger.
 

@@ -854,8 +854,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         assert len(test_integrand.shape) >= 2
         del test_output, test_integrand
 
+        # The benchmark's batch size is only reported (result.max_batch): during
+        # the integration the batch is recomputed from live memory.
+        measured_max_batch = None
         if force_max_batch is None:
-            self._setup_memory_checks(
+            measured_max_batch = self._setup_memory_checks(
                 f,
                 mesh_init,
                 take_gradient=take_gradient,
@@ -1242,9 +1245,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             n_start_steps_split=n_start_steps_split,
             max_split_depth=max_split_depth,
             # The batch size to pass to a later call: the given max_batch, or
-            # the one this call's benchmark fit gives for the memory free now;
-            # capped after an out-of-memory error in this call.
-            max_batch=self.get_max_batch(total_mem_usage, force_max_batch),
+            # the one this call's benchmark measured; lowered to the cap an
+            # out-of-memory error in this call set (get_max_batch applies it).
+            max_batch=self.get_max_batch(
+                total_mem_usage,
+                measured_max_batch if force_max_batch is None else force_max_batch,
+            ),
         )
 
     def _record_error_check(

@@ -262,7 +262,11 @@ class _MemoryManagement:
     """
 
     device: torch.device
+    dtype: torch.dtype
     C: int
+    _split_f_output: Callable[
+        [Any], tuple[torch.Tensor, tuple[torch.Tensor, ...] | None]
+    ]
     f_mem_coeffs: tuple[float, float, float] | None
     _oom_max_batch: int | None
     init_max_batch: int | None
@@ -273,19 +277,33 @@ class _MemoryManagement:
         self,
         total_mem_usage: float | None = None,
         default_max_batch: int | None = None,
+        *,
+        f: Callable[..., Any] | None = None,
+        t: torch.Tensor | None = None,
+        take_gradient: bool = True,
+        f_args: tuple[Any, ...] = (),
     ) -> int | None:
         """
         Return the largest number of integrand evaluations per batch.
 
-        Does not run the memory benchmark. The first available of these is
-        used: ``default_max_batch``, the ``max_batch`` given at construction,
-        and the number of evaluations that fit in the memory free now, with the
-        memory per call the last benchmark measured. After an out-of-memory
-        error, the result is capped at the reduced batch size chosen then,
-        until the next ``integrate`` call starts.
+        With ``f``, measure it: call ``f`` once on the point ``t`` (an output
+        check that also warms ``f`` up), run the memory benchmark for ``f`` and
+        return the batch size it gives for the memory free now. Pass that value
+        as ``max_batch`` to every later call with the same ``f`` and settings,
+        which then skip the benchmark. The constructor's ``max_batch`` is not
+        used, and a cap left by an earlier out-of-memory error is cleared
+        first. The measurement depends on ``take_gradient``, the solver's dtype
+        and its device, so measure with the settings of the calls that will
+        use it.
 
-        Passing the result as ``max_batch`` to a later call or solver skips
-        the slow benchmark. See :ref:`ug-memory`.
+        Without ``f``, the benchmark is not run. The first available of these
+        is used: ``default_max_batch``, the ``max_batch`` given at
+        construction, and the number of evaluations that fit in the memory free
+        now, with the memory per call the last benchmark measured. After an
+        out-of-memory error, the result is capped at the reduced batch size
+        chosen then, until the next ``integrate`` call starts. To reuse the
+        batch size of a particular call, pass its ``result.max_batch`` instead.
+        See :ref:`ug-memory`.
 
         Parameters
         ----------
@@ -294,16 +312,82 @@ class _MemoryManagement:
             is kept free. None uses the value given at construction.
         default_max_batch : int or None
             A batch size that takes precedence over the other sources. None
-            (default) skips it.
+            (default) skips it. Not allowed together with ``f``.
+        f : Callable or None
+            The integrand to measure, called as ``f(t, *f_args)`` on points of
+            shape [N, T]. None (default) measures nothing.
+        t : torch.Tensor or None
+            A point of the integration interval, shape [T], on which ``f`` is
+            evaluated. Converted to the solver's dtype and device (the solver's
+            dtype is not changed). Required with ``f``.
+        take_gradient : bool
+            The ``take_gradient`` of the calls that will use the measurement;
+            with True (default) the batch leaves memory for backpropagation.
+        f_args : tuple
+            Extra positional arguments of ``f``; tensors are moved to the
+            solver's device. Default ``()``.
 
         Returns
         -------
         int or None
-            The batch size, or None when no source is available (no
+            The batch size, or None when no source is available (no ``f``, no
             ``max_batch`` given and no benchmark run yet).
+
+        Raises
+        ------
+        ValueError
+            If ``f`` is given without a point ``t`` of shape [T], or together
+            with ``default_max_batch``.
+
+        Examples
+        --------
+        Measure once, then pass the value to every call (the measurement takes
+        up to a minute, so this example is not run):
+
+        >>> import torch
+        >>> from padaquad import adaptive_quadrature
+        >>> solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+        >>> t0 = torch.tensor([0.0], dtype=torch.float64)
+        >>> m = solver.get_max_batch(f=torch.exp, t=t0)  # doctest: +SKIP
+        >>> result = solver.integrate(  # doctest: +SKIP
+        ...     torch.exp, mesh_init=t0, mesh_final=t0 + 1, max_batch=m
+        ... )
         """
         if total_mem_usage is None:
             total_mem_usage = self.init_total_mem_usage
+        if f is not None:
+            if t is None or t.dim() != 1:
+                raise ValueError(
+                    "get_max_batch(f=...) needs a point t of shape [T] on which "
+                    "f can be evaluated."
+                )
+            if default_max_batch is not None:
+                raise ValueError(
+                    "get_max_batch(f=...) measures f; do not also pass "
+                    "default_max_batch."
+                )
+            t = t.to(self.dtype).to(self.device)
+            f_args = tuple(
+                a.to(self.device) if torch.is_tensor(a) else a for a in f_args
+            )
+            # A cap from an earlier call or measurement would lower this one.
+            self._oom_max_batch = None
+            # One point, shaped [1, T] like every batch f receives: checks the
+            # output and keeps one-time costs (CUDA start-up, lazy loading) out
+            # of the benchmark, as integrate() does.
+            integrand, _ = self._split_f_output(f(t.reshape(1, -1), *f_args))
+            if integrand.dim() < 2:
+                raise ValueError(
+                    "f must return values of shape [N, D] for points of shape "
+                    f"[N, T]; got shape {list(integrand.shape)}."
+                )
+            return self._setup_memory_checks(
+                f,
+                t,
+                take_gradient=take_gradient,
+                total_mem_usage=total_mem_usage,
+                f_args=f_args,
+            )
         if default_max_batch is not None:
             max_batch = default_max_batch
         elif self.init_max_batch is not None:
@@ -404,13 +488,14 @@ class _MemoryManagement:
         take_gradient: bool,
         total_mem_usage: float,
         f_args: tuple[Any, ...] = (),
-    ) -> None:
+    ) -> int:
         """
         Fit the memory of one call of f on N points (``f_mem_coeffs``, GB).
 
-        This only measures; it does not choose a batch size. The batch size is
-        computed at every evaluation from the memory free at that moment:
-        ``get_max_batch`` -> ``_get_max_f_evals``.
+        Returns the batch size the fit gives for the memory free at the end of
+        the measurement (capped as ``get_max_batch`` caps it). During an
+        integration the batch size is recomputed at every evaluation from the
+        memory free at that moment: ``get_max_batch`` -> ``_get_max_f_evals``.
 
         f is called on N copies of ``node_test``, starting at N = 1. For each
         call, M is the memory the call used (``_measure_call``, with the reader
@@ -512,6 +597,12 @@ class _MemoryManagement:
             Fraction of total memory allowed (0 < value <= 1).
         f_args : tuple[Any, ...]
             Extra arguments passed to f.
+
+        Returns
+        -------
+        int
+            The measured batch size: what ``get_max_batch(f=...)`` returns and
+            what ``integrate`` reports as ``result.max_batch``.
 
         Raises
         ------
@@ -885,6 +976,7 @@ class _MemoryManagement:
             f"pass max_batch={max_batch} to skip this measurement in later runs."
             f"{note}"
         )
+        return max_batch
 
     def _peak_memory_reader(self) -> _Reader:
         """

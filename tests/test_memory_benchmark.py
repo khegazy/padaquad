@@ -1674,9 +1674,10 @@ def test_one_time_cost_of_first_call_absorbed_by_integrate(fake, monkeypatch):
     then uses 1 KiB per point. integrate() calls f once on one point before
     the benchmark, so the benchmark measures 1 KiB per point and the batch is
     about 75 GB / 1 KiB (the reader counts reused memory, so the largest test
-    call does not cap it). Run directly, without that call, the 48 MiB is the
-    only reliable reading and the cautious batch is 39 points. Catches:
-    running the benchmark before integrate()'s one-point call of f."""
+    call does not cap it); get_max_batch(f=...) makes the same call first.
+    Run directly, without that call, the 48 MiB is the only reliable reading
+    and the cautious batch is 39 points. Catches: running the benchmark before
+    the one-point call of f."""
     set_reader(fake.solver, monkeypatch, counts_reuse=True)
 
     def lazy(cost):
@@ -1691,10 +1692,13 @@ def test_one_time_cost_of_first_call_absorbed_by_integrate(fake, monkeypatch):
         return f
 
     cost = CostIntegrand(fake.memory, fake.clock, per_point=1024)
-    fake.solver.integrate(
+    out = fake.solver.integrate(
         lazy(cost), mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
     )
-    assert fake.solver.previous_max_batch == pytest.approx(BUDGET / 1024, abs=1)
+    assert out.max_batch == pytest.approx(BUDGET / 1024, abs=1)
+    # get_max_batch(f=...) makes the same one-point call first.
+    measured = fake.solver.get_max_batch(f=lazy(cost), t=T_INIT, take_gradient=False)
+    assert measured == pytest.approx(BUDGET / 1024, abs=1)
     benchmark(fake.solver, lazy(cost))
     assert fake.solver._get_max_f_evals(0.9) == 39
 
@@ -1938,3 +1942,98 @@ def test_reuse_cap_never_raises_out_of_memory_cap(monkeypatch):
     benchmark(solver, None)
     assert calls == [1, 10]
     assert solver.get_max_batch() == 7 < solver.C
+
+
+# ---------------------------------------------------------------------------
+# get_max_batch(f=..., t=...): the user runs the benchmark and passes the result
+# as max_batch. The benchmark is faked: these tests check the plumbing.
+# ---------------------------------------------------------------------------
+
+_T = torch.tensor([0.0], dtype=torch.float64)
+
+
+def _fake_benchmark(solver, monkeypatch, measured=1234):
+    """Replace the benchmark by a fake that records its calls and returns
+    ``measured``; it also sets a memory fit so integrate() can size batches."""
+    calls = []
+
+    def fake(f, node_test, take_gradient, total_mem_usage, f_args=()):
+        calls.append({"take_gradient": take_gradient, "f_args": f_args})
+        solver.f_mem_coeffs = (0.0, 1e-6, 0.0)
+        return measured
+
+    monkeypatch.setattr(solver, "_setup_memory_checks", fake)
+    return calls
+
+
+def test_get_max_batch_measures_when_given_f(monkeypatch):
+    """With f and t, get_max_batch runs the benchmark once, with the given
+    take_gradient and f_args, clears a stale out-of-memory cap first, and
+    returns the measured batch size."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+    calls = _fake_benchmark(solver, monkeypatch)
+    solver._oom_max_batch = 3
+    seen = []
+
+    def f(t, k):
+        seen.append(len(t))
+        return k * torch.exp(t)
+
+    measured = solver.get_max_batch(f=f, t=_T, take_gradient=False, f_args=(2.0,))
+    assert measured == 1234
+    assert calls == [{"take_gradient": False, "f_args": (2.0,)}]
+    assert seen == [1]  # the one-point output check (warm-up)
+    assert solver._oom_max_batch is None
+
+
+def test_measured_max_batch_skips_the_benchmark_in_integrate(monkeypatch):
+    """A batch size measured once and passed as max_batch skips the benchmark
+    and is returned as result.max_batch."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+    calls = _fake_benchmark(solver, monkeypatch)
+    m = solver.get_max_batch(f=torch.exp, t=_T, take_gradient=False)
+    out = solver.integrate(
+        torch.exp,
+        mesh_init=T_INIT,
+        mesh_final=T_FINAL,
+        max_batch=m,
+        take_gradient=False,
+    )
+    assert len(calls) == 1
+    assert out.max_batch == m
+
+
+def test_result_max_batch_is_the_measured_value(monkeypatch):
+    """Without max_batch, result.max_batch is what the call's benchmark
+    measured, not a new estimate from the memory free at the end of the call."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+    _fake_benchmark(solver, monkeypatch, measured=4321)
+    out = solver.integrate(
+        torch.exp, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
+    )
+    assert out.max_batch == 4321
+
+
+def test_get_max_batch_with_f_ignores_constructor_max_batch(monkeypatch):
+    """A constructor max_batch does not stop the measurement the caller asked for."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu", max_batch=7)
+    calls = _fake_benchmark(solver, monkeypatch)
+    assert solver.get_max_batch(f=torch.exp, t=_T) == 1234
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"f": torch.exp},
+        {"f": torch.exp, "t": torch.tensor([[0.0]])},
+        {"f": torch.exp, "t": _T, "default_max_batch": 5},
+    ],
+    ids=["no_t", "t_not_1d", "with_default_max_batch"],
+)
+def test_get_max_batch_with_f_validates_its_arguments(kwargs):
+    """f needs a point t of shape [T], and cannot be combined with
+    default_max_batch."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+    with pytest.raises(ValueError, match="get_max_batch"):
+        solver.get_max_batch(**kwargs)

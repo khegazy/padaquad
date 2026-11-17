@@ -696,15 +696,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             and cut it. None builds a fresh starting mesh on the bounds, which
             must then both be given (see :ref:`the user guide <ug-mesh>`).
         mesh_init : torch.Tensor or None
-            Lower integration bound, shape [T]. With a ``mesh``, it must lie
-            within the mesh (a value within rounding of ``mesh[0]`` is
-            ``mesh[0]``), and None uses ``mesh[0]``. Without a mesh it is
-            required.
+            Lower integration bound, a tensor of shape [T] (also when T is 1).
+            With a ``mesh``, it must lie within the mesh, up to rounding, and
+            becomes the starting mesh's first point (so it gets its gradient);
+            None uses ``mesh[0]``. Without a mesh it is required.
         mesh_final : torch.Tensor or None
-            Upper integration bound, shape [T]. With a ``mesh``, it must lie
-            within the mesh (a value within rounding of ``mesh[-1]`` is
-            ``mesh[-1]``), and None uses ``mesh[-1]``. Without a mesh it is
-            required.
+            Upper integration bound, a tensor of shape [T] (also when T is 1).
+            With a ``mesh``, it must lie within the mesh, up to rounding, and
+            becomes the starting mesh's last point (so it gets its gradient);
+            None uses ``mesh[-1]``. Without a mesh it is required.
         random_initial_mesh : bool
             If True (default), the points of a fresh starting mesh are placed at
             random, so the mesh does not line up with evenly spaced features of
@@ -2915,15 +2915,18 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         Without a mesh, both bounds must be given. With a mesh, which must be
         [M, T] with M >= 2 increasing points, a missing bound is the mesh's
-        end, and a given bound must be a tensor of shape [T]. ``mesh_init`` is
-        compared with ``mesh[0]`` and ``mesh_final`` with ``mesh[-1]``, with a
-        rounding tolerance relative to the value compared, ``4 eps |x|`` (eps
-        of the coarser of the mesh's and that bound's dtypes): a bound within it
-        of its end is that end, one further outside the mesh raises, and one
-        inside cuts the mesh. The points between the bounds are kept and the
-        bounds added; a bound that cuts also drops the points within rounding of
-        it, which avoids subintervals a few rounding steps wide, on which
-        variable sampling returns NaN. A mesh alone is used as given.
+        end. Every given bound is a tensor of shape [T], and becomes an end
+        point of the mesh, so it gets its gradient as any mesh end does.
+        ``mesh_init`` is compared with ``mesh[0]`` and ``mesh_final`` with
+        ``mesh[-1]``, with a rounding tolerance relative to the value compared,
+        ``4 eps |x|`` (eps of the coarser of the mesh's and that bound's
+        dtypes): a bound further outside the mesh raises. Otherwise the mesh is
+        cut: its points between the bounds are kept and the bounds added; a
+        bound that differs from its end also drops the points within rounding
+        of it, including that end when the bound is within rounding of it,
+        which avoids subintervals a few rounding steps wide, on which variable
+        sampling returns NaN. A mesh alone, or bounds equal to its ends, leave
+        it unchanged.
 
         Parameters
         ----------
@@ -2944,19 +2947,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         ------
         ValueError
             If the mesh is not [M, T] with M >= 2 increasing points, if there
-            is no mesh and a bound is missing, if a bound given with a mesh is
-            not a tensor of shape [T] or lies outside the mesh, or if the bounds
-            do not satisfy ``mesh_init < mesh_final``.
+            is no mesh and a bound is missing, if a bound is not a tensor of
+            shape [T] (the mesh's T, or the other bound's shape without a
+            mesh), if a bound lies outside the mesh, or if the bounds do not
+            satisfy ``mesh_init < mesh_final``.
         """
-        if mesh is None:
-            if mesh_init is None or mesh_final is None:
-                raise ValueError(
-                    "Pass mesh=, or both mesh_init and mesh_final: a call needs "
-                    "an interval to integrate."
-                )
-            mesh_init = mesh_init.to(self.dtype).to(self.device)
-            mesh_final = mesh_final.to(self.dtype).to(self.device)
-        else:
+        if mesh is not None:
             # Increasing for T = 1; distinct consecutive points for any T (the
             # order of a path in T > 1 dimensions is its own). T > 1 is not
             # supported end to end yet: the order check below fails for it.
@@ -2971,16 +2967,34 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     "mesh must be a tensor of shape [M, T] with M >= 2 increasing "
                     f"points; got shape {list(mesh.shape)}."
                 )
-            for name, given in (("mesh_init", mesh_init), ("mesh_final", mesh_final)):
-                if given is not None and (
-                    not isinstance(given, torch.Tensor) or given.shape != mesh.shape[1:]
-                ):
-                    raise ValueError(
-                        f"{name} must be a tensor of shape [T] = "
-                        f"{list(mesh.shape[1:])}, like a point of the mesh; got "
-                        f"{type(given).__name__} "
-                        f"{list(getattr(given, 'shape', []))}."
-                    )
+        elif mesh_init is None or mesh_final is None:
+            raise ValueError(
+                "Pass mesh=, or both mesh_init and mesh_final: a call needs "
+                "an interval to integrate."
+            )
+        # Bounds have shape [T] on every call, like a point of the mesh: the
+        # mesh's T, or without a mesh the same shape for both bounds.
+        shape = (
+            mesh.shape[1:] if mesh is not None else getattr(mesh_init, "shape", None)
+        )
+        for name, given in (("mesh_init", mesh_init), ("mesh_final", mesh_final)):
+            if given is not None and (
+                not isinstance(given, torch.Tensor)
+                or given.dim() != 1
+                or given.shape != shape
+            ):
+                raise ValueError(
+                    f"{name} must be a tensor of shape [T], like a point of the "
+                    f"mesh ({list(shape) if shape is not None else '[T]'}); got "
+                    f"{type(given).__name__} {list(getattr(given, 'shape', []))}."
+                )
+        if mesh is None:
+            # Narrows the types for mypy: both were checked above.
+            assert mesh_init is not None
+            assert mesh_final is not None
+            mesh_init = mesh_init.to(self.dtype).to(self.device)
+            mesh_final = mesh_final.to(self.dtype).to(self.device)
+        else:
             # Rounding tolerance relative to the value compared, 4 eps |x|, with
             # eps of the coarser of the mesh's and that bound's dtypes (a float32
             # mesh_init must not widen the tolerance of a float64 mesh_final).
@@ -2999,9 +3013,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 ("mesh_final", mesh_final, mesh[-1], eps[1]),
             ):
                 bound = None if given is None else given.to(self.dtype).to(self.device)
-                if bound is None or torch.all(
-                    torch.abs(bound - end) <= 4 * e * end.abs()
-                ):
+                if bound is None:
                     resolved.append(end)
                 elif torch.any(bound < mesh[0] - 4 * e * mesh[0].abs()) or torch.any(
                     bound > mesh[-1] + 4 * e * mesh[-1].abs()
@@ -3029,11 +3041,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         if mesh is not None:
             # Cut to the bounds: keep the points in [mesh_init, mesh_final] other
-            # than the bounds, then add the bounds. A bound that cuts the mesh
-            # (is not its end) also drops the points within rounding of it, which
-            # would leave a subinterval a few rounding steps wide (variable
-            # sampling returns NaN on one). Bounds equal to the mesh's ends leave
-            # it unchanged.
+            # than the bounds, then add the bounds, so every given bound is a
+            # mesh end and gets its gradient. A bound that is not its end also
+            # drops the points within rounding of it (the end itself when the
+            # bound is within rounding of it): they would leave a subinterval a
+            # few rounding steps wide, on which variable sampling returns NaN.
+            # Bounds equal to the mesh's ends leave it unchanged.
             keep = torch.all((mesh >= mesh_init) & (mesh <= mesh_final), dim=-1)
             for bound, end, e in (
                 (mesh_init, mesh[0], eps[0]),

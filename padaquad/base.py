@@ -395,8 +395,19 @@ class SolverBase(ABC, DistributedEnvironment):
         Raises
         ------
         ValueError
-            If that tensor's dtype is not torch.float64 or torch.float32.
+            If one of them is not a tensor, or that tensor's dtype is not
+            torch.float64 or torch.float32.
         """
+        for name, x in (
+            ("mesh", mesh),
+            ("mesh_init", mesh_init),
+            ("mesh_final", mesh_final),
+        ):
+            if x is not None and not isinstance(x, torch.Tensor):
+                raise ValueError(
+                    f"{name} must be a tensor (a bound of shape [T], a mesh of "
+                    f"shape [M, T]); got {type(x).__name__}."
+                )
         if mesh is not None:
             self._set_dtype(mesh.dtype)
         elif mesh_init is not None:

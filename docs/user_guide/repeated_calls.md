@@ -16,15 +16,18 @@
 | both bounds, no `mesh` | the bounds | a fresh mesh (`N_init_steps`, `random_initial_mesh`) |
 | one bound or none, no `mesh` | — | `ValueError` |
 
+- Every given bound becomes an end point of the starting mesh, so its
+  gradient is computed as for any mesh end, also when it equals an end of a
+  `mesh_optimal` (which is detached from autograd).
 - A bound within a few rounding steps of its mesh end (4 machine epsilons of
-  the coarser of the bound's and the mesh's dtypes, relative to that end) is
-  that end, so a bound that differs from `mesh[-1]` only by float32 rounding
-  does not raise or add a near-zero-width subinterval. For the same reason,
-  when a bound cuts the mesh, the mesh points within rounding of it are
-  dropped.
-- A given mesh must have shape `[M, T]` with at least two increasing points,
-  and a bound given with it must be a tensor of shape `[T]`, like a point of
-  the mesh.
+  the coarser of the bound's and the mesh's dtypes, relative to that end)
+  replaces that end, so a bound that differs from `mesh[-1]` only by float32
+  rounding neither raises nor adds a near-zero-width subinterval. For the same
+  reason, when a bound cuts the mesh, the mesh points within rounding of it
+  are dropped.
+- A given mesh must have shape `[M, T]` with at least two increasing points.
+  Bounds are tensors of shape `[T]` on every call, with or without a mesh
+  (`torch.tensor([0.0])`, not `torch.tensor(0.0)`).
 - The given mesh's dtype is the call's dtype (see {doc}`devices_memory`), so bounds
   of another dtype are converted to it.
 

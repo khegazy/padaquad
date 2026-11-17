@@ -22,7 +22,8 @@ This release removes the solver's hidden warm-start state. A call reuses an earl
 ### Changed
 
 - **A call needs a mesh or both bounds.** Without a mesh, `mesh_init` and `mesh_final` are required (`ValueError`); there are no default bounds. With a mesh, a missing bound is its end.
-- **A bound outside the given mesh raises `ValueError`.** A bound within a few rounding steps of its mesh end (4 machine epsilons of the coarser of the bound's and the mesh's dtypes, relative to that end) is that end. This is stricter than before: a bound passed with a mesh used to be accepted, and replaced by the mesh's end, when it was within the assertion tolerance (relative 1e-7 in float64, 1e-5 in float32); now a bound further than rounding from the end cuts the mesh or raises. A bound given with a mesh must be a tensor of shape `[T]`.
+- **A bound outside the given mesh raises `ValueError`.** A bound within a few rounding steps of its mesh end (4 machine epsilons of the coarser of the bound's and the mesh's dtypes, relative to that end) replaces that end. This is stricter than before: a bound passed with a mesh used to be accepted, and replaced by the mesh's end, when it was within the assertion tolerance (relative 1e-7 in float64, 1e-5 in float32); now a bound further than rounding from the end cuts the mesh or raises.
+- **Bounds must be tensors of shape `[T]` on every call**, with or without a mesh: a 0-d bound such as `torch.tensor(0.0)` raises `ValueError` (use `torch.tensor([0.0])`), and so does a Python number. 0-d bounds used to work.
 - **A given mesh is validated:** shape `[M, T]` with at least two increasing points, else `ValueError` (it was a bare `AssertionError`). An integrand that does not return values of shape `[N, D]` also raises `ValueError` (it was an `assert`).
 - **Integration bounds that are not increasing raise `ValueError`** instead of `AssertionError`. The check was an `assert`, which `python -O` removes; a reversed call then ran on, stored an out-of-order `mesh_optimal` with points outside the interval, and returned `converged=True`.
 - **Every `integrate` argument after `mesh_final` is keyword-only**, so the removal of `same_f` cannot silently shift positional arguments.
@@ -31,6 +32,7 @@ This release removes the solver's hidden warm-start state. A call reuses an earl
 
 ### Fixed
 
+- **A bound equal to the given mesh's end got no gradient.** With `mesh=result.mesh_optimal` and bounds equal to its ends (the reuse pattern), the bounds were replaced by the mesh's ends, which are detached from autograd, so `bound.grad` stayed `None` (and a bound within rounding of an end behaved the same). Every given bound is now an end point of the starting mesh, so it gets the gradient of any mesh end (d/db of the integral = f(b)).
 - **`mesh_optimal` carried the autograd graph of a bound that requires grad.** A later call started from it then backpropagated into the earlier call's bound (its `.grad` changed although it was not passed), and after a `take_gradient=True` call it raised "Trying to backward through the graph a second time". `mesh_optimal` is now detached, so passing it as `mesh=` is safe; a bound's gradient within its own call is unchanged.
 - **A cut could leave a subinterval one rounding step wide**, on which `interpolatory3_variable` returned NaN. Mesh points within the rounding tolerance of a bound are now dropped when the mesh is cut.
 

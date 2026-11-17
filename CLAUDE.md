@@ -505,15 +505,19 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   `(mesh, mesh_init, mesh_final)`): a call needs a mesh or both bounds; a
   given mesh must be `[M, T]`, M >= 2, increasing (T = 1) or with distinct
   consecutive points (T > 1; unreachable end to end, the order check fails
-  for T > 1); a bound given with a mesh must be a tensor of shape [T];
-  `mesh_init` is compared with `mesh[0]` and `mesh_final` with `mesh[-1]`
-  with a tolerance relative to the value compared, `4 eps |x|` (eps of the
-  coarser of the bound's and mesh's dtypes; a tolerance scaled by the
-  larger mesh end snapped 1e-13 to 0 on [0, 1000]): within it, the bound is
-  that end; further outside, it raises; inside, it cuts the mesh, and a
-  cutting bound drops the points within `4 eps max(|p|, |bound|)` of it (a
-  one-ULP subinterval made `interpolatory3_variable` return NaN). A mesh
-  alone is used as given. Bounds not increasing raise
+  for T > 1); bounds are tensors of shape [T] on every call (with or without
+  a mesh; checked in `_setup_integral_bounds`, non-tensors already in
+  `set_dtype_by_input`); every given bound becomes an end point of the
+  starting mesh, so it gets its gradient as any mesh end (replacing the bound
+  by the detached `mesh_optimal` end lost it); `mesh_init` is compared with
+  `mesh[0]` and `mesh_final` with `mesh[-1]` with a tolerance relative to the
+  value compared, `4 eps |x|` (eps of the coarser of the bound's and mesh's
+  dtypes; a tolerance scaled by the larger mesh end snapped 1e-13 to 0 on
+  [0, 1000]): further outside, the bound raises; otherwise it cuts the mesh,
+  and a bound that is not its end drops the points within
+  `4 eps max(|p|, |bound|)` of it, including that end when within rounding
+  (a one-ULP subinterval made `interpolatory3_variable` return NaN). A mesh
+  alone, or bounds equal to its ends, leave it unchanged. Bounds not increasing raise
   `ValueError`. `_setup_initial_mesh` only builds a fresh mesh.
 - Every `integrate` argument after `mesh_final` is keyword-only.
 - A non-converged call (e.g. under `max_adaptive_splits`) returns a

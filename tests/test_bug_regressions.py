@@ -159,6 +159,54 @@ _MESH = torch.linspace(0.0, 4.0, 9, dtype=torch.float64).unsqueeze(-1)
 
 
 @pytest.mark.parametrize(
+    ("lo", "hi"),
+    [
+        (0.0, 2.0),
+        (0.0, math.nextafter(2.0, 3.0)),
+        (0.5, 1.5),
+    ],
+    ids=["equal_to_the_ends", "within_rounding_of_an_end", "cutting"],
+)
+def test_bound_gradients_through_a_given_mesh(lo, hi):
+    """Given bounds are the mesh's ends, so their gradients are those of any
+    mesh end: for the integral of w e^t over [a, b], d/da = -w e^a and
+    d/db = w e^b, also when a bound equals the end of a detached
+    mesh_optimal (it used to be replaced by that end, and got no gradient)."""
+    mesh = torch.linspace(0.0, 2.0, 9, dtype=torch.float64).unsqueeze(-1)
+    w = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
+    a = _bound(lo).requires_grad_()
+    b = _bound(hi).requires_grad_()
+    out = _solver().integrate(
+        f=lambda t: w * torch.exp(t),
+        mesh=mesh,
+        mesh_init=a,
+        mesh_final=b,
+        take_gradient=False,
+    )
+    out.integral.sum().backward()
+    assert math.isclose(float(a.grad), -2 * math.exp(lo), rel_tol=1e-9)
+    assert math.isclose(float(b.grad), 2 * math.exp(hi), rel_tol=1e-9)
+    assert math.isclose(float(w.grad), math.exp(hi) - math.exp(lo), rel_tol=1e-9)
+
+
+@pytest.mark.parametrize(
+    "bounds",
+    [
+        {"mesh_init": torch.tensor(0.0), "mesh_final": torch.tensor(1.0)},
+        {"mesh_init": torch.tensor([[0.0]]), "mesh_final": torch.tensor([[1.0]])},
+        {"mesh_init": _bound(0.0), "mesh_final": torch.tensor([1.0, 1.0])},
+        {"mesh_init": 0.0, "mesh_final": 1.0},
+    ],
+    ids=["zero_dim", "two_dim", "different_shapes", "python_floats"],
+)
+def test_bounds_without_mesh_must_have_shape_T(bounds):
+    """Bounds are tensors of shape [T] on every call, with or without a mesh,
+    so a loop whose first call has no mesh fails there, not one call later."""
+    with pytest.raises(ValueError, match="shape"):
+        _solver().integrate(f=torch.exp, take_gradient=False, **bounds)
+
+
+@pytest.mark.parametrize(
     "bounds",
     [{}, {"mesh_init": _bound(0.0)}, {"mesh_final": _bound(1.0)}],
     ids=["none", "init_only", "final_only"],
@@ -211,14 +259,14 @@ def test_bound_outside_mesh_raises(bounds):
         _solver().integrate(f=torch.exp, mesh=_MESH, take_gradient=False, **bounds)
 
 
-def test_bound_within_rounding_of_a_mesh_end_is_that_end():
-    """A bound one float64 step past the mesh end is the end (no near-zero-width
-    subinterval, no error)."""
+def test_bound_within_rounding_of_a_mesh_end_replaces_it():
+    """A bound one float64 step past the mesh end replaces that end (no error,
+    no near-zero-width subinterval): the interval is the bound's."""
     beyond = torch.nextafter(_MESH[-1], _MESH[-1] + 1)
     out = _solver().integrate(
         f=torch.exp, mesh=_MESH, mesh_final=beyond, take_gradient=False
     )
-    assert torch.equal(out.mesh_final, _MESH[-1])
+    assert torch.equal(out.mesh_final, beyond)
     assert out.n_start_steps == 8
 
 
@@ -326,9 +374,10 @@ def test_integrand_output_must_be_two_dimensional():
         )
 
 
-def test_float32_bound_at_a_float64_mesh_end_is_that_end():
-    """float32(0.3) differs from the float64 mesh end 0.3 only by float32
-    rounding, so it is that end (the coarser dtype sets the tolerance)."""
+def test_float32_bound_at_a_float64_mesh_end_replaces_it():
+    """float32(0.3) lies past the float64 mesh end 0.3 only by float32
+    rounding (the coarser dtype sets the tolerance), so it raises no error and
+    replaces that end."""
     mesh = torch.linspace(0.0, 0.3, 4, dtype=torch.float64).unsqueeze(-1)
     out = _solver().integrate(
         f=torch.exp,
@@ -336,7 +385,7 @@ def test_float32_bound_at_a_float64_mesh_end_is_that_end():
         mesh_final=_bound(0.3, torch.float32),
         take_gradient=False,
     )
-    assert torch.equal(out.mesh_final, mesh[-1])
+    assert torch.equal(out.mesh_final, _bound(0.3, torch.float32).to(torch.float64))
     assert out.n_start_steps == 3
 
 

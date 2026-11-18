@@ -362,8 +362,11 @@ class Trainer(CurriculumClass):
             f=self._integrad,
             mesh=self.input_times,
             f_args=(self.model,),
-            # Skip the memory benchmark after the first call (None before it).
-            max_batch=self.integrator.get_max_batch(),
+            # The previous training call's batch size skips the memory
+            # benchmark (None on the first call, which measures it).
+            max_batch=None
+            if self.integral_output is None
+            else self.integral_output.max_batch,
         )
         # print(epoch_count, integral_output.nodes.shape)
         loss = self.integral_output.loss
@@ -522,7 +525,9 @@ class Trainer(CurriculumClass):
                                 f=self._integrad,
                                 mesh=self.eval_input_times,
                                 f_args=(self.model,),
-                                max_batch=self.integrator.get_max_batch(),
+                                max_batch=None
+                                if self.integral_output is None
+                                else self.integral_output.max_batch,
                             )
                         integral_values.append(eval_integral_output.loss.item())
                         integral_limits.append(eval_t)

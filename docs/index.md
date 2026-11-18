@@ -26,7 +26,8 @@ it is not for.
 :link-type: doc
 
 How the integration works, how to choose a method, how the error is
-controlled, gradients, repeated calls, and memory.
+controlled, gradients, reusing the mesh and batch size across calls, and
+memory.
 :::
 
 :::{grid-item-card} API reference

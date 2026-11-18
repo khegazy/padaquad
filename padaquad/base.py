@@ -6,7 +6,7 @@ Base class and sampling modes shared by the padaquad solvers.
 - ``DEFAULT_SAMPLING_TYPE`` and ``DEFAULT_METHODS``: the sampling mode, and the
   method of each sampling mode, used when the caller names none.
 - ``SolverBase``: the abstract base class of the solvers. It keeps the dtype,
-  the device, the construction-time defaults and the warm-start mesh, and
+  the device and the construction-time defaults (no state between calls), and
   declares the ``integrate()`` / ``_calculate_integral()`` interface that the
   concrete solvers implement.
 
@@ -111,12 +111,12 @@ class SolverBase(ABC, DistributedEnvironment):
       (float64 or float32), and sets looser tolerances for internal
       consistency checks, such as the check that the nodes are in order.
     - Device: inherited from ``DistributedEnvironment``.
-    - Defaults: ``f``, ``y0``, ``mesh_init`` and ``mesh_final`` given at
-      construction are used by every ``integrate`` call that does not pass
-      them.
-    - Warm starts: stores the optimal mesh of the last call that returned, in
-      ``mesh_previous``; ``integrate(..., same_f=True)`` starts from it. See
-      :ref:`ug-same-f`.
+    - Defaults: ``f`` and ``y0`` given at construction are used by every
+      ``integrate`` call that does not pass them. The bounds have no default:
+      each call passes a mesh or both bounds.
+    - No state between calls: a call reuses an earlier call's mesh and batch
+      size only when they are passed to it (``result.mesh_optimal``,
+      ``result.max_batch``). See :ref:`ug-reuse`.
 
     Subclasses implement the abstract methods: ``integrate``, the integral and
     error estimate of a batch of subintervals, and the update of their own
@@ -136,8 +136,6 @@ class SolverBase(ABC, DistributedEnvironment):
         rtol: float,
         y0: torch.Tensor | None,
         f: Callable[..., Any] | None,
-        mesh_init: torch.Tensor | None,
-        mesh_final: torch.Tensor | None,
         output_speed_info: bool,
         dtype: torch.dtype,
         device: str | torch.device | None,
@@ -163,10 +161,6 @@ class SolverBase(ABC, DistributedEnvironment):
         f : callable or None
             The integrand: points of shape ``[N, T]`` in, values of shape
             ``[N, D]`` out. None means ``integrate`` must be given one.
-        mesh_init : torch.Tensor or None
-            Lower bound, shape ``[T]``. None uses 0.
-        mesh_final : torch.Tensor or None
-            Upper bound, shape ``[T]``. None uses 1.
         output_speed_info : bool
             If True, writes the time each part of the integration takes to
             the file ``padaquad_speed.log``.
@@ -199,30 +193,14 @@ class SolverBase(ABC, DistributedEnvironment):
         self.atol = torch.tensor(atol, dtype=dtype, device=self.device)
         self.rtol = torch.tensor(rtol, dtype=dtype, device=self.device)
         # Construction-time defaults; each integrate() call falls back to these
-        # when its corresponding argument is None (the active value is the local
-        # resolved in _check_variables).
+        # when its corresponding argument is None (resolved in _check_variables).
+        # The bounds have no default: each call gives its interval.
         self.init_f: Callable[..., Any] | None = f
         self.init_y0 = (
             y0.to(self.device)
             if y0 is not None
             else torch.tensor([0], dtype=dtype, device=self.device)
         )
-        self.init_mesh_init = (
-            mesh_init.to(self.device)
-            if mesh_init is not None
-            else torch.tensor([0], dtype=dtype, device=self.device)
-        )
-        self.init_mesh_final = (
-            mesh_final.to(self.device)
-            if mesh_final is not None
-            else torch.tensor([1], dtype=dtype, device=self.device)
-        )
-        # Stored time barriers from the last integration for warm-starting.
-        # Used only when integrate(..., same_f=True) is passed;
-        # otherwise ignored. They are the *optimal* mesh of the last call that
-        # returned (post-prune-and-refine).
-        self.mesh_previous: torch.Tensor | None = None
-
         self._set_dtype(dtype)
 
     # -------------------------------------------------------------------------------- #
@@ -330,9 +308,9 @@ class SolverBase(ABC, DistributedEnvironment):
         """
         Set the floating-point precision for all solver tensors.
 
-        Converts atol, rtol, y0, mesh_init, mesh_final and the stored
-        warm-start mesh (``mesh_previous``) to the new dtype, then calls
-        ``_set_solver_dtype``. Also sets dtype-appropriate assertion tolerances
+        Converts atol, rtol and y0 to the new dtype,
+        then calls ``_set_solver_dtype``. Also sets dtype-appropriate assertion
+        tolerances
         used for internal sanity checks (e.g. verifying that the nodes are in
         increasing order despite floating-point rounding).
 
@@ -373,10 +351,6 @@ class SolverBase(ABC, DistributedEnvironment):
 
         self.dtype = dtype
         self.init_y0 = self.init_y0.to(self.dtype)
-        self.init_mesh_init = self.init_mesh_init.to(self.dtype)
-        self.init_mesh_final = self.init_mesh_final.to(self.dtype)
-        if self.mesh_previous is not None:
-            self.mesh_previous = self.mesh_previous.to(self.dtype)
 
         # Update integration control error tolerances
         self.atol = self.atol.to(self.dtype)
@@ -421,8 +395,19 @@ class SolverBase(ABC, DistributedEnvironment):
         Raises
         ------
         ValueError
-            If that tensor's dtype is not torch.float64 or torch.float32.
+            If one of them is not a tensor, or that tensor's dtype is not
+            torch.float64 or torch.float32.
         """
+        for name, x in (
+            ("mesh", mesh),
+            ("mesh_init", mesh_init),
+            ("mesh_final", mesh_final),
+        ):
+            if x is not None and not isinstance(x, torch.Tensor):
+                raise ValueError(
+                    f"{name} must be a tensor (a bound of shape [T], a mesh of "
+                    f"shape [M, T]); got {type(x).__name__}."
+                )
         if mesh is not None:
             self._set_dtype(mesh.dtype)
         elif mesh_init is not None:
@@ -433,33 +418,28 @@ class SolverBase(ABC, DistributedEnvironment):
     def _check_variables(
         self,
         f: Callable[..., Any] | None = None,
-        mesh_init: torch.Tensor | None = None,
-        mesh_final: torch.Tensor | None = None,
         y0: torch.Tensor | None = None,
-    ) -> tuple[Callable[..., Any], torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[Callable[..., Any], torch.Tensor]:
         """
-        Fill in missing arguments with stored defaults and move to correct device.
+        Fill in a missing integrand and offset with stored defaults.
 
         Any argument that is None is replaced with the value stored at
-        construction time. Tensor arguments are cast to the solver's dtype
-        and moved to the solver's device.
+        construction time; ``y0`` is cast to the solver's dtype and moved to
+        the solver's device. The bounds are resolved by the solver's
+        ``_setup_integral_bounds``.
 
         Parameters
         ----------
         f : Callable[..., Any] | None
             Integrand function, or None to use self.init_f.
-        mesh_init : torch.Tensor | None
-            Lower integration bound, or None to use self.init_mesh_init.
-        mesh_final : torch.Tensor | None
-            Upper integration bound, or None to use self.init_mesh_final.
         y0 : torch.Tensor | None
             Initial integral value, or None to use self.init_y0.
 
         Returns
         -------
-        tuple[Callable[..., Any], torch.Tensor, torch.Tensor, torch.Tensor]
-            Tuple of (f, mesh_init, mesh_final, y0) with defaults filled
-            in and tensors on the correct device/dtype.
+        tuple[Callable[..., Any], torch.Tensor]
+            ``(f, y0)`` with defaults filled in and ``y0`` on the solver's
+            dtype and device.
 
         Raises
         ------
@@ -472,15 +452,8 @@ class SolverBase(ABC, DistributedEnvironment):
                 "No integrand given: pass f to integrate() or to the solver "
                 "constructor."
             )
-        mesh_init = self.init_mesh_init if mesh_init is None else mesh_init
-        mesh_final = self.init_mesh_final if mesh_final is None else mesh_final
         y0 = self.init_y0 if y0 is None else y0
-
-        mesh_init = mesh_init.to(self.dtype).to(self.device)
-        mesh_final = mesh_final.to(self.dtype).to(self.device)
-        y0 = y0.to(self.dtype).to(self.device)
-
-        return f, mesh_init, mesh_final, y0
+        return f, y0.to(self.dtype).to(self.device)
 
     # -------------------------------------------------------------------------------- #
     #                         TRAINING AND EVALUATION TOGGLING                         #

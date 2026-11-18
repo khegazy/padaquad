@@ -1285,7 +1285,7 @@ def test_messages_when_measuring(caplog, monkeypatch):
     assert "devices_memory.html#ug-memory-limitations" in text
     assert "The only way to guarantee" in text
     assert "inherits these limitations" in text
-    assert "same_f=True" in text
+    assert "result.max_batch" in text
     assert "Memory measurement finished in" in text
     assert "bytes per evaluation" in text
     assert "stopped because" in text
@@ -1345,8 +1345,8 @@ def test_integrate_batches_within_measured_max_batch(
     For memory BUDGET / 400 * N^2 the batch is the largest that fits,
     sqrt(400) = 20 points; for an out-of-memory error at N = 10 (after one
     reliable reading, 8 MiB at N = 1) it is the cap, 7. Both are below the 44 points (11 subintervals of bosh3's 4 nodes)
-    the integration needs, so it takes several batches. The batch is stored
-    as previous_max_batch, so a same_f=True call skips the benchmark and
+    the integration needs, so it takes several batches. The batch is returned
+    as result.max_batch, so a call that passes it skips the benchmark and
     keeps to it. The reader counts reused memory, so the largest test call
     does not cap the batch."""
     set_reader(fake.solver, monkeypatch, counts_reuse=True)
@@ -1358,12 +1358,12 @@ def test_integrate_batches_within_measured_max_batch(
     assert len(batches) >= 2
     assert max(batches) <= max_batch
     assert float(result.integral.sum()) == pytest.approx(1.0)
-    assert fake.solver.previous_max_batch == max_batch
+    assert result.max_batch == max_batch
 
     n_first = len(f.calls)
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=qmem.__name__):
-        result = fake.solver.integrate(f, same_f=True, **bounds)
+        result = fake.solver.integrate(f, max_batch=result.max_batch, **bounds)
     assert "PadaQuad is measuring" not in caplog.text
     assert max(f.calls[n_first:]) <= max_batch
     assert float(result.integral.sum()) == pytest.approx(1.0)
@@ -1650,25 +1650,22 @@ def test_slow_model_doubles_to_floor(fake, monkeypatch, seconds, limited, outcom
     assert fake.clock.now <= 60
 
 
-def test_same_f_after_failed_benchmark_measures_again(fake):
+def test_call_after_failed_benchmark_measures_again(fake):
     """A first integrate() whose benchmark fails (an out-of-memory error at
-    N = 10, the only reading, 1 KiB at N = 1, below the floor) raises and
-    stores nothing, but leaves the out-of-memory cap of 7 points on the
-    solver. A later same_f=True call has no stored batch, so it runs the
-    benchmark again, and the cap of the failed call does not limit its batch.
+    N = 10, the only reading, 1 KiB at N = 1, below the floor) raises, but
+    leaves the out-of-memory cap of 7 points on the solver. A later call
+    without max_batch runs the benchmark again, and the cap of the failed
+    call does not limit its batch.
     Catches: not clearing ``_oom_max_batch`` at the start of integrate()."""
     bounds = {"mesh_init": T_INIT, "mesh_final": T_FINAL, "take_gradient": False}
     bad = CostIntegrand(fake.memory, fake.clock, per_point=1024, oom_from=10)
     with pytest.raises(RuntimeError, match="No test call of f used at least"):
         fake.solver.integrate(bad, **bounds)
     assert fake.solver._oom_max_batch == 7
-    assert fake.solver.previous_max_batch is None
     good = CostIntegrand(fake.memory, fake.clock, fixed=8 * 2**20, per_point=1024)
-    result = fake.solver.integrate(good, same_f=True, **bounds)
+    result = fake.solver.integrate(good, **bounds)
     assert good.calls[1:4] == [1, 10, 100]  # after the one-point check
-    assert fake.solver.previous_max_batch == pytest.approx(
-        (BUDGET - 8 * 2**20) / 1024, abs=1
-    )
+    assert result.max_batch == pytest.approx((BUDGET - 8 * 2**20) / 1024, abs=1)
     assert float(result.integral.sum()) == pytest.approx(1.0)
 
 
@@ -1677,9 +1674,10 @@ def test_one_time_cost_of_first_call_absorbed_by_integrate(fake, monkeypatch):
     then uses 1 KiB per point. integrate() calls f once on one point before
     the benchmark, so the benchmark measures 1 KiB per point and the batch is
     about 75 GB / 1 KiB (the reader counts reused memory, so the largest test
-    call does not cap it). Run directly, without that call, the 48 MiB is the
-    only reliable reading and the cautious batch is 39 points. Catches:
-    running the benchmark before integrate()'s one-point call of f."""
+    call does not cap it); get_max_batch(f=...) makes the same call first.
+    Run directly, without that call, the 48 MiB is the only reliable reading
+    and the cautious batch is 39 points. Catches: running the benchmark before
+    the one-point call of f."""
     set_reader(fake.solver, monkeypatch, counts_reuse=True)
 
     def lazy(cost):
@@ -1694,10 +1692,13 @@ def test_one_time_cost_of_first_call_absorbed_by_integrate(fake, monkeypatch):
         return f
 
     cost = CostIntegrand(fake.memory, fake.clock, per_point=1024)
-    fake.solver.integrate(
+    out = fake.solver.integrate(
         lazy(cost), mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
     )
-    assert fake.solver.previous_max_batch == pytest.approx(BUDGET / 1024, abs=1)
+    assert out.max_batch == pytest.approx(BUDGET / 1024, abs=1)
+    # get_max_batch(f=...) makes the same one-point call first.
+    measured = fake.solver.get_max_batch(f=lazy(cost), t=T_INIT, take_gradient=False)
+    assert measured == pytest.approx(BUDGET / 1024, abs=1)
     benchmark(fake.solver, lazy(cost))
     assert fake.solver._get_max_f_evals(0.9) == 39
 
@@ -1941,3 +1942,182 @@ def test_reuse_cap_never_raises_out_of_memory_cap(monkeypatch):
     benchmark(solver, None)
     assert calls == [1, 10]
     assert solver.get_max_batch() == 7 < solver.C
+
+
+# ---------------------------------------------------------------------------
+# get_max_batch(f=..., t=...): the user runs the benchmark and passes the result
+# as max_batch. The benchmark is faked: these tests check the plumbing.
+# ---------------------------------------------------------------------------
+
+_T = torch.tensor([0.0], dtype=torch.float64)
+
+
+def _fake_benchmark(solver, monkeypatch, measured=1234):
+    """Replace the benchmark by a fake that records its calls and returns
+    ``measured``; it also sets a memory fit so integrate() can size batches."""
+    calls = []
+
+    def fake(f, node_test, take_gradient, total_mem_usage, f_args=()):
+        calls.append({"take_gradient": take_gradient, "f_args": f_args})
+        solver.f_mem_coeffs = (0.0, 1e-6, 0.0)
+        return measured
+
+    monkeypatch.setattr(solver, "_setup_memory_checks", fake)
+    return calls
+
+
+def test_get_max_batch_measures_when_given_f(monkeypatch):
+    """With f and t, get_max_batch runs the benchmark once, with the given
+    take_gradient and f_args, clears a stale out-of-memory cap first, and
+    returns the measured batch size."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+    calls = _fake_benchmark(solver, monkeypatch)
+    solver._oom_max_batch = 3
+    seen = []
+
+    def f(t, k):
+        seen.append(len(t))
+        return k * torch.exp(t)
+
+    measured = solver.get_max_batch(f=f, t=_T, take_gradient=False, f_args=(2.0,))
+    assert measured == 1234
+    assert calls == [{"take_gradient": False, "f_args": (2.0,)}]
+    assert seen == [1]  # the one-point output check (warm-up)
+    assert solver._oom_max_batch is None
+
+
+def test_measured_max_batch_skips_the_benchmark_in_integrate(monkeypatch):
+    """A batch size measured once and passed as max_batch skips the benchmark
+    and is returned as result.max_batch."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+    calls = _fake_benchmark(solver, monkeypatch)
+    m = solver.get_max_batch(f=torch.exp, t=_T, take_gradient=False)
+    out = solver.integrate(
+        torch.exp,
+        mesh_init=T_INIT,
+        mesh_final=T_FINAL,
+        max_batch=m,
+        take_gradient=False,
+    )
+    assert len(calls) == 1
+    assert out.max_batch == m
+
+
+def test_result_max_batch_is_the_measured_value(monkeypatch):
+    """Without max_batch, result.max_batch is what the call's benchmark
+    measured, not a new estimate from the memory free at the end of the call."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+    _fake_benchmark(solver, monkeypatch, measured=4321)
+    out = solver.integrate(
+        torch.exp, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
+    )
+    assert out.max_batch == 4321
+
+
+def test_get_max_batch_with_f_ignores_constructor_max_batch(monkeypatch):
+    """A constructor max_batch does not stop the measurement the caller asked for."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu", max_batch=7)
+    calls = _fake_benchmark(solver, monkeypatch)
+    assert solver.get_max_batch(f=torch.exp, t=_T) == 1234
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"f": torch.exp},
+        {"f": torch.exp, "t": torch.tensor([[0.0]])},
+        {"f": torch.exp, "t": 0.0},
+        {"f": torch.exp, "t": torch.tensor([0.0], dtype=torch.float16)},
+        {"f": torch.exp, "t": torch.tensor([0])},
+        {"f": torch.exp, "t": _T, "total_mem_usage": 1.5},
+        {"f": lambda t: torch.exp(t)[:, 0], "t": _T},
+    ],
+    ids=[
+        "no_t",
+        "t_not_1d",
+        "t_not_a_tensor",
+        "t_float16",
+        "t_integer",
+        "total_mem_usage_above_1",
+        "output_not_2d",
+    ],
+)
+def test_get_max_batch_with_f_validates_its_arguments(kwargs, monkeypatch):
+    """f needs a float32 or float64 point t of shape [T] (the dtypes the solver
+    integrates in), needs
+    0 < total_mem_usage <= 1, and must return values of shape [N, D]. The fake
+    benchmark keeps a missing check from running the real one."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+    calls = _fake_benchmark(solver, monkeypatch)
+    with pytest.raises(ValueError, match=r"get_max_batch|total_mem_usage|shape"):
+        solver.get_max_batch(**kwargs)
+    assert calls == []
+
+
+def test_get_max_batch_measures_in_the_dtype_of_t(monkeypatch):
+    """The benchmark runs in t's dtype, not in whatever dtype an earlier call
+    left the solver in, and the solver's dtype is not changed."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+    f32 = {"dtype": torch.float32}
+    solver.integrate(
+        torch.exp,
+        mesh_init=torch.tensor([0.0], **f32),
+        mesh_final=torch.tensor([1.0], **f32),
+        max_batch=10_000,
+        take_gradient=False,
+    )
+    assert solver.dtype == torch.float32
+    seen = []
+
+    def fake(f, node_test, take_gradient, total_mem_usage, f_args=()):
+        seen.append(node_test.dtype)
+        return 1234
+
+    monkeypatch.setattr(solver, "_setup_memory_checks", fake)
+    solver.get_max_batch(f=torch.exp, t=_T)
+    assert seen == [torch.float64]
+    assert solver.dtype == torch.float32
+
+
+def test_integrate_sizes_batches_from_live_memory(monkeypatch):
+    """The measured batch size is only reported: during the integration each
+    batch is sized from the memory free then (here the fit allows far more than
+    the 50 the fake benchmark reports)."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+    _fake_benchmark(solver, monkeypatch, measured=50)
+    sizes = []
+
+    def f(t):
+        sizes.append(len(t))
+        return torch.exp(t)
+
+    out = solver.integrate(f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False)
+    assert max(sizes) > 50
+    assert out.max_batch == 50
+
+
+@pytest.mark.parametrize("value", [0.0, -0.5, 1.5], ids=["zero", "negative", "above_1"])
+@pytest.mark.parametrize("where", ["constructor", "integrate", "get_max_batch"])
+def test_total_mem_usage_outside_0_1_raises(where, value):
+    """total_mem_usage is a fraction in (0, 1]: every entry point raises
+    ValueError (integrate used an assert, which python -O removes; the
+    constructor and get_max_batch() did not check it)."""
+    bounds = {"mesh_init": T_INIT, "mesh_final": T_FINAL, "max_batch": 10_000}
+    with pytest.raises(ValueError, match="total_mem_usage"):
+        if where == "constructor":
+            adaptive_quadrature("uniform", "gk21", device="cpu", total_mem_usage=value)
+        elif where == "integrate":
+            solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+            solver.integrate(torch.exp, total_mem_usage=value, **bounds)
+        else:
+            adaptive_quadrature("uniform", "gk21", device="cpu").get_max_batch(value)
+
+
+def test_get_max_batch_takes_no_default_max_batch():
+    """default_max_batch was removed: it only returned the value passed in
+    (lowered to the out-of-memory cap), which callers can pass to integrate
+    themselves."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu", max_batch=10_000)
+    with pytest.raises(TypeError, match="default_max_batch"):
+        solver.get_max_batch(default_max_batch=5)

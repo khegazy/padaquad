@@ -5,8 +5,8 @@ split evaluation handlers
 (``_evaluate_f_on_split_nodes`` / ``_evaluate_f_on_split_residual_nodes``) are
 supposed to shrink ``max_batch`` and retry the failed batch, caching the new cap
 in ``self._oom_max_batch`` so every later batch stays clamped. The cap is
-cleared at the start of every ``integrate()`` call; ``same_f=True``
-carries it over through the stored ``previous_max_batch``. The reduction
+cleared at the start of every ``integrate()`` call; a later call keeps it
+only when it is passed ``result.max_batch``. The reduction
 repeats until the batch fits or a single
 evaluation (``max_batch == 1``) still fails, at which point an informative error
 is raised.
@@ -232,8 +232,8 @@ class TestSplitHandlersOOM:
         assert cap is not None
         # Every batch that actually fit (didn't OOM) is within the cap.
         assert all(b <= cap for b in oom.batch_sizes if b <= oom.limit)
-        # The get_max_batch clamp (quadrature/memory.py) refuses a larger request.
-        assert solver.get_max_batch(default_max_batch=10**9) == cap
+        # The cap (quadrature/memory.py, _cap_max_batch) lowers a larger request.
+        assert solver._cap_max_batch(10**9) == cap
 
     def test_unfittable_single_eval_raises(self, handler):
         """If even ``max_batch == 1`` OOMs (``limit=0``), the handler raises an
@@ -303,8 +303,9 @@ class TestIntegrateOOMRecovery:
 
     def test_oom_max_batch_reset_between_calls(self):
         """``_oom_max_batch`` is cleared at the start of every ``integrate()``
-        call, even for the same ``f`` object: without ``same_f=True``
-        the solver does not assume the next call has the same footprint."""
+        call, even for the same ``f`` object: unless it is passed
+        ``result.max_batch``, the next call is not assumed to have the same
+        footprint."""
         solver = make_uniform_solver(
             "gk21", atol=1e-6, rtol=1e-6, device="cpu", max_batch=self.BIG_BATCH
         )
@@ -331,11 +332,10 @@ class TestIntegrateOOMRecovery:
         ],
         ids=["constructor", "per_call"],
     )
-    def test_oom_max_batch_kept_for_same_f(self, solver_kwargs, call_kwargs):
-        """With ``same_f=True`` the cap learned on one call (stored as
-        ``previous_max_batch``) clamps the next call even when an explicit
-        ``max_batch`` (constructor or per call) asks for more: no OOM is
-        re-triggered and no batch exceeds the cap."""
+    def test_result_max_batch_carries_the_oom_cap(self, solver_kwargs, call_kwargs):
+        """The cap learned on one call is its ``result.max_batch``; passed to
+        the next call (with the mesh), it overrides a larger constructor
+        ``max_batch``: no OOM is re-triggered and no batch exceeds the cap."""
         solver = make_uniform_solver(
             "gk21", atol=1e-6, rtol=1e-6, device="cpu", **solver_kwargs
         )
@@ -344,19 +344,29 @@ class TestIntegrateOOMRecovery:
             mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False, **call_kwargs
         )
 
-        solver.integrate(oom, **call)
+        first = solver.integrate(oom, **call)
         cap = solver._oom_max_batch
         n_oom, n_before = oom.n_oom, len(oom.batch_sizes)
         assert cap is not None
         assert n_oom >= 1
 
-        assert solver.previous_max_batch == cap
+        assert first.max_batch == cap
+        # get_max_batch() lowers the constructor's max_batch to the cap too
+        # (None without one: no benchmark ran).
+        assert solver.get_max_batch() == (
+            cap if solver.init_max_batch is not None else None
+        )
 
-        result = solver.integrate(oom, same_f=True, **call)
+        result = solver.integrate(
+            oom,
+            mesh=first.mesh_optimal,
+            max_batch=first.max_batch,
+            take_gradient=False,
+        )
 
         assert math.isclose(float(result.integral.sum()), 1.0, abs_tol=1e-5)
         assert oom.n_oom == n_oom, "cap was forgotten: the second call OOM'd again"
         # Only the second call's batches: the first call's record also holds
         # the OOM attempts above the cap.
         assert all(b <= cap for b in oom.batch_sizes[n_before:])
-        assert solver.previous_max_batch == cap
+        assert result.max_batch == cap

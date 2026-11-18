@@ -50,8 +50,8 @@ def adaptive_quadrature(
         ``"gk21"`` (uniform) or ``"interpolatory3_variable"`` (variable).
     **options : Any
         Keyword arguments of the solver's constructor (for example ``atol``,
-        ``rtol``, ``f``, ``mesh_init``, ``mesh_final``, ``max_batch``,
-        ``device``).
+        ``rtol``, ``f``, ``max_batch``, ``device``). The bounds are not
+        constructor options: pass them, or a mesh, to every ``integrate`` call.
 
     Returns
     -------
@@ -68,9 +68,9 @@ def adaptive_quadrature(
 
     Examples
     --------
-    Build the solver once and call it twice on the same integrand. With
-    ``same_f=True`` the second call starts from the mesh the first call ended
-    with and reuses its ``max_batch``.
+    Build the solver once and call it twice on the same integrand. The second
+    call starts from the mesh the first call ended with and reuses its
+    ``max_batch`` (so it skips the memory benchmark), because both are passed.
 
     >>> import torch
     >>> from padaquad import adaptive_quadrature
@@ -83,7 +83,9 @@ def adaptive_quadrature(
     ...     "mesh_final": torch.tensor([1.0], dtype=torch.float64),
     ... }
     >>> first = solver.integrate(lambda t: t**2, max_batch=10_000, **bounds)
-    >>> second = solver.integrate(lambda t: t**2, same_f=True, **bounds)
+    >>> second = solver.integrate(
+    ...     lambda t: t**2, mesh=first.mesh_optimal, max_batch=first.max_batch
+    ... )
     >>> print(round(float(first.integral), 8), round(float(second.integral), 8))
     0.33333333 0.33333333
     """
@@ -124,9 +126,9 @@ def integrate(
     ``take_gradient``, ``max_batch``, ``result_device``), and to the solver's
     constructor otherwise (for example ``atol``, ``rtol``, ``remove_cut``,
     ``merge_rule``, ``use_absolute_error_ratio``, ``device``). Defaults are
-    those of the solver class. A one-call solver has no previous mesh, so
-    ``same_f=True`` has no effect here; use ``adaptive_quadrature`` for
-    repeated calls.
+    those of the solver class. To reuse an earlier result's mesh and batch
+    size, pass ``mesh=result.mesh_optimal`` and ``max_batch=result.max_batch``,
+    as with a solver.
 
     The integrand depends only on the integration variable ``t`` (and on
     ``f_args``), never on the running value of the integral, so the nodes of

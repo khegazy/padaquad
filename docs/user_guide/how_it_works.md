@@ -8,8 +8,8 @@
 (ug-mesh)=
 ## The starting mesh
 
-Without a `mesh` argument, and without a stored mesh from `same_f=True`, the
-starting mesh is built from `N_init_steps`. With
+Without a `mesh` argument, the starting mesh is built from `N_init_steps` on
+the bounds `mesh_init` and `mesh_final`, which are then both required. With
 $s = \lfloor\sqrt{N_\text{init}}\rfloor$, the domain is cut into $s$ equal
 segments, and each segment receives $s + 1$ mesh points: at random positions
 (sorted) by default, or evenly spaced with `random_initial_mesh=False`. The
@@ -23,14 +23,15 @@ estimate can be small while the integral is wrong. Call `torch.manual_seed`
 before integrating to get the same mesh, and so the same result to the last
 digit, on every run.
 
-A given `mesh` must be a tensor of shape `[M, T]` with increasing values from
-`mesh_init` to `mesh_final`.
+A given `mesh` must be a tensor of shape `[M, T]` with at least two increasing
+points. Its ends are the bounds, unless bounds inside it are given, which cut
+it ({ref}`ug-reuse`).
 
 (ug-optimal-mesh)=
 ## The optimal mesh and the merge rule
 
 After the integration converges, padaquad builds `mesh_optimal`, the mesh a
-later call with `same_f=True` starts from. Pairs of neighbouring subintervals
+later call starts from when it is passed as `mesh=` ({ref}`ug-reuse`). Pairs of neighbouring subintervals
 whose merged subinterval is predicted to pass with a margin are merged, so that a
 mesh finer than needed shrinks, and subintervals that failed are split. The
 merged subinterval is not evaluated during this step; the next call evaluates it.

@@ -29,9 +29,10 @@ vector-valued integrands has never been defined or documented.
 
 ## The blocker
 
-`_setup_integral_bounds` (`padaquad/quadrature/base.py`, lines 1834 and 1843) checks
-`assert mesh_init < mesh_final`. For `T = 1` that comparison is one True/False value. For `T = 2`
-it is two, and Python's `assert` raises:
+`_setup_integral_bounds` (`padaquad/quadrature/base.py`) checks
+`if not mesh_init < mesh_final: raise ValueError(...)` (one check since the warm-start bounds fix;
+before it, two `assert` statements). For `T = 1` that comparison is one True/False value. For
+`T = 2` it is two, and taking its truth value raises:
 
 ```python
 import torch
@@ -86,6 +87,6 @@ $\int f\,dx = \int_0^1 2s^2\,ds = 2/3$ and $\int f\,dy = \int_0^1 4s^2\,ds = 4/3
 ## What is needed
 
 1. **Decide what the integral means for `T > 1`.** Options include per-coordinate integrals $\int f\,dx_k$, the scalar line integral $\int f\,|dr|$, or the vector line integral $\int F\cdot dr$. Document the choice, including which `D` are allowed.
-2. **Replace the scalar `mesh_init < mesh_final` asserts with the existing any-T pattern:** require distinct endpoints for any `T`, and require ordering only when `T == 1`.
+2. **Replace the scalar `mesh_init < mesh_final` check with the existing any-T pattern:** require distinct endpoints for any `T`, and require ordering only when `T == 1`.
 3. **Add end-to-end `T = 2` tests** through `integrate()`, with analytic answers, for both sampling types and both `take_gradient` modes, plus one test without `max_batch` to exercise the memory benchmark.
 4. **Fix the `_RK_integral` docstring shapes.**

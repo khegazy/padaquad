@@ -109,6 +109,73 @@ values there). Because `f` depends only on `t`, the solver can evaluate
 the nodes of many subintervals in one call, on a CPU or a GPU.
 
 <!-- include-end: quickstart -->
+## Reusing the mesh and batch size
+<!-- include-start: reuse -->
+
+When you integrate a similar integrand many times, for example once per
+optimizer step of a model, each call can start where the last one ended.
+Every result carries the two things worth reusing:
+
+- `result.mesh_optimal`, the refined mesh, so the next call needs few splits;
+- `result.max_batch`, the batch size, so the next call skips the memory
+  measurement.
+
+Pass them to the next call. The solver keeps nothing between calls: a call
+reuses exactly what you pass, and no call can change what another one reuses.
+
+```python
+import torch
+from padaquad import adaptive_quadrature
+
+solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+a = torch.tensor([0.0], dtype=torch.float64)
+b = torch.tensor([1.0], dtype=torch.float64)
+
+# Measure the batch size once, before any integral (optional: without it,
+# the first call measures it and returns it as result.max_batch).
+max_batch = solver.get_max_batch(f=torch.cos, t=a)
+
+# Training: the same call line for every iteration. The first iteration has
+# no mesh, so a fresh one is built on [a, b].
+mesh = None
+for scale in (1.0, 1.1, 1.2):
+    result = solver.integrate(
+        lambda t, s=scale: torch.cos(s * t),
+        mesh=mesh,
+        mesh_init=a,
+        mesh_final=b,
+        max_batch=max_batch,
+    )
+    mesh, max_batch = result.mesh_optimal, result.max_batch
+
+# Validation on [0, 0.5]: bounds inside the mesh cut it. mesh and max_batch
+# are not reassigned, so the training loop continues unchanged.
+half = solver.integrate(
+    lambda t: torch.cos(1.2 * t), mesh=mesh, mesh_final=b / 2, max_batch=max_batch
+)
+
+# A new interval reuses only the batch size; a fresh mesh is built.
+longer = solver.integrate(
+    lambda t: torch.cos(1.2 * t), mesh_init=a, mesh_final=2 * b, max_batch=max_batch
+)
+print(round(float(result.integral), 4), round(float(half.integral), 4))  # 0.7767 0.4705
+```
+
+| To reuse | Pass |
+|---|---|
+| the mesh and the batch size (same or similar integrand) | `mesh=result.mesh_optimal, max_batch=result.max_batch`, and bounds inside the mesh to integrate part of it |
+| only the batch size (same integrand, another interval or your own mesh) | the bounds or your mesh, and `max_batch=result.max_batch` |
+| a batch size measured before any integral | `max_batch=solver.get_max_batch(f=f, t=t)` |
+| nothing | the bounds, or a mesh |
+
+A call needs a `mesh` or both bounds. Bounds inside the mesh cut it; a bound
+outside it extends it, and the integration refines the new subinterval.
+
+<!-- include-end: reuse -->
+More, including several integrals per step, checkpoints and when not to reuse
+`max_batch`:
+[Reusing the mesh and batch size](https://khegazy.github.io/padaquad/user_guide/repeated_calls.html).
+
 ## Differentiable integration
 <!-- include-start: autodiff -->
 
@@ -158,37 +225,6 @@ the number of integrand evaluations is large enough that the graph would
 otherwise exceed GPU memory.
 
 <!-- include-end: autodiff -->
-## Adaptive mesh and warm-starting
-
-Each call returns a `result.mesh_optimal` — the post-refinement,
-post-pruning mesh that the integration converged to. This mesh is the
-ideal starting point for a *similar* integrand on the next call: when
-training a model, the integrand changes only slightly between iterations,
-so re-running adaptive refinement from a coarse random mesh wastes
-work. The sketch below assumes your own integrand `f_theta`, bounds and
-optimizer.
-
-<!-- not-tested -->
-```python
-solver = adaptive_quadrature(method="gk21", atol=1e-8, rtol=1e-8)
-
-for epoch in range(N_epochs):
-    # same_f=True: from the second iteration on, start from the
-    # previous run's optimal mesh and max_batch (they replace any mesh or
-    # max_batch passed here) and skip the memory benchmark. The first
-    # iteration has nothing stored, so it uses a fresh mesh. The default,
-    # same_f=False, never reuses a stored mesh for a different
-    # integrand.
-    result = solver.integrate(
-        f=f_theta,
-        mesh_init=mesh_init,
-        mesh_final=mesh_final,
-        same_f=True,
-        take_gradient=True,
-    )
-    optimizer.step()
-```
-
 ## Available methods
 
 The library ships thirteen quadrature methods in three families:
@@ -260,8 +296,10 @@ the same text. In short:
   `f_args`, `max_batch`, ...), and to the solver constructor otherwise
   (`atol`, `rtol`, `remove_cut`, `merge_rule`, `device`, ...).
 - `adaptive_quadrature(sampling_type, method, **options)` builds a solver to
-  reuse across calls, for example to warm-start with `same_f=True`. Every
-  constructor option is keyword-only.
+  call many times; pass `mesh=result.mesh_optimal` and
+  `max_batch=result.max_batch` to start a call from an earlier one (see
+  "Reusing the mesh and batch size" above). Every constructor option is
+  keyword-only.
 - Both return an `IntegrationResult`: the integral, its estimated error (a
   signed sum over subintervals), the mesh, and diagnostics such as
   `converged`, `mesh_optimal` and the split statistics.
@@ -295,8 +333,9 @@ the same text. In short:
    splitting (then `converged` is usually `False`).
 
 5. **Optimal mesh.** After convergence, pairs of neighbouring subintervals are
-   merged into `mesh_optimal`, which `same_f=True` starts from on the next
-   call, when the merged subinterval is predicted to pass with a margin. By
+   merged into `mesh_optimal`, which a later call starts from when it is
+   passed as `mesh=`, when the merged subinterval is predicted to pass with a
+   margin. By
    default the prediction interpolates the integrand values already stored for
    the two neighbours onto the merged subinterval's nodes, so no new
    evaluation is needed; `remove_cut` sets the margin and `merge_rule` the

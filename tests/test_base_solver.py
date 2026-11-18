@@ -1,4 +1,4 @@
-"""Unit tests for SolverBase methods: _set_dtype, set_dtype_by_input, _check_variables, _integral_loss, device selection."""
+"""Unit tests for SolverBase methods: _set_dtype, set_dtype_by_input, _check_variables (with the bound defaults of _setup_integral_bounds), _integral_loss, device selection."""
 
 from __future__ import annotations
 
@@ -101,30 +101,6 @@ class TestSetDtype:
         finally:
             _restore_tableau("bosh3", saved)
 
-    def test_converts_t_init_t_final(self):
-        """mesh_init and mesh_final dtype match after conversion."""
-        saved = _save_tableau("bosh3")
-        solver = make_solver_for_unit_test()
-        try:
-            solver._set_dtype(torch.float32)
-            assert solver.init_mesh_init.dtype == torch.float32
-            assert solver.init_mesh_final.dtype == torch.float32
-        finally:
-            _restore_tableau("bosh3", saved)
-
-    def test_converts_cached_barriers(self):
-        """mesh_previous is converted if set."""
-        saved = _save_tableau("bosh3")
-        solver = make_solver_for_unit_test()
-        solver.mesh_previous = torch.linspace(0, 1, 5, dtype=torch.float64).unsqueeze(
-            -1
-        )
-        try:
-            solver._set_dtype(torch.float32)
-            assert solver.mesh_previous.dtype == torch.float32
-        finally:
-            _restore_tableau("bosh3", saved)
-
 
 # ---------------------------------------------------------------------------
 # set_dtype_by_input
@@ -189,16 +165,17 @@ class TestSetDtypeByInput:
         finally:
             _restore_tableau("bosh3", saved)
 
-    def test_integrate_infers_dtype_from_mesh_final_only(self):
-        """integrate() given only mesh_final adopts mesh_final's dtype.
+    def test_integrate_infers_dtype_from_bounds(self):
+        """integrate() given float32 bounds on a float64 solver runs in float32.
 
         Goes through integrate(), not set_dtype_by_input directly: integrate()
-        used to pass mesh_final=mesh_init, so a float32 mesh_final on a float64
-        solver was ignored and the integral ran in float64.
+        once passed mesh_final=mesh_init, so a float32 mesh_final was ignored.
+        A call now needs both bounds (or a mesh), so both are float32 here.
         """
         solver = make_solver_for_unit_test()  # float64
         result = solver.integrate(
             constant_integrand,
+            mesh_init=torch.tensor([0.0], dtype=torch.float32),
             mesh_final=torch.tensor([2.0], dtype=torch.float32),
             max_batch=10000,
         )
@@ -213,18 +190,17 @@ class TestSetDtypeByInput:
 
 
 class TestCheckVariables:
-    """Tests for SolverBase._check_variables: default filling and type conversion."""
+    """Tests for the defaults of a call: SolverBase._check_variables (f, y0) and
+    AdaptiveQuadrature._setup_integral_bounds (the bounds), with dtype
+    conversion."""
 
     def test_fills_defaults(self):
-        """All None tensor args are replaced with stored defaults."""
+        """None f and y0 are the constructor's; bounds have no default."""
         solver = make_solver_for_unit_test()
-        _f, mesh_init, mesh_final, y0 = solver._check_variables(f=torch.sin)
-        assert mesh_init is not None
-        assert mesh_final is not None
-        assert y0 is not None
-        assert torch.equal(mesh_init, solver.init_mesh_init)
-        assert torch.equal(mesh_final, solver.init_mesh_final)
+        _f, y0 = solver._check_variables(f=torch.sin)
         assert torch.equal(y0, solver.init_y0)
+        with pytest.raises(ValueError, match="mesh_init and mesh_final"):
+            solver._setup_integral_bounds(None, None, None)
 
     def test_overrides_with_args(self):
         """Explicit args override stored defaults."""
@@ -233,11 +209,9 @@ class TestCheckVariables:
         custom_t_final = torch.tensor([5.0], dtype=torch.float64)
         custom_y0 = torch.tensor([10.0], dtype=torch.float64)
 
-        _, mesh_init, mesh_final, y0 = solver._check_variables(
-            f=torch.sin,
-            mesh_init=custom_t_init,
-            mesh_final=custom_t_final,
-            y0=custom_y0,
+        _, y0 = solver._check_variables(f=torch.sin, y0=custom_y0)
+        _, mesh_init, mesh_final = solver._setup_integral_bounds(
+            None, custom_t_init, custom_t_final
         )
         assert torch.equal(mesh_init, custom_t_init)
         assert torch.equal(mesh_final, custom_t_final)
@@ -247,8 +221,13 @@ class TestCheckVariables:
         """Tensors are converted to solver's dtype."""
         solver = make_solver_for_unit_test()
         t_init_f32 = torch.tensor([0.0], dtype=torch.float32)
-        _, mesh_init, _, _ = solver._check_variables(f=torch.sin, mesh_init=t_init_f32)
+        y0_f32 = torch.tensor([1.0], dtype=torch.float32)
+        _, mesh_init, _ = solver._setup_integral_bounds(
+            None, t_init_f32, torch.tensor([1.0], dtype=torch.float32)
+        )
+        _, y0 = solver._check_variables(f=torch.sin, y0=y0_f32)
         assert mesh_init.dtype == torch.float64
+        assert y0.dtype == torch.float64
 
     def test_missing_f_raises(self):
         """No integrand here or at construction raises ValueError."""
@@ -261,7 +240,7 @@ class TestCheckVariables:
         """f=None uses the integrand given at construction."""
         solver = make_solver_for_unit_test()
         solver.init_f = torch.sin
-        f, _, _, _ = solver._check_variables()
+        f, _ = solver._check_variables()
         assert f is torch.sin
 
 

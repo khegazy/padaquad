@@ -79,8 +79,9 @@ rounding floor
   splitting once the error is at rounding level.
 
 warm start
-  Starting an integration from the mesh the previous integration ended with,
-  instead of a fresh one. Requested with `same_f=True`.
+  Starting an integration from the mesh an earlier integration ended with,
+  instead of a fresh one: pass its `mesh_optimal` as `mesh=` (usually with its
+  `max_batch`).
 
 uniform sampling
   The nodes of every subinterval sit at the method's fixed node fractions, so

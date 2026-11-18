@@ -2,8 +2,8 @@
 
 ``IntegrationResult`` reports how much adaptive refinement a call needed:
 
-  - ``n_start_steps``: steps in the starting mesh (given, stored by
-    ``same_f=True``, or freshly generated);
+  - ``n_start_steps``: steps in the starting mesh (given, possibly cut to
+    the bounds, or freshly generated);
   - ``n_start_steps_split``: starting steps split at least once;
   - ``percent_start_steps_split``: ``100 * n_start_steps_split / n_start_steps``;
   - ``max_split_depth``: the largest number of times any one step was halved.
@@ -132,17 +132,19 @@ def test_statistics_are_consistent_with_the_mesh(sampling, method, seed, take_gr
         assert out.h.shape[0] == out.n_start_steps
 
 
-def test_statistics_count_the_filtered_stored_mesh():
-    """With same_f=True on a shorter interval, the starting mesh is the stored
-    mesh filtered to [0, 0.5] and padded with the new end point."""
+def test_statistics_count_the_cut_mesh():
+    """Given an earlier mesh_optimal and a shorter interval, the starting mesh
+    is that mesh cut to [0, 0.5] and padded with the new end point."""
     solver = _gk21_solver(max_batch=BIG_BATCH)
     f = lambda t, *_: torch.sin(3 * t)  # noqa: E731
     torch.manual_seed(0)
-    solver.integrate(f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False)
-    stored = solver.mesh_previous[:, 0].cpu()
+    cold = solver.integrate(
+        f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
+    )
+    stored = cold.mesh_optimal[:, 0].cpu()
     half = torch.tensor([0.5], dtype=torch.float64)
     out = solver.integrate(
-        f=f, same_f=True, mesh_init=T_INIT, mesh_final=half, take_gradient=False
+        f=f, mesh=cold.mesh_optimal, mesh_final=half, take_gradient=False
     )
     n_inside = int(((stored > 0.0) & (stored < 0.5)).sum())
     assert out.n_start_steps == n_inside + 1
@@ -223,8 +225,9 @@ def test_numpy_integer_max_adaptive_splits_is_accepted():
 
 def test_capped_call_then_warm_starts_converge():
     """A cap of 1 stops refinement of sin(20 t) on [0, 4] short of the
-    tolerance; repeated same_f=True calls refine from mesh_optimal and reach
-    convergence, and an uncapped call on the same solver is accurate."""
+    tolerance; repeated calls from the previous mesh_optimal and max_batch,
+    as the not-converged warning advises, stay on [0, 4], refine further and
+    reach convergence, and an uncapped call on the same solver is accurate."""
     bounds = {
         "mesh_init": T_INIT,
         "mesh_final": torch.tensor([4.0], dtype=torch.float64),
@@ -242,10 +245,17 @@ def test_capped_call_then_warm_starts_converge():
     assert first.max_split_depth == 1
 
     results = [first]
+    out = first
     for _ in range(6):
         out = solver.integrate(
-            f=sharp, same_f=True, take_gradient=False, max_adaptive_splits=1, **bounds
+            f=sharp,
+            mesh=out.mesh_optimal,
+            max_batch=out.max_batch,
+            take_gradient=False,
+            max_adaptive_splits=1,
         )
+        assert torch.equal(out.mesh_init.cpu(), bounds["mesh_init"])
+        assert torch.equal(out.mesh_final.cpu(), bounds["mesh_final"])
         results.append(out)
         if out.converged:
             break
@@ -483,6 +493,7 @@ def test_warning_reports_the_size_of_the_error(caplog, take_gradient):
     assert f"|integral| = {abs_integral:.3g} (" in message
     assert "raise max_adaptive_splits" in message
     assert ("take_gradient=False" in message) is take_gradient
+    assert "mesh=result.mesh_optimal" in message
 
 
 def test_warning_separates_failing_from_all_steps(caplog):

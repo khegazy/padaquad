@@ -137,6 +137,7 @@ class TestIntegrationResultFields:
             "n_start_steps",
             "n_start_steps_split",
             "max_split_depth",
+            "max_batch",
             "percent_start_steps_split",
         ):
             assert hasattr(r, name), f"IntegrationResult missing field {name!r}"

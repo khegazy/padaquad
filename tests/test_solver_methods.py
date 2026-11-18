@@ -225,8 +225,6 @@ class TestConstructorSignature:
             method="DOPRI5",
             atol=1e-7,
             rtol=1e-6,
-            mesh_init=_LO,
-            mesh_final=_HI,
             y0=torch.tensor([2.0], dtype=torch.float64),
             remove_cut=0.05,
             max_batch=1000,
@@ -291,7 +289,6 @@ class TestIntegrateRouting:
     @pytest.mark.parametrize(
         "option",
         [
-            {"same_f": True},
             {"N_init_steps": 5},
             {"loss_fxn": lambda r: r.integral.sum()},
             {"random_initial_mesh": False},

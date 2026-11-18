@@ -30,8 +30,9 @@ it ({ref}`ug-reuse`).
 (ug-optimal-mesh)=
 ## The optimal mesh and the merge rule
 
-After the integration converges, padaquad builds `mesh_optimal`, the mesh a
-later call starts from when it is passed as `mesh=` ({ref}`ug-reuse`). Pairs of neighbouring subintervals
+After the integration converges, padaquad builds the optimal mesh,
+`state.mesh`, the mesh a later call starts from when the state is passed as
+`state=` ({ref}`ug-reuse`). Pairs of neighbouring subintervals
 whose merged subinterval is predicted to pass with a margin are merged, so that a
 mesh finer than needed shrinks, and subintervals that failed are split. The
 merged subinterval is not evaluated during this step; the next call evaluates it.

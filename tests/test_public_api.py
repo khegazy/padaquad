@@ -69,7 +69,7 @@ class TestOdePathIntegralEntryPoint:
     """The free function `integrate` works for the simplest case."""
 
     def test_simple_sine_integral(self, take_gradient):
-        result = integrate(
+        result, _ = integrate(
             f=torch.sin,
             method="dopri5",
             atol=1e-8,
@@ -84,7 +84,7 @@ class TestOdePathIntegralEntryPoint:
 
     def test_constant_integral(self, take_gradient):
         # int_0^1 1 dt = 1
-        result = integrate(
+        result, _ = integrate(
             f=torch.ones_like,
             method="bosh3",
             atol=1e-10,
@@ -113,14 +113,13 @@ class TestIntegrationResultFields:
             mesh_init=torch.tensor([0.0], dtype=torch.float64),
             mesh_final=torch.tensor([math.pi], dtype=torch.float64),
             take_gradient=take_gradient,
-        )
+        )[0]
 
     def test_documented_fields_present(self, take_gradient):
         r = self._run(take_gradient)
         for name in (
             "integral",
             "integral_error",
-            "mesh_optimal",
             "mesh_init",
             "mesh_final",
             "nodes",
@@ -137,7 +136,6 @@ class TestIntegrationResultFields:
             "n_start_steps",
             "n_start_steps_split",
             "max_split_depth",
-            "max_batch",
             "percent_start_steps_split",
         ):
             assert hasattr(r, name), f"IntegrationResult missing field {name!r}"
@@ -153,7 +151,7 @@ class TestIntegrationResultFields:
         def f(t):
             return torch.sin(t), (t**2,)
 
-        r = integrate(
+        r, _ = integrate(
             f=f,
             method="dopri5",
             atol=1e-8,

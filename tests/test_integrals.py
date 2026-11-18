@@ -35,14 +35,14 @@ class TestUniformIntegralAccuracy:
         correct = solution_fxn(mesh_init=T_INIT, mesh_final=T_FINAL)
         torch.manual_seed(SEED)
         solver = make_uniform_solver(method_name, atol=ATOL_TIGHT, rtol=RTOL_TIGHT)
-        output = solver.integrate(
+        output, state = solver.integrate(
             f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=take_gradient
         )
-        return output, correct, cutoff
+        return output, correct, cutoff, state
 
     def test_integral_value(self, method_name, integrand_name, take_gradient):
         """Computed integral matches the analytical solution within the error cutoff."""
-        output, correct, cutoff = self._integrate(
+        output, correct, cutoff, _ = self._integrate(
             method_name, integrand_name, take_gradient
         )
         rel_error = torch.abs((output.integral.cpu() - correct) / correct)
@@ -54,15 +54,15 @@ class TestUniformIntegralAccuracy:
 
     def test_time_ordering(self, method_name, integrand_name, take_gradient):
         """All time points in the integration output are non-decreasing."""
-        output, _, _ = self._integrate(method_name, integrand_name, take_gradient)
+        output, _, _, _ = self._integrate(method_name, integrand_name, take_gradient)
         assert_time_ordering(output)
 
     def test_optimal_mesh_ordering(self, method_name, integrand_name, take_gradient):
         """Optimal mesh time points are non-decreasing."""
-        output, _, _ = self._integrate(method_name, integrand_name, take_gradient)
-        assert_optimal_mesh_ordering(output)
+        _, _, _, state = self._integrate(method_name, integrand_name, take_gradient)
+        assert_optimal_mesh_ordering(state.mesh)
 
     def test_step_continuity(self, method_name, integrand_name, take_gradient):
         """Consecutive integration steps share boundary points."""
-        output, _, _ = self._integrate(method_name, integrand_name, take_gradient)
+        output, _, _, _ = self._integrate(method_name, integrand_name, take_gradient)
         assert_step_continuity(output)

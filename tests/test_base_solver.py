@@ -173,7 +173,7 @@ class TestSetDtypeByInput:
         A call now needs both bounds (or a mesh), so both are float32 here.
         """
         solver = make_solver_for_unit_test()  # float64
-        result = solver.integrate(
+        result, _ = solver.integrate(
             constant_integrand,
             mesh_init=torch.tensor([0.0], dtype=torch.float32),
             mesh_final=torch.tensor([2.0], dtype=torch.float32),
@@ -356,7 +356,7 @@ class TestDeviceSelection:
             return f(t)
 
         solver = make_uniform_solver("gk21", device=device)
-        result = solver.integrate(
+        result, _ = solver.integrate(
             f_on_device,
             mesh_init=T_INIT,
             mesh_final=T_FINAL,

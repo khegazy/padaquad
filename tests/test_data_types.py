@@ -43,17 +43,17 @@ class TestDtypeHandling:
             cutoff = np.sqrt(cutoff)
 
         solver = make_uniform_solver(method_name, atol=ATOL_MED, rtol=RTOL_MED)
-        output = solver.integrate(
+        output, state = solver.integrate(
             f,
             mesh_init=torch.tensor([0], dtype=dtype),
             mesh_final=torch.tensor([1], dtype=dtype),
             take_gradient=take_gradient,
         )
-        return output, correct, cutoff
+        return output, correct, cutoff, state
 
     def test_integral_accuracy(self, method_name, dtype, take_gradient):
         """Integral is accurate at both float32 and float64 precision."""
-        output, correct, cutoff = self._integrate(method_name, dtype, take_gradient)
+        output, correct, cutoff, _ = self._integrate(method_name, dtype, take_gradient)
         rel_error = torch.abs((output.integral.cpu() - correct) / correct)
         assert rel_error < cutoff, (
             f"{method_name} ({dtype}) failed on {INTEGRAND_NAME}: "
@@ -63,15 +63,15 @@ class TestDtypeHandling:
 
     def test_time_ordering(self, method_name, dtype, take_gradient):
         """Time points are non-decreasing regardless of dtype."""
-        output, _, _ = self._integrate(method_name, dtype, take_gradient)
+        output, _, _, _ = self._integrate(method_name, dtype, take_gradient)
         assert_time_ordering(output)
 
     def test_optimal_mesh_ordering(self, method_name, dtype, take_gradient):
         """Optimal mesh is non-decreasing regardless of dtype."""
-        output, _, _ = self._integrate(method_name, dtype, take_gradient)
-        assert_optimal_mesh_ordering(output)
+        _, _, _, state = self._integrate(method_name, dtype, take_gradient)
+        assert_optimal_mesh_ordering(state.mesh)
 
     def test_step_continuity(self, method_name, dtype, take_gradient):
         """Consecutive steps share boundary points regardless of dtype."""
-        output, _, _ = self._integrate(method_name, dtype, take_gradient)
+        output, _, _, _ = self._integrate(method_name, dtype, take_gradient)
         assert_step_continuity(output)

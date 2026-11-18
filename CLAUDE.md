@@ -122,7 +122,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_convergence_rate.py` | Empirical convergence-rate slope matches each method's theoretical rate |
 | `test_autodiff_consistency.py` | $\nabla_\theta\int f_\theta dt$ via backprop equals $\int \nabla_\theta f_\theta dt$ |
 | `test_error_indicator.py` | Behavior of absolute vs cumulative error indicators (Bug B8 investigation) |
-| `test_bug_regressions.py` | Regression tests for bugs B4, B6 fixed in Phase 1; reuse by passing `mesh_optimal` / `max_batch` (no state on the solver, `same_f` and constructor bounds gone); the interval rules (bounds required, cut, outside extends, rounding snap, one-ULP cut, mesh validation, keyword-only options) |
+| `test_bug_regressions.py` | Regression tests for bugs B4, B6 fixed in Phase 1; reuse by passing the returned state (no state on the solver, `same_f` and constructor bounds gone); the interval rules (bounds required, cut, outside extends, rounding snap, one-ULP cut, mesh validation, keyword-only options) |
 | `test_snapshots.py` | Golden-value regression net for the file-split refactor; CPU-only float64 |
 | `test_public_api.py` | Smoke test of every public symbol and `IntegrationResult` fields |
 | `test_rk_integral.py` | `_RK_integral`: constant / linear / multi-step / multi-dim / zero-width / variable-b inputs |
@@ -136,7 +136,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed error ratios, midpoint placement |
 | `test_record_and_sort.py` | `_record_results` and `_sort_record` |
 | `test_evaluate_and_merge.py` | `_evaluate_adaptive_nodes` + `_merge_excess_nodes` for both uniform and variable solvers |
-| `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: `mesh_optimal` re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
+| `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: the state's mesh re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
 | `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
 | `test_error_integral_reference.py` | The `error_integral_reference` argument of `integrate()` |
@@ -285,7 +285,7 @@ is a boolean array where `True` means the panel still needs evaluation.
    ~$\sqrt{N_\text{init}}$ evenly-spaced top-level segments with random
    sub-barriers (random by default — uniform aliases on
    uniform-feature integrands). With a `mesh` (for example an earlier
-   result's `mesh_optimal`), start from it, cut to any bounds inside it
+   call's `state.mesh`), start from it, cut to any bounds inside it
    (`_setup_integral_bounds`).
 2. **Main loop.** While any `mesh_trackers` are `True`:
    - Size the next call of `f` with `_batch_for` (the call's batch size, or
@@ -307,7 +307,7 @@ is a boolean array where `True` means the panel still needs evaluation.
    judge every recorded step against the final integral with
    `_record_error_check` (the same helper the in-loop re-check uses) to set
    `converged`, logging `_warn_not_converged` when it is `False` (a NaN/Inf
-   error counts as failing); then compute `mesh_optimal` via
+   error counts as failing); then compute the optimal mesh (`state.mesh`) via
    `_get_optimal_mesh` (prune low-error pairs, refine
    high-error gaps), returned for the caller to pass to a later call.
 
@@ -415,9 +415,8 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   `_batch_for(n_waiting)` sizes every call of `f`: `min(n_waiting, B)` if
   converged, else `min(n_waiting, 10 B)` (`_GROWTH`); `_evaluate_f_in_batches`
   raises `_batch` after each call that ran and, on OOM, sets it to
-  `_shrink_batch(failed)`, converged. Returned as `result.max_batch`,
-  `result.max_batch_converged`; `result.state` is a property built from them
-  and `mesh_optimal`.
+  `_shrink_batch(failed)`, converged. `integrate` returns `(result, IntegrationState(mesh_optimal,
+  _batch, _batch_converged))`; the result has no mesh_optimal or max_batch.
 - **`take_gradient=True`** (`_evaluate_f_on_full_nodes`, one batch per loop
   turn): a forward OOM drops the outputs and retries with fewer
   subintervals; on a GPU, when `f`'s output requires grad, the check
@@ -534,7 +533,7 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 - The solver keeps no warm-start state between calls (`same_f`,
   `mesh_previous`, `previous_max_batch` and the constructor's bounds were
   removed). A call reuses an earlier one only through what it is passed:
-  `state=result.state` (its mesh is `mesh_optimal`, detached, on the solver's
+  `state=state`, the second value `integrate` returns (its mesh is the optimal mesh, detached, on the solver's
   device, ends equal to the bounds bit for bit; its batch size and converged
   flag), or `mesh=` / `max_batch=` directly. `mesh=` with `state=` raises.
 - Interval rules, all in `_setup_integral_bounds` (returns

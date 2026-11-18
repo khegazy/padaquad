@@ -142,7 +142,7 @@ def run_once(solver: str, f: CountingIntegrand, tol: float, device: str) -> floa
         )
         return float(y[-1, 0])
     method = solver.split()[1]
-    result = padaquad.integrate(
+    result, _ = padaquad.integrate(
         f,
         method,
         atol=tol,

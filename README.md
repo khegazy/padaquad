@@ -93,7 +93,7 @@ import math
 import torch
 from padaquad import integrate
 
-result = integrate(
+result, state = integrate(
     torch.sin,
     mesh_init=torch.tensor([0.0], dtype=torch.float64),
     mesh_final=torch.tensor([math.pi], dtype=torch.float64),
@@ -114,14 +114,16 @@ the nodes of many subintervals in one call, on a CPU or a GPU.
 
 When you integrate a similar integrand many times, for example once per
 optimizer step of a model, each call can start where the last one ended.
-Every result carries a `state` with what is worth reusing:
+Every call returns, beside its result, a `state` with what is worth reusing:
+`result, state = solver.integrate(...)`.
 
-- `state.mesh`, the refined mesh (`result.mesh_optimal`), so the next call
-  needs few splits;
+- `state.mesh`, the optimal mesh (the final mesh with low-error subintervals
+  merged), so the next call needs few splits;
 - `state.max_batch`, the batch size (the most points per call of the
-  integrand known to fit), and whether it may still grow.
+  integrand known to fit), and `state.max_batch_converged`, whether it may
+  still grow.
 
-Pass it to the next call as `state=result.state`. The solver keeps nothing
+Pass it to the next call as `state=state`. The solver keeps nothing
 between calls: a call reuses exactly what you pass, and no call can change what
 another one reuses.
 
@@ -135,20 +137,20 @@ b = torch.tensor([1.0], dtype=torch.float64)
 
 # Training: the first iteration builds a fresh mesh on [a, b]; every later
 # one starts from the state of the one before.
-result = solver.integrate(lambda t: torch.cos(t), mesh_init=a, mesh_final=b)
+result, state = solver.integrate(lambda t: torch.cos(t), mesh_init=a, mesh_final=b)
 for scale in (1.1, 1.2):
-    result = solver.integrate(lambda t, s=scale: torch.cos(s * t), state=result.state)
+    result, state = solver.integrate(lambda t, s=scale: torch.cos(s * t), state=state)
 
-# Validation on [0, 0.5]: a bound inside the state's mesh cuts it. result is
+# Validation on [0, 0.5]: a bound inside the state's mesh cuts it. state is
 # not reassigned, so the training loop continues unchanged.
-half = solver.integrate(lambda t: torch.cos(1.2 * t), state=result.state, mesh_final=b / 2)
+half, _ = solver.integrate(lambda t: torch.cos(1.2 * t), state=state, mesh_final=b / 2)
 print(round(float(result.integral), 4), round(float(half.integral), 4))  # 0.7767 0.4705
 ```
 
 | To reuse | Pass |
 |---|---|
-| the mesh and the batch size (same or similar integrand) | `state=result.state`, and bounds inside its mesh to integrate part of it |
-| only the batch size (another interval or your own mesh) | the bounds or your mesh, and `max_batch=result.max_batch` (then fixed) |
+| the mesh and the batch size (same or similar integrand) | `state=state`, and bounds inside its mesh to integrate part of it |
+| only the batch size (another interval or your own mesh) | the bounds or your mesh, and `max_batch=state.max_batch` (then fixed), or `state=dataclasses.replace(state, mesh=None)` with the bounds |
 | nothing | the bounds, or a mesh |
 
 A call needs a `mesh`, a `state` with a mesh, or both bounds. Bounds inside the
@@ -197,7 +199,7 @@ print(theta.grad)  # 2.0
 
 # (B) Integrate the gradient of the integrand directly.
 df_dtheta = lambda t: torch.sin(t)  # closed-form derivative
-out_b = solver.integrate(f=df_dtheta, mesh_init=mesh_init, mesh_final=mesh_final)
+out_b, _ = solver.integrate(f=df_dtheta, mesh_init=mesh_init, mesh_final=mesh_final)
 print(out_b.integral)  # also 2.0
 ```
 
@@ -282,13 +284,15 @@ the same text. In short:
   `f_args`, `max_batch`, ...), and to the solver constructor otherwise
   (`atol`, `rtol`, `remove_cut`, `merge_rule`, `device`, ...).
 - `adaptive_quadrature(sampling_type, method, **options)` builds a solver to
-  call many times; pass `state=result.state` to start a call from an
-  earlier one (see
+  call many times; pass `state=state` to start a call from an earlier
+  one (see
   "Reusing the mesh and batch size" above). Every constructor option is
   keyword-only.
-- Both return an `IntegrationResult`: the integral, its estimated error (a
-  signed sum over subintervals), the mesh, and diagnostics such as
-  `converged`, `mesh_optimal` and the split statistics.
+- Both return a pair `result, state`. The `IntegrationResult` holds the
+  integral, its estimated error (a signed sum over subintervals), the mesh,
+  and diagnostics such as `converged` and the split statistics; the
+  `IntegrationState` holds the optimal mesh and the batch size for the next
+  call.
 
 ## How it works
 <!-- include-start: how-it-works -->
@@ -319,8 +323,8 @@ the same text. In short:
    splitting (then `converged` is usually `False`).
 
 5. **Optimal mesh.** After convergence, pairs of neighbouring subintervals are
-   merged into `mesh_optimal`, which a later call starts from when it is
-   passed as `mesh=`, when the merged subinterval is predicted to pass with a
+   merged into the state's mesh, which a later call starts from when it is
+   passed as `state=`, when the merged subinterval is predicted to pass with a
    margin. By
    default the prediction interpolates the integrand values already stored for
    the two neighbours onto the merged subinterval's nodes, so no new

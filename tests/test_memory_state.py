@@ -4,7 +4,7 @@ Without ``max_batch`` or a ``state``, ``integrate`` calls ``f`` on 10, 100, ...
 copies of one point, up to the order of its first pass, and starts from the
 largest that ran. While the batch size has not converged, a call of ``f`` that
 needs more points tries 10 times as many; an out-of-memory error shrinks it by
-0.75 and makes it converged. ``result.state`` carries the mesh and the batch
+0.75 and makes it converged. ``result_state`` carries the mesh and the batch
 size to the next call. With ``take_gradient=True`` an out-of-memory error in a
 backward pass puts back the gradients the call added (found by walking each
 batch's autograd graph) and restarts the integral, or raises
@@ -81,13 +81,13 @@ def test_test_calls_stop_at_the_order_of_the_first_pass(
     memory benchmark runs and none of its messages is logged."""
     f = Recorder()
     with caplog.at_level(logging.WARNING):
-        result = solver().integrate(
+        result, result_state = solver().integrate(
             f, mesh=even_mesh(n_subintervals), take_gradient=False
         )
     first_pass = 23 * n_subintervals
     assert f.sizes[: len(test_calls) + 2] == [1, *test_calls, first_pass]
-    assert result.max_batch >= first_pass
-    assert not result.max_batch_converged
+    assert result_state.max_batch >= first_pass
+    assert not result_state.max_batch_converged
     assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
     assert "measuring how much memory" not in caplog.text
 
@@ -97,10 +97,12 @@ def test_failed_test_call_shrinks_until_one_runs():
     at 75 and 56 points; 56 runs and becomes the converged batch size. No
     larger test call follows, and every later batch is at most 56 points."""
     f = Recorder(limit=60)
-    result = solver().integrate(f, mesh_init=A, mesh_final=B, take_gradient=False)
+    result, result_state = solver().integrate(
+        f, mesh_init=A, mesh_final=B, take_gradient=False
+    )
     assert f.sizes[:5] == [1, 10, 100, 75, 56]
     assert max(f.sizes[5:]) <= 56
-    assert (result.max_batch, result.max_batch_converged) == (56, True)
+    assert (result_state.max_batch, result_state.max_batch_converged) == (56, True)
     assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
 
 
@@ -113,22 +115,25 @@ def test_batch_grows_tenfold_per_call_until_out_of_memory(conserve_memory):
     the right integral."""
     state = IntegrationState(even_mesh(500), 100, False)
     f = Recorder()
-    result = solver().integrate(
+    result, result_state = solver().integrate(
         f, state=state, take_gradient=False, conserve_memory=conserve_memory
     )
     assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
     if not conserve_memory:
         assert f.sizes[1:4] == [1000, 10000, 500]
-        assert (result.max_batch, result.max_batch_converged) == (10000, False)
+        assert (result_state.max_batch, result_state.max_batch_converged) == (
+            10000,
+            False,
+        )
 
     f = Recorder(limit=3000)
-    result = solver().integrate(
+    result, result_state = solver().integrate(
         f, state=state, take_gradient=False, conserve_memory=conserve_memory
     )
     assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
-    assert result.max_batch_converged
-    assert result.max_batch <= 3000
-    assert max(n for n in f.sizes if n <= 3000) == result.max_batch
+    assert result_state.max_batch_converged
+    assert result_state.max_batch <= 3000
+    assert max(n for n in f.sizes if n <= 3000) == result_state.max_batch
 
 
 def test_given_max_batch_is_fixed_and_converged():
@@ -136,34 +141,38 @@ def test_given_max_batch_is_fixed_and_converged():
     (no test calls, no growth) and returned as converged; given with a state,
     it replaces the state's."""
     f = Recorder()
-    result = solver().integrate(
+    result, result_state = solver().integrate(
         f, mesh=even_mesh(46), max_batch=50, take_gradient=False
     )
     assert f.sizes[0] == 1
     assert max(f.sizes[1:]) <= 50
-    assert (result.max_batch, result.max_batch_converged) == (50, True)
+    assert (result_state.max_batch, result_state.max_batch_converged) == (50, True)
     f = Recorder()
-    result = solver(max_batch=40).integrate(f, mesh=even_mesh(46), take_gradient=False)
+    result, result_state = solver(max_batch=40).integrate(
+        f, mesh=even_mesh(46), take_gradient=False
+    )
     assert max(f.sizes[1:]) <= 40
-    assert result.max_batch_converged
+    assert result_state.max_batch_converged
     f = Recorder()
     state = IntegrationState(even_mesh(46), 5000, False)
-    result = solver().integrate(f, state=state, max_batch=30, take_gradient=False)
+    result, result_state = solver().integrate(
+        f, state=state, max_batch=30, take_gradient=False
+    )
     assert max(f.sizes[1:]) <= 30
-    assert (result.max_batch, result.max_batch_converged) == (30, True)
+    assert (result_state.max_batch, result_state.max_batch_converged) == (30, True)
 
 
 def test_state_carries_mesh_and_batch_size_to_the_next_call():
     """The next call starts from the state's mesh and batch size: no test
     calls, and its first pass covers the mesh's subintervals. The state's
     batch size beats the constructor's max_batch."""
-    first = solver().integrate(
+    first, first_state = solver().integrate(
         Recorder(), mesh_init=A, mesh_final=B, take_gradient=False
     )
     f = Recorder()
-    second = solver(max_batch=7).integrate(f, state=first.state, take_gradient=False)
-    assert second.n_start_steps == len(first.mesh_optimal) - 1
-    assert f.sizes[1] == min(23 * second.n_start_steps, 10 * first.max_batch)
+    second, _ = solver(max_batch=7).integrate(f, state=first_state, take_gradient=False)
+    assert second.n_start_steps == len(first_state.mesh) - 1
+    assert f.sizes[1] == min(23 * second.n_start_steps, 10 * first_state.max_batch)
     assert math.isclose(float(second.integral), EXACT, abs_tol=1e-9)
 
 
@@ -177,7 +186,7 @@ def test_state_saves_loads_and_validates():
     """dataclasses.asdict gives a dictionary torch.load reads with
     weights_only=True; == compares identity instead of raising on the tensor
     field; invalid fields raise ValueError."""
-    state = solver().integrate(Recorder(), mesh_init=A, mesh_final=B).state
+    _, state = solver().integrate(Recorder(), mesh_init=A, mesh_final=B)
     buffer = io.BytesIO()
     torch.save(dataclasses.asdict(state), buffer)
     buffer.seek(0)
@@ -273,9 +282,9 @@ def test_forward_out_of_memory_is_retried_with_gradients():
     is evaluated again smaller (no gradient was written yet), the state
     converges, and the gradients are right."""
     f = GradIntegrand(forward_limit=3000)
-    result = solver().integrate(f, state=GROWING)
-    assert result.max_batch_converged
-    assert result.max_batch <= 3000
+    result, result_state = solver().integrate(f, state=GROWING)
+    assert result_state.max_batch_converged
+    assert result_state.max_batch <= 3000
     assert grads(f) == pytest.approx((D_W, D_V), rel=1e-8)
 
 
@@ -294,11 +303,11 @@ def test_backward_out_of_memory_restarts_without_double_counting(
     f.w.grad = torch.tensor([1.0], dtype=torch.float64)
     kwargs = {"parameters": [f.w, f.v]} if pass_parameters else {}
     with caplog.at_level(logging.WARNING):
-        result = solver().integrate(f, state=GROWING, **kwargs)
+        result, result_state = solver().integrate(f, state=GROWING, **kwargs)
     assert caplog.text.count("The backward pass of a batch of") == 3
     assert "restarted from its starting mesh" in caplog.text
-    assert result.max_batch_converged
-    assert result.max_batch <= 5000
+    assert result_state.max_batch_converged
+    assert result_state.max_batch <= 5000
     assert grads(f) == pytest.approx((1 + D_W, D_V), rel=1e-8)
     assert math.isclose(float(result.integral), 1.3 * D_W + 0.7 * D_V, abs_tol=1e-9)
 
@@ -362,10 +371,10 @@ def test_backward_check_shrinks_the_batch_on_a_gpu(monkeypatch, caplog):
     w = torch.tensor([1.3], dtype=torch.float64, device="cuda", requires_grad=True)
     state = IntegrationState(even_mesh(500).cuda(), 1000, False)
     with caplog.at_level(logging.WARNING):
-        result = s.integrate(lambda t: w * torch.sin(40 * t), state=state)
+        result, result_state = s.integrate(lambda t: w * torch.sin(40 * t), state=state)
     assert "predicted not to fit" in caplog.text
-    assert result.max_batch_converged
-    assert result.max_batch < 1000
+    assert result_state.max_batch_converged
+    assert result_state.max_batch < 1000
     assert float(w.grad) == pytest.approx(D_W, rel=1e-8)
     caplog.clear()
     with caplog.at_level(logging.WARNING):

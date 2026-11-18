@@ -89,7 +89,7 @@ def path_b_integrate_the_gradient() -> float:
         # f_theta(t) = theta * sin(t)  =>  df/dtheta = sin(t)
         return torch.sin(t)
 
-    out = integrate(
+    out, _ = integrate(
         f=df_dtheta,
         method="gk21",
         atol=ATOL,

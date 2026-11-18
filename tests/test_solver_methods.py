@@ -298,15 +298,15 @@ class TestIntegrateRouting:
         ids=lambda o: next(iter(o)),
     )
     def test_call_options_are_accepted(self, option):
-        result = integrate(torch.cos, **_BASE, **option)
+        result, _ = integrate(torch.cos, **_BASE, **option)
         assert float(result.integral) == pytest.approx(0.8414709848, abs=1e-8)
 
     def test_f_args_reach_the_integrand(self):
-        result = integrate(lambda t, k: k * torch.cos(t), **_BASE, f_args=(2.0,))
+        result, _ = integrate(lambda t, k: k * torch.cos(t), **_BASE, f_args=(2.0,))
         assert float(result.integral) == pytest.approx(2 * 0.8414709848, abs=1e-8)
 
     def test_constructor_options_are_used(self):
-        result = integrate(torch.cos, "interpolatory3_variable", "variable", **_BASE)
+        result, _ = integrate(torch.cos, "interpolatory3_variable", "variable", **_BASE)
         assert float(result.integral) == pytest.approx(0.8414709848, abs=1e-5)
 
     def test_unknown_option_raises(self):
@@ -329,5 +329,5 @@ class TestDefaultMethod:
         assert adaptive_quadrature("variable", device="cpu").method_name == expected
 
     def test_integrate_variable_without_method(self):
-        result = integrate(torch.cos, sampling="variable", **_BASE)
+        result, _ = integrate(torch.cos, sampling="variable", **_BASE)
         assert float(result.integral) == pytest.approx(0.8414709848, abs=1e-6)

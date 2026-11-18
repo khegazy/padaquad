@@ -28,7 +28,7 @@ from .distributed import DistributedEnvironment
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from .results import IntegrationResult, MethodOutput
+    from .results import IntegrationResult, IntegrationState, MethodOutput
 
 
 class steps(Enum):
@@ -115,7 +115,8 @@ class SolverBase(ABC, DistributedEnvironment):
       ``integrate`` call that does not pass them. The bounds have no default:
       each call passes a mesh or both bounds.
     - No state between calls: a call reuses an earlier call's mesh and batch
-      size only when they are passed to it (``state=result.state``). See
+      size only when they are passed to it (``state=state``, the state an
+      earlier call returned). See
       :ref:`ug-reuse`.
 
     Subclasses implement the abstract methods: ``integrate``, the integral and
@@ -264,7 +265,7 @@ class SolverBase(ABC, DistributedEnvironment):
         mesh_final: torch.Tensor | None = None,
         *,
         f_args: tuple[Any, ...] = (),
-    ) -> IntegrationResult:
+    ) -> tuple[IntegrationResult, IntegrationState]:
         """
         Integrate f from mesh_init to mesh_final.
 
@@ -296,8 +297,10 @@ class SolverBase(ABC, DistributedEnvironment):
 
         Returns
         -------
-        IntegrationResult
-            The integral, its error estimate, the mesh and diagnostics.
+        result : IntegrationResult
+            The integral, its error estimate and diagnostics.
+        state : IntegrationState
+            The optimal mesh and the batch size, for a later call.
         """
 
     # -------------------------------------------------------------------------------- #

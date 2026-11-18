@@ -41,6 +41,6 @@ changes the registries.
    back-propagated as soon as it is accepted, so the autograd graph of the
    whole integral is never held at once ({ref}`ug-autodiff`).
 5. **Optimal mesh.** After convergence, neighbouring subintervals whose
-   combined error is small are merged and the result is stored as
-   `mesh_optimal`, the starting mesh of the next warm-started call
+   combined error is small are merged and the result is returned as the
+   state's mesh, the starting mesh of the next warm-started call
    ({ref}`ug-optimal-mesh`).

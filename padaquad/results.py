@@ -22,8 +22,9 @@ class IntegrationState:
     """
     Where an ``integrate`` call ended, for the next call to start from.
 
-    Pass ``state=result.state`` to the next call of the same, or a slightly
-    changed, integrand. It never changes after it is made: ``integrate``
+    ``integrate`` returns it beside the result, ``result, state =
+    solver.integrate(...)``; pass ``state=state`` to the next call of the
+    same, or a slightly changed, integrand. It never changes after it is made: ``integrate``
     returns a new one, and ``dataclasses.replace(state, ...)`` makes an edited
     copy. ``dataclasses.asdict(state)`` gives a dictionary that ``torch.save``
     and ``torch.load`` (with its default ``weights_only=True``) handle, and
@@ -32,9 +33,11 @@ class IntegrationState:
     Attributes
     ----------
     mesh : torch.Tensor or None
-        The mesh to start from (an earlier result's ``mesh_optimal``), shape
-        [M, T]; None makes a fresh mesh on the bounds, which must then be
-        given.
+        The mesh to start from, shape [M, T]: the optimal mesh of the call
+        that returned the state (low-error subintervals merged, failing ones
+        split), detached from autograd, on the solver's device, its ends equal
+        to the bounds. None makes a fresh mesh on the bounds, which must then
+        be given.
     max_batch : int
         The batch size to start with: the largest number of points per call of
         the integrand known to fit.
@@ -73,22 +76,25 @@ class IntegrationResult:
     r"""
     Result of an integration: the integral, its error estimate, the mesh and diagnostics.
 
+    ``integrate`` returns it with an ``IntegrationState``, the mesh and batch
+    size to start the next call from: ``result, state = solver.integrate(...)``.
+
     Every field is required and passed by keyword (``kw_only=True``), except
-    ``mesh_optimal``, ``tracked_variables``, ``loss``, ``converged``,
-    ``n_start_steps``, ``n_start_steps_split``, ``max_split_depth`` and
-    ``max_batch``, which default to ``None``. Below, ``N`` is the number of accepted subintervals,
+    ``tracked_variables``, ``loss``, ``converged``, ``n_start_steps``,
+    ``n_start_steps_split`` and ``max_split_depth``, which default to
+    ``None``. Below, ``N`` is the number of accepted subintervals,
     ``C`` the number of nodes per subinterval, ``P = C + (N - 1)(C - 1)`` the
     number of distinct nodes, and ``M`` the number of mesh points (see
     :ref:`ug-shapes`).
 
-    ``integral``, ``integral_error``, ``y0``, ``mesh_optimal``, ``mesh_init``
-    and ``mesh_final`` are on the solver's device; the other tensors are on
+    ``integral``, ``integral_error``, ``y0``, ``mesh_init`` and
+    ``mesh_final`` are on the solver's device; the other tensors are on
     ``result_device`` (default ``"cpu"``).
 
     The solver also builds one result per batch of accepted subintervals and
     passes it to ``loss_fxn``. That result covers only the batch: ``integral``
-    is the batch's contribution, ``y0`` is zero, ``mesh_optimal``, ``loss``,
-    ``converged``, the split counts and ``max_batch`` are ``None``, and ``nodes``, ``y`` and
+    is the batch's contribution, ``y0`` is zero, ``loss``, ``converged`` and
+    the split counts are ``None``, and ``nodes``, ``y`` and
     ``tracked_variables`` keep one row per subinterval (shapes ``[N, C, T]``,
     ``[N, C, D]`` and ``[N, C, ...]``) instead of the flattened shapes below.
 
@@ -101,11 +107,6 @@ class IntegrationResult:
         Sum of the subintervals' signed error estimates. Shape ``[D]``. With
         ``take_gradient=False``, subintervals accepted and later split again
         can leave it off by their error estimates. See :ref:`ug-error-control`.
-    mesh_optimal : torch.Tensor or None
-        Mesh to start the next integration of the same, or a slightly changed,
-        integrand from: pass it as ``mesh=``. The final mesh with low-error
-        subintervals merged and failing ones split; on the solver's device and
-        detached from autograd. Shape ``[M, T]``. See :ref:`ug-optimal-mesh`.
     mesh_init : torch.Tensor
         Lower integration bound. Shape ``[T]``.
     mesh_final : torch.Tensor
@@ -151,25 +152,17 @@ class IntegrationResult:
         the bounds, or a new random one).
     n_start_steps_split : int or None
         Number of starting subintervals that were split at least once during
-        the integration (splits made to build ``mesh_optimal`` do not count).
+        the integration (splits made to build the state's mesh do not count).
     max_split_depth : int or None
         Largest number of times one starting subinterval was halved: 0 if
         none was split, at most ``max_adaptive_splits``.
-    max_batch : int or None
-        The batch size at the end of the call: the largest number of points per
-        call of the integrand known to fit (the given ``max_batch``, or the
-        largest batch that ran; lowered by an out-of-memory error). None only
-        in the per-batch results given to ``loss_fxn``.
-    max_batch_converged : bool or None
-        Whether ``max_batch`` will not grow again: True when it was given, or
-        when the call ran out of memory. None only in the per-batch results.
 
     Examples
     --------
     >>> import torch
     >>> from padaquad import integrate
     >>> _ = torch.manual_seed(0)  # the starting mesh is random
-    >>> result = integrate(
+    >>> result, state = integrate(
     ...     lambda t: torch.exp(t),
     ...     atol=1e-10,
     ...     rtol=1e-10,
@@ -199,34 +192,12 @@ class IntegrationResult:
     error_ratios: torch.Tensor
     gradient_taken: bool
     y0: torch.Tensor
-    mesh_optimal: torch.Tensor | None = None
     tracked_variables: tuple[torch.Tensor, ...] | None = None
     loss: torch.Tensor | None = None
     converged: bool | None = None
     n_start_steps: int | None = None
     n_start_steps_split: int | None = None
     max_split_depth: int | None = None
-    max_batch: int | None = None
-    max_batch_converged: bool | None = None
-
-    @property
-    def state(self) -> IntegrationState | None:
-        """
-        The state to pass to the next call as ``state=``.
-
-        Built from ``mesh_optimal``, ``max_batch`` and ``max_batch_converged``;
-        None in the per-batch results given to ``loss_fxn``.
-
-        Returns
-        -------
-        IntegrationState or None
-            The state, or None.
-        """
-        if self.max_batch is None or self.max_batch_converged is None:
-            return None
-        return IntegrationState(
-            self.mesh_optimal, self.max_batch, self.max_batch_converged
-        )
 
     @property
     def percent_start_steps_split(self) -> float | None:

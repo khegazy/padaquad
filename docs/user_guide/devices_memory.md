@@ -6,8 +6,8 @@
 `"cuda:N"` or a `torch.device`; `None` picks the GPU if one is available. The
 solver never changes PyTorch's global default device. `result_device` is where the per-subinterval arrays of the result go (nodes,
 integrand values, contributions, errors), to keep them off the GPU; `None`
-keeps them on the solver's device. The integral, its error estimate and
-`mesh_optimal` stay on the solver's device.
+keeps them on the solver's device. The integral, its error estimate and the
+state's mesh stay on the solver's device.
 
 The solver computes in the dtype of the bounds or mesh given to `integrate`,
 float64 or float32. A float32 tensor such as `torch.tensor([1.0])` therefore
@@ -21,7 +21,7 @@ integrand. The number of points per call is the batch size, `max_batch`.
 
 **How `integrate` chooses it.** A `max_batch` given to the call (or to the
 constructor, when no `state` is given) is used as it is and never grows. A
-`state` (`result.state` of an earlier call, {ref}`ug-reuse`) gives the batch
+`state` (the state an earlier call returned, {ref}`ug-reuse`) gives the batch
 size to start from. With neither, the integrand is called, forward only, on 10,
 100, ... copies of the lower bound, up to the order of the first pass (for the
 default starting mesh of gk21, 253 points: calls of 10 and 100), and the batch
@@ -34,7 +34,7 @@ many (or all that are waiting). The first pass of a call therefore runs whole
 when it is at most 10 times the batch size. When a call runs out of memory, it
 is evaluated again at three quarters of its size, repeatedly, until it fits;
 that size becomes the batch size, and the batch size has then converged
-(`result.max_batch_converged`): it never grows again, in this call or in any
+(`state.max_batch_converged`): it never grows again, in this call or in any
 call given its state. Reaching the limit this way costs a few failed calls of
 the integrand once per state (measured on an A100: about 5 to 6 s for networks
 filling the GPU).
@@ -112,7 +112,7 @@ fits, which leaves the hardware underused, and for some integrands a batch
 larger than what fits. **Passing your own `max_batch`, chosen for the
 integrand and the machine, avoids all of this**: the benchmark does not run,
 and the batch is the value given. Reusing the benchmark's result, through
-`result.max_batch` or `solver.get_max_batch()`, only skips the time it takes; the
+`solver.get_max_batch()`, only skips the time it takes; the
 batch keeps the limitations below. The known
 limitations follow. Numbers marked "simulated" come from fake memory readings
 and a fake clock (`tests/test_memory_benchmark.py` and review scripts);

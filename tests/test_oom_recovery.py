@@ -6,7 +6,7 @@ split evaluation handlers
 supposed to shrink ``max_batch`` and retry the failed batch, storing the new
 size as the call's batch size ``self._batch``, converged, so every later batch
 stays clamped. A later call keeps it only when it is passed
-``result.state``. The reduction
+``result_state``. The reduction
 repeats until the batch fits or a single
 evaluation (``max_batch == 1``) still fails, at which point an informative error
 is raised.
@@ -341,7 +341,7 @@ class TestIntegrateOOMRecovery:
             "gk21", atol=1e-6, rtol=1e-6, device="cpu", max_batch=self.BIG_BATCH
         )
         oom = OOMIntegrand(limit=self.LIMIT, fail=FAILURE_MODES[fail])
-        result = solver.integrate(
+        result, result_state = solver.integrate(
             oom,
             mesh_init=T_INIT,
             mesh_final=T_FINAL,
@@ -351,8 +351,8 @@ class TestIntegrateOOMRecovery:
 
         assert oom.n_oom >= 1, "the integrand never OOM'd; test setup is wrong"
         assert math.isclose(float(result.integral.sum()), 1.0, abs_tol=1e-5)
-        assert result.max_batch_converged
-        assert result.max_batch <= oom.limit
+        assert result_state.max_batch_converged
+        assert result_state.max_batch <= oom.limit
 
     @pytest.mark.parametrize("limit_share", [0.3, 0.5, 0.8])
     @pytest.mark.parametrize("max_batch", [30, 60, 100, 150, 200])
@@ -375,7 +375,7 @@ class TestIntegrateOOMRecovery:
         oom = OOMIntegrand(
             limit=int(limit_share * max_batch), value=_wave, max_calls=50_000
         )
-        result = solver.integrate(
+        result, result_state = solver.integrate(
             oom,
             mesh_init=T_INIT,
             mesh_final=T_FINAL,
@@ -411,16 +411,16 @@ class TestIntegrateOOMRecovery:
             "gk21", atol=1e-6, rtol=1e-6, device="cpu", max_batch=self.BIG_BATCH
         )
         oom = OOMIntegrand(limit=self.LIMIT)
-        first = solver.integrate(
+        first, first_state = solver.integrate(
             oom, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
         )
-        assert first.max_batch_converged
-        assert first.max_batch <= self.LIMIT
+        assert first_state.max_batch_converged
+        assert first_state.max_batch <= self.LIMIT
 
         n_before = len(oom.batch_sizes)
         oom.limit = self.BIG_BATCH
         solver.integrate(oom, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False)
-        assert max(oom.batch_sizes[n_before:]) > first.max_batch
+        assert max(oom.batch_sizes[n_before:]) > first_state.max_batch
 
     def test_state_carries_the_shrunk_size(self):
         """The size an out-of-memory error left is the result's state; passed
@@ -430,13 +430,18 @@ class TestIntegrateOOMRecovery:
             "gk21", atol=1e-6, rtol=1e-6, device="cpu", max_batch=self.BIG_BATCH
         )
         oom = OOMIntegrand(limit=self.LIMIT)
-        first = solver.integrate(
+        first, first_state = solver.integrate(
             oom, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
         )
         n_oom, n_before = oom.n_oom, len(oom.batch_sizes)
         assert n_oom >= 1
-        result = solver.integrate(oom, state=first.state, take_gradient=False)
+        result, result_state = solver.integrate(
+            oom, state=first_state, take_gradient=False
+        )
         assert math.isclose(float(result.integral.sum()), 1.0, abs_tol=1e-5)
         assert oom.n_oom == n_oom, "the size was forgotten: the call OOM'd again"
-        assert all(b <= first.max_batch for b in oom.batch_sizes[n_before:])
-        assert (result.max_batch, result.max_batch_converged) == (first.max_batch, True)
+        assert all(b <= first_state.max_batch for b in oom.batch_sizes[n_before:])
+        assert (result_state.max_batch, result_state.max_batch_converged) == (
+            first_state.max_batch,
+            True,
+        )

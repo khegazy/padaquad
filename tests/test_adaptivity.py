@@ -51,19 +51,19 @@ class TestStepAdding:
         """A minimal mesh (C points) should grow after integration."""
         solver = self._make_solver(method_name)
         t = torch.linspace(0, 1.0, solver.C).unsqueeze(1)
-        output = solver.integrate(
+        output, output_state = solver.integrate(
             mesh=t, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=take_gradient
         )
-        assert len(t) < len(output.mesh_optimal), (
+        assert len(t) < len(output_state.mesh), (
             f"{method_name}: coarse mesh ({len(t)} points) should produce "
-            f"a larger optimal mesh, but got {len(output.mesh_optimal)} points"
+            f"a larger optimal mesh, but got {len(output_state.mesh)} points"
         )
 
     def test_time_ordering_after_refinement(self, method_name, take_gradient):
         """Time points remain ordered after adaptive refinement."""
         solver = self._make_solver(method_name)
         t = torch.linspace(0, 1.0, solver.C).unsqueeze(1)
-        output = solver.integrate(
+        output, output_state = solver.integrate(
             mesh=t, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=take_gradient
         )
         assert_time_ordering(output)
@@ -72,7 +72,7 @@ class TestStepAdding:
         """Consecutive steps share boundaries after adaptive refinement."""
         solver = self._make_solver(method_name)
         t = torch.linspace(0, 1.0, solver.C).unsqueeze(1)
-        output = solver.integrate(
+        output, output_state = solver.integrate(
             mesh=t, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=take_gradient
         )
         assert_step_continuity(output)
@@ -84,13 +84,13 @@ class TestStepAdding:
         solver = self._make_solver(method_name)
         t = torch.linspace(0, 1.0, solver.C).unsqueeze(1)
         for idx in range(3):
-            output = solver.integrate(
+            output, output_state = solver.integrate(
                 mesh=t,
                 mesh_init=T_INIT,
                 mesh_final=T_FINAL,
                 take_gradient=take_gradient,
             )
-            t_optimal = output.mesh_optimal
+            t_optimal = output_state.mesh
             if idx == 0:
                 # First iteration: mesh must grow
                 assert len(t) < len(t_optimal), (
@@ -126,19 +126,19 @@ class TestStepRemoval:
         """A very dense mesh (997 points) should be pruned after integration."""
         solver = self._make_solver()
         t = torch.linspace(0, 1, 997).unsqueeze(1)
-        output = solver.integrate(
+        output, output_state = solver.integrate(
             mesh=t, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=take_gradient
         )
-        assert len(t) > len(output.mesh_optimal), (
+        assert len(t) > len(output_state.mesh), (
             f"Dense mesh ({len(t)} points) should be pruned, "
-            f"but got {len(output.mesh_optimal)} points"
+            f"but got {len(output_state.mesh)} points"
         )
 
     def test_time_ordering_after_pruning(self, take_gradient):
         """Time points remain ordered after pruning."""
         solver = self._make_solver()
         t = torch.linspace(0, 1, 997).unsqueeze(1)
-        output = solver.integrate(
+        output, output_state = solver.integrate(
             mesh=t, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=take_gradient
         )
         assert_time_ordering(output)
@@ -147,7 +147,7 @@ class TestStepRemoval:
         """Consecutive steps share boundaries after pruning."""
         solver = self._make_solver()
         t = torch.linspace(0, 1, 997).unsqueeze(1)
-        output = solver.integrate(
+        output, output_state = solver.integrate(
             mesh=t, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=take_gradient
         )
         assert_step_continuity(output)
@@ -157,13 +157,13 @@ class TestStepRemoval:
         solver = self._make_solver()
         t = torch.linspace(0, 1, 997).unsqueeze(1)
         for idx in range(3):
-            output = solver.integrate(
+            output, output_state = solver.integrate(
                 mesh=t,
                 mesh_init=T_INIT,
                 mesh_final=T_FINAL,
                 take_gradient=take_gradient,
             )
-            t_optimal = output.mesh_optimal
+            t_optimal = output_state.mesh
             if idx == 0:
                 # First iteration: mesh must shrink
                 assert len(t) > len(t_optimal), (

@@ -22,7 +22,7 @@ from .quadrature import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from .results import IntegrationResult
+    from .results import IntegrationResult, IntegrationState
 
 
 def adaptive_quadrature(
@@ -69,8 +69,8 @@ def adaptive_quadrature(
     Examples
     --------
     Build the solver once and call it twice on the same integrand. The second
-    call starts from the mesh the first call ended with and reuses its
-    ``max_batch`` (so it skips the memory benchmark), because both are passed.
+    call starts from the mesh and batch size the first call ended with,
+    because its state is passed.
 
     >>> import torch
     >>> from padaquad import adaptive_quadrature
@@ -82,10 +82,8 @@ def adaptive_quadrature(
     ...     "mesh_init": torch.tensor([0.0], dtype=torch.float64),
     ...     "mesh_final": torch.tensor([1.0], dtype=torch.float64),
     ... }
-    >>> first = solver.integrate(lambda t: t**2, max_batch=10_000, **bounds)
-    >>> second = solver.integrate(
-    ...     lambda t: t**2, mesh=first.mesh_optimal, max_batch=first.max_batch
-    ... )
+    >>> first, state = solver.integrate(lambda t: t**2, max_batch=10_000, **bounds)
+    >>> second, state = solver.integrate(lambda t: t**2, state=state)
     >>> print(round(float(first.integral), 8), round(float(second.integral), 8))
     0.33333333 0.33333333
     """
@@ -115,7 +113,7 @@ def integrate(
     method: str | None = None,
     sampling: str | steps = DEFAULT_SAMPLING_TYPE,
     **options: Any,
-) -> IntegrationResult:
+) -> tuple[IntegrationResult, IntegrationState]:
     """
     Compute the integral of ``f`` from ``mesh_init`` to ``mesh_final`` in one call.
 
@@ -127,7 +125,8 @@ def integrate(
     constructor otherwise (for example ``atol``, ``rtol``, ``remove_cut``,
     ``merge_rule``, ``use_absolute_error_ratio``, ``device``). Defaults are
     those of the solver class. To reuse an earlier result's mesh and batch
-    size, pass ``state=result.state``, as with a solver.
+    size, pass the state it returned, ``result, state = integrate(...)``, as
+    ``state=state``, as with a solver.
 
     The integrand depends only on the integration variable ``t`` (and on
     ``f_args``), never on the running value of the integral, so the nodes of
@@ -153,9 +152,10 @@ def integrate(
 
     Returns
     -------
-    IntegrationResult
-        The integral, its error estimate, the mesh and convergence
-        diagnostics.
+    result : IntegrationResult
+        The integral, its error estimate and convergence diagnostics.
+    state : IntegrationState
+        The optimal mesh and the batch size, for a later call's ``state=``.
 
     Raises
     ------
@@ -173,7 +173,7 @@ def integrate(
     >>> import torch
     >>> from padaquad import integrate
     >>> _ = torch.manual_seed(0)  # the starting mesh is random
-    >>> result = integrate(
+    >>> result, state = integrate(
     ...     torch.sin,
     ...     atol=1e-10,
     ...     rtol=1e-10,

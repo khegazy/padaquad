@@ -75,9 +75,7 @@ class TestAdaptivelyAddSteps:
         assert len(er_kept) == 2
         assert mo_out.mesh_quadratures.shape[0] == 2
         # mesh_indices maps every barrier coordinate to its mesh position.
-        assert mesh_idx == {
-            tuple(b.tolist()): i for i, b in enumerate(barriers_new)
-        }
+        assert mesh_idx == {tuple(b.tolist()): i for i, b in enumerate(barriers_new)}
 
     def test_all_fail(self):
         """All error_ratios >= 1: midpoints inserted, error_ratios_kept empty."""
@@ -97,9 +95,7 @@ class TestAdaptivelyAddSteps:
         assert len(er_kept) == 0
         assert mo_out.mesh_quadratures.shape[0] == 0
         # mesh_indices reflects the inserted midpoints and the bumped positions.
-        assert mesh_idx == {
-            tuple(b.tolist()): i for i, b in enumerate(barriers_new)
-        }
+        assert mesh_idx == {tuple(b.tolist()): i for i, b in enumerate(barriers_new)}
 
     def test_mixed_pass_fail(self):
         """First passes, second fails: 1 midpoint added."""
@@ -674,9 +670,7 @@ class TestPartialAndBoundary:
         )
         assert len(barriers_new) == 3  # split
         assert len(er_kept) == 0
-        assert torch.allclose(
-            barriers_new[1], torch.tensor([0.5], dtype=torch.float64)
-        )
+        assert torch.allclose(barriers_new[1], torch.tensor([0.5], dtype=torch.float64))
 
     def test_all_pass_with_split_counts(self):
         """N_t_add == 0 path with split_counts: mesh and counts unchanged."""

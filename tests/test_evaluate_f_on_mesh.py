@@ -1031,16 +1031,14 @@ class TestSplitResidualNodes:
             seen_inputs.append(t.detach().clone())
             return _simple_integrand(t, *args)
 
-        _n1, _e1, _tracked, ridxs1, state1 = (
-            solver._evaluate_f_on_split_residual_nodes(
-                recording_f,
-                (),
-                mesh,
-                step_idxs,
-                max_batch=max_batch,
-                max_mesh_steps=max_mesh_steps,
-                split_node_state=(None, None, None, None),
-            )
+        _n1, _e1, _tracked, ridxs1, state1 = solver._evaluate_f_on_split_residual_nodes(
+            recording_f,
+            (),
+            mesh,
+            step_idxs,
+            max_batch=max_batch,
+            max_mesh_steps=max_mesh_steps,
+            split_node_state=(None, None, None, None),
         )
         iter1_calls = len(seen_inputs)
 
@@ -1202,16 +1200,14 @@ class TestSplitResidualNodes:
             assert len(remaining) > 0
             batches_left = len(remaining) * C
             effective_max_batch = min(max_batch, batches_left)
-            _ni, fi, _tracked, ri, state = (
-                solver._evaluate_f_on_split_residual_nodes(
-                    vec_integrand,
-                    (),
-                    mesh,
-                    remaining,
-                    max_batch=effective_max_batch,
-                    max_mesh_steps=effective_max_batch // C,
-                    split_node_state=state,
-                )
+            _ni, fi, _tracked, ri, state = solver._evaluate_f_on_split_residual_nodes(
+                vec_integrand,
+                (),
+                mesh,
+                remaining,
+                max_batch=effective_max_batch,
+                max_mesh_steps=effective_max_batch // C,
+                split_node_state=state,
             )
             assert len(ri) > 0
             f_evals_acc.append(fi)
@@ -1500,7 +1496,7 @@ class TestEndToEnd:
                 )
         else:
             torch.manual_seed(2025)
-            result = solver.integrate(
+            result, _ = solver.integrate(
                 f=f,
                 mesh_init=self.T_INIT,
                 mesh_final=self.T_FINAL,
@@ -1508,7 +1504,7 @@ class TestEndToEnd:
             )
             reference = self._solver(method, max_batch=_method_C(method))
             torch.manual_seed(2025)
-            ref_result = reference.integrate(
+            ref_result, _ = reference.integrate(
                 f=f,
                 mesh_init=self.T_INIT,
                 mesh_final=self.T_FINAL,
@@ -1565,7 +1561,7 @@ class TestEndToEnd:
         f, solution_fxn, cutoff = _resolve_integrand(integrand_name)
         solver = self._solver(method, max_batch=max_batch)
         torch.manual_seed(2025)
-        result = solver.integrate(
+        result, _ = solver.integrate(
             f=f,
             mesh_init=self.T_INIT,
             mesh_final=self.T_FINAL,
@@ -1604,7 +1600,7 @@ class TestEndToEnd:
         for mb in candidates:
             solver = self._solver(method, max_batch=mb)
             torch.manual_seed(2025)
-            r = solver.integrate(
+            r, _ = solver.integrate(
                 f=f,
                 mesh_init=self.T_INIT,
                 mesh_final=self.T_FINAL,
@@ -1637,21 +1633,21 @@ class TestEndToEnd:
         C = _method_C(method)
 
         torch.manual_seed(2025)
-        ref_first = self._solver(method, max_batch=2 * C).integrate(
+        ref_first, _ = self._solver(method, max_batch=2 * C).integrate(
             f=f, mesh_init=self.T_INIT, mesh_final=self.T_FINAL, take_gradient=False
         )
         torch.manual_seed(2025)
-        ref_second = self._solver(method, max_batch=5 * C).integrate(
+        ref_second, _ = self._solver(method, max_batch=5 * C).integrate(
             f=f, mesh_init=self.T_INIT, mesh_final=self.T_FINAL, take_gradient=False
         )
 
         reused = self._solver(method, max_batch=2 * C)
         torch.manual_seed(2025)
-        first = reused.integrate(
+        first, _ = reused.integrate(
             f=f, mesh_init=self.T_INIT, mesh_final=self.T_FINAL, take_gradient=False
         )
         torch.manual_seed(2025)
-        second = reused.integrate(
+        second, _ = reused.integrate(
             f=f,
             mesh_init=self.T_INIT,
             mesh_final=self.T_FINAL,
@@ -1675,7 +1671,7 @@ class TestEndToEnd:
         method = "gk15"
 
         torch.manual_seed(2025)
-        default = self._solver(method, max_batch=3 * _method_C(method)).integrate(
+        default, _ = self._solver(method, max_batch=3 * _method_C(method)).integrate(
             f=f,
             mesh_init=self.T_INIT,
             mesh_final=self.T_FINAL,
@@ -1683,7 +1679,7 @@ class TestEndToEnd:
             conserve_memory=False,
         )
         torch.manual_seed(2025)
-        conserved = self._solver(method, max_batch=3 * _method_C(method)).integrate(
+        conserved, _ = self._solver(method, max_batch=3 * _method_C(method)).integrate(
             f=f,
             mesh_init=self.T_INIT,
             mesh_final=self.T_FINAL,
@@ -1734,7 +1730,7 @@ class TestEndToEndBelowC:
             torch.manual_seed(2025)
             return solver.integrate(
                 f=f, mesh_init=t_init, mesh_final=t_final, take_gradient=False
-            )
+            )[0]
 
         result = _run(max_batch)
         reference = _run(_method_C(method))
@@ -1761,7 +1757,7 @@ class TestEndToEndBelowC:
         for mb in candidates:
             solver = make_uniform_solver(method, atol=1e-4, rtol=1e-4, max_batch=mb)
             torch.manual_seed(2025)
-            r = solver.integrate(
+            r, _ = solver.integrate(
                 f=f,
                 mesh_init=torch.tensor([0.0], dtype=torch.float64),
                 mesh_final=torch.tensor([1.0], dtype=torch.float64),

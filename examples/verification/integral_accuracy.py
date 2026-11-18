@@ -79,7 +79,7 @@ for sampling, name in runs:
         n_sub_at_worst = 0
         for f, solution, _ in integrand_dict.values():
             torch.manual_seed(0)
-            result = integrate(
+            result, _ = integrate(
                 f,
                 method=name,
                 sampling=sampling,

@@ -19,7 +19,7 @@
 
 - Every given bound becomes an end point of the starting mesh, so its
   gradient is computed as for any mesh end, also when it equals an end of a
-  `mesh_optimal` (which is detached from autograd).
+  state's mesh (which is detached from autograd).
 - A bound within a few rounding steps of its mesh end (4 machine epsilons of
   the coarser of the bound's and the mesh's dtypes, relative to that end)
   replaces that end, so a bound that differs from `mesh[-1]` only by float32
@@ -40,8 +40,8 @@ and the integration refines the new subinterval like any other.
 
 <!-- not-tested -->
 ```python
-result = solver.integrate(
-    f, state=result.state, mesh_final=torch.tensor([2.0], dtype=torch.float64)
+result, state = solver.integrate(
+    f, state=state, mesh_final=torch.tensor([2.0], dtype=torch.float64)
 )
 ```
 
@@ -52,7 +52,7 @@ and pass each its own `state`.
 
 ## Checkpoints
 
-`dataclasses.asdict(result.state)` is a dictionary of a tensor, an int and a
+`dataclasses.asdict(state)` is a dictionary of a tensor, an int and a
 bool, so it can be saved with a model and loaded (also with `torch.load`'s
 default `weights_only=True`) to resume training:
 
@@ -61,9 +61,9 @@ default `weights_only=True`) to resume training:
 import dataclasses
 from padaquad import IntegrationState
 
-torch.save(dataclasses.asdict(result.state), path)
+torch.save(dataclasses.asdict(state), path)
 state = IntegrationState(**torch.load(path, map_location=device))
-result = solver.integrate(f, state=state)
+result, state = solver.integrate(f, state=state)
 ```
 
 ## The batch size of a state
@@ -77,7 +77,7 @@ result = solver.integrate(f, state=state)
   size.
 - A size that shrank never grows back, also when the memory shortage was
   temporary. To let it grow again, pass
-  `state=dataclasses.replace(result.state, max_batch_converged=False)`.
+  `state=dataclasses.replace(state, max_batch_converged=False)`.
 - A batch size depends on the integrand, `take_gradient`, the dtype and the
   device. A state reused with another of these still works: an out-of-memory
   error shrinks the batch until it fits, at the cost of the failed calls.

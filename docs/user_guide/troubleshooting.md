@@ -26,7 +26,7 @@ every entry can be below 1 while `converged` is `False`. With
 
 - `n_start_steps` is the number of subintervals in the starting mesh.
 - `n_start_steps_split` counts those split at least once (splits made to build
-  `mesh_optimal` are not counted), and `percent_start_steps_split` gives it as
+  the state's mesh are not counted), and `percent_start_steps_split` gives it as
   a percentage. A small value means the starting mesh was nearly fine enough,
   which is what a warm start should achieve.
 - `max_split_depth` is the largest number of times any subinterval was halved;
@@ -43,8 +43,8 @@ Measure once and pass the value as `max_batch`.
 ## A call logs "Caught OOM" or "was dropped"
 
 The batch size grew until the integrand ran out of memory, then shrank
-({ref}`ug-memory`). This happens once per state: pass `state=result.state` to
-the next call, which starts from the size that fit.
+({ref}`ug-memory`). This happens once per state: pass the state the call
+returned to the next call, which starts from the size that fit.
 
 ## Out of memory
 
@@ -71,7 +71,7 @@ subtracted from the signed sum, so `integral_error` is then approximate.
 ## Renamed and removed arguments
 
 - `reuse_mesh` was renamed `same_f` (1.3.0), and `same_f` was removed
-  (2.0.0): pass `state=result.state` of the call to start from
+  (2.0.0): pass `state=state`, the state the call to start from returned
   ({ref}`ug-reuse`).
 - The constructor's `mesh_init` and `mesh_final` were removed (2.0.0):
   pass the bounds, or a mesh, to every `integrate` call.

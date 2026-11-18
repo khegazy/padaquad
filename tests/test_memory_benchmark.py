@@ -1283,7 +1283,7 @@ def test_messages_when_measuring(caplog, monkeypatch):
     assert "may result in an underutilization of your hardware" in text
     assert "devices_memory.html#ug-memory-limitations" in text
     assert "The only way to guarantee" in text
-    assert "result.max_batch" not in text
+    assert "result_state.max_batch" not in text
     assert "Memory measurement finished in" in text
     assert "bytes per evaluation" in text
     assert "stopped because" in text
@@ -1319,7 +1319,7 @@ def test_slow_integrand_gradient_path_completes(monkeypatch):
     # and readings that do not grow would raise.
     set_reader(solver, monkeypatch, floor=0, read=lambda: 0)
     assert solver.get_max_batch(f=slow, t=T_INIT) >= solver.C
-    result = solver.integrate(
+    result, result_state = solver.integrate(
         slow,
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
@@ -1358,7 +1358,7 @@ def test_integrate_batches_within_measured_max_batch(
     assert measured == max_batch
     caplog.clear()
     with caplog.at_level(logging.WARNING, logger=qmem.__name__):
-        result = fake.solver.integrate(
+        result, result_state = fake.solver.integrate(
             f,
             mesh_init=T_INIT,
             mesh_final=T_FINAL,
@@ -1370,7 +1370,10 @@ def test_integrate_batches_within_measured_max_batch(
     assert len(batches) >= 2
     assert max(batches) <= max_batch
     assert float(result.integral.sum()) == pytest.approx(1.0)
-    assert (result.max_batch, result.max_batch_converged) == (max_batch, True)
+    assert (result_state.max_batch, result_state.max_batch_converged) == (
+        max_batch,
+        True,
+    )
 
 
 def test_get_max_batch_uses_solver_total_mem_usage(monkeypatch):
@@ -1823,7 +1826,7 @@ def test_limit_benchmark_time_is_a_solver_option():
     accepted by padaquad.integrate, which passes it to the constructor."""
     assert adaptive_quadrature().limit_benchmark_time is True
     assert adaptive_quadrature(limit_benchmark_time=False).limit_benchmark_time is False
-    result = integrate(
+    result, result_state = integrate(
         torch.cos,
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
@@ -1904,11 +1907,11 @@ def test_out_of_memory_retry_shrinks_the_failed_batch(fake, monkeypatch):
     size. Catches: a retry that does not shrink the failed batch itself."""
     stub_calls(fake.solver, monkeypatch, lambda n: 2**20 * n)
     f = CostIntegrand(fake.memory, fake.clock, oom_from=30)
-    result = fake.solver.integrate(
+    result, result_state = fake.solver.integrate(
         f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
     )
     assert f.calls == [1, 44, 33, 25, 19]  # after the one-point check
-    assert (result.max_batch, result.max_batch_converged) == (25, True)
+    assert (result_state.max_batch, result_state.max_batch_converged) == (25, True)
     assert float(result.integral.sum()) == pytest.approx(1.0)
 
 
@@ -1979,11 +1982,11 @@ def test_get_max_batch_measures_when_given_f(monkeypatch):
 
 def test_measured_max_batch_skips_the_benchmark_in_integrate(monkeypatch):
     """A batch size measured once and passed as max_batch skips the benchmark
-    and is returned as result.max_batch."""
+    and is returned as result_state.max_batch."""
     solver = adaptive_quadrature("uniform", "gk21", device="cpu")
     calls = _fake_benchmark(solver, monkeypatch)
     m = solver.get_max_batch(f=torch.exp, t=_T, take_gradient=False)
-    out = solver.integrate(
+    out, out_state = solver.integrate(
         torch.exp,
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
@@ -1991,7 +1994,7 @@ def test_measured_max_batch_skips_the_benchmark_in_integrate(monkeypatch):
         take_gradient=False,
     )
     assert len(calls) == 1
-    assert out.max_batch == m
+    assert out_state.max_batch == m
 
 
 def test_get_max_batch_with_f_ignores_constructor_max_batch(monkeypatch):

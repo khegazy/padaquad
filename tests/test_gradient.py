@@ -97,7 +97,7 @@ class TestGradientFlowThroughIntegrate:
         solver = make_uniform_solver(
             "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device=DEVICE
         )
-        result = solver.integrate(
+        result, _ = solver.integrate(
             mesh_init=torch.tensor([0], dtype=torch.float64),
             mesh_final=torch.tensor([1], dtype=torch.float64),
             take_gradient=False,
@@ -114,7 +114,7 @@ class TestGradientFlowThroughIntegrate:
         solver = make_uniform_solver(
             "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device=DEVICE
         )
-        result = solver.integrate(
+        result, _ = solver.integrate(
             mesh_init=torch.tensor([0], dtype=torch.float64),
             mesh_final=torch.tensor([1], dtype=torch.float64),
             take_gradient=True,
@@ -131,7 +131,7 @@ class TestGradientFlowThroughIntegrate:
         solver = make_uniform_solver(
             "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device=DEVICE
         )
-        result = solver.integrate(
+        result, _ = solver.integrate(
             mesh_init=torch.tensor([0], dtype=torch.float64),
             mesh_final=torch.tensor([1], dtype=torch.float64),
             take_gradient=False,
@@ -206,7 +206,7 @@ class TestCustomLoss:
         solver = make_uniform_solver(
             "bosh3", atol=ATOL_LOOSE, rtol=RTOL_LOOSE, f=integrand, device=DEVICE
         )
-        result = solver.integrate(
+        result, _ = solver.integrate(
             mesh_init=torch.tensor([0], dtype=torch.float64),
             mesh_final=torch.tensor([1], dtype=torch.float64),
         )
@@ -225,7 +225,7 @@ class TestCustomLoss:
         def double_loss(output):
             return output.integral * 2
 
-        result = solver.integrate(
+        result, _ = solver.integrate(
             mesh_init=torch.tensor([0], dtype=torch.float64),
             mesh_final=torch.tensor([1], dtype=torch.float64),
             loss_fxn=double_loss,
@@ -246,7 +246,7 @@ class TestCustomLoss:
         def square_loss(output):
             return (output.integral**2).sum()
 
-        result = solver.integrate(
+        result, _ = solver.integrate(
             mesh_init=torch.tensor([0], dtype=torch.float64),
             mesh_final=torch.tensor([1], dtype=torch.float64),
             take_gradient=True,

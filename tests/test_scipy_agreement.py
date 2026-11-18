@@ -107,7 +107,7 @@ def test_method_agrees_with_scipy_quad(method, integrand_name, a, b, take_gradie
     scipy_fn = next(s for n, _, s, _ in _INTEGRANDS if n == integrand_name)
 
     scipy_value, scipy_err = scipy_integrate.quad(scipy_fn, a, b, epsabs=ATOL)
-    library_result = integrate(
+    library_result, _ = integrate(
         f=torch_fn,
         method=method,
         atol=ATOL,

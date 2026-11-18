@@ -62,7 +62,7 @@ def _rough_until(edge):
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 def test_narrow_peak_splits_one_starting_step(take_gradient):
     """Only the step holding the peak is split, three levels deep."""
-    out = _gk21_solver(max_batch=BIG_BATCH).integrate(
+    out, out_state = _gk21_solver(max_batch=BIG_BATCH).integrate(
         f=_narrow_peak, mesh=_MESH20, take_gradient=take_gradient
     )
     assert out.n_start_steps == 20
@@ -78,7 +78,7 @@ def test_rough_region_splits_the_steps_it_covers(edge, n_split, take_gradient):
     """The steps below ``edge`` are split once each; the rest are not. The
     integrand is evaluated in several calls of 5 steps (``max_batch``)."""
     solver = _gk21_solver(max_batch=BIG_BATCH)
-    out = solver.integrate(
+    out, out_state = solver.integrate(
         f=_rough_until(edge),
         mesh=_MESH20,
         max_batch=5 * solver.C,
@@ -91,7 +91,7 @@ def test_rough_region_splits_the_steps_it_covers(edge, n_split, take_gradient):
 
 
 def test_smooth_integrand_on_fine_mesh_splits_nothing():
-    out = _gk21_solver(max_batch=BIG_BATCH).integrate(
+    out, out_state = _gk21_solver(max_batch=BIG_BATCH).integrate(
         f=lambda t, *_: torch.sin(t), mesh=_MESH20, take_gradient=False
     )
     assert out.n_start_steps == 20
@@ -113,7 +113,7 @@ def test_statistics_are_consistent_with_the_mesh(sampling, method, seed, take_gr
     depth is 0 exactly when nothing was split, and each split starting step
     leaves at least two accepted steps."""
     torch.manual_seed(seed)
-    out = integrate(
+    out, out_state = integrate(
         f=lambda t: torch.exp(-(((t - 0.3) / 0.05) ** 2)),
         method=method,
         sampling=sampling,
@@ -138,13 +138,13 @@ def test_statistics_count_the_cut_mesh():
     solver = _gk21_solver(max_batch=BIG_BATCH)
     f = lambda t, *_: torch.sin(3 * t)  # noqa: E731
     torch.manual_seed(0)
-    cold = solver.integrate(
+    cold, cold_state = solver.integrate(
         f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
     )
-    stored = cold.mesh_optimal[:, 0].cpu()
+    stored = cold_state.mesh[:, 0].cpu()
     half = torch.tensor([0.5], dtype=torch.float64)
-    out = solver.integrate(
-        f=f, mesh=cold.mesh_optimal, mesh_final=half, take_gradient=False
+    out, out_state = solver.integrate(
+        f=f, mesh=cold_state.mesh, mesh_final=half, take_gradient=False
     )
     n_inside = int(((stored > 0.0) & (stored < 0.5)).sum())
     assert out.n_start_steps == n_inside + 1
@@ -160,7 +160,7 @@ def test_per_batch_result_has_no_statistics_or_convergence():
         seen.append(batch_result)
         return batch_result.integral.sum()
 
-    out = _gk21_solver(max_batch=BIG_BATCH).integrate(
+    out, out_state = _gk21_solver(max_batch=BIG_BATCH).integrate(
         f=_narrow_peak, mesh=_MESH20, take_gradient=False, loss_fxn=loss_fxn
     )
     assert out.converged is True
@@ -209,7 +209,7 @@ def test_invalid_per_call_max_adaptive_splits_raises(value, error):
 
 
 def test_numpy_integer_max_adaptive_splits_is_accepted():
-    out = _gk21_solver(max_batch=BIG_BATCH).integrate(
+    out, out_state = _gk21_solver(max_batch=BIG_BATCH).integrate(
         f=_narrow_peak,
         mesh=_MESH20,
         take_gradient=False,
@@ -225,7 +225,7 @@ def test_numpy_integer_max_adaptive_splits_is_accepted():
 
 def test_capped_call_then_warm_starts_converge():
     """A cap of 1 stops refinement of sin(20 t) on [0, 4] short of the
-    tolerance; repeated calls from the previous mesh_optimal and max_batch,
+    tolerance; repeated calls from the previous call's state,
     as the not-converged warning advises, stay on [0, 4], refine further and
     reach convergence, and an uncapped call on the same solver is accurate."""
     bounds = {
@@ -238,7 +238,7 @@ def test_capped_call_then_warm_starts_converge():
         "dopri5", atol=1e-8, rtol=1e-8, device="cpu", max_batch=BIG_BATCH
     )
     torch.manual_seed(0)
-    first = solver.integrate(
+    first, out_state = solver.integrate(
         f=sharp, take_gradient=False, max_adaptive_splits=1, **bounds
     )
     assert first.converged is False
@@ -247,10 +247,10 @@ def test_capped_call_then_warm_starts_converge():
     results = [first]
     out = first
     for _ in range(6):
-        out = solver.integrate(
+        out, out_state = solver.integrate(
             f=sharp,
-            mesh=out.mesh_optimal,
-            max_batch=out.max_batch,
+            mesh=out_state.mesh,
+            max_batch=out_state.max_batch,
             take_gradient=False,
             max_adaptive_splits=1,
         )
@@ -263,7 +263,7 @@ def test_capped_call_then_warm_starts_converge():
     starts = [r.n_start_steps for r in results[1:]]
     assert starts == sorted(starts), starts
 
-    uncapped = solver.integrate(f=sharp, take_gradient=False, **bounds)
+    uncapped, _ = solver.integrate(f=sharp, take_gradient=False, **bounds)
     assert uncapped.converged is True
     assert abs(float(uncapped.integral) - exact) < 1e-6
 
@@ -295,7 +295,7 @@ def test_converged_matches_a_hand_computed_tolerance_check(
         use_absolute_error_ratio=absolute,
     )
     torch.manual_seed(seed)
-    out = solver.integrate(
+    out, out_state = solver.integrate(
         f=lambda t: torch.sin(2 * math.pi * t),
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
@@ -324,7 +324,7 @@ def test_y0_does_not_loosen_the_converged_tolerance():
     solver = make_uniform_solver(
         "bosh3", atol=1e-14, rtol=1e-6, device="cpu", max_batch=BIG_BATCH
     )
-    out = solver.integrate(
+    out, out_state = solver.integrate(
         f=lambda t, *_: torch.sin(30 * t),
         mesh=torch.linspace(0.0, 1.0, 3, dtype=torch.float64).unsqueeze(-1),
         y0=torch.tensor([1e6], dtype=torch.float64),
@@ -348,7 +348,7 @@ def test_cumulative_mode_recheck_uses_the_running_integral():
         use_absolute_error_ratio=False,
     )
     torch.manual_seed(1)
-    out = solver.integrate(
+    out, out_state = solver.integrate(
         f=lambda t: torch.sin(2 * math.pi * t),
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
@@ -378,7 +378,7 @@ def test_failure_fraction_converged_follows_the_accept_rule(
         mesh_failure_tolerance=mesh_failure_tolerance,
         max_batch=BIG_BATCH,
     )
-    out = solver.integrate(
+    out, out_state = solver.integrate(
         f=lambda t: torch.cat([torch.sin(30 * t), torch.ones_like(t)], dim=-1),
         mesh=torch.linspace(0.0, 1.0, 3, dtype=torch.float64).unsqueeze(-1),
         take_gradient=False,
@@ -404,7 +404,7 @@ def test_failure_fraction_nan_component_is_not_converged(absolute):
         use_absolute_error_ratio=absolute,
         max_batch=BIG_BATCH,
     )
-    out = solver.integrate(
+    out, out_state = solver.integrate(
         f=lambda t: torch.cat(
             [torch.ones_like(t), torch.where(t > 0.9, torch.nan, torch.ones_like(t))],
             dim=-1,
@@ -418,7 +418,7 @@ def test_failure_fraction_nan_component_is_not_converged(absolute):
 
 
 def test_float32_smooth_integral_converges():
-    out = integrate(
+    out, out_state = integrate(
         f=torch.sin,
         method="gk21",
         atol=1e-5,
@@ -442,7 +442,7 @@ def test_converged_uses_the_final_integral_not_the_given_reference():
         "bosh3", atol=1e-9, rtol=1e-6, device="cpu", max_batch=BIG_BATCH
     )
     torch.manual_seed(0)
-    out = solver.integrate(
+    out, out_state = solver.integrate(
         f=lambda t, *_: torch.sin(2 * math.pi * t),
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
@@ -450,7 +450,7 @@ def test_converged_uses_the_final_integral_not_the_given_reference():
         error_integral_reference=100.0,
     )
     assert out.converged is False
-    assert len(out.mesh_optimal) - 1 > out.h.shape[0]
+    assert len(out_state.mesh) - 1 > out.h.shape[0]
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +474,7 @@ def test_warning_reports_the_size_of_the_error(caplog, take_gradient):
     )
     mesh = torch.linspace(0.0, 1.0, 3, dtype=torch.float64).unsqueeze(-1)
     with caplog.at_level(logging.WARNING, logger="padaquad.quadrature.base"):
-        out = solver.integrate(
+        out, out_state = solver.integrate(
             f=lambda t, *_: torch.sin(30 * t),
             mesh=mesh,
             take_gradient=take_gradient,
@@ -493,7 +493,7 @@ def test_warning_reports_the_size_of_the_error(caplog, take_gradient):
     assert f"|integral| = {abs_integral:.3g} (" in message
     assert "raise max_adaptive_splits" in message
     assert ("take_gradient=False" in message) is take_gradient
-    assert "state=result.state" in message
+    assert "state=state" in message
 
 
 def test_warning_separates_failing_from_all_steps(caplog):
@@ -504,7 +504,7 @@ def test_warning_separates_failing_from_all_steps(caplog):
         "bosh3", atol=1e-2, rtol=0.0, device="cpu", max_batch=BIG_BATCH
     )
     with caplog.at_level(logging.WARNING, logger="padaquad.quadrature.base"):
-        out = solver.integrate(
+        out, out_state = solver.integrate(
             f=lambda t, *_: torch.where(
                 t < 0.5, torch.sin(30 * t), 0.1 * torch.sin(5 * t)
             ),
@@ -532,7 +532,7 @@ def test_warning_reports_one_output_component(caplog):
         "bosh3", atol=1e-12, rtol=1e-12, device="cpu", max_batch=BIG_BATCH
     )
     with caplog.at_level(logging.WARNING, logger="padaquad.quadrature.base"):
-        out = solver.integrate(
+        out, out_state = solver.integrate(
             f=lambda t, *_: torch.cat(
                 [torch.sin(30 * t), 1000.0 + 1e-3 * torch.sin(5 * t)], dim=-1
             ),
@@ -556,7 +556,7 @@ def test_warning_with_a_pinned_reference_suggests_the_reference(caplog):
     )
     torch.manual_seed(0)
     with caplog.at_level(logging.WARNING, logger="padaquad.quadrature.base"):
-        out = solver.integrate(
+        out, out_state = solver.integrate(
             f=lambda t, *_: torch.sin(2 * math.pi * t),
             mesh_init=T_INIT,
             mesh_final=T_FINAL,
@@ -572,7 +572,7 @@ def test_warning_with_a_pinned_reference_suggests_the_reference(caplog):
 
 def test_no_warning_when_converged(caplog):
     with caplog.at_level(logging.WARNING, logger="padaquad.quadrature.base"):
-        out = _gk21_solver(max_batch=BIG_BATCH).integrate(
+        out, out_state = _gk21_solver(max_batch=BIG_BATCH).integrate(
             f=_narrow_peak, mesh=_MESH20, take_gradient=False
         )
     assert out.converged is True
@@ -588,7 +588,7 @@ def test_no_warning_when_converged(caplog):
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 def test_converged_on_cuda_with_cpu_results(take_gradient):
     solver = make_uniform_solver("gk21", atol=1e-10, rtol=1e-10, device="cuda")
-    out = solver.integrate(
+    out, out_state = solver.integrate(
         f=_narrow_peak,
         mesh=_MESH20,
         take_gradient=take_gradient,
@@ -596,7 +596,7 @@ def test_converged_on_cuda_with_cpu_results(take_gradient):
     )
     assert out.converged is True
     assert out.n_start_steps_split == 1
-    capped = solver.integrate(
+    capped, _ = solver.integrate(
         f=lambda t, *_: torch.sin(400 * t),
         mesh=_MESH20,
         take_gradient=take_gradient,

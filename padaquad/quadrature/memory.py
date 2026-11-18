@@ -23,13 +23,16 @@ depends on the memory one evaluation uses. This module holds:
 from __future__ import annotations
 
 import ctypes
+import functools
 import gc
+import inspect
 import logging
 import math
 import os
 import time
+import weakref
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple, ParamSpec, TypeVar
 
 import numpy as np
 import psutil
@@ -79,6 +82,100 @@ def _shrink_batch(n: int) -> int:
         The smaller batch size.
     """
     return max(1, int(min(round(_OOM_BACKOFF * n), n - 1)))
+
+
+# Saved gradients, by id of the tensor: a weak reference to it (so that a
+# leaf made for one batch is not kept alive for the whole call) and a copy of
+# its .grad before the call (None if it had none).
+_SavedGrads = dict[int, tuple["weakref.ref[torch.Tensor]", "torch.Tensor | None"]]
+
+
+def _save_grad(leaf: torch.Tensor, saved: _SavedGrads) -> None:
+    """
+    Save leaf's ``.grad`` in ``saved`` unless it is there already.
+
+    The entry is removed when the tensor is freed, so a new tensor that gets
+    the same ``id`` is saved again.
+
+    Parameters
+    ----------
+    leaf : torch.Tensor
+        A tensor a backward pass may write a gradient to.
+    saved : _SavedGrads
+        The saved gradients, updated in place.
+    """
+    key = id(leaf)
+    if key not in saved:
+        grad = None if leaf.grad is None else leaf.grad.clone()
+        saved[key] = (weakref.ref(leaf, lambda _: saved.pop(key, None)), grad)
+
+
+class _Restart(Exception):
+    """Raised by ``integrate`` to be called again with ``args[0]`` as its state."""
+
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+
+def _restart_after_backward_oom(integrate: Callable[_P, _R]) -> Callable[_P, _R]:
+    """
+    Call ``integrate`` again, with a new state, when it raises ``_Restart``.
+
+    ``integrate`` raises ``_Restart(state)`` after an out-of-memory error in a
+    backward pass, once it has put back the gradients the failed attempt
+    added. The new call gets the same arguments, except ``mesh`` and
+    ``max_batch`` (None) and ``state``. It runs after the failed call has
+    returned, so that call's tensors are freed first. ``parameters`` is made
+    a list once, so a generator such as ``model.parameters()`` is still there
+    for a restart.
+
+    Parameters
+    ----------
+    integrate : Callable
+        The solver's ``integrate`` method.
+
+    Returns
+    -------
+    Callable
+        ``integrate`` with the restart.
+    """
+    signature = inspect.signature(integrate)
+
+    @functools.wraps(integrate)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+        """
+        Run ``integrate``, and again after each ``_Restart``.
+
+        Parameters
+        ----------
+        *args : Any
+            The positional arguments of ``integrate``, ``self`` first.
+        **kwargs : Any
+            Its keyword arguments.
+
+        Returns
+        -------
+        Any
+            What ``integrate`` returns.
+        """
+        call = signature.bind(*args, **kwargs).arguments
+        parameters = call.get("parameters")
+        if parameters is not None:
+            call["parameters"] = (
+                [p for g in parameters.param_groups for p in g["params"]]
+                if isinstance(parameters, torch.optim.Optimizer)
+                else list(parameters)
+            )
+        while True:
+            try:
+                return integrate(**call)  # type: ignore[call-arg]
+            except _Restart as restart:
+                state = restart.args[0]
+            call["self"]._release_memory()
+            call.update(mesh=None, max_batch=None, state=state)
+
+    return wrapper
 
 
 class BackwardOutOfMemoryError(torch.OutOfMemoryError):
@@ -362,8 +459,7 @@ class _MemoryManagement:
 
         The one place the cap ``_oom_max_batch`` (set after an out-of-memory
         error, until the next ``integrate`` call starts) is applied: to every
-        batch of the integration, to ``result.max_batch``, to the benchmark's
-        result and to ``get_max_batch``.
+        benchmark's result and to ``get_max_batch``.
 
         Parameters
         ----------
@@ -407,7 +503,7 @@ class _MemoryManagement:
         measured. After an out-of-memory error, the result is capped at the
         reduced batch size chosen then, until the next ``integrate`` call
         starts. To reuse the batch size of a particular call, pass its
-        ``result.max_batch`` instead.
+        ``state`` instead.
         See :ref:`ug-memory`.
 
         Parameters
@@ -454,7 +550,7 @@ class _MemoryManagement:
         >>> solver = adaptive_quadrature("uniform", "gk21", device="cpu")
         >>> t0 = torch.tensor([0.0], dtype=torch.float64)
         >>> m = solver.get_max_batch(f=torch.exp, t=t0)  # doctest: +SKIP
-        >>> result = solver.integrate(  # doctest: +SKIP
+        >>> result, state = solver.integrate(  # doctest: +SKIP
         ...     torch.exp, mesh_init=t0, mesh_final=t0 + 1, max_batch=m
         ... )
         """
@@ -699,8 +795,7 @@ class _MemoryManagement:
         Returns
         -------
         int
-            The measured batch size: what ``get_max_batch(f=...)`` returns and
-            what ``integrate`` reports as ``result.max_batch``.
+            The measured batch size, what ``get_max_batch(f=...)`` returns.
 
         Raises
         ------
@@ -1024,8 +1119,7 @@ class _MemoryManagement:
             # more than fits; the largest test call ran, so it fit then. Never
             # below one subinterval's C nodes, the smallest batch the
             # take_gradient=True path can evaluate (the fit still limits it).
-            # The cap lasts this integrate() call, like the out-of-memory cap
-            # (result.max_batch carries it over when the caller passes it on).
+            # The cap lasts until the next measurement.
             largest = max(*Ns, self.C)
             self._oom_max_batch = min(largest, self._oom_max_batch or largest)
 
@@ -1417,10 +1511,7 @@ class _MemoryManagement:
         return batch, converged
 
     def _save_grads(
-        self,
-        loss: torch.Tensor,
-        saved: dict[int, tuple[torch.Tensor, torch.Tensor | None]],
-        listed: bool,
+        self, loss: torch.Tensor, saved: _SavedGrads, listed: bool
     ) -> str | None:
         """
         Save the gradient of every tensor a backward pass of loss will write to.
@@ -1435,8 +1526,9 @@ class _MemoryManagement:
         ----------
         loss : torch.Tensor
             The loss about to be backpropagated.
-        saved : dict[int, tuple[torch.Tensor, torch.Tensor or None]]
-            Saved gradients by ``id`` of the tensor; updated in place.
+        saved : _SavedGrads
+            Saved gradients by ``id`` of the tensor (``_save_grad``); updated
+            in place.
         listed : bool
             Whether the user gave ``parameters=`` (already in ``saved``).
 
@@ -1457,9 +1549,7 @@ class _MemoryManagement:
             seen.add(node)
             leaf = getattr(node, "variable", None)
             if leaf is not None:
-                if id(leaf) not in saved:
-                    grad = None if leaf.grad is None else leaf.grad.clone()
-                    saved[id(leaf)] = (leaf, grad)
+                _save_grad(leaf, saved)
                 if getattr(leaf, "_post_accumulate_grad_hooks", None):
                     reason = "a parameter has a post-accumulate-grad hook"
             elif not listed and isinstance(

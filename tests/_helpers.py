@@ -272,9 +272,9 @@ def assert_time_ordering(integral_output):
     )
 
 
-def assert_optimal_mesh_ordering(integral_output):
-    """Assert that the optimal mesh time points are non-decreasing."""
-    t_optimal_flat = torch.flatten(integral_output.mesh_optimal, start_dim=0, end_dim=1)
+def assert_optimal_mesh_ordering(mesh):
+    """Assert that the optimal mesh (a state's mesh) is non-decreasing."""
+    t_optimal_flat = torch.flatten(mesh, start_dim=0, end_dim=1)
     assert torch.all(t_optimal_flat[1:] - t_optimal_flat[:-1] >= 0), (
         "Optimal mesh time points are not non-decreasing"
     )

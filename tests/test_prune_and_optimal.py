@@ -257,12 +257,12 @@ def test_mesh_optimal_ends_are_the_bounds(
     )
     if case == "merge":
         mesh = torch.linspace(0.3, 1.7, 129, dtype=dtype).unsqueeze(-1)
-        out = solver.integrate(
+        out, out_state = solver.integrate(
             torch.exp, mesh=mesh, take_gradient=False, result_device=result_device
         )
     else:
         mesh = torch.tensor([[0.3], [4.0]], dtype=dtype)  # the bounds only
-        out = solver.integrate(
+        out, out_state = solver.integrate(
             lambda t: torch.sin(20 * t),
             mesh_init=mesh[0],
             mesh_final=mesh[-1],
@@ -270,9 +270,9 @@ def test_mesh_optimal_ends_are_the_bounds(
             take_gradient=False,
             result_device=result_device,
         )
-    assert torch.equal(out.mesh_optimal[0].cpu(), mesh[0])
-    assert torch.equal(out.mesh_optimal[-1].cpu(), mesh[-1])
-    assert torch.all(torch.diff(out.mesh_optimal[:, 0]) > 0)
+    assert torch.equal(out_state.mesh[0].cpu(), mesh[0])
+    assert torch.equal(out_state.mesh[-1].cpu(), mesh[-1])
+    assert torch.all(torch.diff(out_state.mesh[:, 0]) > 0)
 
 
 # ---------------------------------------------------------------------------
@@ -280,11 +280,11 @@ def test_mesh_optimal_ends_are_the_bounds(
 # ---------------------------------------------------------------------------
 
 
-def _warm_start_passes(solver, f, cold) -> bool:
-    """Re-integrate f from the cold call's mesh_optimal; True when no starting
+def _warm_start_passes(solver, f, cold_state) -> bool:
+    """Re-integrate f from the cold call's state; True when no starting
     subinterval fails, i.e. none of that mesh's subintervals had to be split."""
-    out = solver.integrate(
-        f=f, mesh=cold.mesh_optimal, max_batch=cold.max_batch, take_gradient=False
+    out, out_state = solver.integrate(
+        f=f, mesh=cold_state.mesh, max_batch=cold_state.max_batch, take_gradient=False
     )
     return out.n_start_steps_split == 0
 
@@ -308,10 +308,10 @@ def test_optimal_mesh_passes_when_reevaluated(
         method, atol=atol, rtol=rtol, device="cpu", merge_rule=merge_rule
     )
     torch.manual_seed(0)
-    cold = solver.integrate(
+    cold, cold_state = solver.integrate(
         f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
     )
-    assert _warm_start_passes(solver, f, cold)
+    assert _warm_start_passes(solver, f, cold_state)
 
 
 @pytest.mark.parametrize(
@@ -340,10 +340,10 @@ def test_optimal_mesh_passes_when_reevaluated_cumulative(
         merge_rule=merge_rule,
     )
     torch.manual_seed(0)
-    cold = solver.integrate(
+    cold, cold_state = solver.integrate(
         f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
     )
-    assert _warm_start_passes(solver, f, cold)
+    assert _warm_start_passes(solver, f, cold_state)
 
 
 @pytest.mark.parametrize("use_absolute_error_ratio", [True, False])
@@ -389,16 +389,16 @@ def test_repeated_warm_starts_prune_to_a_fixed_point(method, merge_rule):
         method, atol=1e-9, rtol=1e-7, device="cpu", merge_rule=merge_rule
     )
     mesh = torch.linspace(0.0, 1.0, 129, dtype=torch.float64).unsqueeze(-1)
-    out = solver.integrate(f=f, mesh=mesh, take_gradient=False)
-    sizes = [len(mesh) - 1, len(out.mesh_optimal) - 1]
+    out, out_state = solver.integrate(f=f, mesh=mesh, take_gradient=False)
+    sizes = [len(mesh) - 1, len(out_state.mesh) - 1]
     for _ in range(8):
-        out = solver.integrate(
-            f=f, mesh=out.mesh_optimal, max_batch=out.max_batch, take_gradient=False
+        out, out_state = solver.integrate(
+            f=f, mesh=out_state.mesh, max_batch=out_state.max_batch, take_gradient=False
         )
         assert out.n_start_steps_split == 0
         assert out.converged is True
         assert torch.allclose(out.integral.cpu(), exact, atol=1e-9, rtol=1e-6)
-        sizes.append(len(out.mesh_optimal) - 1)
+        sizes.append(len(out_state.mesh) - 1)
         if sizes[-1] == sizes[-2]:
             break
     assert sizes[-1] == sizes[-2], f"no fixed point: {sizes}"
@@ -507,9 +507,11 @@ def test_preasymptotic_pair_merges(merge_rule, merged):
         max_batch=SMALL_BATCH,
     )
     mesh = torch.tensor([[0.0], [0.5], [1.0]], dtype=torch.float64)
-    result = solver.integrate(f=_lorentz_5, mesh=mesh, take_gradient=False)
+    result, result_state = solver.integrate(
+        f=_lorentz_5, mesh=mesh, take_gradient=False
+    )
     expected = mesh[[0, -1]] if merged else mesh
-    assert torch.equal(result.mesh_optimal.cpu(), expected)
+    assert torch.equal(result_state.mesh.cpu(), expected)
 
 
 def _warm_errors(solver, f, exact, mesh, n_warm):
@@ -519,13 +521,16 @@ def _warm_errors(solver, f, exact, mesh, n_warm):
     error, summed rounding floor 50 eps |Q_i|), eps of the mesh's dtype."""
     eps = torch.finfo(mesh.dtype).eps
     tol = max(float(solver.atol), float(solver.rtol) * abs(exact))
-    cold = solver.integrate(f=f, mesh=mesh, take_gradient=False)
+    cold, cold_state = solver.integrate(f=f, mesh=mesh, take_gradient=False)
     cold_error = abs(float(cold.integral) - exact)
     rows = []
-    warm = cold
+    warm_state = cold_state
     for _ in range(n_warm):
-        warm = solver.integrate(
-            f=f, mesh=warm.mesh_optimal, max_batch=warm.max_batch, take_gradient=False
+        warm, warm_state = solver.integrate(
+            f=f,
+            mesh=warm_state.mesh,
+            max_batch=warm_state.max_batch,
+            take_gradient=False,
         )
         floor = float((50 * eps * warm.mesh_quadratures.abs()).sum())
         bound = max(tol, 1.05 * cold_error, floor)
@@ -604,7 +609,7 @@ def test_merge_rule_option():
         make_solver_for_unit_test(merge_rule="bogus")
     solver = adaptive_quadrature("uniform", "gk21", device="cpu", merge_rule="sum")
     assert solver.merge_rule == "sum"
-    result = integrate(
+    result, result_state = integrate(
         torch.exp,
         mesh_init=torch.tensor([0.0], dtype=torch.float64),
         mesh_final=torch.tensor([1.0], dtype=torch.float64),
@@ -796,12 +801,15 @@ def test_predicted_warm_starts_with_vector_output(error_norm, absolute):
         max_batch=SMALL_BATCH,
     )
     torch.manual_seed(0)
-    warm = solver.integrate(
+    warm, warm_state = solver.integrate(
         f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
     )
     for _ in range(3):
-        warm = solver.integrate(
-            f=f, mesh=warm.mesh_optimal, max_batch=warm.max_batch, take_gradient=False
+        warm, warm_state = solver.integrate(
+            f=f,
+            mesh=warm_state.mesh,
+            max_batch=warm_state.max_batch,
+            take_gradient=False,
         )
         assert warm.n_start_steps_split == 0
         assert warm.converged is True
@@ -901,7 +909,7 @@ def test_nan_integrand_does_not_break_the_prediction():
         )
 
     mesh = torch.linspace(0.0, 1.0, 33, dtype=torch.float64).unsqueeze(-1)
-    optimal = solver.integrate(f=f, mesh=mesh, take_gradient=False).mesh_optimal
+    optimal = solver.integrate(f=f, mesh=mesh, take_gradient=False)[1].mesh
     optimal = optimal.cpu()[:, 0]
     assert torch.isfinite(optimal).all()
     assert torch.all(optimal[1:] > optimal[:-1])
@@ -928,26 +936,26 @@ def test_predicted_on_gpu_with_either_result_device():
         )
         for device in ("cuda", "cpu")
     )
-    out_gpu = gpu.integrate(f=f, mesh=mesh, take_gradient=False)
-    out_cpu = cpu.integrate(f=f, mesh=mesh, take_gradient=False)
+    out_gpu, out_gpu_state = gpu.integrate(f=f, mesh=mesh, take_gradient=False)
+    out_cpu, out_cpu_state = cpu.integrate(f=f, mesh=mesh, take_gradient=False)
     for result_device in ("cuda", "cpu", "cuda"):
-        out_gpu = gpu.integrate(
+        out_gpu, out_gpu_state = gpu.integrate(
             f=f,
-            mesh=out_gpu.mesh_optimal,
-            max_batch=out_gpu.max_batch,
+            mesh=out_gpu_state.mesh,
+            max_batch=out_gpu_state.max_batch,
             take_gradient=False,
             result_device=result_device,
         )
-        out_cpu = cpu.integrate(
+        out_cpu, out_cpu_state = cpu.integrate(
             f=f,
-            mesh=out_cpu.mesh_optimal,
-            max_batch=out_cpu.max_batch,
+            mesh=out_cpu_state.mesh,
+            max_batch=out_cpu_state.max_batch,
             take_gradient=False,
         )
         cached = [v for k, v in gpu._merge_weight_cache.items() if k is not None]
         assert cached
         assert all(v.device.type == result_device for v in cached)
-        assert out_gpu.mesh_optimal.device.type == "cuda"
-        assert len(out_gpu.mesh_optimal) == len(out_cpu.mesh_optimal)
+        assert out_gpu_state.mesh.device.type == "cuda"
+        assert len(out_gpu_state.mesh) == len(out_cpu_state.mesh)
         assert out_gpu.n_start_steps_split == 0
         assert abs(float(out_gpu.integral) - exact) <= 1e-8

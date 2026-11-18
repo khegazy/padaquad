@@ -46,6 +46,7 @@ import inspect
 import logging
 import math
 import numbers
+import operator
 import time
 from abc import abstractmethod
 from typing import TYPE_CHECKING, Any, ClassVar
@@ -758,8 +759,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             given with it cut or extend its mesh (see :ref:`the user guide <ug-reuse>`).
         parameters : iterable of torch.Tensor, torch.optim.Optimizer or None
             Needed only when f uses a custom autograd function (for example
-            activation checkpointing with ``use_reentrant=True``) and
-            ``take_gradient=True``: the tensors f's gradients reach, or their
+            activation checkpointing with ``use_reentrant=True``, or a function
+            compiled with ``torch.compile``) and ``take_gradient=True``: the tensors f's gradients reach, or their
             optimizer. After an out-of-memory error in a backward pass,
             padaquad puts back the gradients the call added and restarts the
             integral; it finds them by walking each batch's autograd graph,
@@ -865,7 +866,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             self.init_max_batch if max_batch is None and state is None else max_batch
         )
         if given is not None:
-            self._batch, self._batch_converged = int(given), True
+            # An int (numpy ints too) of at least 1; a bool, float or string
+            # raises here, before f is called.
+            if isinstance(given, bool) or operator.index(given) < 1:
+                raise ValueError(f"max_batch must be an int >= 1; got {given!r}.")
+            self._batch, self._batch_converged = operator.index(given), True
         elif state is not None:
             self._batch, self._batch_converged = (
                 state.max_batch,
@@ -1211,33 +1216,34 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 )
 
                 # TODO make sure growing string loss center is a time not the number of evals because eval number is meaningless here.
-                # Compute loss
-                loss = loss_fxn(intermediate_results)
-
-                # Backpropagate gradients through the integration if requested.
-                # First save what the backward pass writes to (_save_grads); on
-                # a GPU, measure its peak memory for the next batch's check
-                # (_evaluate_f_on_full_nodes).
-                if take_gradient and loss.requires_grad:
-                    unsafe = (
-                        self._save_grads(loss, saved, parameters is not None) or unsafe
-                    )
-                    cuda = self.device.type == "cuda"
-                    if cuda:
-                        torch.cuda.reset_peak_memory_stats(self.device)
-                        before = torch.cuda.memory_allocated(self.device)
-                    try:
+                # The loss, and its backward pass if requested. First save what
+                # the backward pass writes to (_save_grads); on a GPU, measure
+                # its peak memory for the next batch's check
+                # (_evaluate_f_on_full_nodes). With take_gradient=True an
+                # out-of-memory error in loss_fxn or in the backward pass
+                # restarts the integral (below the loop).
+                try:
+                    loss = loss_fxn(intermediate_results)
+                    if take_gradient and loss.requires_grad:
+                        unsafe = (
+                            self._save_grads(loss, saved, parameters is not None)
+                            or unsafe
+                        )
+                        cuda = self.device.type == "cuda"
+                        if cuda:
+                            torch.cuda.reset_peak_memory_stats(self.device)
+                            before = torch.cuda.memory_allocated(self.device)
                         loss.backward()
-                    except (RuntimeError, MemoryError) as e:
-                        if not _is_out_of_memory(e):
-                            raise
-                        failed_batch = batch_size
-                    if failed_batch is not None:
-                        break
-                    if cuda and self._forward_bytes > 0:
-                        self._backward_ratio = (
-                            torch.cuda.max_memory_allocated(self.device) - before
-                        ) / self._forward_bytes
+                        if cuda and self._forward_bytes > 0:
+                            self._backward_ratio = (
+                                torch.cuda.max_memory_allocated(self.device) - before
+                            ) / self._forward_bytes
+                except (RuntimeError, MemoryError) as e:
+                    if not (take_gradient and _is_out_of_memory(e)):
+                        raise
+                    failed_batch = batch_size
+                if failed_batch is not None:
+                    break
 
                 # Accumulate into the record
                 intermediate_results.loss = loss
@@ -2080,17 +2086,18 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             if cuda:
                 torch.cuda.reset_peak_memory_stats(self.device)
                 before = torch.cuda.memory_allocated(self.device)
-            output = None
+            output, outside = None, False
             try:
                 output = self._split_f_output(f(nodes_flat, *f_args))
             except (RuntimeError, MemoryError) as e:
                 if not _is_out_of_memory(e) or max_mesh_steps == 1:
                     raise
+                outside = not isinstance(e, torch.OutOfMemoryError)
             n = len(nodes_flat)
             if output is None:
                 # Out of memory in f: no gradient was written yet, so the
                 # batch can be evaluated again, smaller.
-                self._release_memory()
+                self._release_memory(empty_cache=outside)
                 n, why = _shrink_batch(n), "f ran out of memory"
             elif not (cuda and output[0].requires_grad):
                 break
@@ -2199,11 +2206,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                         f"{e}\n\nSingle integrand (f) evaluation failed to fit in memory, batch size cannot be reduced."
                     ) from e
                 out_of_memory = True
+                outside = not isinstance(e, torch.OutOfMemoryError)
             if out_of_memory:
                 # Cleaned up here, after the except block: inside it the error's
                 # traceback still holds f's tensors, so they cannot be freed.
                 free_mem, total_mem = self._get_memory()
-                self._release_memory()
+                self._release_memory(empty_cache=outside)
                 # Shrink the batch that failed; the batch size of the call
                 # stops growing (see _batch_for).
                 self._batch, self._batch_converged = _shrink_batch(max_batch), True

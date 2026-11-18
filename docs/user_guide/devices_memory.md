@@ -36,8 +36,9 @@ is evaluated again at three quarters of its size, repeatedly, until it fits;
 that size becomes the batch size, and the batch size has then converged
 (`state.max_batch_converged`): it never grows again, in this call or in any
 call given its state. Reaching the limit this way costs a few failed calls of
-the integrand once per state (measured on an A100: about 5 to 6 s for networks
-filling the GPU).
+the integrand once per state (measured on an A100, for a network filling the
+GPU: 0.6 s more than a run with the right batch size from the start, 1.4 s
+from a cold call).
 
 **With `take_gradient=True`.** padaquad backpropagates every batch right after
 evaluating it. On a GPU, before each backward pass it compares the memory
@@ -50,12 +51,15 @@ memory, padaquad puts back the gradients the call added, lowers the batch
 size, and restarts the integral from its starting mesh, with a warning. It
 finds those gradients by walking each batch's autograd graph. A custom
 autograd function (for example activation checkpointing with
-`use_reentrant=True`) can hide parameters from that walk; pass
+`use_reentrant=True`, or a function compiled with `torch.compile`) can hide
+parameters from that walk; pass
 `parameters=model.parameters()` (or the optimizer) in that case, else
 padaquad raises `BackwardOutOfMemoryError`, whose `state` is the state to call
 again with after resetting the gradients. It raises it also when a parameter
 has a post-accumulate-grad hook, or when `torch.distributed` runs more than one
-process.
+process. An out-of-memory error in `loss_fxn` is handled the same way as one in
+the backward pass. One solver serves one thread: an integrand may integrate with
+the same solver (a double integral), but two threads must not share one.
 
 **Measuring before any integral.** `solver.get_max_batch(f=f, t=t,
 take_gradient=...)` runs the memory benchmark: it fits the memory of calls on

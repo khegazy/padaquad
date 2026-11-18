@@ -94,8 +94,10 @@ def _save_grad(leaf: torch.Tensor, saved: _SavedGrads) -> None:
     """
     Save leaf's ``.grad`` in ``saved`` unless it is there already.
 
-    The entry is removed when the tensor is freed, so a new tensor that gets
-    the same ``id`` is saved again.
+    A tensor freed during the call leaves its entry; a new tensor that gets
+    its ``id`` is told apart by the weak reference and saved again. (A
+    callback removing the entry would put ``saved`` in a reference cycle, so
+    the copies would outlive the call until Python's cyclic collector runs.)
 
     Parameters
     ----------
@@ -104,15 +106,24 @@ def _save_grad(leaf: torch.Tensor, saved: _SavedGrads) -> None:
     saved : _SavedGrads
         The saved gradients, updated in place.
     """
-    key = id(leaf)
-    if key not in saved:
+    entry = saved.get(id(leaf))
+    if entry is None or entry[0]() is not leaf:
         grad = None if leaf.grad is None else leaf.grad.clone()
-        saved[key] = (weakref.ref(leaf, lambda _: saved.pop(key, None)), grad)
+        saved[id(leaf)] = (weakref.ref(leaf), grad)
 
 
 class _Restart(Exception):
     """Raised by ``integrate`` to be called again with ``args[0]`` as its state."""
 
+
+# Solver attributes that hold the state of one integrate() call.
+_PER_CALL = (
+    "_batch",
+    "_batch_converged",
+    "_total_mem_usage",
+    "_forward_bytes",
+    "_backward_ratio",
+)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -128,7 +139,9 @@ def _restart_after_backward_oom(integrate: Callable[_P, _R]) -> Callable[_P, _R]
     ``max_batch`` (None) and ``state``. It runs after the failed call has
     returned, so that call's tensors are freed first. ``parameters`` is made
     a list once, so a generator such as ``model.parameters()`` is still there
-    for a restart.
+    for a restart. The solver's per-call attributes are put back when the
+    call ends, so an integrand that integrates with the same solver (a double
+    integral) does not change the outer call's batch size.
 
     Parameters
     ----------
@@ -161,18 +174,24 @@ def _restart_after_backward_oom(integrate: Callable[_P, _R]) -> Callable[_P, _R]
         """
         call = signature.bind(*args, **kwargs).arguments
         parameters = call.get("parameters")
-        if parameters is not None:
+        if isinstance(parameters, torch.Tensor):
+            call["parameters"] = [parameters]
+        elif parameters is not None:
             call["parameters"] = (
                 [p for g in parameters.param_groups for p in g["params"]]
                 if isinstance(parameters, torch.optim.Optimizer)
                 else list(parameters)
             )
+        solver = call["self"]
+        outer = {name: getattr(solver, name) for name in _PER_CALL}
         while True:
             try:
                 return integrate(**call)  # type: ignore[call-arg]
             except _Restart as restart:
                 state = restart.args[0]
-            call["self"]._release_memory()
+            finally:
+                vars(solver).update(outer)
+            solver._release_memory()
             call.update(mesh=None, max_batch=None, state=state)
 
     return wrapper
@@ -656,24 +675,29 @@ class _MemoryManagement:
         else:
             return self._get_cpu_memory()
 
-    def _release_memory(self) -> None:
+    def _release_memory(self, empty_cache: bool = False) -> None:
         """
         Free memory after an out-of-memory error or a memory benchmark.
 
-        Always runs the garbage collector. On a CUDA solver it also empties
-        PyTorch's caching allocator, which releases the cache of every GPU
-        (NativeCachingAllocator::emptyCache in c10/cuda/CUDACachingAllocator.cpp
-        loops over all devices), so no device context is needed. A CPU solver
-        never touches the GPU.
+        Runs the garbage collector. With ``empty_cache``, on a CUDA solver,
+        also empties PyTorch's caching allocator, which releases the cache of
+        every GPU (NativeCachingAllocator::emptyCache in
+        c10/cuda/CUDACachingAllocator.cpp loops over all devices). That helps
+        only allocations made outside PyTorch's allocator (a CUDA library's,
+        for example); after an error of PyTorch's own allocator it only slows
+        the next calls down (measured on an A100: the first call after it ran
+        about 1.3 s slower, and an out-of-memory episode took 1.4 to 6 s
+        longer; ``docs/issues/2026-11-18-memory-state-break-and-speed.md``).
+        A CPU solver never touches the GPU.
+
+        Parameters
+        ----------
+        empty_cache : bool
+            Whether to empty PyTorch's GPU cache too. Default False.
         """
         gc.collect()
-        if self.device.type == "cuda":
+        if empty_cache and self.device.type == "cuda":
             torch.cuda.empty_cache()
-            # Small grace period for any async CUDA cleanup to land. Avoiding
-            # `torch.cuda.synchronize()` here on purpose: after a CUDA OOM the
-            # default stream can be in an error state, and synchronize on a
-            # faulted stream has been observed to block indefinitely.
-            time.sleep(0.05)
 
     def _setup_memory_checks(
         self,
@@ -1084,7 +1108,7 @@ class _MemoryManagement:
                 "max_batch to skip the measurement."
             ) from e
 
-        self._release_memory()
+        self._release_memory(empty_cache=True)
         n_rel = sum(reliable)
         (a, b, d), ready = memory_model()
         if error is None and n_rel == 0:
@@ -1365,11 +1389,12 @@ class _MemoryManagement:
                     f"{self.device} with total_mem_usage={total_mem_usage}."
                 ) from e
             out_of_memory = True
+            outside = not isinstance(e, torch.OutOfMemoryError)
         if out_of_memory:
             # Clean up here, after the except block: inside it, the error's
             # traceback still holds f's tensors, so they could not be freed.
             t_input = result = None
-            self._release_memory()
+            self._release_memory(empty_cache=outside)
             return None
 
         if self.device.type == "cuda":

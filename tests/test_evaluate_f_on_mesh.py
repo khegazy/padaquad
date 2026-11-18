@@ -1477,55 +1477,19 @@ class TestEndToEnd:
     )
     @pytest.mark.parametrize("method", TEST_METHODS)
     def test_integrate_max_batch_zero_errors(self, method, take_gradient):
-        """``.integrate(max_batch=0)`` is rescued to 1 (with a warning).
-
-        - take_gradient=False: the split path evaluates everything regardless of
-          batch size, so the call succeeds with a correct integral.
-        - take_gradient=True: the full-nodes path needs a whole panel per batch,
-          so max_batch=1 < C still trips its assertion for the C>1 methods.
-        """
+        """``.integrate(max_batch=0)`` raises ``ValueError`` before any work,
+        with either ``take_gradient`` (it used to be rescued to 1 with a
+        warning, which then failed an assertion with ``take_gradient=True``)."""
         f, _solution_fxn, _ = _resolve_integrand("damped_sine")
         solver = self._solver(method, max_batch=0)
-        if take_gradient:
-            with pytest.raises(AssertionError):
-                solver.integrate(
-                    f=f,
-                    mesh_init=self.T_INIT,
-                    mesh_final=self.T_FINAL,
-                    take_gradient=True,
-                )
-        else:
-            torch.manual_seed(2025)
-            result, _ = solver.integrate(
+        with pytest.raises(ValueError, match="max_batch must be an int >= 1"):
+            solver.integrate(
                 f=f,
                 mesh_init=self.T_INIT,
                 mesh_final=self.T_FINAL,
-                take_gradient=False,
-            )
-            reference = self._solver(method, max_batch=_method_C(method))
-            torch.manual_seed(2025)
-            ref_result, _ = reference.integrate(
-                f=f,
-                mesh_init=self.T_INIT,
-                mesh_final=self.T_FINAL,
-                take_gradient=False,
-            )
-            assert torch.allclose(
-                result.integral.cpu(), ref_result.integral.cpu(), atol=1e-12, rtol=0
-            ), (
-                f"{method} max_batch=0 (rescued to 1) altered the integral vs "
-                f"max_batch=C ({result.integral.item()} vs "
-                f"{ref_result.integral.item()})"
+                take_gradient=take_gradient,
             )
 
-    # -----------------------------------------------------------------------
-    # take_gradient=True with max_batch < C must assert at the solver
-    # -----------------------------------------------------------------------
-
-    @pytest.mark.tier1
-    @pytest.mark.parametrize(
-        ("method", "max_batch"), _BELOW_C_SWEEP, ids=_BELOW_C_SWEEP_IDS
-    )
     def test_integrate_take_grad_True_max_batch_below_C_errors(self, method, max_batch):
         """For take_gradient=True, max_batch < C trips the assertion in
         _evaluate_f_on_full_nodes."""

@@ -163,14 +163,15 @@ def test_restart_keeps_the_gradient_of_a_mesh_that_requires_grad(through):
     assert torch.allclose(restarted, reference, rtol=1e-8, atol=1e-12)
 
 
-@pytest.mark.parametrize("max_batch", [np.int64(5000), 5000.0])
+@pytest.mark.parametrize("max_batch", [np.int64(5000)])
 def test_result_state_after_a_numpy_or_float_max_batch(max_batch):
     """``integrate(max_batch=np.int64(5000))`` runs (as on ``main``), but the
     batch size is kept as given, and building the returned state raises
     ValueError ("max_batch must be an int"), so the hand-over of the state to
     the next call fails (also ``examples/pode/trainer.py``'s
-    ``dataclasses.replace(state, ...)``). Either integrate should convert the
-    value (``operator.index``) or reject it up front."""
+    ``dataclasses.replace(state, ...)``). integrate now converts an integer
+    (``operator.index``) and rejects a float up front
+    (``test_invalid_max_batch_is_rejected_before_any_work``)."""
     _, state = run(
         solver(),
         lambda t: torch.sin(40 * t) + t,
@@ -266,16 +267,9 @@ def test_backward_ratio_is_not_computed_from_a_stale_forward_peak(monkeypatch, c
     one call of 2,300 points reaching t > 0.5, not two."""
     s = adaptive_quadrature("uniform", "gk21", device="cuda", atol=1e-10, rtol=1e-10)
     w = torch.tensor([1.3], dtype=torch.float64, device="cuda", requires_grad=True)
-    run(
-        s,
-        lambda t: (
-            w
-            * torch.sin(40 * t)
-            * torch.ones(len(t), 4096, device="cuda").mean(1, keepdim=True)
-        ),
-        state=IntegrationState(even_mesh(50).cuda(), 10_000, True),
-    )
-    assert s._forward_bytes > 1e7
+    # The value an earlier call left (the call's attributes are now put back
+    # when it ends, so this also stands for a value left inside the call).
+    s._forward_bytes = 2e7
     assert _run_mixed_call(s, w, monkeypatch, caplog) == 1
 
 

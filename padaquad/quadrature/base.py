@@ -2309,36 +2309,17 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 num_eval_nodes,
             )
 
-        # The last batch may run past num_nodes_to_eval; that overshoot is the
-        # residual carried to the next call.
+        # The batches run until at least num_nodes_to_eval nodes are evaluated;
+        # the last one may run past it.
         f_eval_batches, tracked_lists, num_nodes_evaluated = (
             self._evaluate_f_in_batches(
                 f, f_args, nodes_flat, num_nodes_to_eval, max_batch
             )
         )
-        num_residual_nodes = num_nodes_evaluated - num_nodes_to_eval
-        # Get the residual evaluations of the last mesh step
-        residual_nodes: torch.Tensor | None = None
-        residual_f_evals: torch.Tensor | None = None
-        residual_tracked: list[torch.Tensor] | None = None
-        residual_mesh_idx: torch.Tensor | None = None
-        if num_residual_nodes > 0:
-            residual_nodes = nodes_flat[-self.C : -self.C + num_residual_nodes]
-            nodes_flat = nodes_flat[: -self.C]
-            residual_f_evals = f_eval_batches[-1][-num_residual_nodes:]
-            f_eval_batches[-1] = f_eval_batches[-1][:-num_residual_nodes]
-            if tracked_lists is not None:
-                residual_tracked = [
-                    tl[-1][-num_residual_nodes:].detach() for tl in tracked_lists
-                ]
-                for tl in tracked_lists:
-                    tl[-1] = tl[-1][:-num_residual_nodes]
-            # Store the residual panel's barrier coordinate, not its
-            # integer index — see the note at the top of this method.
-            residual_mesh_idx = mesh[step_idxs[-1]].clone()
-            step_idxs = step_idxs[:-1]
 
-        # Combine split evaluations and nodes
+        # Everything evaluated in this layout, in node order: the carried nodes
+        # of the previous call first, then the nodes these batches evaluated.
+        nodes_flat = nodes_flat[:num_nodes_evaluated]
         if split_mesh_idx is not None:
             assert split_nodes is not None
             assert split_f_evals is not None
@@ -2346,8 +2327,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             f_evals = torch.concatenate([split_f_evals, *f_eval_batches], dim=0)
         else:
             f_evals = torch.concatenate(f_eval_batches, dim=0)
-
-        # Combine tracked variables the same way (prepending the carried split).
         tracked_combined: list[torch.Tensor] | None = None
         if tracked_lists is not None:
             tracked_combined = []
@@ -2361,6 +2340,36 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     )
                 else:
                     tracked_combined.append(torch.concatenate(tl, dim=0))
+
+        # Cut at the last whole subinterval. The nodes after it, fewer than C,
+        # are the residual carried to the next call. The cut is counted from
+        # what was evaluated, not from the planned layout: an out-of-memory
+        # retry changes the batch size inside this call, and the batches then
+        # end elsewhere than planned (for example on one whole subinterval
+        # more, which is returned like the others, or exactly on
+        # num_nodes_to_eval, which leaves the planned extra subinterval
+        # unevaluated and unreturned).
+        num_whole_steps = len(nodes_flat) // self.C
+        num_whole_nodes = num_whole_steps * self.C
+        residual_nodes: torch.Tensor | None = None
+        residual_f_evals: torch.Tensor | None = None
+        residual_tracked: list[torch.Tensor] | None = None
+        residual_mesh_idx: torch.Tensor | None = None
+        if len(nodes_flat) > num_whole_nodes:
+            residual_nodes = nodes_flat[num_whole_nodes:]
+            residual_f_evals = f_evals[num_whole_nodes:]
+            if tracked_combined is not None:
+                residual_tracked = [
+                    tv[num_whole_nodes:].detach() for tv in tracked_combined
+                ]
+            # Store the residual panel's barrier coordinate, not its
+            # integer index — see the note at the top of this method.
+            residual_mesh_idx = mesh[step_idxs[num_whole_steps]].clone()
+        nodes_flat = nodes_flat[:num_whole_nodes]
+        f_evals = f_evals[:num_whole_nodes]
+        if tracked_combined is not None:
+            tracked_combined = [tv[:num_whole_nodes] for tv in tracked_combined]
+        step_idxs = step_idxs[:num_whole_steps]
 
         # Reshape and combine outputs
         nodes = torch.reshape(nodes_flat, (-1, self.C, nodes_flat.shape[-1]))

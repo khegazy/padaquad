@@ -824,7 +824,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         1.718282
         """
         # The arguments as given, for a restart after an out-of-memory error in
-        # a backward pass (see the end of the loop).
+        # a backward pass (see the end of the loop); parameters as a list, so
+        # a generator such as model.parameters() is not used up by then.
+        if parameters is not None:
+            parameters = (
+                [p for g in parameters.param_groups for p in g["params"]]
+                if isinstance(parameters, torch.optim.Optimizer)
+                else list(parameters)
+            )
         call_args = {k: v for k, v in locals().items() if k != "self"}
         if state is not None:
             if mesh is not None:
@@ -951,15 +958,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # Gradients to put back after an out-of-memory error in a backward
         # pass: the given parameters now, the rest as the graph walk finds them.
         saved: dict[int, tuple[torch.Tensor, torch.Tensor | None]] = {}
-        if parameters is not None:
-            listed = (
-                [p for g in parameters.param_groups for p in g["params"]]
-                if isinstance(parameters, torch.optim.Optimizer)
-                else list(parameters)
-            )
-            saved = {
-                id(p): (p, None if p.grad is None else p.grad.clone()) for p in listed
-            }
+        for p in parameters or ():
+            saved[id(p)] = (p, None if p.grad is None else p.grad.clone())
         unsafe: str | None = None
         failed_batch: int | None = None
 

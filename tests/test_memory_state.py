@@ -205,23 +205,35 @@ class GradIntegrand:
     ``forward_limit`` points; a hook makes the backward pass of a batch above
     ``backward_limit`` points run out of memory, before any gradient of this
     batch is written. ``function`` routes w through a custom autograd
-    function."""
+    function that hides it from the autograd graph (it is not an input; the
+    function adds its gradient itself), as activation checkpointing with
+    ``use_reentrant=True`` does."""
 
-    def __init__(self, forward_limit=math.inf, backward_limit=math.inf, function=False):
+    def __init__(
+        self, forward_limit=math.inf, backward_limit=math.inf, function=False, fail=()
+    ):
         self.w = torch.tensor([1.3], dtype=torch.float64, requires_grad=True)
         self.v = torch.tensor([0.7], dtype=torch.float64, requires_grad=True)
         self.forward_limit, self.backward_limit = forward_limit, backward_limit
         self.function, self.sizes = function, []
+        # The backward passes of these batches (counted from 1, one-point
+        # calls excluded) run out of memory too, whatever their size.
+        self.fail, self.batches = set(fail), 0
 
     def __call__(self, t):
         self.sizes.append(len(t))
         if len(t) > self.forward_limit:
             raise torch.OutOfMemoryError("simulated forward")
-        w = Identity.apply(self.w) if self.function else self.w
-        y = w * torch.sin(40 * t)
+        if self.function:
+            y = HiddenScale.apply(torch.sin(40 * t) + 0 * self.v, self)
+        else:
+            y = self.w * torch.sin(40 * t)
         if bool((t > 0.9).any()):
             y = y + self.v * torch.clamp(t - 0.9, min=0)
-        if y.requires_grad and len(t) > self.backward_limit:
+        self.batches += len(t) > 1
+        if y.requires_grad and (
+            len(t) > self.backward_limit or (len(t) > 1 and self.batches in self.fail)
+        ):
             y.register_hook(self._fail)
         return y
 
@@ -230,16 +242,23 @@ class GradIntegrand:
         raise torch.OutOfMemoryError("simulated backward")
 
 
-class Identity(torch.autograd.Function):
-    """A custom autograd function (shows up as a BackwardCFunction node)."""
+class HiddenScale(torch.autograd.Function):
+    """x * owner.w, with w hidden: not an input, so the graph has no node for
+    it; backward adds w's gradient itself. Shows up as a BackwardCFunction."""
 
     @staticmethod
-    def forward(ctx, x):
-        return x.clone()
+    def forward(ctx, x, owner):
+        ctx.owner = owner
+        ctx.save_for_backward(x)
+        return x * owner.w.detach()
 
     @staticmethod
     def backward(ctx, grad):
-        return grad
+        (x,) = ctx.saved_tensors
+        w = ctx.owner.w
+        g = (grad * x).sum().reshape(1)
+        w.grad = g if w.grad is None else w.grad + g
+        return grad * w.detach(), None
 
 
 def grads(f):
@@ -302,9 +321,13 @@ def test_custom_autograd_function_needs_parameters():
     solver().integrate(f, state=state)
     assert grads(f) == pytest.approx((D_W, D_V), rel=1e-8)
 
-    f = GradIntegrand(backward_limit=5000, function=True)
-    solver().integrate(f, state=GROWING, parameters=torch.optim.SGD([f.w, f.v]))
-    assert grads(f) == pytest.approx((D_W, D_V), rel=1e-8)
+    # An optimizer, and a generator (used up after one pass over it), which
+    # every restart must still see. The second batch of the first two attempts
+    # fails, so each attempt has added w's hidden gradient before it fails.
+    for listed in (lambda f: torch.optim.SGD([f.w, f.v]), lambda f: iter([f.w, f.v])):
+        f = GradIntegrand(function=True, fail={2, 4})
+        solver().integrate(f, state=GROWING, parameters=listed(f))
+        assert grads(f) == pytest.approx((D_W, D_V), rel=1e-8)
 
 
 def test_post_accumulate_hook_raises_instead_of_restarting():

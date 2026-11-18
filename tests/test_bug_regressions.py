@@ -76,31 +76,18 @@ def test_no_warm_start_path_correctness(take_gradient):
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
 def test_reuse_mesh_and_max_batch(device, monkeypatch):
-    """The first call benchmarks and returns max_batch; passing it and the
-    optimal mesh to the next call skips the benchmark and starts from every
-    point of that mesh."""
+    """The first call finds a batch size (test calls, then growth) and returns
+    it with its optimal mesh in result.state; passing the state to the next
+    call makes no test call and starts from every point of that mesh."""
     solver = adaptive_quadrature("uniform", "gk21", device=device)
-    calls = []
-
-    def fake_benchmark(*args, **kwargs):
-        calls.append(1)
-        solver.f_mem_coeffs = (0.0, 1e-6, 0.0)  # GB: 1e-6 per evaluation
-        return 1234  # the measured batch size, as _setup_memory_checks returns
-
-    monkeypatch.setattr(solver, "_setup_memory_checks", fake_benchmark)
     first = solver.integrate(
         f=torch.exp, mesh_init=_bound(2.0), mesh_final=_bound(3.0), take_gradient=False
     )
-    assert len(calls) == 1
-    assert first.max_batch == 1234
+    assert first.max_batch >= solver.C
+    assert not first.max_batch_converged
 
-    second = solver.integrate(
-        f=torch.exp,
-        mesh=first.mesh_optimal,
-        max_batch=first.max_batch,
-        take_gradient=False,
-    )
-    assert len(calls) == 1
+    monkeypatch.setattr(solver, "_measure_call", lambda *a: pytest.fail("test call"))
+    second = solver.integrate(f=torch.exp, state=first.state, take_gradient=False)
     assert second.n_start_steps == len(first.mesh_optimal) - 1
     exact = math.exp(3.0) - math.exp(2.0)
     assert math.isclose(float(second.integral), exact, rel_tol=1e-6)

@@ -9,8 +9,7 @@ Run with::
 Each example computes a definite integral with ``integrate(f, ...)`` and
 compares it with the exact value. Every call passes float64 bounds (padaquad
 computes in the dtype of the bounds), ``device="cpu"`` and a fixed
-``max_batch``, which skips the memory benchmark that otherwise runs on every
-call without one.
+``max_batch``, so every batch has the same size.
 """
 
 from __future__ import annotations
@@ -161,26 +160,24 @@ def example_warm_start_loop() -> None:
 
     This is the pattern of a training loop: the integrand changes a little at
     each iteration, so the mesh the previous call ended with is a good starting
-    mesh for the next one: pass ``mesh=result.mesh_optimal`` and
-    ``max_batch=result.max_batch`` (the latter skips the memory benchmark). The
-    same call works for every iteration: on the first, ``mesh`` is None and a
-    fresh mesh is built on the bounds. The first call splits some of its
+    mesh for the next one: pass ``state=result.state``, which carries that mesh
+    and the batch size. On the first iteration there is no state, and a fresh
+    mesh is built on the bounds. The first call splits some of its
     subintervals; the later calls start from the refined mesh and need fewer
     splits. The low-degree method ``bosh3`` is used so
     that the first call has to refine; ``gk21`` would need no split here.
     """
     print("warm-start loop over a scaled sin integrand:")
     solver = adaptive_quadrature("uniform", "bosh3", atol=1e-8, rtol=1e-8, **OPTIONS)
-    mesh = max_batch = None
+    state = None
     for k, scale in enumerate([1.0, 1.05, 1.1, 1.15]):
         result = solver.integrate(
             lambda t, s=scale: torch.sin(s * t),
-            mesh=mesh,
+            state=state,
             mesh_init=torch.tensor([0.0], dtype=F64),
             mesh_final=torch.tensor([3 * math.pi], dtype=F64),
-            max_batch=max_batch,
         )
-        mesh, max_batch = result.mesh_optimal, result.max_batch
+        state = result.state
         expected = (1 - math.cos(3 * math.pi * scale)) / scale
         print(
             f"  iter {k} (scale={scale:.2f}): error "

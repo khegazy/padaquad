@@ -123,12 +123,11 @@ def integrate(
     calls its ``integrate`` method once. Each keyword in ``options`` goes to
     that ``integrate`` call if it is one of the call's arguments (for example
     ``mesh_init``, ``mesh_final``, ``mesh``, ``y0``, ``f_args``,
-    ``take_gradient``, ``max_batch``, ``result_device``), and to the solver's
+    ``take_gradient``, ``max_batch``, ``state``, ``result_device``), and to the solver's
     constructor otherwise (for example ``atol``, ``rtol``, ``remove_cut``,
     ``merge_rule``, ``use_absolute_error_ratio``, ``device``). Defaults are
     those of the solver class. To reuse an earlier result's mesh and batch
-    size, pass ``mesh=result.mesh_optimal`` and ``max_batch=result.max_batch``,
-    as with a solver.
+    size, pass ``state=result.state``, as with a solver.
 
     The integrand depends only on the integration variable ``t`` (and on
     ``f_args``), never on the running value of the integral, so the nodes of

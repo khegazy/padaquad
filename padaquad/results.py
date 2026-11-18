@@ -13,10 +13,59 @@ one batch of subintervals, as computed by the solver's
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
-if TYPE_CHECKING:
-    import torch
+import torch
+
+
+@dataclass(frozen=True, eq=False)
+class IntegrationState:
+    """
+    Where an ``integrate`` call ended, for the next call to start from.
+
+    Pass ``state=result.state`` to the next call of the same, or a slightly
+    changed, integrand. It never changes after it is made: ``integrate``
+    returns a new one, and ``dataclasses.replace(state, ...)`` makes an edited
+    copy. ``dataclasses.asdict(state)`` gives a dictionary that ``torch.save``
+    and ``torch.load`` (with its default ``weights_only=True``) handle, and
+    ``IntegrationState(**d)`` rebuilds it. See :ref:`ug-reuse`.
+
+    Attributes
+    ----------
+    mesh : torch.Tensor or None
+        The mesh to start from (an earlier result's ``mesh_optimal``), shape
+        [M, T]; None makes a fresh mesh on the bounds, which must then be
+        given.
+    max_batch : int
+        The batch size to start with: the largest number of points per call of
+        the integrand known to fit.
+    max_batch_converged : bool
+        True when the batch size will not grow again: it was given by the user,
+        or a call ran out of memory. While False, a call that needs larger
+        batches tries 10 times the batch size (see :ref:`ug-memory`).
+
+    Raises
+    ------
+    ValueError
+        If ``mesh`` is not a tensor or None, ``max_batch`` is not an int of at
+        least 1, or ``max_batch_converged`` is not a bool.
+    """
+
+    mesh: torch.Tensor | None
+    max_batch: int
+    max_batch_converged: bool
+
+    def __post_init__(self) -> None:
+        """Validate the fields (see the class's Raises)."""
+        if not (self.mesh is None or isinstance(self.mesh, torch.Tensor)):
+            raise ValueError("IntegrationState.mesh must be a tensor or None.")
+        if isinstance(self.max_batch, bool) or not isinstance(self.max_batch, int):
+            raise ValueError("IntegrationState.max_batch must be an int.")
+        if self.max_batch < 1:
+            raise ValueError(
+                f"IntegrationState.max_batch must be at least 1; got {self.max_batch}."
+            )
+        if not isinstance(self.max_batch_converged, bool):
+            raise ValueError("IntegrationState.max_batch_converged must be a bool.")
 
 
 @dataclass(kw_only=True)
@@ -107,12 +156,13 @@ class IntegrationResult:
         Largest number of times one starting subinterval was halved: 0 if
         none was split, at most ``max_adaptive_splits``.
     max_batch : int or None
-        The batch size to pass as ``max_batch`` to a later call of the same
-        integrand, which then skips the memory benchmark: the ``max_batch``
-        this call was given, or else the value its memory benchmark measured
-        (the integration itself sizes each batch from the memory free at that
-        moment); after an out-of-memory error, the reduced size. None only in
-        the per-batch results given to ``loss_fxn``.
+        The batch size at the end of the call: the largest number of points per
+        call of the integrand known to fit (the given ``max_batch``, or the
+        largest batch that ran; lowered by an out-of-memory error). None only
+        in the per-batch results given to ``loss_fxn``.
+    max_batch_converged : bool or None
+        Whether ``max_batch`` will not grow again: True when it was given, or
+        when the call ran out of memory. None only in the per-batch results.
 
     Examples
     --------
@@ -157,6 +207,26 @@ class IntegrationResult:
     n_start_steps_split: int | None = None
     max_split_depth: int | None = None
     max_batch: int | None = None
+    max_batch_converged: bool | None = None
+
+    @property
+    def state(self) -> IntegrationState | None:
+        """
+        The state to pass to the next call as ``state=``.
+
+        Built from ``mesh_optimal``, ``max_batch`` and ``max_batch_converged``;
+        None in the per-batch results given to ``loss_fxn``.
+
+        Returns
+        -------
+        IntegrationState or None
+            The state, or None.
+        """
+        if self.max_batch is None or self.max_batch_converged is None:
+            return None
+        return IntegrationState(
+            self.mesh_optimal, self.max_batch, self.max_batch_converged
+        )
 
     @property
     def percent_start_steps_split(self) -> float | None:

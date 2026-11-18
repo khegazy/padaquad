@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -358,15 +359,18 @@ class Trainer(CurriculumClass):
 
     def train_iteration(self):
         self.optimizer.zero_grad()
+        # Every call starts from the training times; the previous call's state
+        # carries its batch size (the first call finds one).
+        state = (
+            None
+            if self.integral_output is None
+            else dataclasses.replace(self.integral_output.state, mesh=self.input_times)
+        )
         self.integral_output = self.integrator.integrate(
             f=self._integrad,
-            mesh=self.input_times,
+            mesh=self.input_times if state is None else None,
+            state=state,
             f_args=(self.model,),
-            # The previous training call's batch size skips the memory
-            # benchmark (None on the first call, which measures it).
-            max_batch=None
-            if self.integral_output is None
-            else self.integral_output.max_batch,
         )
         # print(epoch_count, integral_output.nodes.shape)
         loss = self.integral_output.loss

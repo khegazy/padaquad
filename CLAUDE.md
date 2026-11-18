@@ -288,7 +288,8 @@ is a boolean array where `True` means the panel still needs evaluation.
    result's `mesh_optimal`), start from it, cut to any bounds inside it
    (`_setup_integral_bounds`).
 2. **Main loop.** While any `mesh_trackers` are `True`:
-   - Determine `max_steps` from GPU memory budget or explicit `max_batch`.
+   - Size the next call of `f` with `_batch_for` (the call's batch size, or
+     10 times it while not converged; see Memory management).
    - Select up to `max_steps` unevaluated panels.
    - Place C nodes per panel via `_compute_nodes`.
    - Evaluate `f` on all flattened nodes; reshape to `[N, C, D]`.
@@ -402,16 +403,48 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 
 ### Memory management
 
+- **The batch size of `integrate`** (no benchmark; design and evidence in
+  `docs/issues/2026-11-17-integration-state-design.md` and
+  `2026-11-18-memory-state-plan.md`). Per call, `_batch` (largest batch known
+  to fit) and `_batch_converged` (will not grow again), set at the start of
+  `integrate`: from `max_batch` (call, or constructor when no state) →
+  converged; from `state=` (`IntegrationState`, `results.py`); else from
+  `_first_batch` (forward calls on 10, 100, ... copies of `mesh_init` up to
+  the order of the first pass, through `_measure_call` with no-op readers;
+  an OOM shrinks by `_shrink_batch` = 0.75 until one runs → converged).
+  `_batch_for(n_waiting)` sizes every call of `f`: `min(n_waiting, B)` if
+  converged, else `min(n_waiting, 10 B)` (`_GROWTH`); `_evaluate_f_in_batches`
+  raises `_batch` after each call that ran and, on OOM, sets it to
+  `_shrink_batch(failed)`, converged. Returned as `result.max_batch`,
+  `result.max_batch_converged`; `result.state` is a property built from them
+  and `mesh_optimal`.
+- **`take_gradient=True`** (`_evaluate_f_on_full_nodes`, one batch per loop
+  turn): a forward OOM drops the outputs and retries with fewer
+  subintervals; on a GPU, when `f`'s output requires grad, the check
+  `usable >= _backward_ratio * F` (F = forward peak via
+  `reset_peak_memory_stats`/`max_memory_allocated`, `_backward_ratio` = the
+  previous batch's backward peak / forward peak, 1 at first) else drops and
+  shrinks to `min(0.75 N, N usable / need)`. Before each `loss.backward()`,
+  `_save_grads` walks the loss graph and saves `.grad` of every leaf first
+  seen in the call (plus `parameters=` at the start); a backward OOM breaks
+  the loop, restores them and re-calls `integrate` with the original
+  arguments (`call_args`) and `state=IntegrationState(start_mesh,
+  _shrink_batch(failed), True)`, or raises `BackwardOutOfMemoryError` (custom
+  autograd function without `parameters=`, a post-accumulate-grad hook,
+  `torch.distributed` world size > 1, or a batch below C).
+  `_is_out_of_memory` is False for that error.
+- `_setup_memory_checks` (the benchmark) runs only in
+  `get_max_batch(f=...)`; `f_mem_coeffs`, `_get_max_f_evals`,
+  `_oom_max_batch` and `_cap_max_batch` serve only `get_max_batch`.
 - All of this lives in `quadrature/memory.py` (`_MemoryManagement` mixin,
   `_is_out_of_memory`); the batch loop `_evaluate_f_in_batches` stays in
   `quadrature/base.py`.
 - `_setup_memory_checks` fits the memory of ONE call of `f` on N points,
   `f_mem_coeffs` = s·((a + E) + b·N + d·N²) in GB (s =
   `_GRADIENT_MEMORY_SAFETY_FACTOR` = 2.1 when `take_gradient`, else 1), and
-  returns the batch size that fit gives for the memory free at its end
-  (`result.max_batch`). Its only callers: `integrate` (after its one-point
-  output check) and the public `get_max_batch(f=..., t=...)`, which makes the
-  same one-point call first, clears `_oom_max_batch`, and lets a user measure
+  returns the batch size that fit gives for the memory free at its end. Its
+  only caller: the public `get_max_batch(f=..., t=...)`, which makes a
+  one-point call first, clears `_oom_max_batch`, and lets a user measure
   before any integral. The reader (`_peak_memory_reader` →
   `_Reader`: reset, read, E, noise floor, counts_reuse): CUDA peak counter
   (floor 10 KB, counts reused memory); Linux `VmHWM` reset through
@@ -450,13 +483,10 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   and update them when a change fixes or adds one.
   The batch loop's out-of-memory retry shrinks the batch that failed, not
   `_oom_max_batch` (which can be far above it).
-- Unless `max_batch` (call or constructor) fixes it, the batch size is
-  computed at every evaluation from live memory: `_get_max_f_evals` =
-  `_largest_n(f_mem_coeffs, _MEMORY_BUDGET·usable)` (capped at 1e9). Every
-  batch size (forced or computed), `result.max_batch`, the benchmark's result
-  and `get_max_batch()` go through one private cap, `_cap_max_batch`
-  (`min(value, _oom_max_batch)`); `get_max_batch` has no
-  `default_max_batch` (removed).
+- `get_max_batch()` without `f`: the constructor's `max_batch`, else
+  `_get_max_f_evals` = `_largest_n(f_mem_coeffs, _MEMORY_BUDGET·usable)` from
+  the last `get_max_batch(f=...)`, both through `_cap_max_batch`
+  (`min(value, _oom_max_batch)`); no `default_max_batch` (removed).
 - Out-of-memory errors are recognized by `_is_out_of_memory` (GPU OOM, CPU
   `DefaultCPUAllocator` refusal, CUDA "out of memory" and CUDA-library
   `*ALLOC*_FAILED` statuses, `MemoryError`);
@@ -504,12 +534,9 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 - The solver keeps no warm-start state between calls (`same_f`,
   `mesh_previous`, `previous_max_batch` and the constructor's bounds were
   removed). A call reuses an earlier one only through what it is passed:
-  `mesh=result.mesh_optimal` (detached, on the solver's device; its ends are
-  the bounds bit for bit) and `max_batch=result.max_batch`.
-- `result.max_batch`: the forced `max_batch` (call or constructor), else the
-  value `_setup_memory_checks` returned for this call, lowered to
-  `_oom_max_batch` (through `_cap_max_batch`). The
-  integration itself still sizes every batch from live memory.
+  `state=result.state` (its mesh is `mesh_optimal`, detached, on the solver's
+  device, ends equal to the bounds bit for bit; its batch size and converged
+  flag), or `mesh=` / `max_batch=` directly. `mesh=` with `state=` raises.
 - Interval rules, all in `_setup_integral_bounds` (returns
   `(mesh, mesh_init, mesh_final)`): a call needs a mesh or both bounds; a
   given mesh must be `[M, T]`, M >= 2, increasing (T = 1) or with distinct

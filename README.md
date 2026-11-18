@@ -114,14 +114,16 @@ the nodes of many subintervals in one call, on a CPU or a GPU.
 
 When you integrate a similar integrand many times, for example once per
 optimizer step of a model, each call can start where the last one ended.
-Every result carries the two things worth reusing:
+Every result carries a `state` with what is worth reusing:
 
-- `result.mesh_optimal`, the refined mesh, so the next call needs few splits;
-- `result.max_batch`, the batch size, so the next call skips the memory
-  measurement.
+- `state.mesh`, the refined mesh (`result.mesh_optimal`), so the next call
+  needs few splits;
+- `state.max_batch`, the batch size (the most points per call of the
+  integrand known to fit), and whether it may still grow.
 
-Pass them to the next call. The solver keeps nothing between calls: a call
-reuses exactly what you pass, and no call can change what another one reuses.
+Pass it to the next call as `state=result.state`. The solver keeps nothing
+between calls: a call reuses exactly what you pass, and no call can change what
+another one reuses.
 
 ```python
 import torch
@@ -131,45 +133,29 @@ solver = adaptive_quadrature("uniform", "gk21", device="cpu")
 a = torch.tensor([0.0], dtype=torch.float64)
 b = torch.tensor([1.0], dtype=torch.float64)
 
-# Measure the batch size once, before any integral (optional: without it,
-# the first call measures it and returns it as result.max_batch).
-max_batch = solver.get_max_batch(f=torch.cos, t=a)
+# Training: the first iteration builds a fresh mesh on [a, b]; every later
+# one starts from the state of the one before.
+result = solver.integrate(lambda t: torch.cos(t), mesh_init=a, mesh_final=b)
+for scale in (1.1, 1.2):
+    result = solver.integrate(lambda t, s=scale: torch.cos(s * t), state=result.state)
 
-# Training: the same call line for every iteration. The first iteration has
-# no mesh, so a fresh one is built on [a, b].
-mesh = None
-for scale in (1.0, 1.1, 1.2):
-    result = solver.integrate(
-        lambda t, s=scale: torch.cos(s * t),
-        mesh=mesh,
-        mesh_init=a,
-        mesh_final=b,
-        max_batch=max_batch,
-    )
-    mesh, max_batch = result.mesh_optimal, result.max_batch
-
-# Validation on [0, 0.5]: bounds inside the mesh cut it. mesh and max_batch
-# are not reassigned, so the training loop continues unchanged.
-half = solver.integrate(
-    lambda t: torch.cos(1.2 * t), mesh=mesh, mesh_final=b / 2, max_batch=max_batch
-)
-
-# A new interval reuses only the batch size; a fresh mesh is built.
-longer = solver.integrate(
-    lambda t: torch.cos(1.2 * t), mesh_init=a, mesh_final=2 * b, max_batch=max_batch
-)
+# Validation on [0, 0.5]: a bound inside the state's mesh cuts it. result is
+# not reassigned, so the training loop continues unchanged.
+half = solver.integrate(lambda t: torch.cos(1.2 * t), state=result.state, mesh_final=b / 2)
 print(round(float(result.integral), 4), round(float(half.integral), 4))  # 0.7767 0.4705
 ```
 
 | To reuse | Pass |
 |---|---|
-| the mesh and the batch size (same or similar integrand) | `mesh=result.mesh_optimal, max_batch=result.max_batch`, and bounds inside the mesh to integrate part of it |
-| only the batch size (same integrand, another interval or your own mesh) | the bounds or your mesh, and `max_batch=result.max_batch` |
-| a batch size measured before any integral | `max_batch=solver.get_max_batch(f=f, t=t)` |
+| the mesh and the batch size (same or similar integrand) | `state=result.state`, and bounds inside its mesh to integrate part of it |
+| only the batch size (another interval or your own mesh) | the bounds or your mesh, and `max_batch=result.max_batch` (then fixed) |
 | nothing | the bounds, or a mesh |
 
-A call needs a `mesh` or both bounds. Bounds inside the mesh cut it; a bound
-outside it extends it, and the integration refines the new subinterval.
+A call needs a `mesh`, a `state` with a mesh, or both bounds. Bounds inside the
+mesh cut it; a bound outside it extends it, and the integration refines the new
+subinterval. Without `max_batch` or a state, the first call tries a few small
+batches and then lets the batch size grow by factors of 10 until the integrand
+runs out of memory; a state carries what it found to the next call.
 
 <!-- include-end: reuse -->
 More, including several integrals per step, checkpoints and when not to reuse
@@ -296,8 +282,8 @@ the same text. In short:
   `f_args`, `max_batch`, ...), and to the solver constructor otherwise
   (`atol`, `rtol`, `remove_cut`, `merge_rule`, `device`, ...).
 - `adaptive_quadrature(sampling_type, method, **options)` builds a solver to
-  call many times; pass `mesh=result.mesh_optimal` and
-  `max_batch=result.max_batch` to start a call from an earlier one (see
+  call many times; pass `state=result.state` to start a call from an
+  earlier one (see
   "Reusing the mesh and batch size" above). Every constructor option is
   keyword-only.
 - Both return an `IntegrationResult`: the integral, its estimated error (a
@@ -316,9 +302,9 @@ the same text. In short:
 
 2. **Batched evaluation.** The nodes of a batch of subintervals are stacked
    into one tensor and the integrand is called once on all of them. Unless
-   `max_batch` is given, the batch size is set from a short measurement of how
-   much memory one evaluation takes, so that batches fill the device memory
-   until a fraction `1 - total_mem_usage` of the total remains free.
+   `max_batch` is given, the batch size starts small and grows by factors of
+   10 whenever more points are waiting, until the integrand runs out of memory;
+   then it shrinks and stops growing.
 
 3. **Error estimate per subinterval.** Each method computes the integral of a
    subinterval twice: with its own weights and with a lower-degree method on

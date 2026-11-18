@@ -1326,10 +1326,9 @@ class TestIntegration:
             "f_args": (),
             "mesh": mesh,
             "mesh_trackers": mesh_trackers,
-            "force_max_batch": 10 * C,
-            "total_mem_usage": 0.9,
             "split_node_state": (None, None, None, None),
         }
+        solver._batch = 10 * C
 
         # Route 1: take_gradient=True -> full
         solver._evaluate_f_on_mesh(take_gradient=True, conserve_memory=False, **common)
@@ -1375,6 +1374,7 @@ class TestIntegration:
         for _ in range(max_iters):
             if not torch.any(mesh_trackers):
                 break
+            solver._batch = max_batch
             nodes_i, _f_evals_i, _tracked, idxs_i, state = solver._evaluate_f_on_mesh(
                 _simple_integrand,
                 (),
@@ -1382,8 +1382,6 @@ class TestIntegration:
                 mesh_trackers,
                 take_gradient,
                 conserve_memory,
-                max_batch,
-                0.9,
                 state,
             )
             nodes_acc.append(nodes_i)
@@ -1423,6 +1421,7 @@ class TestIntegration:
             for _ in range(n_panels + 5):
                 if not torch.any(mesh_trackers):
                     break
+                solver._batch = max_batch
                 ni, ei, _tracked, ii, state = solver._evaluate_f_on_mesh(
                     _simple_integrand,
                     (),
@@ -1430,8 +1429,6 @@ class TestIntegration:
                     mesh_trackers,
                     take_gradient,
                     conserve_memory,
-                    max_batch,
-                    0.9,
                     state,
                 )
                 nodes_acc.append(ni)

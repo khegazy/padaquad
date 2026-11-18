@@ -403,9 +403,10 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 
 ### Memory management
 
-- **The batch size of `integrate`** (no benchmark; design and evidence in
-  `docs/issues/2026-11-17-integration-state-design.md` and
-  `2026-11-18-memory-state-plan.md`). Per call, `_batch` (largest batch known
+- **The batch size of `integrate`** (no benchmark; the design, plan and
+  reviews were deleted once done and are in commit `6b3cf42`,
+  `docs/issues/2026-11-17-*.md` and `2026-11-18-memory-state-plan.md`; the
+  two reviews of the code in `d0bcbdc` and `59b7f11`). Per call, `_batch` (largest batch known
   to fit) and `_batch_converged` (will not grow again), set at the start of
   `integrate`: from `max_batch` (call, or constructor when no state) →
   converged; from `state=` (`IntegrationState`, `results.py`); else from

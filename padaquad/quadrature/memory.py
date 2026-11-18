@@ -692,7 +692,8 @@ class _MemoryManagement:
         for example); after an error of PyTorch's own allocator it only slows
         the next calls down (measured on an A100: the first call after it ran
         about 1.3 s slower, and an out-of-memory episode took 1.4 to 6 s
-        longer; ``docs/issues/2026-11-18-memory-state-break-and-speed.md``).
+        longer; the break-and-speed review of the ``change_memory`` branch,
+        commit 59b7f11).
         A CPU solver never touches the GPU.
 
         Parameters

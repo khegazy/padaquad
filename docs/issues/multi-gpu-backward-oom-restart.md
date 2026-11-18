@@ -1,7 +1,9 @@
 # Recovering from an out-of-memory error in the backward pass during multi-GPU training
 
 Status: open, for the future. Recorded 2026-11-17 while designing the
-integration state (`2026-11-17-integration-state-design.md`, section 6.4).
+integration state (that design, section 6.4, is in git history: commit
+`6b3cf42`, `docs/issues/2026-11-17-integration-state-design.md`; the
+restart it describes is implemented on branch `change_memory`).
 Written so that another agent can pick it up without the original session.
 Nothing here was run or measured.
 
@@ -40,10 +42,11 @@ batches, and so different numbers of backward passes. Whether
 verified. `padaquad/distributed.py` sets up process groups and devices; no code
 in `padaquad/quadrature/` performs a collective operation.
 
-## What the design does now
+## What padaquad does now
 
 - Detects a running `torch.distributed` process group with more than one
-  process (`torch.distributed.is_initialized()` and `get_world_size() > 1`).
+  process (`torch.distributed.is_initialized()` and `get_world_size() > 1`,
+  `padaquad/quadrature/base.py:1279-1280`).
 - In that case never restarts: it raises the backward out-of-memory error,
   which carries a ready state (starting mesh, smaller batch size, converged)
   and says that the gradients now hold a partial result and must be reset.

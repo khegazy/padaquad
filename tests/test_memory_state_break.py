@@ -1,7 +1,9 @@
 """Break-and-speed review of the memory state, the growing batch size and the restart.
 
-Written by the break-and-speed review of the ``change_memory`` branch (report:
-``docs/issues/2026-11-18-memory-state-break-and-speed.md``). Tests marked
+Written by the break-and-speed review of the ``change_memory`` branch (report,
+deleted once the bugs were fixed:
+``docs/issues/2026-11-18-memory-state-break-and-speed.md`` in commit
+``59b7f11``). Tests marked
 ``xfail(strict=True)`` failed because of the bug named in their ``reason``
 (all fixed now, the markers removed); the
 others pin behavior the review checked and found correct. Everything runs on

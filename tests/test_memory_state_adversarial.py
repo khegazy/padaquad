@@ -1,7 +1,8 @@
 """Adversarial tests of the batch size, the state and the backward restart.
 
-Written by a bug hunt of the ``change_memory`` branch (report:
-``docs/issues/2026-11-18-memory-state-bughunt.md``). The first eight tests
+Written by a bug hunt of the ``change_memory`` branch (report, deleted once
+the bugs were fixed: ``docs/issues/2026-11-18-memory-state-bughunt.md`` in
+commit ``d0bcbdc``). The first eight tests
 pin the bugs it found (all fixed); the others pin behavior it checked and
 found correct. Everything runs on the CPU
 with simulated out-of-memory errors, except the tests marked ``needs_cuda``.

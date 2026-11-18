@@ -319,7 +319,8 @@ def test_backward_error_is_not_a_retryable_out_of_memory_error():
     """padaquad's own out-of-memory handlers must not catch the new error (an
     outer integral would retry and keep the inner call's partial gradients),
     and it survives pickling with its state."""
-    error = BackwardOutOfMemoryError("message", IntegrationState(None, 3, True))
+    error = BackwardOutOfMemoryError("message")
+    error.state = IntegrationState(None, 3, True)
     assert isinstance(error, torch.OutOfMemoryError)
     assert not _is_out_of_memory(error)
     copy = pickle.loads(pickle.dumps(error))

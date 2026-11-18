@@ -1271,15 +1271,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             ):
                 unsafe = "torch.distributed runs more than one process"
             if unsafe is not None or restart.max_batch < self.C:
-                raise BackwardOutOfMemoryError(
+                error = BackwardOutOfMemoryError(
                     f"The backward pass of a batch of {failed_batch} points ran out "
                     "of memory, and padaquad cannot restart the integral ("
                     f"{unsafe or 'a smaller batch cannot hold one subinterval'}). "
                     "The gradients now hold part of the integral's gradient: reset "
                     "them (for example optimizer.zero_grad()) and call again with "
                     f"state=error.state (batch size {restart.max_batch}).",
-                    restart,
                 )
+                error.state = restart
+                raise error
             for leaf, grad in saved.values():
                 leaf.grad = grad
             logger.warning(
@@ -1540,9 +1541,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 "use an error_integral_reference no larger than |integral| "
                 "(converged is judged against the final integral)"
             )
-        remedies.append(
-            "call again with state=result.state"
-        )
+        remedies.append("call again with state=result.state")
         logger.warning(
             "The integral did not converge: %d of %d accepted steps (%.1f%%) do "
             "not meet the tolerance (atol=%.3g, rtol=%.3g) judged against %s. "

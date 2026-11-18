@@ -94,22 +94,15 @@ class BackwardOutOfMemoryError(torch.OutOfMemoryError):
     them (for example with ``optimizer.zero_grad()``) and call again with
     ``state=error.state`` (see :ref:`ug-memory`).
 
-    Parameters
+    Attributes
     ----------
-    message : str
-        The error message.
     state : IntegrationState
         The state to call again with: the call's starting mesh and a smaller,
-        converged batch size.
+        converged batch size. Set after construction, so the error pickles
+        with it (``BaseException`` pickles its ``__dict__``).
     """
 
-    def __init__(self, message: str, state: Any) -> None:
-        super().__init__(message)
-        self.state = state
-
-    def __reduce__(self) -> tuple[Any, ...]:
-        """Pickle with both arguments (the default keeps only the message)."""
-        return type(self), (str(self), self.state)
+    state: Any = None
 
 
 # Largest number of points in one call: the benchmark's search limit and the

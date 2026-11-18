@@ -493,7 +493,7 @@ def test_warning_reports_the_size_of_the_error(caplog, take_gradient):
     assert f"|integral| = {abs_integral:.3g} (" in message
     assert "raise max_adaptive_splits" in message
     assert ("take_gradient=False" in message) is take_gradient
-    assert "mesh=result.mesh_optimal" in message
+    assert "state=result.state" in message
 
 
 def test_warning_separates_failing_from_all_steps(caplog):

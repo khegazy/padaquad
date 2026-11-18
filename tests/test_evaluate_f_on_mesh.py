@@ -1490,6 +1490,14 @@ class TestEndToEnd:
                 take_gradient=take_gradient,
             )
 
+    # -----------------------------------------------------------------------
+    # take_gradient=True with max_batch < C must assert at the solver
+    # -----------------------------------------------------------------------
+
+    @pytest.mark.tier1
+    @pytest.mark.parametrize(
+        ("method", "max_batch"), _BELOW_C_SWEEP, ids=_BELOW_C_SWEEP_IDS
+    )
     def test_integrate_take_grad_True_max_batch_below_C_errors(self, method, max_batch):
         """For take_gradient=True, max_batch < C trips the assertion in
         _evaluate_f_on_full_nodes."""

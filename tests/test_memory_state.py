@@ -1,8 +1,8 @@
 """Tests for the batch size of ``integrate`` and the state it returns.
 
-Without ``max_batch`` or a ``state``, ``integrate`` calls ``f`` on 10, 100, ...
-copies of one point, up to the order of its first pass, and starts from the
-largest that ran. While the batch size has not converged, a call of ``f`` that
+Without ``max_batch`` or a ``state``, ``integrate`` calls ``f`` on 10, 100 and
+1,000 copies of one point, stopping at the order of its first pass, and starts
+from the largest that ran. While the batch size has not converged, a call of ``f`` that
 needs more points tries 10 times as many; an out-of-memory error shrinks it by
 0.75 and makes it converged. ``result_state`` carries the mesh and the batch
 size to the next call. With ``take_gradient=True`` an out-of-memory error in a
@@ -70,23 +70,31 @@ def even_mesh(n_subintervals: int) -> torch.Tensor:
 
 
 @pytest.mark.parametrize(
-    ("n_subintervals", "test_calls"), [(11, [10, 100]), (46, [10, 100, 1000])]
+    ("n_subintervals", "test_calls"),
+    [(11, [10, 100]), (46, [10, 100, 1000]), (500, [10, 100, 1000])],
 )
-def test_test_calls_stop_at_the_order_of_the_first_pass(
+def test_test_calls_stop_at_1000_or_the_order_of_the_first_pass(
     n_subintervals, test_calls, caplog
 ):
-    """After the one-point output check, f is called on 10, 100, ... points up
-    to the largest power of 10 not above the first pass (gk21: 23 nodes per
-    subinterval, so 253 and 1,058 points), then on the first pass, whole. No
-    memory benchmark runs and none of its messages is logged."""
+    """After the one-point output check, f is called on 10, 100 and 1,000
+    points, stopping at the largest power of 10 not above the first pass (gk21:
+    23 nodes per subinterval, so 253, 1,058 and 11,500 points). The first call
+    of the pass is then the whole pass, or 10 times the last test call (10,000
+    of the 11,500 points). No memory benchmark runs and none of its messages is
+    logged."""
     f = Recorder()
     with caplog.at_level(logging.WARNING):
         result, result_state = solver().integrate(
             f, mesh=even_mesh(n_subintervals), take_gradient=False
         )
     first_pass = 23 * n_subintervals
-    assert f.sizes[: len(test_calls) + 2] == [1, *test_calls, first_pass]
-    assert result_state.max_batch >= first_pass
+    first_call = min(first_pass, 10 * test_calls[-1])
+    assert f.sizes[: len(test_calls) + 1] == [1, *test_calls]
+    passes = f.sizes[len(test_calls) + 1 :]
+    assert passes[0] == first_call
+    if first_call < first_pass:  # the rest of the first pass
+        assert passes[1] == first_pass - first_call
+    assert result_state.max_batch >= first_call
     assert not result_state.max_batch_converged
     assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
     assert "measuring how much memory" not in caplog.text

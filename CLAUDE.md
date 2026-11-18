@@ -409,8 +409,8 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   to fit) and `_batch_converged` (will not grow again), set at the start of
   `integrate`: from `max_batch` (call, or constructor when no state) →
   converged; from `state=` (`IntegrationState`, `results.py`); else from
-  `_first_batch` (forward calls on 10, 100, ... copies of `mesh_init` up to
-  the order of the first pass, through `_measure_call` with no-op readers;
+  `_first_batch` (forward calls on 10, 100 and 1,000 = `_LARGEST_TEST_CALL`
+  copies of `mesh_init`, stopping at the order of the first pass, through `_measure_call` with no-op readers;
   an OOM shrinks by `_shrink_batch` = 0.75 until one runs → converged).
   `_batch_for(n_waiting)` sizes every call of `f`: `min(n_waiting, B)` if
   converged, else `min(n_waiting, 10 B)` (`_GROWTH`); `_evaluate_f_in_batches`

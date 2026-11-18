@@ -23,9 +23,9 @@ integrand. The number of points per call is the batch size, `max_batch`.
 constructor, when no `state` is given) is used as it is and never grows. A
 `state` (the state an earlier call returned, {ref}`ug-reuse`) gives the batch
 size to start from. With neither, the integrand is called, forward only, on 10,
-100, ... copies of the lower bound, up to the order of the first pass (for the
-default starting mesh of gk21, 253 points: calls of 10 and 100), and the batch
-size starts at the largest that ran. These calls read no memory; they only
+100 and 1,000 copies of the lower bound, stopping at the order of the first
+pass (for the default starting mesh of gk21, 253 points: calls of 10 and 100),
+and the batch size starts at the largest that ran. These calls read no memory; they only
 check that the integrand runs.
 
 **How it grows.** While the batch size has not converged, a call of the

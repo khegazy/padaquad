@@ -749,10 +749,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         max_batch : int or None
             Largest number of integrand evaluations per call of f, used as it is
             (it does not grow), also with a ``state``. If this, the ``state``
-            and the constructor's value are all None, f is called on 10, 100, ...
-            points up to the size of the first pass, and the batch size starts
-            at the largest that ran and grows by factors of 10 until f runs out
-            of memory (see :ref:`the user guide <ug-memory>`).
+            and the constructor's value are all None, f is called on 10, 100
+            and 1,000 points (stopping at the size of the first pass), and the
+            batch size starts at the largest that ran and grows by factors of
+            10 until f runs out of memory (see :ref:`the user guide <ug-memory>`).
         state : IntegrationState or None
             Where an earlier call ended (the second value it returned): its mesh (as
             ``mesh=``) and its batch size. Cannot be given with ``mesh``; bounds

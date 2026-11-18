@@ -63,6 +63,11 @@ _OOM_BACKOFF = 0.75
 # that needs more points than it tries this many times as many.
 _GROWTH = 10
 
+# The largest test call of integrate() given no max_batch and no state (the
+# test calls are 10, 100 and 1,000 points; larger sizes are reached by growth,
+# whose calls of f do useful work).
+_LARGEST_TEST_CALL = 1000
+
 
 def _shrink_batch(n: int) -> int:
     """
@@ -1495,9 +1500,10 @@ class _MemoryManagement:
         """
         Find the starting batch size of a call given no max_batch and no state.
 
-        Calls f, forward only, on 10, 100, ... copies of ``node``, up to the
-        order of the first pass (the largest power of 10 not above n_first),
-        only to see whether f runs at these sizes; no memory is read. A call
+        Calls f, forward only, on 10, 100 and 1,000 (``_LARGEST_TEST_CALL``)
+        copies of ``node``, stopping at the order of the first pass (the
+        largest power of 10 not above n_first), only to see whether f runs at
+        these sizes; no memory is read. A call
         that runs out of memory is repeated at ``_shrink_batch`` of its size
         until one runs, and no larger call follows.
 
@@ -1524,7 +1530,7 @@ class _MemoryManagement:
             If f does not fit on a single point.
         """
         batch, converged, n = 1, False, _GROWTH
-        while n <= n_first and not converged:
+        while n <= min(n_first, _LARGEST_TEST_CALL) and not converged:
             while (
                 self._measure_call(
                     f, f_args, node, n, lambda: None, lambda: 0, total_mem_usage

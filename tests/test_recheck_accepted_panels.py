@@ -84,7 +84,7 @@ def test_recheck_enforces_final_tolerance_on_all_panels():
     """
     solver = _solver()
     torch.manual_seed(0)
-    result = _run(solver, _cancelling, take_gradient=False)
+    result, _ = _run(solver, _cancelling, take_gradient=False)
     assert result.converged is True
 
 
@@ -98,7 +98,7 @@ def test_without_recheck_some_panel_violates_final_tolerance():
     """
     solver = _solver()
     torch.manual_seed(0)
-    result = _run(solver, _cancelling, take_gradient=True)
+    result, _ = _run(solver, _cancelling, take_gradient=True)
     assert result.converged is False
 
 
@@ -106,7 +106,7 @@ def test_integral_consistency_and_accuracy():
     """integral == sum(mesh_quadratures) exactly; value is correct and finite."""
     solver = _solver()
     torch.manual_seed(0)
-    result = _run(solver, _cancelling, take_gradient=False)
+    result, _ = _run(solver, _cancelling, take_gradient=False)
     rebuilt = result.mesh_quadratures.sum(0)
     assert torch.allclose(result.integral, rebuilt, atol=1e-12, rtol=0.0), (
         f"integral {result.integral} != sum(mesh_quadratures) {rebuilt}"
@@ -124,7 +124,7 @@ def test_termination_near_cancellation_with_split_cap():
     """
     solver = _solver(max_adaptive_splits=15)
     torch.manual_seed(0)
-    result = _run(
+    result, _ = _run(
         solver,
         lambda t, *a: torch.sin(t),
         take_gradient=False,
@@ -142,7 +142,7 @@ def test_recheck_skipped_with_fixed_reference_still_valid():
     stays finite, accurate, and within tolerance."""
     solver = _solver()
     torch.manual_seed(0)
-    result = _run(
+    result, _ = _run(
         solver, _cancelling, take_gradient=False, error_integral_reference=0.0
     )
     assert result.converged is True
@@ -175,7 +175,7 @@ def test_recheck_vector_integrand():
     """D>1 with the default L2 norm: shape, per-panel contract, accuracy."""
     solver = _solver()
     torch.manual_seed(0)
-    result = _run(solver, _vector_cancelling, take_gradient=False)
+    result, _ = _run(solver, _vector_cancelling, take_gradient=False)
     assert result.integral.shape == (2,)
     assert torch.all(torch.isfinite(result.integral))
     assert result.converged is True
@@ -194,7 +194,7 @@ def test_recheck_failure_fraction_mode(mesh_failure_tolerance):
         mesh_failure_tolerance=mesh_failure_tolerance,
     )
     torch.manual_seed(0)
-    result = _run(solver, _vector_cancelling, take_gradient=False)
+    result, _ = _run(solver, _vector_cancelling, take_gradient=False)
     assert result.integral.shape == (2,)
     assert torch.all(torch.isfinite(result.integral))
     assert result.converged is True
@@ -207,7 +207,7 @@ def test_recheck_error_norm_max_rms(error_norm):
     """The re-check reuses _reduce_norm, so it must work for every norm."""
     solver = _solver(error_norm=error_norm)
     torch.manual_seed(0)
-    result = _run(solver, _vector_cancelling, take_gradient=False)
+    result, _ = _run(solver, _vector_cancelling, take_gradient=False)
     assert torch.all(torch.isfinite(result.integral))
     assert result.converged is True
     assert torch.allclose(result.integral.cpu(), _vector_truth(), atol=1e-4, rtol=1e-3)
@@ -235,7 +235,7 @@ def test_recheck_preserves_gradient():
 
     solver_a = _solver()
     torch.manual_seed(0)
-    res_a = _run(
+    res_a, _ = _run(
         solver_a, lambda t, *a: theta * _grad_integrand(t), take_gradient=False
     )
     res_a.integral.sum().backward()
@@ -243,7 +243,7 @@ def test_recheck_preserves_gradient():
 
     solver_b = _solver()
     torch.manual_seed(0)
-    res_b = _run(solver_b, lambda t, *a: _grad_integrand(t), take_gradient=False)
+    res_b, _ = _run(solver_b, lambda t, *a: _grad_integrand(t), take_gradient=False)
     integral_g = float(res_b.integral.reshape(-1)[0])
 
     assert abs(grad - integral_g) < 1e-5, (
@@ -264,7 +264,7 @@ def test_recheck_filters_tracked_variables():
 
     solver = _solver()
     torch.manual_seed(0)
-    result = _run(solver, f_tracked, take_gradient=False)
+    result, _ = _run(solver, f_tracked, take_gradient=False)
     assert result.tracked_variables is not None
     assert len(result.tracked_variables) == 1
     tv = result.tracked_variables[0]
@@ -281,7 +281,7 @@ def test_recheck_with_y0_and_f_args():
     y0 = torch.tensor([3.0], dtype=torch.float64)
     solver = _solver()
     torch.manual_seed(0)
-    result = _run(solver, f, take_gradient=False, f_args=(2.0, 0.0), y0=y0)
+    result, _ = _run(solver, f, take_gradient=False, f_args=(2.0, 0.0), y0=y0)
     # ∫ 2 sin(2πt) dt over [0, 1] = 0, so integral == y0.
     assert abs(float(result.integral.reshape(-1)[0]) - 3.0) < 1e-5
     assert torch.allclose(result.y0.cpu(), y0)
@@ -297,7 +297,7 @@ def test_recheck_cumulative_mode():
     final cumulative tolerance."""
     solver = _solver(use_absolute_error_ratio=False)
     torch.manual_seed(0)
-    result = _run(solver, _cancelling, take_gradient=False)
+    result, _ = _run(solver, _cancelling, take_gradient=False)
     assert torch.all(torch.isfinite(result.integral))
     assert abs(float(result.integral.reshape(-1)[0])) < 1e-4
     assert result.converged is True
@@ -308,7 +308,7 @@ def test_recheck_respects_split_cap():
     accurate integral and a finite optimal mesh."""
     solver = _solver(max_adaptive_splits=8)
     torch.manual_seed(0)
-    result = _run(
+    result, state = _run(
         solver,
         lambda t, *a: torch.sin(t),
         take_gradient=False,
@@ -317,7 +317,7 @@ def test_recheck_respects_split_cap():
     )
     assert torch.all(torch.isfinite(result.integral))
     assert abs(float(result.integral.reshape(-1)[0])) < 1e-2
-    assert torch.all(torch.isfinite(result.mesh_optimal))
+    assert torch.all(torch.isfinite(state.mesh))
 
 
 def test_recheck_actually_resplits_accepted_panels():
@@ -340,7 +340,7 @@ def test_recheck_actually_resplits_accepted_panels():
 
     solver._remove_failed_record_panels = counting_remove
     torch.manual_seed(0)
-    result = _run(solver, _cancelling, take_gradient=False)
+    result, _ = _run(solver, _cancelling, take_gradient=False)
 
     assert removed_total > 0, (
         "the re-check never removed/re-split an accepted panel; the feature did "
@@ -354,10 +354,10 @@ def test_recheck_determinism():
     """Same seed => identical integral and panel count."""
     s1 = _solver()
     torch.manual_seed(0)
-    r1 = _run(s1, _cancelling, take_gradient=False)
+    r1, _ = _run(s1, _cancelling, take_gradient=False)
     s2 = _solver()
     torch.manual_seed(0)
-    r2 = _run(s2, _cancelling, take_gradient=False)
+    r2, _ = _run(s2, _cancelling, take_gradient=False)
     assert torch.equal(r1.integral, r2.integral)
     assert r1.h.shape[0] == r2.h.shape[0]
 

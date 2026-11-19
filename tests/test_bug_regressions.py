@@ -45,7 +45,7 @@ def test_no_warm_start_path_correctness(take_gradient):
     solver's reported error estimate. This anchors the no-warm-start
     path so Phase 1 fixes cannot accidentally regress it.
     """
-    out = integrate(
+    out, out_state = integrate(
         f=lambda t: torch.exp(-(t**2)),
         method="dopri5",
         atol=1e-8,
@@ -68,40 +68,26 @@ def test_no_warm_start_path_correctness(take_gradient):
 
 # -----------------------------------------------------------------------------
 # Reuse by passing: the solver keeps no warm-start state. A later call reuses an
-# earlier result's mesh and batch size by passing mesh=r.mesh_optimal and
-# max_batch=r.max_batch (this replaced same_f, mesh_previous and
-# previous_max_batch).
+# earlier result's mesh and batch size by passing the state it returned (this
+# replaced same_f, mesh_previous and previous_max_batch).
 # -----------------------------------------------------------------------------
 
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
 def test_reuse_mesh_and_max_batch(device, monkeypatch):
-    """The first call benchmarks and returns max_batch; passing it and the
-    optimal mesh to the next call skips the benchmark and starts from every
-    point of that mesh."""
+    """The first call finds a batch size (test calls, then growth) and returns
+    it with its optimal mesh in result.state; passing the state to the next
+    call makes no test call and starts from every point of that mesh."""
     solver = adaptive_quadrature("uniform", "gk21", device=device)
-    calls = []
-
-    def fake_benchmark(*args, **kwargs):
-        calls.append(1)
-        solver.f_mem_coeffs = (0.0, 1e-6, 0.0)  # GB: 1e-6 per evaluation
-        return 1234  # the measured batch size, as _setup_memory_checks returns
-
-    monkeypatch.setattr(solver, "_setup_memory_checks", fake_benchmark)
-    first = solver.integrate(
+    first, first_state = solver.integrate(
         f=torch.exp, mesh_init=_bound(2.0), mesh_final=_bound(3.0), take_gradient=False
     )
-    assert len(calls) == 1
-    assert first.max_batch == 1234
+    assert first_state.max_batch >= solver.C
+    assert not first_state.max_batch_converged
 
-    second = solver.integrate(
-        f=torch.exp,
-        mesh=first.mesh_optimal,
-        max_batch=first.max_batch,
-        take_gradient=False,
-    )
-    assert len(calls) == 1
-    assert second.n_start_steps == len(first.mesh_optimal) - 1
+    monkeypatch.setattr(solver, "_measure_call", lambda *a: pytest.fail("test call"))
+    second, _ = solver.integrate(f=torch.exp, state=first_state, take_gradient=False)
+    assert second.n_start_steps == len(first_state.mesh) - 1
     exact = math.exp(3.0) - math.exp(2.0)
     assert math.isclose(float(second.integral), exact, rel_tol=1e-6)
 
@@ -110,10 +96,12 @@ def test_result_max_batch_is_the_batch_used():
     """result.max_batch is the max_batch the call used: the constructor's, or
     the call's own."""
     bounds = {"mesh_init": _bound(0.0), "mesh_final": _bound(1.0)}
-    out = _solver().integrate(f=torch.exp, take_gradient=False, **bounds)
-    assert out.max_batch == 10_000
-    out = _solver().integrate(f=torch.exp, max_batch=500, take_gradient=False, **bounds)
-    assert out.max_batch == 500
+    out, out_state = _solver().integrate(f=torch.exp, take_gradient=False, **bounds)
+    assert out_state.max_batch == 10_000
+    out, out_state = _solver().integrate(
+        f=torch.exp, max_batch=500, take_gradient=False, **bounds
+    )
+    assert out_state.max_batch == 500
 
 
 def test_solver_keeps_no_warm_start_state():
@@ -124,7 +112,7 @@ def test_solver_keeps_no_warm_start_state():
     solver.integrate(f=torch.exp, mesh=mesh, take_gradient=False)
     assert not hasattr(solver, "mesh_previous")
     assert not hasattr(solver, "previous_max_batch")
-    out = solver.integrate(
+    out, out_state = solver.integrate(
         f=torch.exp, mesh_init=_bound(0.0), mesh_final=_bound(1.0), take_gradient=False
     )
     assert out.n_start_steps == 11
@@ -189,7 +177,7 @@ def test_bound_gradients_through_a_given_mesh(lo, hi, given_mesh, take_gradient)
     w = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
     a = _bound(lo).requires_grad_()
     b = _bound(hi).requires_grad_()
-    out = _solver().integrate(
+    out, out_state = _solver().integrate(
         f=lambda t: w * torch.exp(t),
         mesh=mesh if given_mesh else None,
         mesh_init=a,
@@ -233,7 +221,7 @@ def test_bound_gradient_crosses_the_mesh_graph_once(kind, method):
 
     a = _bound(0.0).requires_grad_()
     b = _bound(1.0).requires_grad_()
-    out = adaptive_quadrature(
+    out, out_state = adaptive_quadrature(
         kind, method, device="cpu", atol=1e-10, rtol=1e-10
     ).integrate(
         f=f,
@@ -257,7 +245,7 @@ def test_bound_gradient_stays_none_when_the_loss_ignores_it(take_gradient):
     depend on t and the loss sums the squares of f's values."""
     w = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
     b = _bound(1.0).requires_grad_()
-    out = _solver().integrate(
+    out, out_state = _solver().integrate(
         f=lambda t: w * torch.ones_like(t),
         mesh_init=_bound(0.0),
         mesh_final=b,
@@ -321,7 +309,7 @@ def test_bounds_inside_mesh_cut_it(dtype):
     2.5, 3, 3.3 (5 subintervals). The float64 mesh sets the dtype, so float32
     bounds are converted to float64."""
     lo, hi = _bound(1.2, dtype), _bound(3.3, dtype)
-    out = _solver().integrate(
+    out, out_state = _solver().integrate(
         f=torch.exp, mesh=_MESH, mesh_init=lo, mesh_final=hi, take_gradient=False
     )
     assert out.n_start_steps == 5
@@ -333,7 +321,7 @@ def test_bounds_inside_mesh_cut_it(dtype):
 
 def test_one_bound_with_mesh_takes_the_other_from_mesh():
     """With a mesh, a missing bound is the mesh's end: [0, 3], 6 subintervals."""
-    out = _solver().integrate(
+    out, out_state = _solver().integrate(
         f=torch.exp, mesh=_MESH, mesh_final=_bound(3.0), take_gradient=False
     )
     assert torch.equal(out.mesh_init, _MESH[0])
@@ -355,7 +343,9 @@ def test_bound_outside_mesh_extends_it(lo, hi, n_start):
         bounds["mesh_init"] = _bound(lo)
     if hi is not None:
         bounds["mesh_final"] = _bound(hi)
-    out = _solver().integrate(f=torch.exp, mesh=_MESH, take_gradient=False, **bounds)
+    out, out_state = _solver().integrate(
+        f=torch.exp, mesh=_MESH, take_gradient=False, **bounds
+    )
     a = 0.0 if lo is None else lo
     b = 4.0 if hi is None else hi
     assert torch.equal(out.mesh_init, _bound(a))
@@ -369,7 +359,7 @@ def test_bound_within_rounding_of_a_mesh_end_replaces_it():
     """A bound one float64 step past the mesh end replaces that end (no error,
     no near-zero-width subinterval): the interval is the bound's."""
     beyond = torch.nextafter(_MESH[-1], _MESH[-1] + 1)
-    out = _solver().integrate(
+    out, out_state = _solver().integrate(
         f=torch.exp, mesh=_MESH, mesh_final=beyond, take_gradient=False
     )
     assert torch.equal(out.mesh_final, beyond)
@@ -396,7 +386,7 @@ def test_bound_near_a_large_mesh_end_is_not_snapped(mesh_final, expected):
         "mesh_final": _bound(mesh_final),
         "take_gradient": False,
     }
-    out = _solver().integrate(**call)
+    out, out_state = _solver().integrate(**call)
     assert torch.equal(out.mesh_final, _bound(mesh_final))
     assert math.isclose(float(out.integral), expected, rel_tol=1e-9)
 
@@ -413,7 +403,7 @@ def test_bound_one_ulp_from_a_mesh_point_drops_that_point(sampling, method, dtyp
     mesh = torch.linspace(0.0, 4.0, 9, dtype=dtype).unsqueeze(-1)
     bound = torch.nextafter(mesh[6], mesh[7])
     solver = adaptive_quadrature(sampling, method, device="cpu", max_batch=10_000)
-    out = solver.integrate(
+    out, out_state = solver.integrate(
         f=torch.exp, mesh=mesh, mesh_final=bound, take_gradient=False
     )
     assert out.n_start_steps == 6
@@ -427,7 +417,7 @@ def test_bound_near_zero_is_not_snapped():
     largest end: a bound 1e-13 from the end 0 of a mesh reaching 1000 is a
     different interval (it was snapped to 0, where t^(-1/2) is infinite)."""
     mesh = torch.linspace(0.0, 1000.0, 11, dtype=torch.float64).unsqueeze(-1)
-    out = _solver().integrate(
+    out, out_state = _solver().integrate(
         f=_ONES, mesh=mesh, mesh_init=_bound(1e-13), take_gradient=False
     )
     assert torch.equal(out.mesh_init, _bound(1e-13))
@@ -441,7 +431,7 @@ def test_mesh_points_near_zero_are_kept():
     mesh = torch.tensor(
         [[0.0], [1e-13], [1e-6], [1.0], [500.0], [1000.0]], dtype=torch.float64
     )
-    out = _solver().integrate(f=_ONES, mesh=mesh, take_gradient=False)
+    out, out_state = _solver().integrate(f=_ONES, mesh=mesh, take_gradient=False)
     assert out.n_start_steps == 5
 
 
@@ -451,7 +441,7 @@ def test_mesh_point_within_rounding_of_an_end_is_kept():
     that cuts the mesh drops the points within rounding of it."""
     one = _bound(1.0)
     mesh = torch.stack([one, torch.nextafter(one, one + 1), _bound(2.0)])
-    out = _solver().integrate(f=_ONES, mesh=mesh, take_gradient=False)
+    out, out_state = _solver().integrate(f=_ONES, mesh=mesh, take_gradient=False)
     assert out.n_start_steps == 2
 
 
@@ -481,7 +471,7 @@ def test_float32_bound_at_a_float64_mesh_end_replaces_it():
     rounding (the coarser dtype sets the tolerance), so it raises no error and
     replaces that end."""
     mesh = torch.linspace(0.0, 0.3, 4, dtype=torch.float64).unsqueeze(-1)
-    out = _solver().integrate(
+    out, out_state = _solver().integrate(
         f=torch.exp,
         mesh=mesh,
         mesh_final=_bound(0.3, torch.float32),
@@ -496,7 +486,7 @@ def test_float32_bound_leaves_the_other_bounds_tolerance_unchanged():
     mesh_init must not snap the float64 mesh_final 999.9996, 4e-4 inside the
     end 1000 (far beyond float64 rounding), to that end."""
     mesh = torch.linspace(0.0, 1000.0, 11, dtype=torch.float64).unsqueeze(-1)
-    out = _solver().integrate(
+    out, out_state = _solver().integrate(
         f=_ONES,
         mesh=mesh,
         mesh_init=_bound(0.5, torch.float32),
@@ -543,14 +533,16 @@ def test_solver_usable_after_a_raising_call():
     solver = _solver()
     with pytest.raises(RuntimeError, match="boom"):
         solver.integrate(f=broken, mesh=_MESH, take_gradient=False)
-    out = solver.integrate(f=torch.exp, mesh=_MESH, take_gradient=False)
+    out, out_state = solver.integrate(f=torch.exp, mesh=_MESH, take_gradient=False)
     assert math.isclose(float(out.integral), math.exp(4.0) - 1.0, rel_tol=1e-6)
 
 
 def test_bounds_equal_to_mesh_ends_leave_it_unchanged():
     """Bounds equal to the mesh's ends give the same call as the mesh alone."""
-    alone = _solver().integrate(f=torch.exp, mesh=_MESH, take_gradient=False)
-    with_bounds = _solver().integrate(
+    alone, alone_state = _solver().integrate(
+        f=torch.exp, mesh=_MESH, take_gradient=False
+    )
+    with_bounds, with_bounds_state = _solver().integrate(
         f=torch.exp,
         mesh=_MESH,
         mesh_init=_MESH[0],
@@ -559,7 +551,7 @@ def test_bounds_equal_to_mesh_ends_leave_it_unchanged():
     )
     assert with_bounds.n_start_steps == alone.n_start_steps == 8
     assert torch.equal(with_bounds.integral, alone.integral)
-    assert torch.equal(with_bounds.mesh_optimal, alone.mesh_optimal)
+    assert torch.equal(with_bounds_state.mesh, alone_state.mesh)
 
 
 @pytest.mark.parametrize(
@@ -588,21 +580,21 @@ def test_mesh_optimal_carries_no_autograd_graph(take_gradient, warm_bounds):
     to backward through the graph a second time"."""
     solver = adaptive_quadrature("uniform", "gk21", device="cpu", max_batch=10_000)
     hi = _bound(2.0).requires_grad_()
-    first = solver.integrate(
+    first, first_state = solver.integrate(
         f=torch.exp, mesh_init=_bound(0.0), mesh_final=hi, take_gradient=take_gradient
     )
     if not take_gradient:
         first.integral.sum().backward()
     # d/dhi of the integral of e^t over [0, hi] is e^hi (the bound's gradient).
     assert math.isclose(float(hi.grad), math.exp(2.0), rel_tol=1e-6)
-    assert not first.mesh_optimal.requires_grad
+    assert not first_state.mesh.requires_grad
     grad_before = hi.grad.clone()
 
     bounds = (
         {"mesh_init": _bound(0.0), "mesh_final": _bound(2.0)} if warm_bounds else {}
     )
-    warm = solver.integrate(
-        f=torch.exp, mesh=first.mesh_optimal, take_gradient=True, **bounds
+    warm, _ = solver.integrate(
+        f=torch.exp, mesh=first_state.mesh, take_gradient=True, **bounds
     )
 
     assert math.isclose(float(warm.integral), math.exp(2.0) - 1.0, rel_tol=1e-6)
@@ -622,7 +614,7 @@ def test_normal_completion_has_converged_true(take_gradient):
     initial mesh decides how close the worst step gets to the tolerance.
     """
     torch.manual_seed(0)
-    out = integrate(
+    out, out_state = integrate(
         f=torch.sin,
         method="dopri5",
         atol=1e-6,
@@ -752,7 +744,7 @@ def test_nonfinite_integrand_does_not_hang(nan_f, sampling, method, take_gradien
             # of whether a GPU is visible (NaN handling is device-agnostic).
             device="cpu",
             max_batch=cached_max_batch(),
-        )
+        )[0]
     )
     assert isinstance(out, IntegrationResult)
     # The non-finite contribution propagates into the integral (honest result).
@@ -810,7 +802,7 @@ def test_nonfinite_cumulative_error_mode_terminates(nan_f):
             use_absolute_error_ratio=False,
             device="cpu",
             max_batch=cached_max_batch(),
-        )
+        )[0]
     )
     assert isinstance(out, IntegrationResult)
     assert torch.isnan(out.integral).any()
@@ -823,7 +815,7 @@ def test_finite_integrand_unaffected_by_nonfinite_check(take_gradient):
     """The default-on finiteness check must not false-trigger on a smooth
     integrand: the integral is still correct and finite.
     """
-    out = integrate(
+    out, out_state = integrate(
         f=torch.sin,
         method="gk21",
         atol=1e-8,

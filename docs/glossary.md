@@ -80,8 +80,8 @@ rounding floor
 
 warm start
   Starting an integration from the mesh an earlier integration ended with,
-  instead of a fresh one: pass its `mesh_optimal` as `mesh=` (usually with its
-  `max_batch`).
+  instead of a fresh one: pass the state it returned as `state=`, which
+  holds its optimal mesh and batch size.
 
 uniform sampling
   The nodes of every subinterval sit at the method's fixed node fractions, so

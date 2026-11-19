@@ -139,7 +139,7 @@ def _run(solver, f, **kwargs):
         max_batch=MAX_BATCH,
         conserve_memory=True,
         **kwargs,
-    )
+    )[0]
 
 
 def _assert_accurate(result, true_integral, rtol=1e-3):
@@ -219,9 +219,7 @@ def test_too_small_reference_inflates_early_steps():
     good = _run(_make_solver(), _growing, error_integral_reference=true_I)
 
     torch.manual_seed(0)
-    too_small = _run(
-        _make_solver(), _growing, error_integral_reference=0.01 * true_I
-    )
+    too_small = _run(_make_solver(), _growing, error_integral_reference=0.01 * true_I)
 
     assert _n_steps(too_small) > _n_steps(good), (
         f"too-small reference should inflate step count: "

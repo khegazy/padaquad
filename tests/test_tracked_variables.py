@@ -69,7 +69,7 @@ def test_basic_tracked_variables(sampling, method, take_gradient):
         return torch.sin(t), (t**2, torch.cos(t))
 
     solver = _make(sampling, method)
-    result = solver.integrate(
+    result, _ = solver.integrate(
         f=f,
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
@@ -105,7 +105,7 @@ def test_basic_tracked_variables(sampling, method, take_gradient):
 def test_bare_tensor_has_no_tracked_variables(take_gradient):
     """The existing contract (f returns a bare tensor) yields None."""
     solver = make_uniform_solver("gk21", atol=ATOL_MED, rtol=RTOL_MED)
-    result = solver.integrate(
+    result, _ = solver.integrate(
         f=torch.sin,
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
@@ -121,7 +121,7 @@ def test_single_tensor_tracked_is_wrapped():
         return torch.sin(t), t**2
 
     solver = make_uniform_solver("gk21", atol=ATOL_MED, rtol=RTOL_MED)
-    result = solver.integrate(
+    result, _ = solver.integrate(
         f=f,
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
@@ -139,7 +139,7 @@ def test_empty_tracked_tuple_is_none():
         return torch.sin(t), ()
 
     solver = make_uniform_solver("gk21", atol=ATOL_MED, rtol=RTOL_MED)
-    result = solver.integrate(
+    result, _ = solver.integrate(
         f=f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
     )
     assert result.tracked_variables is None
@@ -163,7 +163,7 @@ def test_many_tracked_variables_keep_order(take_gradient, conserve_memory):
         return torch.sin(t), tuple(k * t + k for k in range(n_tracked))
 
     solver = make_uniform_solver("bosh3", atol=1e-8, rtol=1e-8)
-    result = solver.integrate(
+    result, _ = solver.integrate(
         f=f,
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
@@ -185,7 +185,7 @@ def test_multidim_trailing_shape_preserved():
         return torch.sin(t), (tracked,)
 
     solver = make_uniform_solver("gk21", atol=ATOL_MED, rtol=RTOL_MED)
-    result = solver.integrate(
+    result, _ = solver.integrate(
         f=f,
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
@@ -211,7 +211,7 @@ def test_non_float_tracked_across_multiple_batches():
         return torch.sin(t), (labels,)
 
     solver = make_uniform_solver("bosh3", atol=1e-8, rtol=1e-8)
-    result = solver.integrate(
+    result, _ = solver.integrate(
         f=f,
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
@@ -234,7 +234,7 @@ def test_tracked_variables_dtype(dtype):
         return torch.sin(t), (t**2,)
 
     solver = make_uniform_solver("gk21", atol=1e-5, rtol=1e-5)
-    result = solver.integrate(
+    result, _ = solver.integrate(
         f=f,
         mesh_init=torch.tensor([0.0], dtype=dtype),
         mesh_final=torch.tensor([1.0], dtype=dtype),

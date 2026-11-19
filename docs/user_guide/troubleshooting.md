@@ -26,7 +26,7 @@ every entry can be below 1 while `converged` is `False`. With
 
 - `n_start_steps` is the number of subintervals in the starting mesh.
 - `n_start_steps_split` counts those split at least once (splits made to build
-  `mesh_optimal` are not counted), and `percent_start_steps_split` gives it as
+  the state's mesh are not counted), and `percent_start_steps_split` gives it as
   a percentage. A small value means the starting mesh was nearly fine enough,
   which is what a warm start should achieve.
 - `max_split_depth` is the largest number of times any subinterval was halved;
@@ -35,19 +35,28 @@ every entry can be below 1 while `converged` is `False`. With
 With `max_adaptive_splits=0` nothing is split, so `n_start_steps_split` is 0
 even when subintervals fail; read `converged` instead.
 
-## The first call is slow and logs warnings
+## `get_max_batch(f=...)` is slow and logs warnings
 
-That is the memory benchmark ({ref}`ug-memory`). Pass `max_batch`: a value of
-your own, one measured once with `solver.get_max_batch(f=f, t=t)`, or the
-`result.max_batch` of an earlier call ({ref}`ug-reuse`).
+That is the memory benchmark ({ref}`ug-memory`); `integrate` never runs it.
+Measure once and pass the value as `max_batch`.
+
+## A call logs "Caught OOM" or "was dropped"
+
+The batch size grew until the integrand ran out of memory, then shrank
+({ref}`ug-memory`). This happens once per state: pass the state the call
+returned to the next call, which starts from the size that fit.
 
 ## Out of memory
 
-padaquad shrinks the batch and retries when an evaluation runs out of memory
+padaquad shrinks the batch and retries when an evaluation runs out of memory,
+and with `take_gradient=True` restarts the integral when a backward pass does
 ({ref}`ug-memory`). If a single evaluation of the integrand does not fit, it
-raises `torch.OutOfMemoryError`. Lower `total_mem_usage`, pass a smaller
-`max_batch`, use `take_gradient=True` (which does not keep the whole graph), or
-set `conserve_memory=True`.
+raises `torch.OutOfMemoryError`. It raises `BackwardOutOfMemoryError` when a
+backward pass ran out of memory and the integrand uses a custom autograd
+function: pass `parameters=` (the tensors, or their optimizer) so padaquad can
+restart, or reset the gradients and call again with `state=error.state`. Else
+pass a smaller `max_batch`, use `take_gradient=True` (which does not keep the
+whole graph), or set `conserve_memory=True`.
 
 ## The error estimate seems unreliable
 
@@ -62,8 +71,8 @@ subtracted from the signed sum, so `integral_error` is then approximate.
 ## Renamed and removed arguments
 
 - `reuse_mesh` was renamed `same_f` (1.3.0), and `same_f` was removed
-  (2.0.0): pass `mesh=result.mesh_optimal` and
-  `max_batch=result.max_batch` of the call to start from ({ref}`ug-reuse`).
+  (2.0.0): pass `state=state`, the state the call to start from returned
+  ({ref}`ug-reuse`).
 - The constructor's `mesh_init` and `mesh_final` were removed (2.0.0):
   pass the bounds, or a mesh, to every `integrate` call.
 - `max_path_change` was removed; use `max_adaptive_splits` to limit refinement

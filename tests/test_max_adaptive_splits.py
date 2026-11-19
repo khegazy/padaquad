@@ -78,7 +78,7 @@ def test_panel_count_equals_K_times_2_pow_n(sampling, method, n, take_gradient):
         remove_cut=REMOVE_CUT,
         max_adaptive_splits=n,
     )
-    result = solver.integrate(
+    result, _ = solver.integrate(
         f=_hard_f,
         mesh=_mesh(K),
         take_gradient=take_gradient,
@@ -104,7 +104,7 @@ def test_integrate_arg_takes_priority_over_construction(take_gradient):
         remove_cut=REMOVE_CUT,
         max_adaptive_splits=5,
     )
-    result = solver.integrate(
+    result, _ = solver.integrate(
         f=_hard_f,
         mesh=_mesh(K),
         take_gradient=take_gradient,
@@ -126,7 +126,7 @@ def test_construction_value_used_when_no_call_arg(take_gradient):
         remove_cut=REMOVE_CUT,
         max_adaptive_splits=1,
     )
-    result = solver.integrate(
+    result, _ = solver.integrate(
         f=_hard_f,
         mesh=_mesh(K),
         take_gradient=take_gradient,
@@ -146,7 +146,7 @@ def test_call_arg_used_when_no_construction_value(take_gradient):
         rtol=RTOL_FAIL,
         remove_cut=REMOVE_CUT,
     )
-    result = solver.integrate(
+    result, _ = solver.integrate(
         f=_hard_f,
         mesh=_mesh(K),
         take_gradient=take_gradient,
@@ -167,7 +167,7 @@ def test_uncapped_default_converges_correctly(take_gradient):
         remove_cut=REMOVE_CUT,
         max_batch=BIG_BATCH,
     )
-    result = solver.integrate(
+    result, _ = solver.integrate(
         f=torch.sin,
         mesh_init=torch.tensor([0.0], dtype=torch.float64),
         mesh_final=torch.tensor([math.pi], dtype=torch.float64),
@@ -182,7 +182,7 @@ def test_high_cap_does_not_interfere_via_free_function(take_gradient):
 
     Also exercises the free ``integrate()`` function's max_adaptive_splits path.
     """
-    result = integrate(
+    result, _ = integrate(
         f=torch.sin,
         method="gk21",
         atol=1e-9,
@@ -201,7 +201,7 @@ def test_high_cap_does_not_interfere_via_free_function(take_gradient):
 def test_free_function_cap_panel_count(take_gradient):
     """The free integrate() honors the cap (deterministic panel count)."""
     K = 3
-    result = integrate(
+    result, _ = integrate(
         f=_hard_f,
         method="bosh3",
         sampling="uniform",

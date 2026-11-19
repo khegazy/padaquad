@@ -122,7 +122,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_convergence_rate.py` | Empirical convergence-rate slope matches each method's theoretical rate |
 | `test_autodiff_consistency.py` | $\nabla_\theta\int f_\theta dt$ via backprop equals $\int \nabla_\theta f_\theta dt$ |
 | `test_error_indicator.py` | Behavior of absolute vs cumulative error indicators (Bug B8 investigation) |
-| `test_bug_regressions.py` | Regression tests for bugs B4, B6 fixed in Phase 1; reuse by passing `mesh_optimal` / `max_batch` (no state on the solver, `same_f` and constructor bounds gone); the interval rules (bounds required, cut, outside extends, rounding snap, one-ULP cut, mesh validation, keyword-only options) |
+| `test_bug_regressions.py` | Regression tests for bugs B4, B6 fixed in Phase 1; reuse by passing the returned state (no state on the solver, `same_f` and constructor bounds gone); the interval rules (bounds required, cut, outside extends, rounding snap, one-ULP cut, mesh validation, keyword-only options) |
 | `test_snapshots.py` | Golden-value regression net for the file-split refactor; CPU-only float64 |
 | `test_public_api.py` | Smoke test of every public symbol and `IntegrationResult` fields |
 | `test_rk_integral.py` | `_RK_integral`: constant / linear / multi-step / multi-dim / zero-width / variable-b inputs |
@@ -136,7 +136,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed error ratios, midpoint placement |
 | `test_record_and_sort.py` | `_record_results` and `_sort_record` |
 | `test_evaluate_and_merge.py` | `_evaluate_adaptive_nodes` + `_merge_excess_nodes` for both uniform and variable solvers |
-| `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: `mesh_optimal` re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
+| `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: the state's mesh re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
 | `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
 | `test_error_integral_reference.py` | The `error_integral_reference` argument of `integrate()` |
@@ -285,10 +285,11 @@ is a boolean array where `True` means the panel still needs evaluation.
    ~$\sqrt{N_\text{init}}$ evenly-spaced top-level segments with random
    sub-barriers (random by default — uniform aliases on
    uniform-feature integrands). With a `mesh` (for example an earlier
-   result's `mesh_optimal`), start from it, cut to any bounds inside it
+   call's `state.mesh`), start from it, cut to any bounds inside it
    (`_setup_integral_bounds`).
 2. **Main loop.** While any `mesh_trackers` are `True`:
-   - Determine `max_steps` from GPU memory budget or explicit `max_batch`.
+   - Size the next call of `f` with `_batch_for` (the call's batch size, or
+     10 times it while not converged; see Memory management).
    - Select up to `max_steps` unevaluated panels.
    - Place C nodes per panel via `_compute_nodes`.
    - Evaluate `f` on all flattened nodes; reshape to `[N, C, D]`.
@@ -306,7 +307,7 @@ is a boolean array where `True` means the panel still needs evaluation.
    judge every recorded step against the final integral with
    `_record_error_check` (the same helper the in-loop re-check uses) to set
    `converged`, logging `_warn_not_converged` when it is `False` (a NaN/Inf
-   error counts as failing); then compute `mesh_optimal` via
+   error counts as failing); then compute the optimal mesh (`state.mesh`) via
    `_get_optimal_mesh` (prune low-error pairs, refine
    high-error gaps), returned for the caller to pass to a later call.
 
@@ -402,16 +403,52 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 
 ### Memory management
 
+- **The batch size of `integrate`** (no benchmark; the design, plan and
+  reviews were deleted once done and are in commit `6b3cf42`,
+  `docs/issues/2026-11-17-*.md` and `2026-11-18-memory-state-plan.md`; the
+  two reviews of the code in `d0bcbdc` and `59b7f11`). Per call, `_batch` (largest batch known
+  to fit) and `_batch_converged` (will not grow again), set at the start of
+  `integrate`: from `max_batch` (call, or constructor when no state) →
+  converged; from `state=` (`IntegrationState`, `results.py`); else from
+  `_initialize_max_batch` (forward calls on 10, 100 and 1,000 = `_LARGEST_TEST_CALL`
+  copies of `mesh_init`, stopping at the order of the first pass, through `_measure_call` with no-op readers;
+  an OOM shrinks by `_shrink_batch` = 0.75 until one runs → converged).
+  `_batch_for(n_waiting)` sizes every call of `f`: `min(n_waiting, B)` if
+  converged, else `min(n_waiting, 10 B)` (`_GROWTH`); `_evaluate_f_in_batches`
+  raises `_batch` after each call that ran and, on OOM, sets it to
+  `_shrink_batch(failed)`, converged. `integrate` returns `(result, IntegrationState(mesh_optimal,
+  _batch, _batch_converged))`; the result has no mesh_optimal or max_batch.
+- **`take_gradient=True`** (`_evaluate_f_on_full_nodes`, one batch per loop
+  turn): a forward OOM drops the outputs and retries with fewer
+  subintervals; on a GPU, when `f`'s output requires grad, the check
+  `usable >= _backward_ratio * F` (F = forward peak via
+  `reset_peak_memory_stats`/`max_memory_allocated`, `_backward_ratio` = the
+  previous batch's backward peak / forward peak, 1 at first) else drops and
+  shrinks to `min(0.75 N, N usable / need)`. Each batch's loss and backward
+  pass run in `_loss_and_backward` (memory.py): before `loss.backward()`,
+  `_save_grads` walks the loss graph and saves `.grad` of every leaf first
+  seen in the call (plus `parameters=` at the start), and on a GPU the
+  backward peak sets `_backward_ratio`; it returns no loss on an OOM. A
+  backward OOM breaks the loop; `_raise_after_backward_oom` restores the
+  gradients and raises `_Restart`, which `_restart_after_backward_oom`
+  turns into a new call with the original arguments and
+  `state=IntegrationState(start_mesh, _shrink_batch(failed), True)`, or
+  raises `BackwardOutOfMemoryError` (custom
+  autograd function without `parameters=`, a post-accumulate-grad hook,
+  `torch.distributed` world size > 1, or a batch below C).
+  `_is_out_of_memory` is False for that error.
+- `_setup_memory_checks` (the benchmark) runs only in
+  `get_max_batch(f=...)`; `f_mem_coeffs`, `_get_max_f_evals`,
+  `_oom_max_batch` and `_cap_max_batch` serve only `get_max_batch`.
 - All of this lives in `quadrature/memory.py` (`_MemoryManagement` mixin,
   `_is_out_of_memory`); the batch loop `_evaluate_f_in_batches` stays in
   `quadrature/base.py`.
 - `_setup_memory_checks` fits the memory of ONE call of `f` on N points,
   `f_mem_coeffs` = s·((a + E) + b·N + d·N²) in GB (s =
   `_GRADIENT_MEMORY_SAFETY_FACTOR` = 2.1 when `take_gradient`, else 1), and
-  returns the batch size that fit gives for the memory free at its end
-  (`result.max_batch`). Its only callers: `integrate` (after its one-point
-  output check) and the public `get_max_batch(f=..., t=...)`, which makes the
-  same one-point call first, clears `_oom_max_batch`, and lets a user measure
+  returns the batch size that fit gives for the memory free at its end. Its
+  only caller: the public `get_max_batch(f=..., t=...)`, which makes a
+  one-point call first, clears `_oom_max_batch`, and lets a user measure
   before any integral. The reader (`_peak_memory_reader` →
   `_Reader`: reset, read, E, noise floor, counts_reuse): CUDA peak counter
   (floor 10 KB, counts reused memory); Linux `VmHWM` reset through
@@ -450,18 +487,20 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   and update them when a change fixes or adds one.
   The batch loop's out-of-memory retry shrinks the batch that failed, not
   `_oom_max_batch` (which can be far above it).
-- Unless `max_batch` (call or constructor) fixes it, the batch size is
-  computed at every evaluation from live memory: `_get_max_f_evals` =
-  `_largest_n(f_mem_coeffs, _MEMORY_BUDGET·usable)` (capped at 1e9). Every
-  batch size (forced or computed), `result.max_batch`, the benchmark's result
-  and `get_max_batch()` go through one private cap, `_cap_max_batch`
-  (`min(value, _oom_max_batch)`); `get_max_batch` has no
-  `default_max_batch` (removed).
+- `get_max_batch()` without `f`: the constructor's `max_batch`, else
+  `_get_max_f_evals` = `_largest_n(f_mem_coeffs, _MEMORY_BUDGET·usable)` from
+  the last `get_max_batch(f=...)`, both through `_cap_max_batch`
+  (`min(value, _oom_max_batch)`); no `default_max_batch` (removed).
 - Out-of-memory errors are recognized by `_is_out_of_memory` (GPU OOM, CPU
   `DefaultCPUAllocator` refusal, CUDA "out of memory" and CUDA-library
-  `*ALLOC*_FAILED` statuses, `MemoryError`);
-  the shared batch loop `_evaluate_f_in_batches` shrinks the batch, and
-  `_release_memory` cleans up (CUDA cache only on a CUDA solver).
+  `*ALLOC*_FAILED` statuses, `MemoryError`). Every call of `f` in the
+  integration loop goes through `_call_f` (memory.py), the one place that
+  catches them: it returns None after `_release_memory` (CUDA cache only on
+  a CUDA solver, and only for an error from outside PyTorch's allocator), or
+  raises `torch.OutOfMemoryError` ("cannot be reduced") when the caller cannot
+  shrink. Its two callers retry smaller: `_evaluate_f_in_batches`
+  (`take_gradient=False`) and the `while output is None` loop of
+  `_evaluate_f_on_full_nodes` (`take_gradient=True`).
 - `_get_usable_memory = free - buffer`, where
   `buffer = (1 - total_mem_usage) * total_memory`.
 - Supports both CUDA (`torch.cuda.mem_get_info`) and CPU
@@ -504,12 +543,9 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 - The solver keeps no warm-start state between calls (`same_f`,
   `mesh_previous`, `previous_max_batch` and the constructor's bounds were
   removed). A call reuses an earlier one only through what it is passed:
-  `mesh=result.mesh_optimal` (detached, on the solver's device; its ends are
-  the bounds bit for bit) and `max_batch=result.max_batch`.
-- `result.max_batch`: the forced `max_batch` (call or constructor), else the
-  value `_setup_memory_checks` returned for this call, lowered to
-  `_oom_max_batch` (through `_cap_max_batch`). The
-  integration itself still sizes every batch from live memory.
+  `state=state`, the second value `integrate` returns (its mesh is the optimal mesh, detached, on the solver's
+  device, ends equal to the bounds bit for bit; its batch size and converged
+  flag), or `mesh=` / `max_batch=` directly. `mesh=` with `state=` raises.
 - Interval rules, all in `_setup_integral_bounds` (returns
   `(mesh, mesh_init, mesh_final)`): a call needs a mesh or both bounds; a
   given mesh must be `[M, T]`, M >= 2, increasing (T = 1) or with distinct

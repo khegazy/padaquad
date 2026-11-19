@@ -3,8 +3,9 @@
 `adaptive_quadrature` returns one of these two classes; both take the same
 keyword-only options, listed under the uniform solver. Build a solver once and
 call its `integrate` method repeatedly, for example in a training loop, and
-start each call from the last one's mesh and batch size by passing
-`mesh=result.mesh_optimal` and `max_batch=result.max_batch` ({ref}`ug-reuse`).
+start each call from the last one's mesh and batch size by passing the state
+it returned, `result, state = solver.integrate(...)`, as `state=state`
+({ref}`ug-reuse`).
 
 ```{eval-rst}
 .. currentmodule:: padaquad

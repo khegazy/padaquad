@@ -61,7 +61,7 @@ class VariableAdaptiveQuadrature(AdaptiveQuadrature):
     ...     device="cpu",
     ...     max_batch=10_000,
     ... )
-    >>> result = solver.integrate(
+    >>> result, state = solver.integrate(
     ...     torch.exp,
     ...     mesh_init=torch.tensor([0.0], dtype=torch.float64),
     ...     mesh_final=torch.tensor([1.0], dtype=torch.float64),

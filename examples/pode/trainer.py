@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import os
@@ -358,15 +359,18 @@ class Trainer(CurriculumClass):
 
     def train_iteration(self):
         self.optimizer.zero_grad()
-        self.integral_output = self.integrator.integrate(
+        # Every call starts from the training times; the previous call's state
+        # carries its batch size (the first call finds one).
+        state = (
+            None
+            if self.integral_state is None
+            else dataclasses.replace(self.integral_state, mesh=self.input_times)
+        )
+        self.integral_output, self.integral_state = self.integrator.integrate(
             f=self._integrad,
-            mesh=self.input_times,
+            mesh=self.input_times if state is None else None,
+            state=state,
             f_args=(self.model,),
-            # The previous training call's batch size skips the memory
-            # benchmark (None on the first call, which measures it).
-            max_batch=None
-            if self.integral_output is None
-            else self.integral_output.max_batch,
         )
         # print(epoch_count, integral_output.nodes.shape)
         loss = self.integral_output.loss
@@ -486,7 +490,7 @@ class Trainer(CurriculumClass):
         cutoff_count = 0
         self.input_times = t_init_eval
         train_criteria = True
-        self.integral_output = None
+        self.integral_output = self.integral_state = None
         force_update = False
         last_save_t_pred = float(np.squeeze(self.t_pred))
         while train_criteria:
@@ -521,13 +525,13 @@ class Trainer(CurriculumClass):
                             [t_init, eval_t], dtype=self.dtype, device=self.device
                         ).unsqueeze(-1)
                         with torch.no_grad():
-                            eval_integral_output = self.integrator.integrate(
+                            eval_integral_output, _ = self.integrator.integrate(
                                 f=self._integrad,
                                 mesh=self.eval_input_times,
                                 f_args=(self.model,),
                                 max_batch=None
-                                if self.integral_output is None
-                                else self.integral_output.max_batch,
+                                if self.integral_state is None
+                                else self.integral_state.max_batch,
                             )
                         integral_values.append(eval_integral_output.loss.item())
                         integral_limits.append(eval_t)

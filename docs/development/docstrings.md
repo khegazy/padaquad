@@ -43,7 +43,7 @@ written for users first.
 | `ug-error-reference` | Error control: absolute and cumulative tolerance, `error_integral_reference` |
 | `ug-mesh` | How it works: the starting mesh (`N_init_steps`, `random_initial_mesh`) |
 | `ug-optimal-mesh` | How it works: the optimal mesh and the merge rule (`remove_cut`) |
-| `ug-reuse` | Reusing the mesh and batch size: `mesh=result.mesh_optimal`, `max_batch=result.max_batch`, `get_max_batch(f=...)` |
+| `ug-reuse` | Reusing the mesh and batch size: `result, state = solver.integrate(...)`, `state=state`, `get_max_batch(f=...)` |
 | `ug-autodiff` | Gradients: `take_gradient` and `loss_fxn` |
 | `ug-memory` | Devices and memory: the memory benchmark, `max_batch`, `get_max_batch`, `total_mem_usage`, `conserve_memory` |
 | `ug-convergence` | Troubleshooting: `converged`, `max_adaptive_splits` and the split statistics |

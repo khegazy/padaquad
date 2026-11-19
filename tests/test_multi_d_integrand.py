@@ -82,7 +82,7 @@ def test_uniform_methods_integrate_vector_valued_integrand(method, take_gradient
     """3-component vector integrand integrated correctly element-wise."""
     a, b = 0.0, math.pi / 2
 
-    result = integrate(
+    result, _ = integrate(
         f=_vector_integrand,
         method=method,
         sampling="uniform",
@@ -111,7 +111,7 @@ def test_integration_result_shapes_for_multi_d(take_gradient):
     """All result fields that depend on D have the right last dim."""
     a, b = 0.0, math.pi / 2
 
-    result = integrate(
+    result, _ = integrate(
         f=_vector_integrand,
         method="gk21",
         atol=ATOL,
@@ -137,7 +137,7 @@ def test_variable_methods_integrate_vector_valued_integrand(method, take_gradien
     """Variable solvers also handle D > 1."""
     a, b = 0.0, math.pi / 2
 
-    result = integrate(
+    result, _ = integrate(
         f=_vector_integrand,
         method=method,
         sampling="variable",
@@ -167,7 +167,7 @@ def test_per_method_independence_across_output_dimensions(take_gradient):
     a, b = 0.0, math.pi / 2
 
     # Vector integration.
-    vec_result = integrate(
+    vec_result, _ = integrate(
         f=_vector_integrand,
         method="gk21",
         atol=1e-10,
@@ -181,7 +181,7 @@ def test_per_method_independence_across_output_dimensions(take_gradient):
     # Scalar integration of each component.
     scalar_results = []
     for i in range(D):
-        scalar_result = integrate(
+        scalar_result, _ = integrate(
             f=lambda t, idx=i: _vector_integrand(t)[..., idx : idx + 1],
             method="gk21",
             atol=1e-10,
@@ -220,7 +220,7 @@ def test_error_norm_schemes_integrate_accurately(error_norm, dtype):
     # float32 cannot resolve 1e-8; use a dtype-appropriate tolerance/cutoff.
     tol = 1e-8 if dtype == torch.float64 else 1e-6
     cutoff = 1e-5 if dtype == torch.float64 else 1e-4
-    result = integrate(
+    result, _ = integrate(
         f=_vector_integrand,
         method="gk21",
         atol=tol,
@@ -247,7 +247,7 @@ def test_failure_fraction_tol_zero_bounds_every_component():
     """With mesh_failure_tolerance=0 every output element must meet tolerance,
     including the hard oscillatory component."""
     a, b = 0.0, 1.0
-    result = integrate(
+    result, _ = integrate(
         f=_heterogeneous_integrand,
         method="gk21",
         atol=1e-7,
@@ -280,10 +280,10 @@ def test_failure_fraction_permissive_uses_no_more_panels():
         "take_gradient": False,
         "max_batch": cached_max_batch(),
     }
-    strict = integrate(mesh_failure_tolerance=0.0, **common)
+    strict, strict_state = integrate(mesh_failure_tolerance=0.0, **common)
     # 0.67 allows up to 2 of 3 components to fail (only an all-fail panel splits).
-    permissive = integrate(mesh_failure_tolerance=0.67, **common)
-    assert len(permissive.mesh_optimal) <= len(strict.mesh_optimal)
+    permissive, permissive_state = integrate(mesh_failure_tolerance=0.67, **common)
+    assert len(permissive_state.mesh) <= len(strict_state.mesh)
 
 
 def test_error_norm_init_and_per_call_override():

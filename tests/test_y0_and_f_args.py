@@ -57,7 +57,7 @@ def test_f_forwards_to_integrand(take_gradient):
         max_batch=cached_max_batch(),
     )
     a, b = 0.0, math.pi
-    result = solver.integrate(
+    result, _ = solver.integrate(
         f=f,
         mesh_init=torch.tensor([a], dtype=torch.float64),
         mesh_final=torch.tensor([b], dtype=torch.float64),
@@ -81,7 +81,7 @@ def test_f_default_empty_tuple_works_with_zero_arg_integrand(take_gradient):
     converge to ~2 ± 1e-6, which is fine for f32 but flunks the
     f64-tight assertion.
     """
-    result = integrate(
+    result, _ = integrate(
         f=torch.sin,
         method="gk21",
         atol=1e-9,
@@ -111,7 +111,7 @@ def test_f_with_tensor_value(take_gradient):
         rtol=1e-9,
         max_batch=cached_max_batch(),
     )
-    result = solver.integrate(
+    result, _ = solver.integrate(
         f=f,
         mesh_init=torch.tensor([0.0], dtype=torch.float64),
         mesh_final=torch.tensor([math.pi], dtype=torch.float64),
@@ -132,7 +132,7 @@ def test_y0_default_zero_gives_pure_integral(take_gradient):
     """With the default ``y0`` (zero), ``result.integral == ∫f``. This
     is the well-defined common case.
     """
-    result = integrate(
+    result, _ = integrate(
         f=torch.ones_like,
         method="gk21",
         atol=1e-12,
@@ -148,7 +148,7 @@ def test_y0_default_zero_gives_pure_integral(take_gradient):
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 def test_y0_offsets_the_result_per_documentation(take_gradient):
     """User-supplied y0 adds an offset to the integral: result.integral = y0 + ∫f."""
-    result = integrate(
+    result, _ = integrate(
         f=torch.ones_like,
         method="gk21",
         atol=1e-12,
@@ -187,8 +187,8 @@ def test_y0_difference_equals_y0_for_same_integral(take_gradient):
     }
     offset = torch.tensor([7.5], dtype=torch.float64)
 
-    result_zero = integrate(**common, y0=torch.zeros(1, dtype=torch.float64))
-    result_offset = integrate(**common, y0=offset)
+    result_zero, _ = integrate(**common, y0=torch.zeros(1, dtype=torch.float64))
+    result_offset, _ = integrate(**common, y0=offset)
 
     # Sanity: the zero-y0 run should match the analytic ∫_0^π sin t dt = 2.
     assert abs(result_zero.integral.item() - 2.0) < 1e-9

@@ -89,7 +89,7 @@ def test_grad_of_integral_matches_integral_of_grad(name, g, interval):
     grad_a = theta.grad.item()
 
     # --- Path B: directly integrate g(t) = df_theta / dtheta. ---
-    out_b = integrate(
+    out_b, _ = integrate(
         f=g,
         method=method,
         atol=ATOL,
@@ -116,7 +116,7 @@ def test_single_batch_autograd_grad_works():
     full graph (see ``test_grad_of_integral_matches_integral_of_grad``).
     """
     theta = torch.tensor(1.7, dtype=torch.float64, device=DEVICE, requires_grad=True)
-    out = integrate(
+    out, _ = integrate(
         f=lambda t: theta * (t**2),  # very simple, fits in one batch
         method="dopri5",
         atol=ATOL,
@@ -142,7 +142,7 @@ def test_take_gradient_does_not_corrupt_integral_value():
     mesh_final = torch.tensor([b], dtype=torch.float64)
     method = "dopri5"
 
-    out_no_grad = integrate(
+    out_no_grad, _ = integrate(
         f=lambda t: 1.7 * torch.sin(t),
         method=method,
         atol=ATOL,
@@ -155,7 +155,7 @@ def test_take_gradient_does_not_corrupt_integral_value():
 
     theta = torch.tensor(1.7, dtype=torch.float64, device=DEVICE, requires_grad=True)
     solver = make_uniform_solver(method, atol=ATOL, rtol=RTOL)
-    out_with_grad = solver.integrate(
+    out_with_grad, _ = solver.integrate(
         f=lambda t: theta * torch.sin(t),
         mesh_init=mesh_init,
         mesh_final=mesh_final,

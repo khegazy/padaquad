@@ -50,7 +50,7 @@ assert (measured.degree, measured.lower_degree) == (3, 1)
 
 # Make it available to the uniform solver by name (lower case).
 UNIFORM_METHODS["simpson"] = simpson
-result = integrate(
+result, state = integrate(
     torch.sin,
     "simpson",
     atol=1e-10,

@@ -102,7 +102,7 @@ def _run_case(
         # torch has initialized CUDA earlier in the session, so pin the solver
         # device explicitly.
         solver = make_uniform_solver(method, atol=atol, rtol=rtol, device="cpu")
-        output = solver.integrate(
+        output, output_state = solver.integrate(
             f,
             mesh_init=T_INIT,
             mesh_final=T_FINAL,
@@ -111,7 +111,7 @@ def _run_case(
         return {
             "integral": output.integral.tolist(),
             "integral_error": output.integral_error.tolist(),
-            "n_optimal_mesh": int(output.mesh_optimal.shape[0]),
+            "n_optimal_mesh": int(output_state.mesh.shape[0]),
         }
     finally:
         torch.set_default_dtype(previous_default_dtype)

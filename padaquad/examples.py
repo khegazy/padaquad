@@ -374,7 +374,7 @@ def wolf_schlegel(t: torch.Tensor, _y: torch.Tensor | None = None) -> torch.Tens
     >>> from padaquad.examples import wolf_schlegel
     >>> from padaquad import integrate
     >>> _ = torch.manual_seed(0)  # the starting mesh is random
-    >>> result = integrate(
+    >>> result, state = integrate(
     ...     wolf_schlegel,
     ...     atol=1e-9,
     ...     rtol=1e-9,

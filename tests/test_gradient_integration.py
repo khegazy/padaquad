@@ -156,7 +156,7 @@ class TestQuadratureWithGradients:
         integrand.eval()
         solver = _make_solver(method_name, integrand)
 
-        result = solver.integrate(mesh_init=T_INIT, mesh_final=T_FINAL)
+        result, _ = solver.integrate(mesh_init=T_INIT, mesh_final=T_FINAL)
         analytical = _exp_analytical_integral(0.0, 1.0)
 
         assert torch.allclose(result.integral.cpu(), analytical, atol=1e-3), (
@@ -170,7 +170,7 @@ class TestQuadratureWithGradients:
         integrand.eval()  # Prevent auto-backward; we do manual backward
         solver = _make_solver(method_name, integrand)
 
-        result = solver.integrate(
+        result, _ = solver.integrate(
             mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
         )
         result.integral.sum().backward()
@@ -196,7 +196,7 @@ class TestPathOptimization:
         path_integrand.eval()
         solver = _make_solver("bosh3", path_integrand)
 
-        result = solver.integrate(
+        result, _ = solver.integrate(
             mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
         )
         result.integral.sum().backward()
@@ -213,7 +213,7 @@ class TestPathOptimization:
 
         # Initial loss
         solver = _make_solver("bosh3", path_integrand)
-        result = solver.integrate(
+        result, _ = solver.integrate(
             mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
         )
         initial_loss = result.integral.sum().item()
@@ -222,7 +222,7 @@ class TestPathOptimization:
         for _ in range(10):
             optimizer.zero_grad()
             solver = _make_solver("bosh3", path_integrand)
-            result = solver.integrate(
+            result, _ = solver.integrate(
                 mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
             )
             loss = result.integral.sum()
@@ -251,7 +251,7 @@ class TestQuadratureWithInitialValue:
         integrand.eval()
         solver = _make_solver(method_name, integrand)
 
-        result = solver.integrate(mesh_init=T_INIT, mesh_final=T_FINAL)
+        result, _ = solver.integrate(mesh_init=T_INIT, mesh_final=T_FINAL)
 
         # The solver computes ∫f(t)dt; add y0 externally. result.integral can
         # live on the compute device (the default take_gradient path), so move it
@@ -294,7 +294,7 @@ class TestQuadratureWithInitialValue:
         # Now integrate using the trained network
         net.eval()
         solver = _make_solver(method_name, net)
-        result = solver.integrate(mesh_init=T_INIT, mesh_final=T_FINAL)
+        result, _ = solver.integrate(mesh_init=T_INIT, mesh_final=T_FINAL)
 
         analytical = _exp_analytical_integral(0.0, 1.0)
         # Looser tolerance since the MLP is an approximation
@@ -318,7 +318,7 @@ class TestTrainingLoopPattern:
         integrand = ScaledIntegrand(scale=2.0).to(DEVICE)
         solver = _make_solver(method_name, integrand)
 
-        result = solver.integrate(
+        result, _ = solver.integrate(
             mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
         )
         result.integral.sum().backward()
@@ -337,7 +337,7 @@ class TestTrainingLoopPattern:
         for _ in range(10):
             optimizer.zero_grad()
             solver = _make_solver(method_name, integrand)
-            result = solver.integrate(
+            result, _ = solver.integrate(
                 mesh_init=T_INIT,
                 mesh_final=T_FINAL,
                 take_gradient=False,

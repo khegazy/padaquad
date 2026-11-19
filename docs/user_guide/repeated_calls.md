@@ -10,15 +10,16 @@
 
 | The call passes | Interval integrated | Starting mesh |
 |---|---|---|
-| `mesh` only | `mesh[0]` to `mesh[-1]` | `mesh`, as given |
+| `mesh` (or a `state` with a mesh) only | `mesh[0]` to `mesh[-1]` | `mesh`, as given |
 | `mesh` and bounds inside it | the bounds; a missing one is the mesh's end | `mesh` cut to the bounds: its points between them, plus the bounds |
 | `mesh` and a bound outside it | the bounds; a missing one is the mesh's end | `mesh` extended: all its points between the bounds, plus the bounds; the integration refines the new subinterval |
 | both bounds, no `mesh` | the bounds | a fresh mesh (`N_init_steps`, `random_initial_mesh`) |
 | one bound or none, no `mesh` | — | `ValueError` |
+| both `mesh` and `state` | — | `ValueError`; use `dataclasses.replace(state, mesh=m)` |
 
 - Every given bound becomes an end point of the starting mesh, so its
   gradient is computed as for any mesh end, also when it equals an end of a
-  `mesh_optimal` (which is detached from autograd).
+  state's mesh (which is detached from autograd).
 - A bound within a few rounding steps of its mesh end (4 machine epsilons of
   the coarser of the bound's and the mesh's dtypes, relative to that end)
   replaces that end, so a bound that differs from `mesh[-1]` only by float32
@@ -39,59 +40,52 @@ and the integration refines the new subinterval like any other.
 
 <!-- not-tested -->
 ```python
-result = solver.integrate(
-    f,
-    mesh=result.mesh_optimal,
-    mesh_final=torch.tensor([2.0], dtype=torch.float64),
-    max_batch=result.max_batch,
+result, state = solver.integrate(
+    f, state=state, mesh_final=torch.tensor([2.0], dtype=torch.float64)
 )
 ```
 
 ## Several integrals per step
 
 Keep one result per integral, for example one per loss term or per interval,
-and pass each its own `mesh_optimal`. A batch size can be shared between
-integrals of the same integrand.
+and pass each its own `state`.
 
 ## Checkpoints
 
-The two values are ordinary tensors and integers, so they can be saved with a
-model and loaded to resume training:
+`dataclasses.asdict(state)` is a dictionary of a tensor, an int and a
+bool, so it can be saved with a model and loaded (also with `torch.load`'s
+default `weights_only=True`) to resume training:
 
 <!-- not-tested -->
 ```python
-torch.save({"mesh": result.mesh_optimal, "max_batch": result.max_batch}, path)
-state = torch.load(path, map_location=device)
-result = solver.integrate(f, mesh=state["mesh"], max_batch=state["max_batch"])
+import dataclasses
+from padaquad import IntegrationState
+
+torch.save(dataclasses.asdict(state), path)
+state = IntegrationState(**torch.load(path, map_location=device))
+result, state = solver.integrate(f, state=state)
 ```
 
-## When not to reuse `max_batch`
+## The batch size of a state
 
-A batch size depends on the integrand and on how the call is run. Measure a
-new one (pass no `max_batch`, or call `solver.get_max_batch(f=f, t=t,
-take_gradient=...)`) when any of these changes:
-
-- `take_gradient`: with `take_gradient=True` a batch keeps its autograd graph
-  until it is backpropagated, so the measurement leaves room for it (a factor
-  2.1, `_GRADIENT_MEMORY_SAFETY_FACTOR`). A batch size measured with
-  `take_gradient=False` is too large for `take_gradient=True`; the other way
-  round it is only smaller than needed.
-- the dtype: a float64 point takes twice the memory of a float32 one;
-- the device.
-
-## `result.max_batch` and `solver.get_max_batch()`
-
-- `result.max_batch` is the `max_batch` a call was given, or the one its
-  memory measurement found (the integration itself sizes each batch from the
-  memory free at that moment), lowered if the call ran out of memory and
-  retried with smaller batches. Passing it on carries that
-  reduction to the next call.
-- `solver.get_max_batch(f=f, t=t, ...)` runs the memory measurement for `f`
-  now and returns the batch size, so it can be chosen before any integral.
-  Pass `t` in the dtype of the calls that will use the result.
-- `solver.get_max_batch()` without `f` estimates a batch size from the last
-  measurement this solver ran and the memory free now. Any call that measures
-  changes it, so prefer `result.max_batch` of the call you want to repeat.
+- `state.max_batch` is the largest number of points per call of the
+  integrand known to fit: the `max_batch` the call was given, else the
+  largest batch that ran.
+- `state.max_batch_converged` is True when it will not grow again: the size
+  was given (`max_batch=`), or a call ran out of memory and shrank it. While
+  it is False, a call that needs larger batches tries 10 times the batch
+  size.
+- A size that shrank never grows back, also when the memory shortage was
+  temporary. To let it grow again, pass
+  `state=dataclasses.replace(state, max_batch_converged=False)`.
+- A batch size depends on the integrand, `take_gradient`, the dtype and the
+  device. A state reused with another of these still works: an out-of-memory
+  error shrinks the batch until it fits, at the cost of the failed calls.
+- `max_batch=` given with a state replaces its batch size, which is then
+  fixed. `solver.get_max_batch(f=f, t=t, ...)` measures a batch size before
+  any integral (it can be slow; measure once and pass the value as
+  `max_batch`). `solver.get_max_batch()` without `f` returns the
+  constructor's `max_batch`, else the value of the last measurement with `f`.
 
 A call that raises an error returns nothing to reuse. It can still have
 switched the solver's dtype, which follows the dtype of the last `mesh` or

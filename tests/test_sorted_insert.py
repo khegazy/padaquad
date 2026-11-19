@@ -26,9 +26,7 @@ class TestMeshOrder:
         Two barriers share coordinate 0 but differ in coordinate 1; the order
         must come from the full-vector mesh position.
         """
-        mesh = torch.tensor(
-            [[0.0, 0.0], [0.0, 1.0], [1.0, 2.0]], dtype=torch.float64
-        )
+        mesh = torch.tensor([[0.0, 0.0], [0.0, 1.0], [1.0, 2.0]], dtype=torch.float64)
         mi = self.solver._get_mesh_indices(mesh)
         barriers = torch.tensor([[0.0, 1.0], [0.0, 0.0]], dtype=torch.float64)
         order = self.solver._mesh_order(barriers, mi)
@@ -96,9 +94,7 @@ class TestInsertSortedResults:
             [[1.0, 10.0], [3.0, 30.0], [5.0, 50.0]], dtype=torch.float64
         )
         result = torch.tensor([[2.0, 20.0], [4.0, 40.0]], dtype=torch.float64)
-        idxs_keep, idxs_input = self.solver._merge_positions(
-            record[:, 0], result[:, 0]
-        )
+        idxs_keep, idxs_input = self.solver._merge_positions(record[:, 0], result[:, 0])
 
         merged = self.solver._insert_sorted_results(
             record, idxs_keep, result, idxs_input

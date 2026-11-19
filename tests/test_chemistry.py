@@ -57,7 +57,7 @@ def test_wolf_schlegel_parallel_vs_scipy(method_name, take_gradient):
         max_batch=cached_max_batch(),
     )
 
-    parallel_output = parallel_solver.integrate(
+    parallel_output, _ = parallel_solver.integrate(
         mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=take_gradient
     )
 

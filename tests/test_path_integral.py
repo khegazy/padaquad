@@ -33,7 +33,7 @@ def test_wrapper_matches_direct_solver_uniform(method_name, take_gradient):
     """integrate(sampling='uniform') matches direct RK solver."""
     torch.manual_seed(SEED)
 
-    wrapper_output = integrate(
+    wrapper_output, wrapper_output_state = integrate(
         f=_integrand,
         method=method_name,
         sampling="uniform",
@@ -56,7 +56,7 @@ def test_wrapper_matches_direct_solver_uniform(method_name, take_gradient):
         f=_integrand,
         max_batch=cached_max_batch(),
     )
-    direct_output = direct_solver.integrate(
+    direct_output, direct_output_state = direct_solver.integrate(
         mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=take_gradient
     )
 
@@ -67,7 +67,7 @@ def test_wrapper_matches_direct_solver_uniform(method_name, take_gradient):
     assert torch.allclose(
         wrapper_output.integral_error, direct_output.integral_error
     ), f"Integral error mismatch for {method_name}"
-    assert torch.allclose(wrapper_output.mesh_optimal, direct_output.mesh_optimal), (
+    assert torch.allclose(wrapper_output_state.mesh, direct_output_state.mesh), (
         f"Optimal mesh mismatch for {method_name}"
     )
     assert torch.allclose(wrapper_output.y, direct_output.y), (

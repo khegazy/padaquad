@@ -2,7 +2,7 @@
 Warm starts from the optimal mesh
 =================================
 
-This script checks the merge rules that build ``mesh_optimal``, the mesh a later
+This script checks the merge rules that build the optimal mesh (``state.mesh``), the mesh a later
 call starts from when it is passed as ``mesh=``. After an integration, pairs of
 neighbouring subintervals are merged when the merged subinterval is predicted to
 pass its tolerance with a margin. With ``merge_rule="predicted"`` (the default)
@@ -15,7 +15,7 @@ optimal mesh and the merge rule".
 What a warm start must not do is make the result less accurate than the call it
 started from. Each chain below is one call from an explicit starting mesh (the
 cold call) followed by four calls each starting from the previous call's
-``mesh_optimal`` and ``max_batch`` (the warm calls). A warm call
+state (the warm calls). A warm call
 passes when its error is at most the largest of
 
 - the tolerance ``max(atol, rtol * |I|)``;
@@ -83,7 +83,7 @@ known = 0
 
 def chain(sampling, name, f, exact, mesh, dtype, merge_rule, atol, rtol):
     """Run a cold call from ``mesh`` and N_WARM warm calls, each from the
-    previous call's ``mesh_optimal`` and ``max_batch``.
+    previous call's state.
 
     Returns the warm calls' integrand evaluations, their starting subintervals
     that had to be split again, the worst warm error divided by its bound, and
@@ -107,16 +107,16 @@ def chain(sampling, name, f, exact, mesh, dtype, merge_rule, atol, rtol):
 
     eps = torch.finfo(dtype).eps
     tol = max(atol, rtol * abs(exact))
-    cold = solver.integrate(f=counted, mesh=mesh, take_gradient=False)
+    cold, warm_state = solver.integrate(f=counted, mesh=mesh, take_gradient=False)
     cold_error = abs(float(cold.integral) - exact)
     count[0] = 0
     splits, worst, healthy = 0, 0.0, True
     warm = cold
     for _ in range(N_WARM):
-        warm = solver.integrate(
+        warm, warm_state = solver.integrate(
             f=counted,
-            mesh=warm.mesh_optimal,
-            max_batch=warm.max_batch,
+            mesh=warm_state.mesh,
+            max_batch=warm_state.max_batch,
             take_gradient=False,
         )
         floor = float((50 * eps * warm.mesh_quadratures.abs()).sum())

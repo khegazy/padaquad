@@ -6,8 +6,8 @@
 `"cuda:N"` or a `torch.device`; `None` picks the GPU if one is available. The
 solver never changes PyTorch's global default device. `result_device` is where the per-subinterval arrays of the result go (nodes,
 integrand values, contributions, errors), to keep them off the GPU; `None`
-keeps them on the solver's device. The integral, its error estimate and
-`mesh_optimal` stay on the solver's device.
+keeps them on the solver's device. The integral, its error estimate and the
+state's mesh stay on the solver's device.
 
 The solver computes in the dtype of the bounds or mesh given to `integrate`,
 float64 or float32. A float32 tensor such as `torch.tensor([1.0])` therefore
@@ -19,69 +19,94 @@ makes the integration run in float32.
 padaquad evaluates the nodes of many subintervals in one call of the
 integrand. The number of points per call is the batch size, `max_batch`.
 
-When no `max_batch` is given (to `integrate` or to the constructor), a
-**memory benchmark** measures how
-the memory of one call of the integrand grows with the number of points N. It
-calls the integrand on 1 point, then on more, and fits the memory of the calls
-as a + b N + d N², so an integrand whose memory grows like N² (for example, one
-that computes a gradient per point inside itself) is measured too. Only
-readings of at least 10 KB on a GPU, or 4 MiB on a CPU, count (smaller CPU
-readings are mostly noise), and the benchmark keeps going until three readings
-do and the memory they show has grown by at least that much. Each next call is
-at most ten times larger (twice as large once calls take more than 0.1 s on a
-GPU or on Linux, whose readings count all the memory a call uses), and no
-larger than the fit predicts to fit in three quarters of the usable memory and
-to take at most 1 s; that 1 s limit is stretched only as far as needed to get
-those readings. No call is started that is predicted to end past 60 s for the
-whole benchmark; `limit_benchmark_time=False` (a constructor option, also
-accepted by `padaquad.integrate`) removes this limit for an integrand so slow
-that the benchmark needs longer. The
-batch size is then computed at every evaluation from the memory free at that
-moment: the largest batch whose fitted
-memory fits in three quarters of the usable memory, which is the free memory
-minus `(1 - total_mem_usage)` times the total memory. With
-`take_gradient=True` the fitted memory is multiplied by a safety factor, a
-margin for the memory that backpropagation needs.
+**How `integrate` chooses it.** A `max_batch` given to the call (or to the
+constructor, when no `state` is given) is used as it is and never grows. A
+`state` (the state an earlier call returned, {ref}`ug-reuse`) gives the batch
+size to start from. With neither, the integrand is called, forward only, on 10,
+100 and 1,000 copies of the lower bound, stopping at the order of the first
+pass (for the default starting mesh of gk21, 253 points: calls of 10 and 100),
+and the batch size starts at the largest that ran. These calls read no memory; they only
+check that the integrand runs.
 
-The benchmark raises an error that lists what it measured and asks for
-`max_batch` when it cannot measure the memory: when the readings do not
-allow a fit within 60 s (the error names `limit_benchmark_time`), when no
-reading reaches the noise floor, or when a call uses more than three times the
-memory that growth like N² allows from an earlier reading that reached the
-noise floor (memory growing faster than N², which the fit cannot follow).
-Faster growth that it does not catch is underestimated
-({ref}`ug-memory-limitations`).
+**How it grows.** While the batch size has not converged, a call of the
+integrand that has more points waiting than the batch size tries 10 times as
+many (or all that are waiting). The first pass of a call therefore runs whole
+when it is at most 10 times the batch size. When a call runs out of memory, it
+is evaluated again at three quarters of its size, repeatedly, until it fits;
+that size becomes the batch size, and the batch size has then converged
+(`state.max_batch_converged`): it never grows again, in this call or in any
+call given its state. Reaching the limit this way costs a few failed calls of
+the integrand once per state (measured on an A100, for a network filling the
+GPU: 0.6 s more than a run with the right batch size from the start, 1.4 s
+from a cold call).
 
-On a CPU, memory is measured as the memory the operating system has given the
-process. Memory the integrand takes from memory the process freed earlier
-does not show up there. On Linux, padaquad first returns such memory with
-glibc's `malloc_trim`, so the readings count it (not with another C
-library, or with an allocator such as jemalloc loaded instead). On macOS and
-Windows that is not possible: in a process that has already evaluated the
-integrand, readings can be far too low, so the batch size is capped at the
-largest call the benchmark made (it ran). See {ref}`ug-memory-limitations` for
-what this costs and what it leaves unbounded; pass `max_batch` there when the
-memory of a batch matters.
+**With `take_gradient=True`.** padaquad backpropagates every batch right after
+evaluating it. On a GPU, before each backward pass it compares the memory
+still usable (keeping `1 - total_mem_usage` of the total free) with what the
+backward pass is predicted to need: the batch's forward peak memory, times the
+ratio of backward to forward peak memory the previous batch measured (1 for
+the first batch). If it does not fit, the batch is dropped before any gradient
+is written and evaluated again, smaller. If a backward pass still runs out of
+memory, padaquad puts back the gradients the call added, lowers the batch
+size, and restarts the integral from its starting mesh, with a warning. It
+finds those gradients by walking each batch's autograd graph. A custom
+autograd function (for example activation checkpointing with
+`use_reentrant=True`, or a function compiled with `torch.compile`) can hide
+parameters from that walk; pass
+`parameters=model.parameters()` (or the optimizer) in that case, else
+padaquad raises `BackwardOutOfMemoryError`, whose `state` is the state to call
+again with after resetting the gradients. It raises it also when a parameter
+has a post-accumulate-grad hook, or when `torch.distributed` runs more than one
+process. An out-of-memory error in `loss_fxn` is handled the same way as one in
+the backward pass. One solver serves one thread: an integrand may integrate with
+the same solver (a double integral), but two threads must not share one.
 
-The benchmark takes a few seconds and logs warnings, and it runs on every call
-without `max_batch`. To run it once, either measure before any integral with
-`max_batch = solver.get_max_batch(f=f, t=t, take_gradient=...)`, or integrate
-once without `max_batch` and read `result.max_batch`; then pass that value to
-later calls or new solvers ({ref}`ug-reuse`). The measurement depends on
-`take_gradient`, the dtype and the device, so measure with the settings of the
-calls that will use it. `solver.get_max_batch()` without `f` returns the batch
-size the solver would use now, from its last measurement, without running the
-benchmark. All of these reuse the benchmark's result, so they save its time
-but keep its limitations ({ref}`ug-memory-limitations`).
+**Measuring before any integral.** `solver.get_max_batch(f=f, t=t,
+take_gradient=...)` runs the memory benchmark: it fits the memory of calls on
+1, 10, ... points as a + b N + d N² and returns the largest batch whose fitted
+memory fits in three quarters of the usable memory. It can take up to a minute
+(`limit_benchmark_time=False` removes that limit) and has the limitations
+listed below; measure once and pass the value as `max_batch`.
+`solver.get_max_batch()` without `f` returns the constructor's `max_batch`,
+else the value of the last measurement with `f`.
 
-With `take_gradient=False`, if an evaluation runs out of memory, the batch is
-shrunk to three quarters and retried; the smaller size stays in force until
-the next `integrate` call. With `take_gradient=True` such an error is raised.
-Out-of-memory errors from PyTorch's allocators and from CUDA libraries are
-recognized; any other error from the integrand is raised unchanged.
+With `take_gradient=False`, `total_mem_usage` does not limit the batch size:
+calls of the integrand grow until they run out of memory. Out-of-memory errors
+from PyTorch's allocators and from CUDA libraries are recognized; any other
+error from the integrand is raised unchanged.
 
 (ug-memory-limitations)=
-### Limitations of the memory benchmark
+### Limitations
+
+**Of the growing batch size in `integrate`**
+
+- *Growth needs a clean failure.* The batch grows until the integrand raises
+  an out-of-memory error. On a CPU an allocation that does not fit can get the
+  process killed instead (Linux accepts most allocations and kills the process
+  when memory runs out), and a GPU driver that falls back to system memory
+  (NVIDIA's on Windows) slows down instead of failing. padaquad is meant for
+  GPUs; on a CPU, pass `max_batch` when memory matters.
+- *Memory is not kept free.* The forward calls fill the memory until they
+  fail; other processes on the same GPU can run out of memory meanwhile.
+  `total_mem_usage` limits only the check before a backward pass.
+- *A size that shrank never grows back* (see {ref}`ug-reuse`).
+- *Results with `take_gradient=True`.* A pass larger than the batch size is
+  spread over several batches, each judged against the running integral of
+  the batches before it, so the result can differ from a run with larger
+  batches (with low-order methods by more than the tolerance, usually with
+  `converged=False`).
+- *The check before a backward pass* resets the GPU's peak-memory counter
+  (`torch.cuda.reset_peak_memory_stats`) before every batch, so a user reading
+  `torch.cuda.max_memory_allocated()` around an `integrate` call sees the peak
+  of its last batch only. Its first batch assumes the backward pass needs as
+  much memory as the forward pass, which activation checkpointing breaks (4 to
+  6 times as much, measured); the restart handles that batch.
+- *A restart repeats side effects* of the integrand and of `loss_fxn`
+  (counters, random draws, running statistics) for the batches before the
+  failure.
+
+**Of `get_max_batch(f=...)`**
+
 
 The benchmark is meant for the common case: an integrand whose memory grows
 linearly with the number of points N, or at most like N², measured where every
@@ -91,7 +116,7 @@ fits, which leaves the hardware underused, and for some integrands a batch
 larger than what fits. **Passing your own `max_batch`, chosen for the
 integrand and the machine, avoids all of this**: the benchmark does not run,
 and the batch is the value given. Reusing the benchmark's result, through
-`result.max_batch` or `solver.get_max_batch()`, only skips the time it takes; the
+`solver.get_max_batch()`, only skips the time it takes; the
 batch keeps the limitations below. The known
 limitations follow. Numbers marked "simulated" come from fake memory readings
 and a fake clock (`tests/test_memory_benchmark.py` and review scripts);

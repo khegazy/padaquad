@@ -20,6 +20,7 @@ where the denominator genuinely drifts within a single solve).
 
 from __future__ import annotations
 
+import collections
 import logging
 import math
 
@@ -42,14 +43,14 @@ T_INIT = torch.tensor([0.0], dtype=torch.float64)
 T_FINAL = torch.tensor([1.0], dtype=torch.float64)
 
 
-def _solver(**kwargs):
+def _solver(device="cpu", **kwargs):
     return adaptive_quadrature(
         sampling_type=steps.ADAPTIVE_UNIFORM,
         method=METHOD,
         atol=ATOL,
         rtol=RTOL,
         remove_cut=REMOVE_CUT,
-        device="cpu",
+        device=device,
         dtype=torch.float64,
         **kwargs,
     )
@@ -64,14 +65,14 @@ def _cancelling(t, *args):
     return torch.sin(2.0 * math.pi * t)
 
 
-def _run(solver, f, take_gradient, mesh_final=T_FINAL, **kwargs):
+def _run(solver, f, take_gradient, mesh_final=T_FINAL, conserve_memory=True, **kwargs):
     return solver.integrate(
         f=f,
         mesh_init=T_INIT,
         mesh_final=mesh_final,
         take_gradient=take_gradient,
         max_batch=MAX_BATCH,
-        conserve_memory=True,
+        conserve_memory=conserve_memory,
         **kwargs,
     )
 
@@ -136,19 +137,31 @@ def test_termination_near_cancellation_with_split_cap():
     assert abs(float(result.integral.reshape(-1)[0])) < 1e-3
 
 
-def test_recheck_skipped_with_fixed_reference_still_valid():
-    """A fixed error_integral_reference pins the absolute denominator, so the
-    re-check is skipped (no drift to correct). The normal accept decision then
-    already judges every panel against that same fixed tolerance, so the result
-    stays finite, accurate, and within tolerance."""
-    solver = _solver()
+def test_small_fixed_reference_needs_no_switch():
+    """A fixed error_integral_reference no larger than |integral| needs no switch.
+
+    The loop judges every panel against the fixed tolerance, which is at least
+    as strict as the final integral's, so when the reference is dropped (every
+    panel accepted) no recorded panel fails and the result is bit-identical to
+    the run without enforcement.
+    """
     torch.manual_seed(0)
-    result, _ = _run(
-        solver, _cancelling, take_gradient=False, error_integral_reference=0.0
+    a, _ = _run(
+        _solver(), _cancelling, take_gradient=False, error_integral_reference=0.0
     )
-    assert result.converged is True
-    assert torch.isfinite(result.integral).all()
-    assert abs(float(result.integral.reshape(-1)[0])) < 1e-5
+    torch.manual_seed(0)
+    b, _ = _run(
+        _solver(),
+        _cancelling,
+        take_gradient=False,
+        error_integral_reference=0.0,
+        enforce_convergence=False,
+    )
+    assert a.converged is True
+    assert torch.isfinite(a.integral).all()
+    assert abs(float(a.integral.reshape(-1)[0])) < 1e-5
+    assert torch.equal(a.integral, b.integral)
+    assert torch.equal(a.h, b.h)
 
 
 # ---------------------------------------------------------------------------
@@ -520,3 +533,133 @@ def test_warning_suggests_enforce_convergence(caplog):
     with caplog.at_level(logging.WARNING, logger="padaquad"):
         _run(_solver(), _cancelling, take_gradient=False, enforce_convergence=False)
     assert "enforce_convergence=True" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# E. A fixed error_integral_reference is dropped once every panel is accepted
+# ---------------------------------------------------------------------------
+# With reference 1.0 and the total integral 0, the loop's tolerance
+# rtol * 1.0 is far looser than the final one (atol), so panels accepted against
+# the reference fail against the final integral.
+
+
+def _spy_evaluated(solver):
+    """Count each evaluated subinterval, keyed by its first and last node."""
+    seen = collections.Counter()
+    evaluate = solver._evaluate_f_on_mesh
+
+    def spy(*args, **kwargs):
+        out = evaluate(*args, **kwargs)
+        nodes = out[0].detach()
+        seen.update(zip(nodes[:, 0, 0].tolist(), nodes[:, -1, 0].tolist(), strict=True))
+        return out
+
+    solver._evaluate_f_on_mesh = spy
+    return seen
+
+
+@pytest.mark.parametrize("conserve_memory", [True, False])
+@pytest.mark.parametrize("max_adaptive_splits", [None, 4])
+def test_switch_never_evaluates_a_subinterval_twice(
+    conserve_memory, max_adaptive_splits
+):
+    """The panels that fail when the reference is dropped are split from their
+    stored errors, never evaluated again (f can be expensive)."""
+    solver = _solver()
+    seen = _spy_evaluated(solver)
+    torch.manual_seed(0)
+    _run(
+        solver,
+        _cancelling,
+        take_gradient=False,
+        conserve_memory=conserve_memory,
+        error_integral_reference=1.0,
+        max_adaptive_splits=max_adaptive_splits,
+    )
+    assert len(seen) > 0
+    assert max(seen.values()) == 1
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
+@pytest.mark.parametrize("conserve_memory", [True, False])
+def test_too_large_fixed_reference_converges(device, conserve_memory):
+    """Once the reference is dropped, the failing panels are refined until
+    every panel meets the final integral's tolerance. On CUDA the record's
+    nodes stay on the CPU (result_device) while the masks and the mesh are on
+    the GPU. Each device is compared with its own run without enforcement:
+    the random starting mesh differs between devices for the same seed."""
+    runs = []
+    for enforce in (False, None):
+        torch.manual_seed(0)
+        result, _ = _run(
+            _solver(device),
+            _cancelling,
+            take_gradient=False,
+            conserve_memory=conserve_memory,
+            error_integral_reference=1.0,
+            enforce_convergence=enforce,
+        )
+        runs.append(result)
+    off, on = runs
+    assert off.converged is False  # today's behavior, kept by False
+    assert on.converged is True
+    assert abs(float(on.integral.reshape(-1)[0])) < 1e-5
+    assert on.h.numel() > off.h.numel()
+
+
+def test_switch_respects_split_cap(caplog):
+    """A failing panel at max_adaptive_splits is not split when the reference
+    is dropped; the warning then names the cap, not the dropped reference."""
+    torch.manual_seed(0)
+    off, _ = _run(
+        _solver(),
+        _cancelling,
+        take_gradient=False,
+        error_integral_reference=1.0,
+        max_adaptive_splits=4,
+        enforce_convergence=False,
+    )
+    torch.manual_seed(0)
+    with caplog.at_level(logging.WARNING, logger="padaquad"):
+        on, _ = _run(
+            _solver(),
+            _cancelling,
+            take_gradient=False,
+            error_integral_reference=1.0,
+            max_adaptive_splits=4,
+        )
+    assert on.converged is False
+    assert on.h.numel() > off.h.numel()  # the switch-over split something
+    last = caplog.records[-1].getMessage()  # the enforced run's warning
+    assert "max_adaptive_splits" in last
+    assert "error_integral_reference" not in last
+
+
+def test_switch_vector_failure_fraction():
+    """Each output component is judged against its own final integral."""
+    torch.manual_seed(0)
+    result, _ = _run(
+        _solver(error_norm="failure_fraction"),
+        _vector_cancelling,
+        take_gradient=False,
+        error_integral_reference=torch.tensor([1.0, 1.0], dtype=torch.float64),
+    )
+    assert result.converged is True  # |integral of component 1| = 0.335 < 1
+    assert torch.allclose(result.integral, _vector_truth(), atol=1e-5)
+
+
+def test_switch_with_nonfinite_terminates():
+    """A NaN integral makes every tolerance non-finite; such panels are
+    accepted, never split, so dropping the reference splits nothing."""
+
+    def f(t, *args):
+        return torch.where(t > 0.9, torch.nan, _cancelling(t))
+
+    torch.manual_seed(0)
+    result, _ = _run(
+        _solver(error_on_nonfinite=False),
+        f,
+        take_gradient=False,
+        error_integral_reference=1.0,
+    )
+    assert result.converged is False

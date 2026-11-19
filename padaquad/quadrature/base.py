@@ -776,7 +776,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         error_integral_reference : float, torch.Tensor or None
             A value close to the integral, used in place of the running integral
             in the relative tolerance ``rtol * |reference|``. Only with
-            ``use_absolute_error_ratio=True`` (see :ref:`the user guide <ug-error-reference>`).
+            ``use_absolute_error_ratio=True``. With ``enforce_convergence``, it
+            is dropped once every subinterval is accepted, and the subintervals
+            that fail against the integral are split until it converges (see
+            :ref:`the user guide <ug-error-reference>`).
         enforce_convergence : bool or None
             If True, judge every accepted subinterval again on every pass,
             against the same tolerance as the subintervals just evaluated, and
@@ -937,7 +940,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             error_integral_reference = error_integral_reference.to(self.device)
             error_integral_reference = error_integral_reference.to(self.dtype)
         # A fixed reference sets every absolute-mode tolerance, so the in-loop
-        # tolerance does not drift and accepted steps are not re-checked.
+        # tolerance does not drift and accepted steps are not re-checked; with
+        # enforce_convergence it is dropped once every step is accepted
+        # (Step 7 of the loop).
         reference_pinned = (
             self.use_absolute_error_ratio and error_integral_reference is not None
         )
@@ -1124,8 +1129,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # immediately re-fail) and split any that now fail in the same mesh
             # update below (extra_split_idxs). Only with enforce_convergence,
             # which is never True with take_gradient=True (per-batch backward
-            # would count a re-split panel's gradient twice). Skipped when a
-            # fixed error_integral_reference pins the denominator (no drift).
+            # would count a re-split panel's gradient twice). Skipped while a
+            # fixed error_integral_reference pins the denominator (no drift);
+            # Step 7 drops it once every panel is accepted.
             recheck_active = (
                 enforce_convergence and len(record) > 0 and not reference_pinned
             )
@@ -1141,23 +1147,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 # batch's steps to its left: the merged record+batch cumsum,
                 # restricted to the recorded positions (a cumsum over the record
                 # alone would leave the batch out).
-                _, rec_remove, _ = self._record_error_check(
+                extra_split_idxs, record_keep_mask = self._failed_record_positions(
                     record,
                     torch.cumsum(all_mesh_quadratures.detach(), 0)[idxs_keep],
                     reference_integral,
+                    mesh_indices,
+                    split_counts,
+                    max_adaptive_splits,
                 )
-                rec_positions = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
-                # Respect the split cap so the record stays consistent with the
-                # mesh: a failing panel already at the cap is not split, so it
-                # must stay recorded.
-                splittable = rec_remove
-                if max_adaptive_splits is not None:
-                    assert split_counts is not None  # always kept in the loop
-                    splittable = rec_remove & (
-                        split_counts[rec_positions] < max_adaptive_splits
-                    )
-                extra_split_idxs = rec_positions[splittable]
-                record_keep_mask = ~splittable
 
             # --- Step 5: Adaptive refinement ---
             # Split steps with error_ratio >= 1, keep steps with error_ratio < 1,
@@ -1278,6 +1275,58 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     order = self._mesh_order(mesh_eval.detach(), mesh_indices)
                     mesh_grad = torch.zeros_like(mesh.detach())
                     mesh_grad[order] = sum(grads)
+
+            # --- Step 7: drop a fixed reference once every panel is accepted ---
+            # With a fixed error_integral_reference the loop judged every panel
+            # against it, not against the integral. The record now holds the
+            # whole integral, so judge every recorded panel against it, from
+            # the stored integrals and error estimates (no call of f), and split
+            # the failures here (a failing panel at max_adaptive_splits is not
+            # split and stays recorded). Only their halves are evaluated, on the
+            # next pass, where the running integral is the reference: they and
+            # the whole record are judged against it together (Step 4b), so the
+            # check of every panel happens in the same pass as the split
+            # decision until the integral converges. A reference is fixed only
+            # in absolute mode, the record is non-empty and in mesh order
+            # (_record_results asserts it), and split_node_state holds nothing
+            # when no tracker is True.
+            if (
+                enforce_convergence
+                and reference_pinned
+                and not torch.any(mesh_trackers)
+            ):
+                error_integral_reference, reference_pinned = None, False
+                split_positions, record_keep_mask = self._failed_record_positions(
+                    record,
+                    torch.cumsum(record["mesh_quadratures"].detach(), 0),
+                    record["integral"].detach(),
+                    mesh_indices,
+                    split_counts,
+                    max_adaptive_splits,
+                )
+                if split_positions.numel() > 0:
+                    # No batch: only the extra positions are split.
+                    (_, _, _, _, mesh, mesh_trackers, mesh_indices, _, split_counts) = (
+                        self._adaptively_increase_mesh(
+                            method_output=None,
+                            error_ratios=torch.empty(
+                                0, dtype=self.dtype, device=self.device
+                            ),
+                            y_step_eval=None,
+                            nodes=None,
+                            mesh=mesh,
+                            mesh_idxs=torch.empty(
+                                0, dtype=torch.long, device=self.device
+                            ),
+                            mesh_trackers=mesh_trackers,
+                            split_counts=split_counts,
+                            max_adaptive_splits=max_adaptive_splits,
+                            extra_split_idxs=split_positions,
+                        )
+                    )
+                    record = self._remove_failed_record_panels(
+                        record, record_keep_mask, loss_fxn
+                    )
 
         if failed_batch is not None:
             # A backward pass ran out of memory: restart from the starting
@@ -1450,6 +1499,62 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         )
         return error_ratios, reject_mask, nonfinite_mask
 
+    def _failed_record_positions(
+        self,
+        record: dict[str, torch.Tensor],
+        cum_mesh_quadratures: torch.Tensor,
+        integral: torch.Tensor,
+        mesh_indices: dict[tuple[float, ...], int],
+        split_counts: torch.Tensor | None,
+        max_adaptive_splits: int | None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        Find the recorded subintervals to split again, from their stored errors.
+
+        Judges every recorded subinterval with ``_record_error_check`` (no call
+        of the integrand) and keeps the failing ones below the split cap. Used
+        by the in-loop re-check (Step 4b of ``integrate``) and when a fixed
+        ``error_integral_reference`` is dropped (Step 7).
+
+        Parameters
+        ----------
+        record : dict[str, torch.Tensor]
+            The running record, in mesh order.
+        cum_mesh_quadratures : torch.Tensor
+            Running integral through each recorded subinterval [N, D] (used in
+            cumulative mode only).
+        integral : torch.Tensor
+            Reference integral [D] for the absolute-mode tolerance.
+        mesh_indices : dict[tuple[float, ...], int]
+            ``{tuple(mesh point): index}`` for the current mesh.
+        split_counts : torch.Tensor or None
+            Split count of each mesh position [M]; required when
+            ``max_adaptive_splits`` is given.
+        max_adaptive_splits : int or None
+            The split cap, or None.
+
+        Returns
+        -------
+        tuple[torch.Tensor, torch.Tensor]
+            Tuple ``(split_positions, record_keep_mask)``: the mesh positions of
+            the failing recorded subintervals below the cap, and a mask [N]
+            that keeps every other recorded subinterval.
+        """
+        _, rec_remove, _ = self._record_error_check(
+            record, cum_mesh_quadratures, integral
+        )
+        rec_positions = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
+        # Respect the split cap so the record stays consistent with the mesh: a
+        # failing subinterval already at the cap is not split, so it must stay
+        # recorded.
+        splittable = rec_remove
+        if max_adaptive_splits is not None:
+            assert split_counts is not None  # always kept in the loop
+            splittable = rec_remove & (
+                split_counts[rec_positions] < max_adaptive_splits
+            )
+        return rec_positions[splittable], ~splittable
+
     def _warn_not_converged(
         self,
         record: dict[str, torch.Tensor],
@@ -1523,7 +1628,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         remedies = []
         if max_adaptive_splits is not None:
             remedies.append("raise max_adaptive_splits")
-        if not enforce_convergence and not reference_pinned:
+        if not enforce_convergence:
             remedies.append(
                 "pass take_gradient=False (accepted steps are then re-checked)"
                 if take_gradient
@@ -4143,9 +4248,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
           diagnostic field.
         - ``loss`` with the default loss equals the integral, so it is set to
           the updated integral; a custom ``loss_fxn`` is left unchanged (its
-          per-batch sum is already an approximation, and the re-check only
-          runs with ``take_gradient=False``, so no per-batch backward depends
-          on it).
+          per-batch sum is already an approximation, and the re-check runs
+          only with ``enforce_convergence``, never with ``take_gradient=True``,
+          so no per-batch backward depends on it).
 
         Parameters
         ----------
@@ -4181,8 +4286,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # value. Bound methods are not identity-stable (``obj.m is obj.m`` is
         # False), so compare the underlying function (the class attribute)
         # rather than the bound method object. A custom loss_fxn is left as-is
-        # (its per-batch sum is already an approximation; the re-check only
-        # runs with take_gradient=False, so no per-batch backward depends on it).
+        # (its per-batch sum is already an approximation; the re-check never
+        # runs with take_gradient=True, so no per-batch backward depends on it).
         is_default_loss = (
             getattr(loss_fxn, "__func__", None) is type(self)._integral_loss
         )

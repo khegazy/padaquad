@@ -778,11 +778,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             in the relative tolerance ``rtol * |reference|``. Only with
             ``use_absolute_error_ratio=True``. With ``enforce_convergence``, it
             is dropped once every subinterval is accepted, and the subintervals
-            that fail against the integral are split until it converges (see
+            that fail against the integral are split, as below (see
             :ref:`the user guide <ug-error-reference>`).
         enforce_convergence : bool or None
-            If True, judge every accepted subinterval again on every pass,
-            against the same tolerance as the subintervals just evaluated, and
+            If True, judge every accepted subinterval again on every pass
+            (with a fixed ``error_integral_reference``, only once the
+            reference is dropped), against the same tolerance as the
+            subintervals just evaluated, and
             split those that fail, so that the returned integral meets the
             tolerance of the final integral unless ``max_adaptive_splits`` or a
             non-finite value stops the refinement. If False, an accepted
@@ -1353,7 +1355,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # cumulative mode, the final running integral through the step), the
         # reference _get_optimal_mesh below also uses. A step can fail here
         # although it passed when accepted, because it was judged against the
-        # running integral and, with take_gradient=True, nothing re-checked it.
+        # running integral and, without enforce_convergence, nothing
+        # re-checked it.
         # A step accepted at max_adaptive_splits usually fails, but can pass.
         # A non-finite error ratio never meets a tolerance; _accept_reject_masks
         # accepts it only because splitting cannot reduce it. In absolute mode
@@ -1630,7 +1633,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             remedies.append("raise max_adaptive_splits")
         if not enforce_convergence:
             remedies.append(
-                "pass take_gradient=False (accepted steps are then re-checked)"
+                "pass take_gradient=False with enforce_convergence None or True "
+                "(accepted steps are then re-checked)"
                 if take_gradient
                 else "pass enforce_convergence=True"
             )
@@ -3040,9 +3044,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
            ``_error_ratios_norm``): this stage does not split a merged
            subinterval, and it does not check the merge prediction.
            Subintervals fail here only when no re-check ran against the final
-           integral (``take_gradient=True``, or a fixed
-           ``error_integral_reference``) or when ``max_adaptive_splits``
-           stopped their refinement.
+           integral (``enforce_convergence=False``, the default with
+           ``take_gradient=True``) or when ``max_adaptive_splits`` or a
+           non-finite value stopped their refinement.
 
         All inputs must share a device, and the returned mesh is on that
         device. (The caller runs this on ``result_device`` through

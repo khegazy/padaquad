@@ -122,7 +122,8 @@ The relative tolerance multiplies a reference value of the integral:
   the reference from the first batch. With `enforce_convergence=True`, that
   reference is dropped once every subinterval is accepted: the subintervals
   that fail against the integral are split, and the integration continues
-  against the running total until it converges.
+  against the running total until it converges, or until
+  `max_adaptive_splits` or a non-finite value stops the refinement.
 - **Cumulative mode** (`use_absolute_error_ratio=False`): the running integral
   from `mesh_init` through each subinterval, as in ODE solvers. Tolerances then
   change along the domain; where the running integral passes through zero, the

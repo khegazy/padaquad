@@ -667,3 +667,21 @@ def test_switch_with_nonfinite_terminates():
         error_integral_reference=1.0,
     )
     assert result.converged is False
+
+
+@pytest.mark.parametrize("enforce_convergence", [None, False])
+def test_warning_with_take_gradient_names_both_settings(caplog, enforce_convergence):
+    """With take_gradient=True the remedy must also say to leave
+    enforce_convergence on: take_gradient=False alone does nothing for a call
+    that passed enforce_convergence=False."""
+    torch.manual_seed(0)
+    with caplog.at_level(logging.WARNING, logger="padaquad"):
+        _run(
+            _solver(),
+            _cancelling,
+            take_gradient=True,
+            enforce_convergence=enforce_convergence,
+        )
+    assert (
+        "pass take_gradient=False with enforce_convergence None or True" in caplog.text
+    )

@@ -672,6 +672,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         max_adaptive_splits: int | None = None,
         error_norm: str | Callable[[torch.Tensor], torch.Tensor] | None = None,
         error_integral_reference: float | torch.Tensor | None = None,
+        enforce_convergence: bool | None = None,
         mesh_failure_tolerance: float | None = None,
         error_on_nonfinite: bool | None = None,
         conserve_memory: bool = False,
@@ -693,7 +694,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         between calls.
 
         Every argument left as None falls back to the constructor's value,
-        except the bounds, which have no default.
+        except the bounds, which have no default, and ``enforce_convergence``,
+        whose default follows ``take_gradient``.
 
         Parameters
         ----------
@@ -775,6 +777,17 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             A value close to the integral, used in place of the running integral
             in the relative tolerance ``rtol * |reference|``. Only with
             ``use_absolute_error_ratio=True`` (see :ref:`the user guide <ug-error-reference>`).
+        enforce_convergence : bool or None
+            If True, judge every accepted subinterval again on every pass,
+            against the same tolerance as the subintervals just evaluated, and
+            split those that fail, so that the returned integral meets the
+            tolerance of the final integral unless ``max_adaptive_splits`` or a
+            non-finite value stops the refinement. If False, an accepted
+            subinterval is never judged again. None (default) means True with
+            ``take_gradient=False`` and False with ``take_gradient=True``;
+            True with ``take_gradient=True`` raises ``ValueError``, because a
+            batch's gradient has already been backpropagated when it is
+            accepted (see :ref:`the user guide <ug-convergence>`).
         mesh_failure_tolerance : float or None
             With ``error_norm="failure_fraction"``, the fraction of output
             components that may fail while a subinterval is still accepted
@@ -810,8 +823,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             satisfy ``mesh_init < mesh_final``; if
             no integrand was given here or at construction, or it does not
             return values of shape [N, D]; if both ``mesh`` and ``state`` are
-            given; or if an option such as ``error_norm`` or
-            ``total_mem_usage`` is invalid.
+            given; if an option such as ``error_norm`` or
+            ``total_mem_usage`` is invalid; or if ``enforce_convergence`` is
+            True with ``take_gradient=True``.
+        TypeError
+            If ``enforce_convergence`` is neither None nor a bool.
         BackwardOutOfMemoryError
             If a backward pass ran out of memory and padaquad cannot restart
             the integral (see ``parameters``); its ``state`` is the state to
@@ -872,6 +888,28 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             else max_adaptive_splits
         )
         self._check_max_adaptive_splits(max_adaptive_splits)
+
+        # The re-check of accepted subintervals (Step 4b) is on by default only
+        # without per-batch backward: with take_gradient=True a batch's
+        # gradient is already backpropagated when the batch is accepted, so
+        # splitting an accepted subinterval again would count its gradient
+        # twice.
+        if enforce_convergence is None:
+            enforce_convergence = not take_gradient
+        if not isinstance(enforce_convergence, bool):
+            raise TypeError(
+                "enforce_convergence must be None or a bool, got "
+                f"{type(enforce_convergence).__name__} {enforce_convergence!r}"
+            )
+        if enforce_convergence and take_gradient:
+            raise ValueError(
+                "enforce_convergence=True cannot be used with take_gradient=True: "
+                "each batch's gradient is backpropagated as soon as the batch is "
+                "accepted, so an accepted subinterval that later fails its "
+                "tolerance cannot be split again without counting its gradient "
+                "twice. Pass take_gradient=False and differentiate "
+                "result.integral, or leave enforce_convergence as None."
+            )
 
         # Per-call error_on_nonfinite takes priority over the constructor value.
         # Stored on self so the evaluation helpers can read it without threading
@@ -1084,12 +1122,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # against the SAME reference_integral the batch just used (so a panel
             # accepted this iteration -- not yet in the record -- cannot
             # immediately re-fail) and split any that now fail in the same mesh
-            # update below (extra_split_idxs). Only when not taking gradients:
-            # per-batch backward has not run, so removing/re-splitting a recorded
-            # panel cannot double-count gradients. Skipped when a fixed
-            # error_integral_reference pins the denominator (no drift).
+            # update below (extra_split_idxs). Only with enforce_convergence,
+            # which is never True with take_gradient=True (per-batch backward
+            # would count a re-split panel's gradient twice). Skipped when a
+            # fixed error_integral_reference pins the denominator (no drift).
             recheck_active = (
-                not take_gradient and len(record) > 0 and not reference_pinned
+                enforce_convergence and len(record) > 0 and not reference_pinned
             )
             extra_split_idxs: torch.Tensor | None = None
             record_keep_mask: torch.Tensor | None = None
@@ -1289,6 +1327,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 nonfinite,
                 max_adaptive_splits,
                 take_gradient,
+                enforce_convergence,
                 reference_pinned,
             )
 
@@ -1419,6 +1458,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         nonfinite: torch.Tensor,
         max_adaptive_splits: int | None,
         take_gradient: bool,
+        enforce_convergence: bool,
         reference_pinned: bool,
     ) -> None:
         """
@@ -1448,12 +1488,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         max_adaptive_splits : int | None
             The split cap used by the call, or None.
         take_gradient : bool
-            Whether the call backpropagated per batch (then accepted
-            subintervals were not re-checked).
+            Whether the call backpropagated per batch (then
+            ``enforce_convergence`` is False).
+        enforce_convergence : bool
+            Whether accepted subintervals were re-checked as the integral
+            changed.
         reference_pinned : bool
-            Whether a fixed ``error_integral_reference`` set the absolute-mode
-            tolerance (then accepted subintervals were not re-checked, and the
-            loop judged them against that reference).
+            Whether a fixed ``error_integral_reference`` still set the
+            absolute-mode tolerance at the end (then accepted subintervals were
+            not re-checked, and the loop judged them against that reference).
         """
         finite_fails = final_fails & ~nonfinite
         # Per-component sums of |per-step error estimate| [D], over the finite
@@ -1480,9 +1523,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         remedies = []
         if max_adaptive_splits is not None:
             remedies.append("raise max_adaptive_splits")
-        if take_gradient and not reference_pinned:
+        if not enforce_convergence and not reference_pinned:
             remedies.append(
                 "pass take_gradient=False (accepted steps are then re-checked)"
+                if take_gradient
+                else "pass enforce_convergence=True"
             )
         if reference_pinned:
             remedies.append(

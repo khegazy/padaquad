@@ -20,6 +20,7 @@ where the denominator genuinely drifts within a single solve).
 
 from __future__ import annotations
 
+import logging
 import math
 
 import pytest
@@ -467,3 +468,55 @@ def test_remove_all_then_record_does_not_crash(result_device):
     record = solver._record_results(record, False, fresh, mi_fresh, result_device)
     assert record["nodes"].shape[0] == 1
     assert torch.allclose(record["mesh_quadratures"], fresh.mesh_quadratures)
+
+
+# ---------------------------------------------------------------------------
+# D. The enforce_convergence argument
+# ---------------------------------------------------------------------------
+
+
+def test_enforce_convergence_false_turns_the_recheck_off():
+    """enforce_convergence=False turns the re-check off with take_gradient=False."""
+    torch.manual_seed(0)
+    result, _ = _run(
+        _solver(), _cancelling, take_gradient=False, enforce_convergence=False
+    )
+    assert result.converged is False
+
+
+def test_enforce_convergence_none_and_true_agree():
+    """None resolves to True with take_gradient=False: the runs are identical."""
+    torch.manual_seed(0)
+    a, _ = _run(_solver(), _cancelling, take_gradient=False)
+    torch.manual_seed(0)
+    b, _ = _run(_solver(), _cancelling, take_gradient=False, enforce_convergence=True)
+    assert torch.equal(a.integral, b.integral)
+    assert torch.equal(a.h, b.h)
+
+
+def test_enforce_convergence_with_take_gradient_raises():
+    """True with take_gradient=True raises before any call of f."""
+    calls = []
+
+    def f(t, *args):
+        calls.append(1)
+        return _cancelling(t)
+
+    with pytest.raises(ValueError, match=r"take_gradient=True.*twice"):
+        _run(_solver(), f, take_gradient=True, enforce_convergence=True)
+    assert calls == []
+
+
+@pytest.mark.parametrize("value", [1, "yes"])
+def test_enforce_convergence_rejects_non_bool(value):
+    """A value that is neither None nor a bool raises TypeError."""
+    with pytest.raises(TypeError, match="enforce_convergence must be None or a bool"):
+        _run(_solver(), _cancelling, take_gradient=False, enforce_convergence=value)
+
+
+def test_warning_suggests_enforce_convergence(caplog):
+    """With the re-check turned off, the warning names the argument."""
+    torch.manual_seed(0)
+    with caplog.at_level(logging.WARNING, logger="padaquad"):
+        _run(_solver(), _cancelling, take_gradient=False, enforce_convergence=False)
+    assert "enforce_convergence=True" in caplog.text

@@ -58,7 +58,6 @@ from padaquad.distributed import DistributedEnvironment, _resolve_device
 from padaquad.methods import _get_method
 from padaquad.quadrature.memory import (
     _GB,
-    _is_out_of_memory,
     _MemoryManagement,
     _restart_after_backward_oom,
     _save_grad,
@@ -2022,7 +2021,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         )
         cuda = self.device.type == "cuda"
         self._forward_bytes = 0.0  # this batch's, measured below
-        while True:
+        # Evaluate the first max_mesh_steps subintervals; while the batch is
+        # dropped (f ran out of memory, or the backward pass is predicted not
+        # to fit), evaluate again with fewer. No gradient was written yet, so
+        # a dropped batch leaves nothing behind. Every retry has fewer
+        # subintervals, and a batch of one is always kept (or f's error is
+        # raised), so the loop ends.
+        output = None
+        while output is None:
             # Place C quadrature points within each of the first max_mesh_steps
             # steps; flatten [N, C, T] -> [N*C, T] for one call of f.
             idxs = step_idxs[:max_mesh_steps]
@@ -2032,22 +2038,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             if cuda:
                 torch.cuda.reset_peak_memory_stats(self.device)
                 before = torch.cuda.memory_allocated(self.device)
-            output, outside = None, False
-            try:
-                output = self._split_f_output(f(nodes_flat, *f_args))
-            except (RuntimeError, MemoryError) as e:
-                if not _is_out_of_memory(e) or max_mesh_steps == 1:
-                    raise
-                outside = not isinstance(e, torch.OutOfMemoryError)
-            n = len(nodes_flat)
+            output = self._call_f(f, f_args, nodes_flat, max_mesh_steps > 1)
             if output is None:
-                # Out of memory in f: no gradient was written yet, so the
-                # batch can be evaluated again, smaller.
-                self._release_memory(empty_cache=outside)
-                n, why = _shrink_batch(n), "f ran out of memory"
-            elif not (cuda and output[0].requires_grad):
-                break
-            else:
+                n, why = _shrink_batch(len(nodes_flat)), "f ran out of memory"
+            elif cuda and output[0].requires_grad:
                 # The backward pass needs about as much memory as this forward
                 # pass, times the ratio the previous batch's backward measured.
                 self._forward_bytes = (
@@ -2055,17 +2049,21 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 )
                 need = self._backward_ratio * self._forward_bytes
                 usable = self._get_usable_memory(self._total_mem_usage) * _GB
-                if usable >= need or max_mesh_steps == 1:
-                    break
-                output = None
-                n = min(_shrink_batch(n), int(n * usable / need))
-                why = "its backward pass is predicted not to fit in memory"
-            max_mesh_steps = max(1, n // self.C)
-            self._batch, self._batch_converged = max_mesh_steps * self.C, True
-            logger.warning(
-                f"A batch of {len(nodes_flat)} points was dropped because {why}; "
-                f"it is evaluated again in batches of {self._batch} points."
-            )
+                if usable < need and max_mesh_steps > 1:
+                    output = None
+                    n = min(
+                        _shrink_batch(len(nodes_flat)),
+                        int(len(nodes_flat) * usable / need),
+                    )
+                    why = "its backward pass is predicted not to fit in memory"
+            if output is None:
+                max_mesh_steps = max(1, n // self.C)
+                self._batch, self._batch_converged = max_mesh_steps * self.C, True
+                logger.warning(
+                    f"A batch of {len(nodes_flat)} points was dropped because "
+                    f"{why}; it is evaluated again in batches of {self._batch} "
+                    "points."
+                )
         self._batch = max(self._batch, len(nodes_flat))
         step_idxs = idxs
         node_evals, tracked = output
@@ -2138,39 +2136,28 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         while num_nodes_evaluated < num_nodes_to_eval:
             # The size of this call (a retry shrinks it, not a larger plan).
             max_batch = min(max_batch, len(nodes_flat) - num_nodes_evaluated)
-            out_of_memory = False
-            try:
-                f_output = f(
-                    nodes_flat[num_nodes_evaluated : num_nodes_evaluated + max_batch],
-                    *f_args,
-                )
-            except (RuntimeError, MemoryError) as e:
-                if not _is_out_of_memory(e):
-                    raise
-                if max_batch == 1:
-                    raise torch.OutOfMemoryError(
-                        f"{e}\n\nSingle integrand (f) evaluation failed to fit in memory, batch size cannot be reduced."
-                    ) from e
-                out_of_memory = True
-                outside = not isinstance(e, torch.OutOfMemoryError)
-            if out_of_memory:
-                # Cleaned up here, after the except block: inside it the error's
-                # traceback still holds f's tensors, so they cannot be freed.
-                free_mem, total_mem = self._get_memory()
-                self._release_memory(empty_cache=outside)
+            f_output = self._call_f(
+                f,
+                f_args,
+                nodes_flat[num_nodes_evaluated : num_nodes_evaluated + max_batch],
+                max_batch > 1,
+            )
+            if f_output is None:
                 # Shrink the batch that failed; the batch size of the call
                 # stops growing (see _batch_for).
+                free_mem, total_mem = self._get_memory()
                 self._batch, self._batch_converged = _shrink_batch(max_batch), True
                 logger.warning(
-                    f"Caught OOM with {free_mem} GB free of {total_mem} GB. "
-                    f"Reducing max_batch from {max_batch} to {self._batch}."
-                    "If this warning appears often, consider reducing max_batch to "
-                    "avoid deleting and rerunning evaluations."
+                    f"Caught OOM in a call of {max_batch} points ({free_mem} GB "
+                    f"free of {total_mem} GB after freeing its memory). Reducing "
+                    f"max_batch from {max_batch} to {self._batch}. If this warning "
+                    "appears often, consider reducing max_batch to avoid deleting "
+                    "and rerunning evaluations."
                 )
                 max_batch = self._batch
                 continue
 
-            integrand, tracked = self._split_f_output(f_output)
+            integrand, tracked = f_output
             self._check_f_output_finite(
                 integrand,
                 nodes_flat[num_nodes_evaluated : num_nodes_evaluated + max_batch],

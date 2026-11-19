@@ -707,6 +707,62 @@ class _MemoryManagement:
         if empty_cache and self.device.type == "cuda":
             torch.cuda.empty_cache()
 
+    def _call_f(
+        self,
+        f: Callable[..., Any],
+        f_args: tuple[Any, ...],
+        points: torch.Tensor,
+        can_shrink: bool,
+    ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...] | None] | None:
+        """
+        Call f on points, or return None when it runs out of memory.
+
+        The one place where the integration loop catches an out-of-memory
+        error of f (``_is_out_of_memory``). After one, the memory f held is
+        released, so the caller can try again with fewer points.
+
+        Parameters
+        ----------
+        f : Callable
+            The integrand.
+        f_args : tuple
+            Extra arguments passed to ``f`` after the points.
+        points : torch.Tensor
+            The points to evaluate. Shape: [N, T].
+        can_shrink : bool
+            Whether the caller can try again with fewer points.
+
+        Returns
+        -------
+        tuple or None
+            ``f``'s values [N, D] and its tracked variables (or None), as
+            ``_split_f_output`` returns them; None when ``f`` ran out of
+            memory.
+
+        Raises
+        ------
+        torch.OutOfMemoryError
+            If ``f`` ran out of memory and ``can_shrink`` is False.
+        """
+        outside = False
+        try:
+            return self._split_f_output(f(points, *f_args))
+        except (RuntimeError, MemoryError) as e:
+            if not _is_out_of_memory(e):
+                raise
+            if not can_shrink:
+                raise torch.OutOfMemoryError(
+                    f"{e}\n\nA call of the integrand f on {len(points)} points ran "
+                    "out of memory, and the batch size cannot be reduced."
+                ) from e
+            # An error from outside PyTorch's allocator (a CUDA library's, or
+            # the CPU's) is helped by emptying PyTorch's GPU cache too.
+            outside = not isinstance(e, torch.OutOfMemoryError)
+        # Released here, after the except block: inside it the error's
+        # traceback still holds f's tensors, so they cannot be freed.
+        self._release_memory(empty_cache=outside)
+        return None
+
     def _setup_memory_checks(
         self,
         f: Callable[..., Any],

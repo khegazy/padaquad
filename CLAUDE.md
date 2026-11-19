@@ -493,9 +493,14 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   (`min(value, _oom_max_batch)`); no `default_max_batch` (removed).
 - Out-of-memory errors are recognized by `_is_out_of_memory` (GPU OOM, CPU
   `DefaultCPUAllocator` refusal, CUDA "out of memory" and CUDA-library
-  `*ALLOC*_FAILED` statuses, `MemoryError`);
-  the shared batch loop `_evaluate_f_in_batches` shrinks the batch, and
-  `_release_memory` cleans up (CUDA cache only on a CUDA solver).
+  `*ALLOC*_FAILED` statuses, `MemoryError`). Every call of `f` in the
+  integration loop goes through `_call_f` (memory.py), the one place that
+  catches them: it returns None after `_release_memory` (CUDA cache only on
+  a CUDA solver, and only for an error from outside PyTorch's allocator), or
+  raises `torch.OutOfMemoryError` ("cannot be reduced") when the caller cannot
+  shrink. Its two callers retry smaller: `_evaluate_f_in_batches`
+  (`take_gradient=False`) and the `while output is None` loop of
+  `_evaluate_f_on_full_nodes` (`take_gradient=True`).
 - `_get_usable_memory = free - buffer`, where
   `buffer = (1 - total_mem_usage) * total_memory`.
 - Supports both CUDA (`torch.cuda.mem_get_info`) and CPU

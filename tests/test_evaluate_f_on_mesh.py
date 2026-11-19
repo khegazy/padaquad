@@ -267,7 +267,7 @@ class TestSplitNodes:
     """
 
     # -----------------------------------------------------------------------
-    # max_batch=0 must error (explicit guard; dispatcher rescues 0 -> 1)
+    # max_batch=0 must error (explicit guard for direct callers)
     # -----------------------------------------------------------------------
 
     @pytest.mark.tier1
@@ -1468,7 +1468,7 @@ class TestEndToEnd:
         )
 
     # -----------------------------------------------------------------------
-    # max_batch=0 at the public API: dispatcher rescues 0 -> 1
+    # max_batch=0 at the public API: ValueError before any work
     # -----------------------------------------------------------------------
 
     @pytest.mark.tier1

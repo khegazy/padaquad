@@ -856,23 +856,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh, mesh_init, mesh_final
         )
 
-        # The batch size of this call: a given max_batch (this call's, else the
-        # constructor's unless a state is given) is fixed; a state's may grow;
-        # with neither, the test calls below set it.
+        # A given max_batch (this call's, else the constructor's unless a state
+        # is given): an int (numpy ints too) of at least 1; a bool, float or
+        # string raises here, before f is called. Used below the starting mesh.
         given = (
             self.init_max_batch if max_batch is None and state is None else max_batch
         )
-        if given is not None:
-            # An int (numpy ints too) of at least 1; a bool, float or string
-            # raises here, before f is called.
-            if isinstance(given, bool) or operator.index(given) < 1:
-                raise ValueError(f"max_batch must be an int >= 1; got {given!r}.")
-            self._batch, self._batch_converged = operator.index(given), True
-        elif state is not None:
-            self._batch, self._batch_converged = (
-                state.max_batch,
-                state.max_batch_converged,
-            )
+        if given is not None and (isinstance(given, bool) or operator.index(given) < 1):
+            raise ValueError(f"max_batch must be an int >= 1; got {given!r}.")
 
         # Per-call max_adaptive_splits takes priority over the constructor value.
         max_adaptive_splits = (
@@ -927,8 +918,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         self._backward_ratio = 1.0
 
         # Make sure f exists and provides the correct output. Running this
-        # before the memory benchmark also warms f up, so one-time costs (CUDA
-        # start-up, lazy model loading, cuBLAS workspace) stay out of it.
+        # before the test calls also warms f up, so one-time costs (CUDA
+        # start-up, lazy model loading, cuBLAS workspace) stay out of them.
         # One point, shaped [1, T] like every batch f receives. mesh_init is
         # already on the solver's dtype and device (_setup_integral_bounds).
         test_integrand, _ = self._split_f_output(f(mesh_init.reshape(1, -1), *f_args))
@@ -951,7 +942,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         )
         n_start_steps = len(mesh) - 1
         start_mesh = given_mesh if given_mesh is not None else mesh.detach().clone()
-        if given is None and state is None:
+        # The batch size of this call (_batch_for): a given max_batch is fixed;
+        # a state's may grow unless it has converged; with neither, the test
+        # calls find where to start.
+        if given is not None:
+            self._batch, self._batch_converged = operator.index(given), True
+        elif state is not None:
+            self._batch = state.max_batch
+            self._batch_converged = state.max_batch_converged
+        else:
             self._batch, self._batch_converged = self._initialize_max_batch(
                 f,
                 f_args,
@@ -995,10 +994,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # Continues until all steps have been evaluated and accepted
         # (mesh_trackers[i] == False for all i)
         while torch.any(mesh_trackers):
-            # From earlier debugging
-            # if y is not None:
-            #    assert max_steps >= len(y), f"{max_steps}  {len(y)}"
-
             # The batch's mesh: a detached copy when mesh_grad collects the
             # gradient (see mesh_grad above).
             mesh_eval = mesh.detach().requires_grad_() if collect_mesh_grad else mesh
@@ -1188,9 +1183,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
             # --- Step 6: Record accepted results and handle gradients ---
             if nodes.shape[0] > 0:
-                # take_gradient = take_gradient or (
-                #    self.training and (torch.any(mesh_trackers) or take_gradient)
-                # )
                 intermediate_results = IntegrationResult(
                     integral=method_output.integral,
                     integral_error=method_output.integral_error,
@@ -1878,8 +1870,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         Chooses the size of the next call of f with ``_batch_for`` (the call's
         batch size, or 10 times it while it has not converged, at most the
-        evaluations left), raised to 1 with a warning if it is 0; then
-        dispatches to
+        evaluations left); then dispatches to
         ``_evaluate_f_on_full_nodes`` when ``take_gradient`` is True, else to
         ``_evaluate_f_on_split_residual_nodes`` when ``conserve_memory`` is True,
         else to ``_evaluate_f_on_split_nodes``.
@@ -1922,23 +1913,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         if take_gradient and not self._batch_converged:
             # Whole subintervals: a small batch size grows to at least one.
             max_batch = max(max_batch, self.C)
-
-        # Rescue a zero budget to the minimum workable value of 1 before
-        # dispatching to either evaluation path. Placed ahead of the
-        # take_gradient branch so neither _evaluate_f_on_full_nodes nor
-        # _evaluate_f_on_split_nodes is ever entered with max_batch=0. A 0 here
-        # comes from the dynamic memory estimate collapsing (or an explicit
-        # max_batch=0); it is always a misconfiguration, hence the warning.
-        if max_batch == 0:
-            logger.warning(
-                "max_batch is 0, increasing to 1. This is a significant issue and "
-                "should be addressed. Either your memory is too small and you will "
-                "get an OOM error, or your system's memory is being significantly "
-                "underutilized and removing the benefits of padaquad's "
-                "parallelization. For the latter case, increase max_batch or "
-                "total_mem_usage to be closer to 1.0"
-            )
-            max_batch = 1
 
         max_mesh_steps = max_batch // self.C
 
@@ -2221,10 +2195,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             None, the indices of their left mesh points [N], ascending, and the
             state carried to the next call (all None).
         """
-        # A zero budget is unsatisfiable here and would divide-by-zero below
-        # (the % max_batch layout math). Callers route through
-        # _evaluate_f_on_mesh, which rescues max_batch=0 -> 1 before dispatch;
-        # this assert guards direct/unit callers with an explicit message.
+        # A zero budget would divide by zero below (the % max_batch layout
+        # math). integrate's batch size is always at least 1 (max_batch is
+        # validated, and every shrink stops at 1); this guards direct callers.
         assert max_batch > 0
 
         # Place C quadrature points within each selected step
@@ -2315,10 +2288,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             None, the indices of their left mesh points [N], ascending, and the
             state carried to the next call (all None when nothing is carried).
         """
-        # A zero budget is unsatisfiable here and would divide-by-zero below
-        # (the % max_batch layout math). Callers route through
-        # _evaluate_f_on_mesh, which rescues max_batch=0 -> 1 before dispatch;
-        # this assert guards direct/unit callers with an explicit message.
+        # A zero budget would divide by zero below (the % max_batch layout
+        # math). integrate's batch size is always at least 1 (max_batch is
+        # validated, and every shrink stops at 1); this guards direct callers.
         assert max_batch > 0
         # When max_batch < C the budget cannot hold even one whole panel, so the
         # dispatcher's max_batch // C floors to 0. Unlike the full-nodes path

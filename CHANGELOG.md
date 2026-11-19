@@ -6,7 +6,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ## [2.0.0] - 2026-11-17
 
-This release removes the solver's hidden warm-start state and the memory benchmark that ran before every `integrate` call without `max_batch` (it took longer than many integrals). A call reuses an earlier call's mesh and batch size only when they are passed to it (`state=result.state`), so no call can change what another call reuses, and every call says which interval it integrates. See "Reusing the mesh and batch size" in the README and the user guide.
+This release removes the solver's hidden warm-start state and the memory benchmark that ran before every `integrate` call without `max_batch` (it took longer than many integrals). A call reuses an earlier call's mesh and batch size only when they are passed to it (`result, state = solver.integrate(...)`, then `state=state`), so no call can change what another call reuses, and every call says which interval it integrates. See "Reusing the mesh and batch size" in the README and the user guide.
 
 ### Removed
 

@@ -32,11 +32,13 @@ import os
 import time
 import weakref
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, NamedTuple, ParamSpec, TypeVar
+from typing import TYPE_CHECKING, Any, NamedTuple, NoReturn, ParamSpec, TypeVar
 
 import numpy as np
 import psutil
 import torch
+
+from padaquad.results import IntegrationResult, IntegrationState
 
 logger = logging.getLogger(__name__)
 
@@ -1490,7 +1492,7 @@ class _MemoryManagement:
         growth = 1 if self._batch_converged else _GROWTH
         return min(n_waiting, growth * self._batch)
 
-    def _first_batch(
+    def _initialize_max_batch(
         self,
         f: Callable[..., Any],
         f_args: tuple[Any, ...],
@@ -1593,3 +1595,141 @@ class _MemoryManagement:
                 )
             stack.extend(n for n, _ in node.next_functions)
         return reason
+
+    def _loss_and_backward(
+        self,
+        results: IntegrationResult,
+        loss_fxn: Callable[[IntegrationResult], torch.Tensor],
+        take_gradient: bool,
+        saved: _SavedGrads,
+        listed: bool,
+    ) -> tuple[torch.Tensor | None, str | None]:
+        """
+        Compute one batch's loss and, with take_gradient, its backward pass.
+
+        Before the backward pass, the gradients it writes to are saved
+        (``_save_grads``), so that an out-of-memory error can be undone. On a
+        GPU its peak memory is measured: ``_backward_ratio``, the backward
+        peak over the forward peak, is what ``_evaluate_f_on_full_nodes``
+        checks the next batch against.
+
+        Parameters
+        ----------
+        results : IntegrationResult
+            The batch's accepted subintervals.
+        loss_fxn : Callable
+            Maps ``results`` to a scalar loss.
+        take_gradient : bool
+            Whether to run the backward pass.
+        saved : _SavedGrads
+            Saved gradients by ``id`` of the tensor; updated in place.
+        listed : bool
+            Whether the user gave ``parameters=`` (already in ``saved``).
+
+        Returns
+        -------
+        loss : torch.Tensor or None
+            The loss, or None when the loss or its backward pass ran out of
+            memory (only with ``take_gradient``; the integral must restart).
+        unsafe : str or None
+            Why the saved gradients may not undo this backward pass, or None
+            (``_save_grads``).
+
+        Raises
+        ------
+        RuntimeError or MemoryError
+            Any error that is not out of memory, and every error when
+            ``take_gradient`` is False.
+        """
+        unsafe = None
+        try:
+            loss = loss_fxn(results)
+            if take_gradient and loss.requires_grad:
+                unsafe = self._save_grads(loss, saved, listed)
+                cuda = self.device.type == "cuda"
+                if cuda:
+                    torch.cuda.reset_peak_memory_stats(self.device)
+                    before = torch.cuda.memory_allocated(self.device)
+                loss.backward()
+                if cuda and self._forward_bytes > 0:
+                    self._backward_ratio = (
+                        torch.cuda.max_memory_allocated(self.device) - before
+                    ) / self._forward_bytes
+        except (RuntimeError, MemoryError) as e:
+            if not (take_gradient and _is_out_of_memory(e)):
+                raise
+            return None, unsafe
+        return loss, unsafe
+
+    def _raise_after_backward_oom(
+        self,
+        failed_batch: int,
+        start_mesh: torch.Tensor,
+        saved: _SavedGrads,
+        unsafe: str | None,
+    ) -> NoReturn:
+        """
+        Restart the integral after a backward pass ran out of memory, or raise.
+
+        Puts back the gradients the call added and raises ``_Restart`` with
+        the call's starting mesh and a smaller, converged batch size, which
+        ``_restart_after_backward_oom`` turns into a new call (after this
+        call's tensors are freed). Raises ``BackwardOutOfMemoryError`` instead
+        when not every gradient can be put back (``unsafe``, or
+        ``torch.distributed`` runs more than one process), or when the
+        smaller batch cannot hold one subinterval.
+
+        Parameters
+        ----------
+        failed_batch : int
+            Number of points of the batch whose backward pass failed.
+        start_mesh : torch.Tensor
+            The call's starting mesh. Shape: [M, T].
+        saved : _SavedGrads
+            The gradients from before the call.
+        unsafe : str or None
+            Why the saved gradients may not undo the backward passes, or None.
+
+        Raises
+        ------
+        _Restart
+            When the gradients were put back; its argument is the new state.
+        BackwardOutOfMemoryError
+            When the integral cannot restart; its ``state`` is the state to
+            call again with, after resetting the gradients.
+        """
+        restart = IntegrationState(start_mesh, _shrink_batch(failed_batch), True)
+        if (
+            torch.distributed.is_available()
+            and torch.distributed.is_initialized()
+            and torch.distributed.get_world_size() > 1
+        ):
+            unsafe = "torch.distributed runs more than one process"
+        if unsafe is None:
+            for ref, grad in list(saved.values()):
+                if (leaf := ref()) is not None:
+                    leaf.grad = grad
+        if unsafe is not None or restart.max_batch < self.C:
+            error = BackwardOutOfMemoryError(
+                f"The backward pass of a batch of {failed_batch} points ran out "
+                "of memory, and padaquad cannot restart the integral ("
+                f"{unsafe or 'a smaller batch cannot hold one subinterval'}). "
+                + (
+                    "The gradients now hold part of the integral's gradient: "
+                    "reset them (for example optimizer.zero_grad()) and call "
+                    "again with "
+                    if unsafe is not None
+                    else "The gradients were put back to their values before "
+                    "the call. Call again with "
+                )
+                + f"state=error.state (batch size {restart.max_batch}).",
+            )
+            error.state = restart
+            raise error
+        logger.warning(
+            f"The backward pass of a batch of {failed_batch} points ran out of "
+            "memory. The gradients it added were removed, and the integral is "
+            "restarted from its starting mesh with batches of at most "
+            f"{restart.max_batch} points."
+        )
+        raise _Restart(restart)

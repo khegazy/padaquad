@@ -58,10 +58,8 @@ from padaquad.distributed import DistributedEnvironment, _resolve_device
 from padaquad.methods import _get_method
 from padaquad.quadrature.memory import (
     _GB,
-    BackwardOutOfMemoryError,
     _is_out_of_memory,
     _MemoryManagement,
-    _Restart,
     _restart_after_backward_oom,
     _save_grad,
     _SavedGrads,
@@ -955,7 +953,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         n_start_steps = len(mesh) - 1
         start_mesh = given_mesh if given_mesh is not None else mesh.detach().clone()
         if given is None and state is None:
-            self._batch, self._batch_converged = self._first_batch(
+            self._batch, self._batch_converged = self._initialize_max_batch(
                 f,
                 f_args,
                 mesh_init.reshape(1, -1),
@@ -1216,33 +1214,19 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 )
 
                 # TODO make sure growing string loss center is a time not the number of evals because eval number is meaningless here.
-                # The loss, and its backward pass if requested. First save what
-                # the backward pass writes to (_save_grads); on a GPU, measure
-                # its peak memory for the next batch's check
-                # (_evaluate_f_on_full_nodes). With take_gradient=True an
-                # out-of-memory error in loss_fxn or in the backward pass
-                # restarts the integral (below the loop).
-                try:
-                    loss = loss_fxn(intermediate_results)
-                    if take_gradient and loss.requires_grad:
-                        unsafe = (
-                            self._save_grads(loss, saved, parameters is not None)
-                            or unsafe
-                        )
-                        cuda = self.device.type == "cuda"
-                        if cuda:
-                            torch.cuda.reset_peak_memory_stats(self.device)
-                            before = torch.cuda.memory_allocated(self.device)
-                        loss.backward()
-                        if cuda and self._forward_bytes > 0:
-                            self._backward_ratio = (
-                                torch.cuda.max_memory_allocated(self.device) - before
-                            ) / self._forward_bytes
-                except (RuntimeError, MemoryError) as e:
-                    if not (take_gradient and _is_out_of_memory(e)):
-                        raise
+                # The loss, and its backward pass if requested. With
+                # take_gradient=True an out-of-memory error in either restarts
+                # the integral (below the loop).
+                loss, batch_unsafe = self._loss_and_backward(
+                    intermediate_results,
+                    loss_fxn,
+                    take_gradient,
+                    saved,
+                    parameters is not None,
+                )
+                unsafe = batch_unsafe or unsafe
+                if loss is None:
                     failed_batch = batch_size
-                if failed_batch is not None:
                     break
 
                 # Accumulate into the record
@@ -1267,47 +1251,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     mesh_grad[order] = sum(grads)
 
         if failed_batch is not None:
-            # The backward pass ran out of memory. Put back the gradients the
-            # call added, then start the integral again from its starting mesh
-            # with a smaller, converged batch size (_restart_after_backward_oom,
-            # after this call's tensors are freed); raise instead when not every
-            # gradient can be put back, or a smaller batch cannot hold one
-            # subinterval.
-            restart = IntegrationState(start_mesh, _shrink_batch(failed_batch), True)
-            if (
-                torch.distributed.is_available()
-                and torch.distributed.is_initialized()
-                and torch.distributed.get_world_size() > 1
-            ):
-                unsafe = "torch.distributed runs more than one process"
-            if unsafe is None:
-                for ref, grad in list(saved.values()):
-                    if (leaf := ref()) is not None:
-                        leaf.grad = grad
-            if unsafe is not None or restart.max_batch < self.C:
-                error = BackwardOutOfMemoryError(
-                    f"The backward pass of a batch of {failed_batch} points ran out "
-                    "of memory, and padaquad cannot restart the integral ("
-                    f"{unsafe or 'a smaller batch cannot hold one subinterval'}). "
-                    + (
-                        "The gradients now hold part of the integral's gradient: "
-                        "reset them (for example optimizer.zero_grad()) and call "
-                        "again with "
-                        if unsafe is not None
-                        else "The gradients were put back to their values before "
-                        "the call. Call again with "
-                    )
-                    + f"state=error.state (batch size {restart.max_batch}).",
-                )
-                error.state = restart
-                raise error
-            logger.warning(
-                f"The backward pass of a batch of {failed_batch} points ran out of "
-                "memory. The gradients it added were removed, and the integral is "
-                "restarted from its starting mesh with batches of at most "
-                f"{restart.max_batch} points."
-            )
-            raise _Restart(restart)
+            # A backward pass ran out of memory: restart from the starting
+            # mesh with a smaller batch size, or raise.
+            self._raise_after_backward_oom(failed_batch, start_mesh, saved, unsafe)
         if mesh_grad is not None:
             mesh.backward(mesh_grad)
 

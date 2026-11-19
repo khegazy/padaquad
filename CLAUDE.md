@@ -410,7 +410,7 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   to fit) and `_batch_converged` (will not grow again), set at the start of
   `integrate`: from `max_batch` (call, or constructor when no state) →
   converged; from `state=` (`IntegrationState`, `results.py`); else from
-  `_first_batch` (forward calls on 10, 100 and 1,000 = `_LARGEST_TEST_CALL`
+  `_initialize_max_batch` (forward calls on 10, 100 and 1,000 = `_LARGEST_TEST_CALL`
   copies of `mesh_init`, stopping at the order of the first pass, through `_measure_call` with no-op readers;
   an OOM shrinks by `_shrink_batch` = 0.75 until one runs → converged).
   `_batch_for(n_waiting)` sizes every call of `f`: `min(n_waiting, B)` if
@@ -424,12 +424,16 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   `usable >= _backward_ratio * F` (F = forward peak via
   `reset_peak_memory_stats`/`max_memory_allocated`, `_backward_ratio` = the
   previous batch's backward peak / forward peak, 1 at first) else drops and
-  shrinks to `min(0.75 N, N usable / need)`. Before each `loss.backward()`,
+  shrinks to `min(0.75 N, N usable / need)`. Each batch's loss and backward
+  pass run in `_loss_and_backward` (memory.py): before `loss.backward()`,
   `_save_grads` walks the loss graph and saves `.grad` of every leaf first
-  seen in the call (plus `parameters=` at the start); a backward OOM breaks
-  the loop, restores them and re-calls `integrate` with the original
-  arguments (`call_args`) and `state=IntegrationState(start_mesh,
-  _shrink_batch(failed), True)`, or raises `BackwardOutOfMemoryError` (custom
+  seen in the call (plus `parameters=` at the start), and on a GPU the
+  backward peak sets `_backward_ratio`; it returns no loss on an OOM. A
+  backward OOM breaks the loop; `_raise_after_backward_oom` restores the
+  gradients and raises `_Restart`, which `_restart_after_backward_oom`
+  turns into a new call with the original arguments and
+  `state=IntegrationState(start_mesh, _shrink_batch(failed), True)`, or
+  raises `BackwardOutOfMemoryError` (custom
   autograd function without `parameters=`, a post-accumulate-grad hook,
   `torch.distributed` world size > 1, or a batch below C).
   `_is_out_of_memory` is False for that error.

@@ -61,9 +61,10 @@ def _case_key(method: str, integrand: str, tol_label: str, take_gradient: bool) 
     """Stable key for a snapshot case in the JSON data file.
 
     ``take_gradient`` is part of the key: the accepted-panel re-check
-    (``enforce_convergence``) is on by default only with ``take_gradient=False``, so the two modes can legitimately
-    produce different meshes/integrals (they coincide only when every panel fits
-    in a single batch).
+    (``enforce_convergence``) is on by default only with
+    ``take_gradient=False``, so the two modes can legitimately produce different
+    meshes/integrals (they coincide only when every panel fits in a single
+    batch).
     """
     return f"{method}|{integrand}|{tol_label}|grad={int(take_gradient)}"
 

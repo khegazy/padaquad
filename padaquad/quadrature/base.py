@@ -1307,6 +1307,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     max_adaptive_splits,
                 )
                 if split_positions.numel() > 0:
+                    # Explains the calls of f that follow the dropped reference.
+                    logger.info(
+                        "error_integral_reference dropped once every step was "
+                        "accepted: %d of %d accepted steps fail against the "
+                        "integral and are split.",
+                        split_positions.numel(),
+                        len(record_keep_mask),
+                    )
                     # No batch: only the extra positions are split.
                     (_, _, _, _, mesh, mesh_trackers, mesh_indices, _, split_counts) = (
                         self._adaptively_increase_mesh(

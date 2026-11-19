@@ -27,6 +27,7 @@ from __future__ import annotations
 import collections
 import logging
 import math
+import re
 
 import pytest
 import torch
@@ -640,16 +641,23 @@ def test_switch_respects_split_cap(caplog):
 
 
 def test_switch_vector_failure_fraction():
-    """Each output component is judged against its own final integral."""
-    torch.manual_seed(0)
-    result, _ = _run(
-        _solver(error_norm="failure_fraction"),
-        _vector_cancelling,
-        take_gradient=False,
-        error_integral_reference=torch.tensor([1.0, 1.0], dtype=torch.float64),
-    )
-    assert result.converged is True  # |integral of component 1| = 0.335 < 1
-    assert torch.allclose(result.integral, _vector_truth(), atol=1e-5)
+    """Each output component is judged against its own final integral: the
+    run fails without enforcement and converges with it."""
+    runs = []
+    for enforce in (False, None):
+        torch.manual_seed(0)
+        result, _ = _run(
+            _solver(error_norm="failure_fraction"),
+            _vector_cancelling,
+            take_gradient=False,
+            error_integral_reference=torch.tensor([1.0, 1.0], dtype=torch.float64),
+            enforce_convergence=enforce,
+        )
+        runs.append(result)
+    off, on = runs
+    assert off.converged is False
+    assert on.converged is True  # |integral of component 1| = 0.335 < 1
+    assert torch.allclose(on.integral, _vector_truth(), atol=1e-5)
 
 
 def test_switch_with_nonfinite_terminates():
@@ -659,14 +667,48 @@ def test_switch_with_nonfinite_terminates():
     def f(t, *args):
         return torch.where(t > 0.9, torch.nan, _cancelling(t))
 
+    solver = _solver(error_on_nonfinite=False)
+    n_split = []  # one entry per call: how many recorded panels it splits
+    find = solver._failed_record_positions
+
+    def spy(*args, **kwargs):
+        out = find(*args, **kwargs)
+        n_split.append(out[0].numel())
+        return out
+
+    solver._failed_record_positions = spy
     torch.manual_seed(0)
-    result, _ = _run(
-        _solver(error_on_nonfinite=False),
-        f,
-        take_gradient=False,
-        error_integral_reference=1.0,
-    )
+    result, _ = _run(solver, f, take_gradient=False, error_integral_reference=1.0)
     assert result.converged is False
+    # The reference was dropped exactly once (Step 4b stays off while it is
+    # fixed), and nothing was split.
+    assert n_split == [0]
+
+
+def _switch_log(caplog, reference):
+    """The 'reference dropped' log lines of one run with the given reference."""
+    caplog.clear()
+    torch.manual_seed(0)
+    with caplog.at_level(logging.INFO, logger="padaquad"):
+        _run(
+            _solver(),
+            _cancelling,
+            take_gradient=False,
+            error_integral_reference=reference,
+        )
+    return [
+        r.getMessage()
+        for r in caplog.records
+        if "error_integral_reference dropped" in r.getMessage()
+    ]
+
+
+def test_switch_logs_the_split(caplog):
+    """Dropping the reference logs how many accepted panels are split, so the
+    extra calls of f are explained; nothing is logged when none fails."""
+    (message,) = _switch_log(caplog, 1.0)
+    assert re.search(r"\d+ of \d+ accepted steps fail", message)
+    assert _switch_log(caplog, 0.0) == []
 
 
 @pytest.mark.parametrize("enforce_convergence", [None, False])

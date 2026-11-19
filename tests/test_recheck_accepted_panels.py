@@ -70,13 +70,21 @@ def _cancelling(t, *args):
     return torch.sin(2.0 * math.pi * t)
 
 
-def _run(solver, f, take_gradient, mesh_final=T_FINAL, conserve_memory=True, **kwargs):
+def _run(
+    solver,
+    f,
+    take_gradient,
+    mesh_final=T_FINAL,
+    conserve_memory=True,
+    max_batch=MAX_BATCH,
+    **kwargs,
+):
     return solver.integrate(
         f=f,
         mesh_init=T_INIT,
         mesh_final=mesh_final,
         take_gradient=take_gradient,
-        max_batch=MAX_BATCH,
+        max_batch=max_batch,
         conserve_memory=conserve_memory,
         **kwargs,
     )
@@ -352,10 +360,10 @@ def test_recheck_actually_resplits_accepted_panels():
     removed_total = 0
     orig_remove = solver._remove_failed_record_panels
 
-    def counting_remove(record, record_keep_mask, loss_fxn):
+    def counting_remove(record, record_keep_mask, *args):
         nonlocal removed_total
         removed_total += int((~record_keep_mask).sum())
-        return orig_remove(record, record_keep_mask, loss_fxn)
+        return orig_remove(record, record_keep_mask, *args)
 
     solver._remove_failed_record_panels = counting_remove
     torch.manual_seed(0)
@@ -421,24 +429,26 @@ def _make_record(solver, n_panels=4, result_device=None):
 
 
 def test_remove_failed_record_panels_subset():
-    """Subset removal: exact integral rebuild, abs-error subtraction, loss, and
-    per-step filtering."""
+    """Subset removal: exact integral rebuild, signed-error subtraction, loss,
+    and per-step filtering."""
     solver = make_solver_for_unit_test()
     record, quad_vals, err_vals = _make_record(solver)
     orig_nodes = record["nodes"].clone()
     orig_err_total = record["integral_error"].clone()
     keep = torch.tensor([True, False, True, False])
 
-    record = solver._remove_failed_record_panels(record, keep, solver._integral_loss)
+    record = solver._remove_failed_record_panels(
+        record, keep, solver._integral_loss, T_INIT, T_FINAL
+    )
 
     assert record["mesh_quadratures"].shape[0] == 2
     assert torch.allclose(record["integral"], quad_vals[keep].sum(0))
-    # integral_error subtracts the removed panels' (abs) errors.
+    # integral_error subtracts the removed panels' signed errors.
     assert torch.allclose(
         record["integral_error"], orig_err_total - err_vals[~keep].sum(0)
     )
-    # Default loss tracks the rebuilt integral (regression for the bound-method
-    # identity bug: obj.m is obj.m is False).
+    # The default loss loses the removed panels' integral, so it tracks the
+    # rebuilt integral.
     assert torch.allclose(record["loss"], record["integral"])
     assert torch.allclose(record["nodes"], orig_nodes[keep])
     assert record["error_ratios"].shape[0] == 2
@@ -456,7 +466,9 @@ def test_remove_all_then_record_does_not_crash(result_device):
     record, _, _ = _make_record(solver, result_device=result_device)
     keep = torch.zeros(4, dtype=torch.bool)
 
-    record = solver._remove_failed_record_panels(record, keep, solver._integral_loss)
+    record = solver._remove_failed_record_panels(
+        record, keep, solver._integral_loss, T_INIT, T_FINAL
+    )
     assert record["mesh_quadratures"].shape[0] == 0
     assert record["nodes"].shape[0] == 0
     assert torch.allclose(record["integral"], torch.zeros_like(record["integral"]))
@@ -563,26 +575,42 @@ def _spy_evaluated(solver):
     return seen
 
 
+@pytest.mark.parametrize("max_batch", [MAX_BATCH, 7, 3])
 @pytest.mark.parametrize("conserve_memory", [True, False])
 @pytest.mark.parametrize("max_adaptive_splits", [None, 4])
 def test_switch_never_evaluates_a_subinterval_twice(
-    conserve_memory, max_adaptive_splits
+    conserve_memory, max_adaptive_splits, max_batch
 ):
     """The panels that fail when the reference is dropped are split from their
-    stored errors, never evaluated again (f can be expensive)."""
+    stored errors, never evaluated again (f can be expensive).
+
+    Batch sizes that are not multiples of C (7) or below it (3) make the
+    conserve_memory path evaluate part of a panel in one call of f and the rest
+    in the next; counting the points passed to f checks that no partly
+    evaluated panel is evaluated again either.
+    """
     solver = _solver()
     seen = _spy_evaluated(solver)
+    n_points = [0]
+
+    def f(t, *args):
+        n_points[0] += t.shape[0]
+        return _cancelling(t)
+
     torch.manual_seed(0)
     _run(
         solver,
-        _cancelling,
+        f,
         take_gradient=False,
         conserve_memory=conserve_memory,
+        max_batch=max_batch,
         error_integral_reference=1.0,
         max_adaptive_splits=max_adaptive_splits,
     )
     assert len(seen) > 0
     assert max(seen.values()) == 1
+    # One point for the integrand's shape check, then C points per panel.
+    assert n_points[0] == 1 + solver.C * len(seen)
 
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
@@ -685,7 +713,7 @@ def test_switch_with_nonfinite_terminates():
     assert n_split == [0]
 
 
-def _switch_log(caplog, reference):
+def _switch_log(caplog, reference, max_adaptive_splits=None):
     """The 'reference dropped' log lines of one run with the given reference."""
     caplog.clear()
     torch.manual_seed(0)
@@ -695,6 +723,7 @@ def _switch_log(caplog, reference):
             _cancelling,
             take_gradient=False,
             error_integral_reference=reference,
+            max_adaptive_splits=max_adaptive_splits,
         )
     return [
         r.getMessage()
@@ -703,11 +732,30 @@ def _switch_log(caplog, reference):
     ]
 
 
-def test_switch_logs_the_split(caplog):
-    """Dropping the reference logs how many accepted panels are split, so the
-    extra calls of f are explained; nothing is logged when none fails."""
-    (message,) = _switch_log(caplog, 1.0)
-    assert re.search(r"\d+ of \d+ accepted steps fail", message)
+_SWITCH_COUNTS = re.compile(
+    r"(\d+) of (\d+) accepted steps fail against the integral; (\d+) of them"
+)
+
+
+@pytest.mark.parametrize("max_adaptive_splits", [None, 4, 0])
+def test_switch_logs_the_split(caplog, max_adaptive_splits):
+    """Dropping the reference logs how many accepted panels fail and how many
+    of them are split (those below the cap), so the extra calls of f are
+    explained; it is logged even when the cap leaves nothing to split. With
+    reference 1.0 and the integral 0 every recorded panel fails."""
+    (message,) = _switch_log(caplog, 1.0, max_adaptive_splits)
+    n_fail, n_accepted, n_split = map(int, _SWITCH_COUNTS.search(message).groups())
+    assert n_fail == n_accepted > 0
+    if max_adaptive_splits is None:
+        assert n_split == n_fail
+    elif max_adaptive_splits == 0:
+        assert n_split == 0
+    else:
+        assert 0 < n_split < n_fail
+
+
+def test_switch_logs_nothing_when_none_fails(caplog):
+    """A reference no larger than the integral leaves nothing to split."""
     assert _switch_log(caplog, 0.0) == []
 
 
@@ -727,3 +775,109 @@ def test_warning_with_take_gradient_names_both_settings(caplog, enforce_converge
     assert (
         "pass take_gradient=False with enforce_convergence None or True" in caplog.text
     )
+
+
+# ---------------------------------------------------------------------------
+# F. Result fields stay exact when accepted panels are removed
+# ---------------------------------------------------------------------------
+
+
+def _signed_error_sum(solver, result, f):
+    """Sum of the returned panels' signed error estimates, recomputed by
+    evaluating f at each panel's nodes (from the widths h; the returned nodes
+    share panel endpoints, so they cannot be split back into panels)."""
+    h = result.h.to(solver.device)
+    left = T_INIT.to(solver.device) + torch.cumsum(h, 0) - h
+    c = solver.method.tableau.c.to(solver.device)
+    nodes = left[:, None, :] + c[None, :, None] * h[:, None, :]
+    y = f(nodes.reshape(-1, 1)).reshape(nodes.shape[0], nodes.shape[1], -1)
+    zero = torch.zeros(1, dtype=torch.float64, device=solver.device)
+    return solver._calculate_integral(nodes, y, y0=zero).integral_error
+
+
+@pytest.mark.parametrize("reference", [None, 1.0])
+def test_integral_error_exact_after_removals(reference):
+    """integral_error is the signed sum over the returned panels, also after
+    the re-check (no reference) or the dropped reference (1.0) removed
+    accepted panels (subtracting |e| of a removed panel was off by up to 2|e|).
+    """
+    solver = _solver()
+    n_removed = []
+    remove = solver._remove_failed_record_panels
+
+    def spy(record, keep, *args, **kwargs):
+        n_removed.append(int((~keep).sum()))
+        return remove(record, keep, *args, **kwargs)
+
+    solver._remove_failed_record_panels = spy
+    torch.manual_seed(0)
+    result, _ = _run(
+        solver, _cancelling, take_gradient=False, error_integral_reference=reference
+    )
+    assert sum(n_removed) > 0
+    expected = _signed_error_sum(solver, result, _cancelling)
+    scale = float(result.mesh_quadrature_errors.abs().sum())
+    assert abs(float(result.integral_error[0]) - float(expected[0])) < 1e-9 * scale
+
+
+@pytest.mark.parametrize("reference", [None, 1.0])
+def test_custom_loss_exact_after_removals(reference):
+    """A custom loss linear in the integral, and its gradient, equal the loss of
+    the returned integral after accepted panels were removed: the removed
+    panels' loss is subtracted, as their integral is.
+
+    f = theta sin(2 pi t) + 0.3 theta^2 t integrates to 0.15 theta^2 over
+    [0, 1]; with loss = 2 * integral and theta = 1: loss 0.3, gradient 0.6.
+    """
+    theta = torch.tensor([1.0], dtype=torch.float64, requires_grad=True)
+
+    def f(t, *args):
+        return theta * _cancelling(t) + 0.3 * theta**2 * t
+
+    torch.manual_seed(0)
+    result, _ = _run(
+        _solver(),
+        f,
+        take_gradient=False,
+        error_integral_reference=reference,
+        loss_fxn=lambda r: 2.0 * r.integral.sum(),
+    )
+    assert result.converged is True
+    assert abs(float(result.loss) - 2.0 * float(result.integral.sum())) < 1e-12
+    assert abs(float(result.loss) - 0.3) < 1e-6
+    result.loss.backward()
+    assert abs(float(theta.grad[0]) - 0.6) < 1e-6
+
+
+def test_nonfinite_warning_names_error_on_nonfinite(caplog):
+    """When NaN/Inf values make the run fail, calling again cannot help: the
+    warning points at the integrand (error_on_nonfinite=True) instead."""
+
+    def f(t, *args):
+        return torch.where(t > 0.9, torch.nan, _cancelling(t))
+
+    torch.manual_seed(0)
+    with caplog.at_level(logging.WARNING, logger="padaquad"):
+        _run(_solver(error_on_nonfinite=False), f, take_gradient=False)
+    assert "error_on_nonfinite=True" in caplog.text
+    assert "call again" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    "reference",
+    [
+        torch.tensor([1.0, 1.0], dtype=torch.float64),
+        torch.tensor([[1.0]], dtype=torch.float64),
+    ],
+    ids=["two-values-for-D=1", "2-d"],
+)
+def test_reference_shape_is_validated(reference):
+    """A reference must be a number, or a tensor of shape [] , [1] or [D];
+    another shape used to broadcast silently and change the mesh."""
+    with pytest.raises(ValueError, match="error_integral_reference"):
+        _run(
+            _solver(),
+            _cancelling,
+            take_gradient=False,
+            error_integral_reference=reference,
+        )

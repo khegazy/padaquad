@@ -973,6 +973,17 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 "f must return values of shape [N, D] for points of shape "
                 f"[N, T]; got shape {list(test_integrand.shape)}."
             )
+        # The reference must match the integrand's D output components (or be
+        # one value for all); another shape would broadcast silently.
+        if error_integral_reference is not None and (
+            error_integral_reference.dim() > 1
+            or error_integral_reference.numel() not in (1, test_integrand.shape[-1])
+        ):
+            raise ValueError(
+                "error_integral_reference must be a number or a tensor of shape "
+                f"[], [1] or [D] = [{test_integrand.shape[-1]}]; got shape "
+                f"{list(error_integral_reference.shape)}."
+            )
         del test_integrand
 
         loss_fxn = loss_fxn if loss_fxn is not None else self._integral_loss
@@ -1149,7 +1160,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 # batch's steps to its left: the merged record+batch cumsum,
                 # restricted to the recorded positions (a cumsum over the record
                 # alone would leave the batch out).
-                extra_split_idxs, record_keep_mask = self._failed_record_positions(
+                extra_split_idxs, record_keep_mask, _ = self._failed_record_positions(
                     record,
                     torch.cumsum(all_mesh_quadratures.detach(), 0)[idxs_keep],
                     reference_integral,
@@ -1215,7 +1226,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # record_keep_mask is set exactly when recheck_active.
             if record_keep_mask is not None and not bool(torch.all(record_keep_mask)):
                 record = self._remove_failed_record_panels(
-                    record, record_keep_mask, loss_fxn
+                    record, record_keep_mask, loss_fxn, mesh_init, mesh_final
                 )
 
             # --- Step 6: Record accepted results and handle gradients ---
@@ -1257,8 +1268,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     failed_batch = batch_size
                     break
 
-                # Accumulate into the record
+                # Accumulate into the record. The record keeps the signed error
+                # estimates, so that removing a subinterval (Step 5b, Step 7)
+                # subtracts exactly what it added to integral_error; loss_fxn
+                # above and the returned result see their absolute values.
                 intermediate_results.loss = loss
+                intermediate_results.mesh_quadrature_errors = (
+                    method_output.mesh_quadrature_errors
+                )
                 record = self._record_results(
                     record=record,
                     take_gradient=take_gradient,
@@ -1298,23 +1315,28 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 and not torch.any(mesh_trackers)
             ):
                 error_integral_reference, reference_pinned = None, False
-                split_positions, record_keep_mask = self._failed_record_positions(
-                    record,
-                    torch.cumsum(record["mesh_quadratures"].detach(), 0),
-                    record["integral"].detach(),
-                    mesh_indices,
-                    split_counts,
-                    max_adaptive_splits,
+                split_positions, record_keep_mask, fails = (
+                    self._failed_record_positions(
+                        record,
+                        torch.cumsum(record["mesh_quadratures"].detach(), 0),
+                        record["integral"].detach(),
+                        mesh_indices,
+                        split_counts,
+                        max_adaptive_splits,
+                    )
                 )
-                if split_positions.numel() > 0:
+                if bool(fails.any()):
                     # Explains the calls of f that follow the dropped reference.
                     logger.info(
                         "error_integral_reference dropped once every step was "
                         "accepted: %d of %d accepted steps fail against the "
-                        "integral and are split.",
+                        "integral; %d of them (those below max_adaptive_splits) "
+                        "are split.",
+                        int(fails.sum()),
+                        len(fails),
                         split_positions.numel(),
-                        len(record_keep_mask),
                     )
+                if split_positions.numel() > 0:
                     # No batch: only the extra positions are split.
                     (_, _, _, _, mesh, mesh_trackers, mesh_indices, _, split_counts) = (
                         self._adaptively_increase_mesh(
@@ -1335,7 +1357,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                         )
                     )
                     record = self._remove_failed_record_panels(
-                        record, record_keep_mask, loss_fxn
+                        record, record_keep_mask, loss_fxn, mesh_init, mesh_final
                     )
 
         if failed_batch is not None:
@@ -1404,7 +1426,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh_optimal = self._get_optimal_mesh(
                 nodes=record["nodes"],
                 mesh_quadratures=record["mesh_quadratures"].to(result_device),
-                mesh_quadrature_errors=record["mesh_quadrature_errors"].to(
+                # Absolute values: the merge sums two subintervals' errors,
+                # which signed values could cancel.
+                mesh_quadrature_errors=torch.abs(record["mesh_quadrature_errors"]).to(
                     result_device
                 ),
                 integral=record["integral"].to(result_device),
@@ -1518,7 +1542,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_indices: dict[tuple[float, ...], int],
         split_counts: torch.Tensor | None,
         max_adaptive_splits: int | None,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Find the recorded subintervals to split again, from their stored errors.
 
@@ -1546,10 +1570,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor]
-            Tuple ``(split_positions, record_keep_mask)``: the mesh positions of
-            the failing recorded subintervals below the cap, and a mask [N]
-            that keeps every other recorded subinterval.
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+            Tuple ``(split_positions, record_keep_mask, fails)``: the mesh
+            positions of the failing recorded subintervals below the cap, a
+            mask [N] that keeps every other recorded subinterval, and the mask
+            [N] of every failing one (including those at the cap).
         """
         _, rec_remove, _ = self._record_error_check(
             record, cum_mesh_quadratures, integral
@@ -1564,7 +1589,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             splittable = rec_remove & (
                 split_counts[rec_positions] < max_adaptive_splits
             )
-        return rec_positions[splittable], ~splittable
+        return rec_positions[splittable], ~splittable, rec_remove
 
     def _warn_not_converged(
         self,
@@ -1651,7 +1676,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 "use an error_integral_reference no larger than |integral| "
                 "(converged is judged against the final integral)"
             )
-        remedies.append("call again with the state it returned (state=state)")
+        if bool(finite_fails.any()):
+            remedies.append("call again with the state it returned (state=state)")
+        if bool((final_fails & nonfinite).any()):
+            remedies.append(
+                "find where the integrand or the integral is NaN/Inf "
+                "(error_on_nonfinite=True raises at the first such value); "
+                "refining cannot remove it"
+            )
         logger.warning(
             "The integral did not converge: %d of %d accepted steps (%.1f%%) do "
             "not meet the tolerance (atol=%.3g, rtol=%.3g) judged against %s. "
@@ -4242,27 +4274,26 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         record: dict[str, torch.Tensor],
         record_keep_mask: torch.Tensor,
         loss_fxn: Callable[[IntegrationResult], torch.Tensor],
+        mesh_init: torch.Tensor,
+        mesh_final: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
         """
         Remove from the record the subintervals that failed the re-check.
 
         They were just split in the mesh (their halves will be evaluated as
         new subintervals), so their entries must leave the record. The
-        per-subinterval fields are filtered by ``record_keep_mask`` and the
-        accumulated scalars are updated:
+        per-subinterval fields are filtered by ``record_keep_mask``, and each
+        accumulated scalar loses what the removed subintervals added to it:
 
-        - ``integral`` is updated exactly: it is the sum of the
-          ``mesh_quadratures``, so subtracting the removed contributions is
-          exact.
-        - ``integral_error`` is a sum of signed errors, but the recorded
-          per-subinterval errors are absolute values, so the removed absolute
-          errors are subtracted; the result is an approximation of this
-          diagnostic field.
-        - ``loss`` with the default loss equals the integral, so it is set to
-          the updated integral; a custom ``loss_fxn`` is left unchanged (its
-          per-batch sum is already an approximation, and the re-check runs
-          only with ``enforce_convergence``, never with ``take_gradient=True``,
-          so no per-batch backward depends on it).
+        - ``integral`` and ``integral_error``: the sums of the removed
+          ``mesh_quadratures`` and signed ``mesh_quadrature_errors``.
+        - ``loss``: ``loss_fxn`` of a result made of the removed subintervals,
+          laid out like a per-batch result. For a loss that is a sum over
+          subintervals (any loss linear in the integral, including the
+          default) the loss and its gradient are then those of the kept
+          subintervals; for another loss the per-batch sum is an
+          approximation either way. The re-check never runs with
+          ``take_gradient=True``, so no backward pass has used the loss yet.
 
         Parameters
         ----------
@@ -4271,7 +4302,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         record_keep_mask : torch.Tensor
             Boolean mask over the recorded subintervals; True keeps one.
         loss_fxn : Callable[[IntegrationResult], torch.Tensor]
-            The active loss function (to detect the default loss).
+            The active loss function.
+        mesh_init : torch.Tensor
+            Lower integration bound, for the removed subintervals' result.
+        mesh_final : torch.Tensor
+            Upper integration bound, for the removed subintervals' result.
 
         Returns
         -------
@@ -4279,34 +4314,48 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             The record without the failed subintervals.
         """
         removed = ~record_keep_mask
-        # mesh_quadratures / mesh_quadrature_errors are device-resident, as are
-        # integral / integral_error; move the mask to each tensor's device.
-        quad = record["mesh_quadratures"]
-        err = record["mesh_quadrature_errors"]
-        removed_quad_sum = quad[removed.to(quad.device)].sum(0)
-        removed_err_sum = err[removed.to(err.device)].sum(0)
+        # The removed subintervals' fields, on the integration device like the
+        # per-batch result loss_fxn receives (nodes, y, h and the tracked
+        # variables live on result_device in the record).
+        gone = {
+            key: value[removed.to(value.device)].to(self.device)
+            for key, value in record.items()
+            if key not in self._RECORD_SCALAR_KEYS
+        }
+        removed_quad_sum = gone["mesh_quadratures"].sum(0)
+        removed_err_sum = gone["mesh_quadrature_errors"].sum(0)
+        removed_result = IntegrationResult(
+            integral=removed_quad_sum,
+            integral_error=removed_err_sum,
+            nodes=gone["nodes"],
+            h=gone["h"],
+            y=gone["y"],
+            tracked_variables=tuple(
+                value
+                for key, value in gone.items()
+                if key.startswith(self._TRACKED_KEY_PREFIX)
+            )
+            or None,
+            mesh_quadratures=gone["mesh_quadratures"],
+            mesh_quadrature_errors=torch.abs(gone["mesh_quadrature_errors"]),
+            error_ratios=gone["error_ratios"],
+            gradient_taken=False,
+            mesh_init=mesh_init,
+            mesh_final=mesh_final,
+            y0=torch.zeros_like(removed_quad_sum),
+        )
         record["integral"] = record["integral"] - removed_quad_sum.to(
             record["integral"].device
         )
         record["integral_error"] = record["integral_error"] - removed_err_sum.to(
             record["integral_error"].device
         )
+        record["loss"] = record["loss"] - loss_fxn(removed_result).to(
+            record["loss"].device
+        )
         for key, value in record.items():
             if key not in self._RECORD_SCALAR_KEYS:
                 record[key] = value[record_keep_mask.to(value.device)]
-        # Default loss == integral, so keep it consistent with the rebuilt
-        # value. Bound methods are not identity-stable (``obj.m is obj.m`` is
-        # False), so compare the underlying function (the class attribute)
-        # rather than the bound method object. A custom loss_fxn is left as-is
-        # (its per-batch sum is already an approximation; the re-check never
-        # runs with take_gradient=True, so no per-batch backward depends on it).
-        is_default_loss = (
-            getattr(loss_fxn, "__func__", None) is type(self)._integral_loss
-        )
-        if is_default_loss:
-            # loss lives on result_device (see _record_results), integral on the
-            # integration device; keep loss where the next batch's loss is added.
-            record["loss"] = record["integral"].to(record["loss"].device)
         return record
 
     def _flatten_output(self, panel_array: torch.Tensor) -> torch.Tensor:

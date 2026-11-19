@@ -323,7 +323,9 @@ the same text. In short:
    splitting (then `converged` is usually `False`). With
    `enforce_convergence` (the default when `take_gradient=False`), accepted
    subintervals are judged again in every batch from their stored error
-   estimates, and split if the changed integral makes them fail.
+   estimates, and split if the changed integral makes them fail; a fixed
+   `error_integral_reference` is used until every subinterval is accepted,
+   then replaced by the integral.
 
 5. **Optimal mesh.** After convergence, pairs of neighbouring subintervals are
    merged into the state's mesh, which a later call starts from when it is

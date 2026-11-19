@@ -334,8 +334,8 @@ The comment above the block must say four things:
 
 ## Known limitations (not in scope)
 
-- **`integral_error` becomes approximate** whenever subintervals are removed from the record (`docs/issues/integral-error-after-recheck.md`). The switch-over removes subintervals in runs that used to have none: `take_gradient=False` with a fixed reference. The fix (store signed errors) is separate.
-- **A custom `loss_fxn` gives a wrong `result.loss`** after removals. `_remove_failed_record_panels` leaves a custom loss unchanged, so a removed subinterval's share stays in it, and its halves add theirs again. This happens with today's re-check too; the switch-over makes it reachable in runs with a fixed reference.
+- **`integral_error` became approximate** whenever subintervals were removed from the record. Fixed on this branch after the second review (2026-11-19): the record keeps signed estimates; `docs/issues/integral-error-after-recheck.md` was deleted.
+- **A custom `loss_fxn` gave a wrong `result.loss`** after removals. Fixed on this branch after the second review (2026-11-19): `_remove_failed_record_panels` subtracts `loss_fxn` of the removed subintervals.
 
 ## Review record (2026-11-18, revised 2026-11-19)
 

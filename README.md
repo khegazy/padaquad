@@ -320,7 +320,10 @@ the same text. In short:
 
 4. **Refinement.** Batches of evaluation and splitting alternate until every
    subinterval is accepted, or until `max_adaptive_splits` stops the
-   splitting (then `converged` is usually `False`).
+   splitting (then `converged` is usually `False`). With
+   `enforce_convergence` (the default when `take_gradient=False`), accepted
+   subintervals are judged again in every batch from their stored error
+   estimates, and split if the changed integral makes them fail.
 
 5. **Optimal mesh.** After convergence, pairs of neighbouring subintervals are
    merged into the state's mesh, which a later call starts from when it is

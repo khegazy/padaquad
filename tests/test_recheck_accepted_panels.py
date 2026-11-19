@@ -7,9 +7,13 @@ accepted early -- against one denominator -- can later violate the *current*
 tolerance once the denominator shrinks. The re-check re-examines the recorded
 (already-accepted) panels every iteration and splits any that no longer pass.
 
-The re-check runs only on the ``take_gradient=False`` path (no per-batch
-backward to double-count, and that path computes the full-integral denominator).
-``take_gradient=True`` therefore serves as the "re-check disabled" baseline.
+The re-check follows ``enforce_convergence``, whose default is
+``not take_gradient`` (with per-batch backward a re-split panel's gradient would
+be counted twice, so ``enforce_convergence=True`` with ``take_gradient=True``
+raises). ``take_gradient=True``, or ``enforce_convergence=False``, therefore
+serves as the "re-check disabled" baseline. With a fixed
+``error_integral_reference`` the re-check is off until every panel is accepted;
+the reference is then dropped (section E).
 
 A strongly *cancelling* integrand drives the effect: its partial integral peaks
 mid-domain and the total is ~0, so the absolute denominator is large mid-run and

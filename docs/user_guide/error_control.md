@@ -111,11 +111,18 @@ The relative tolerance multiplies a reference value of the integral:
   running total is smaller than the final integral, early subintervals are
   refined more than needed. When it is larger, for example when positive and
   negative parts of the integrand cancel, early subintervals are accepted
-  against a tolerance that is too loose. With `take_gradient=False`, accepted
-  subintervals are checked again as the total changes and split if they fail;
-  with `take_gradient=True` they are not, and `converged` reports the failure
-  ({ref}`ug-convergence`). Passing `error_integral_reference`, a value close to
-  the true integral, fixes the reference from the first batch.
+  against a tolerance that is too loose. With `enforce_convergence=True` (the
+  default when `take_gradient=False`), accepted subintervals are checked again
+  in every batch, against the same total as the subintervals just evaluated,
+  and split if they fail; the check uses their stored error estimates, so it
+  costs no evaluation of the integrand. With `take_gradient=True` they are not
+  checked again (a batch's gradient is already backpropagated when it is
+  accepted), and `converged` reports the failure ({ref}`ug-convergence`).
+  Passing `error_integral_reference`, a value close to the true integral, fixes
+  the reference from the first batch. With `enforce_convergence=True`, that
+  reference is dropped once every subinterval is accepted: the subintervals
+  that fail against the integral are split, and the integration continues
+  against the running total until it converges.
 - **Cumulative mode** (`use_absolute_error_ratio=False`): the running integral
   from `mesh_init` through each subinterval, as in ODE solvers. Tolerances then
   change along the domain; where the running integral passes through zero, the

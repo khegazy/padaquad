@@ -349,8 +349,9 @@ and removed from the record (`_remove_failed_record_panels`). A fixed
 drops it once no tracker is True: the record is judged against its own
 integral, the failures are split directly (`_adaptively_increase_mesh` with an
 empty batch) and the loop continues against the running integral. No step is
-ever evaluated twice (a user rule: `f` can be very expensive). Plan and review
-record: `docs/issues/2026-11-18-enforce-convergence-plan.md`.
+ever evaluated twice (a user rule: `f` can be very expensive). The plan and
+its review record were deleted once done; they are in commit `f6f74d3`
+(`docs/issues/2026-11-18-enforce-convergence-plan.md`).
 
 Both families accept a panel with any non-finite (NaN/Inf) element (splitting
 cannot fix it; see `_adaptively_increase_mesh`) and apply a scipy-style

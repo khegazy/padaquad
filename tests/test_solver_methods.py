@@ -294,6 +294,7 @@ class TestIntegrateRouting:
             {"random_initial_mesh": False},
             {"error_integral_reference": 1.0},
             {"conserve_memory": True},
+            {"enforce_convergence": False},
         ],
         ids=lambda o: next(iter(o)),
     )

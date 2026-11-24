@@ -437,7 +437,8 @@ def test_float32_smooth_integral_converges():
 def test_converged_uses_the_final_integral_not_the_given_reference():
     """sin(2 pi t) integrates to ~0. A reference of 100 makes the loop accept
     coarse steps, but against the final integral they fail: converged is False,
-    in agreement with mesh_optimal, which splits them."""
+    in agreement with mesh_optimal, which splits them. enforce_convergence=False
+    keeps the loop from refining them once the reference is dropped."""
     solver = make_uniform_solver(
         "bosh3", atol=1e-9, rtol=1e-6, device="cpu", max_batch=BIG_BATCH
     )
@@ -448,6 +449,7 @@ def test_converged_uses_the_final_integral_not_the_given_reference():
         mesh_final=T_FINAL,
         take_gradient=False,
         error_integral_reference=100.0,
+        enforce_convergence=False,
     )
     assert out.converged is False
     assert len(out_state.mesh) - 1 > out.h.shape[0]
@@ -549,8 +551,10 @@ def test_warning_reports_one_output_component(caplog):
 
 
 def test_warning_with_a_pinned_reference_suggests_the_reference(caplog):
-    """With a fixed error_integral_reference the re-check is off, so
-    take_gradient=False is no remedy; the message points at the reference."""
+    """With take_gradient=True and a fixed error_integral_reference the
+    message points at both remedies: take_gradient=False turns
+    enforce_convergence on, which drops the reference once every step is
+    accepted, and a smaller reference."""
     solver = make_uniform_solver(
         "bosh3", atol=1e-9, rtol=1e-6, device="cpu", max_batch=BIG_BATCH
     )
@@ -566,7 +570,7 @@ def test_warning_with_a_pinned_reference_suggests_the_reference(caplog):
     assert out.converged is False
     (message,) = _warning_messages(caplog)
     assert "error_integral_reference" in message
-    assert "take_gradient=False" not in message
+    assert "take_gradient=False" in message
     assert "max_adaptive_splits" not in message
 
 

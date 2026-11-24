@@ -32,7 +32,8 @@ the graph of every evaluation of the integrand.
 
 `loss_fxn` maps one batch's `IntegrationResult` to a scalar tensor; with
 `take_gradient=True` its result is back-propagated after each batch, and
-`result.loss` is the sum over batches. If it is None, the loss is the batch's
+`result.loss` is the sum over batches (minus the loss of any subintervals the
+re-check removed, see {ref}`ug-error-reference`). If it is None, the loss is the batch's
 integral, so the accumulated gradient is the gradient of the integral. Because
 the loss is applied batch by batch, a loss that is not linear in the integral
 (for example its square) gives the sum of the batches' losses, not the loss of

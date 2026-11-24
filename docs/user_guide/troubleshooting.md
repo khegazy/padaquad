@@ -12,10 +12,14 @@ of the error is logged. Common causes:
   subinterval may be halved since the starting mesh; at the cap a failing
   subinterval is accepted. Raise the cap, or use a higher-degree method.
 - **The tolerance changed after acceptance.** In absolute mode a subinterval
-  is accepted against the running integral; with `take_gradient=True` it is
-  not checked again when the total grows ({ref}`ug-error-reference`). Pass
-  `error_integral_reference`, or use `take_gradient=False`, which re-checks.
-- **A non-finite value** with `error_on_nonfinite=False`.
+  is accepted against the running integral; without `enforce_convergence`
+  (the default with `take_gradient=True`) it is not checked again when the
+  total grows, and a fixed `error_integral_reference` is never replaced by the
+  final integral ({ref}`ug-error-reference`). Use `take_gradient=False`, with
+  which `enforce_convergence` is on by default, or pass an
+  `error_integral_reference` no larger than |integral|.
+- **A non-finite value** with `error_on_nonfinite=False`. Refining cannot
+  remove it; pass `error_on_nonfinite=True` to raise where it first appears.
 
 `result.error_ratios` holds each subinterval's ratio when it was accepted, so
 every entry can be below 1 while `converged` is `False`. With
@@ -62,10 +66,9 @@ whole graph), or set `conserve_memory=True`.
 
 `integral_error` is the sum of the subintervals' signed error estimates, an
 estimate of the embedded method's error, usually much larger than the true
-error ({ref}`ug-error-control`). With `take_gradient=False`, when the re-check
-removes an accepted subinterval, the absolute value of its estimate is
-subtracted from the signed sum, so `integral_error` is then approximate.
-`fehlberg2`'s estimate ignores curvature and can be far too small
+error ({ref}`ug-error-control`). When the re-check (`enforce_convergence`)
+removes an accepted subinterval, its signed estimate is subtracted, so
+`integral_error` stays the sum over the returned subintervals. `fehlberg2`'s estimate ignores curvature and can be far too small
 ({doc}`methods`).
 
 ## Renamed and removed arguments

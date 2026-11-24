@@ -105,8 +105,8 @@ class IntegrationResult:
         ``mesh_final``. Shape ``[D]``.
     integral_error : torch.Tensor
         Sum of the subintervals' signed error estimates. Shape ``[D]``. With
-        ``take_gradient=False``, subintervals accepted and later split again
-        can leave it off by their error estimates. See :ref:`ug-error-control`.
+        ``enforce_convergence``, subintervals accepted and later split again
+        are removed from it exactly. See :ref:`ug-error-control`.
     mesh_init : torch.Tensor
         Lower integration bound. Shape ``[T]``.
     mesh_final : torch.Tensor
@@ -134,7 +134,9 @@ class IntegrationResult:
         tolerance of that moment (with ``error_norm="failure_fraction"``,
         the fraction of failing outputs instead). Shape ``[N]``.
     loss : torch.Tensor or None
-        Sum over batches of ``loss_fxn`` applied to the per-batch results; by
+        Sum over batches of ``loss_fxn`` applied to the per-batch results,
+        minus ``loss_fxn`` of the subintervals the re-check removed (so a loss
+        that is a sum over subintervals is that of the returned ones); by
         default the integral without ``y0``. See :ref:`ug-autodiff`.
     gradient_taken : bool
         The call's ``take_gradient``: whether ``loss.backward()`` ran after

@@ -148,7 +148,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_methods_registry.py` | Registry consistency: table shapes and dtypes, `degree` / `error_exponent` types |
 | `test_multi_d_integrand.py` | Integrands with D > 1 outputs |
 | `test_oom_recovery.py` | The out-of-memory catch-and-retry path |
-| `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance |
+| `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance; `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN) |
 | `test_solver_isolation.py` | Solvers do not share method objects or state |
 | `test_tracked_variables.py` | The `tracked_variables` feature |
 | `test_docs_performance_table.py` | The Performance page's rendering of `docs/performance/results_*.json`: no file, one, two (name order, hardware headings), unreadable files named in the error |
@@ -337,6 +337,21 @@ reducing to `|error| / max(atol, rtol*|I|) < 1` (norm family) or
   failing elements is `<= mesh_failure_tolerance` (default 0.0 ⇒ every element
   must pass). This bounds the error of *every* output dimension rather than an
   aggregate.
+
+**Re-check of accepted steps** (`enforce_convergence`, an `integrate`
+argument; None means `not take_gradient`, True with `take_gradient=True` raises
+`ValueError`): Step 4b judges every recorded step, from its stored
+`mesh_quadratures` / `mesh_quadrature_errors` (no call of `f`), against the same
+reference as the batch, via `_failed_record_positions`, and the failures below
+`max_adaptive_splits` are split in the same mesh update (`extra_split_idxs`)
+and removed from the record (`_remove_failed_record_panels`). A fixed
+`error_integral_reference` turns Step 4b off; with `enforce_convergence`, Step 7
+drops it once no tracker is True: the record is judged against its own
+integral, the failures are split directly (`_adaptively_increase_mesh` with an
+empty batch) and the loop continues against the running integral. No step is
+ever evaluated twice (a user rule: `f` can be very expensive). The plan and
+its review record were deleted once done; they are in commit `f6f74d3`
+(`docs/issues/2026-11-18-enforce-convergence-plan.md`).
 
 Both families accept a panel with any non-finite (NaN/Inf) element (splitting
 cannot fix it; see `_adaptively_increase_mesh`) and apply a scipy-style

@@ -55,11 +55,11 @@ for method in ("gk21", "gk7"):
 # The integrand and the width of every subinterval of the last run: the
 # widths shrink by orders of magnitude toward the peak.
 t = torch.linspace(0.0, 1.0, 4001, dtype=torch.float64).reshape(-1, 1)
-left = a + torch.cumsum(result.h[:, 0], 0) - result.h[:, 0]
+edges = torch.cat([a, a + torch.cumsum(result.h[:, 0], 0)])  # subinterval ends
 fig, (top, bottom) = plt.subplots(2, 1, sharex=True, figsize=(7, 5))
 top.plot(t[:, 0], f(t)[:, 0])
 top.set_ylabel("f(t)")
-bottom.step(left, result.h[:, 0], where="post")
+bottom.stairs(result.h[:, 0], edges, baseline=None)
 bottom.set(yscale="log", xlabel="t", ylabel="subinterval width")
 fig.tight_layout()
 plt.show()

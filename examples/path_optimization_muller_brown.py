@@ -17,12 +17,12 @@ https://github.com/khegazy/popcornn), written here in plain PyTorch:
   ``x(t) = x_A + t (x_B - x_A) + t (1 - t) MLP(2t - 1)``, where the network
   MLP (one hidden layer of 128 GELU units) bends it; the factor t (1 - t)
   keeps its ends fixed;
-- the loss is popcornn's PVRE, the integral of |v . F| along the path, with
+- the loss is popcornn's PVRE, the integral of ``|v . F|`` along the path, with
   the velocity v = dx/dt and the force F = -grad E;
 - Adam with learning rate 0.01, at most 1,000 iterations, stopping when the
   norm of the gradient falls below 0.1.
 
-Why this loss finds the pass: by the chain rule, v . F = -dE/dt, the rate at
+Why this loss finds the pass: v . F = -grad E . dx/dt = -dE/dt, the rate at
 which the energy changes along the path. So the loss is the total variation
 of E along the path: everything it climbs plus everything it descends. A path
 that climbs only once, to its highest energy E_max, and then only descends has
@@ -213,7 +213,11 @@ assert abs(history["loss"][-1] - bound) < 0.05
 # it crosses the ridge at S1 (darkest), without descending into C.
 n = len(history["loss"])
 shown = sorted({0, n - 1, *np.unique(np.geomspace(1, n - 1, 4).astype(int))})
-shade = colors.Normalize(vmin=-0.3 * (n - 1), vmax=n - 1)  # skip the palest blues
+shade = colors.Normalize(vmin=0, vmax=n - 1)
+# Blues without its palest third, which would vanish on white.
+blues = colors.LinearSegmentedColormap.from_list(
+    "blues", cm.Blues(np.linspace(0.3, 1.0, 256))
+)
 grid_x, grid_y = np.meshgrid(np.linspace(-1.5, 1.2, 300), np.linspace(-0.4, 2.0, 300))
 grid = torch.tensor(np.stack([grid_x.ravel(), grid_y.ravel()], -1), dtype=F64)
 with torch.no_grad():
@@ -228,11 +232,11 @@ ax.contour(
     linewidths=0.6,
 )
 for i in shown:
-    ax.plot(*history["paths"][i].T, color=cm.Blues(shade(i)), lw=2)
+    ax.plot(*history["paths"][i].T, color=blues(shade(i)), lw=2)
 for name, (px, py) in points.items():
     ax.plot(px, py, "o" if name in ("A", "B", "C") else "X", color="black", ms=8)
     ax.annotate(name, (px, py), xytext=(6, 6), textcoords="offset points")
-fig.colorbar(cm.ScalarMappable(norm=shade, cmap="Blues"), ax=ax, label="iteration")
+fig.colorbar(cm.ScalarMappable(norm=shade, cmap=blues), ax=ax, label="iteration")
 ax.set(
     xlabel="x", ylabel="y", title="Paths at six iterations on the Müller-Brown energy"
 )
@@ -243,18 +247,18 @@ fig.tight_layout()
 # --------------------------------
 # Left: the loss falls to its lower bound (dashed); the computed loss carries
 # the integration error, so it can end a little below it. Middle: the energy
-# along the path at the same six iterations: the barrier drops to E(S1)
-# (dashed). Right: the integrand evaluations of each iteration.
+# along the path at the same six iterations: the highest energy drops to
+# E(S1) (dashed). Right: the integrand evaluations of each iteration.
 fig, (left, middle, right) = plt.subplots(1, 3, figsize=(12, 3.6))
 left.plot(history["loss"], lw=1.5)
 left.axhline(bound, ls="--", color="0.4", lw=1, label="2 E(S1) - E(A) - E(B)")
-left.set(xlabel="iteration", ylabel="loss (integral of |v . F|)", yscale="log")
+left.set(xlabel="iteration", ylabel="loss (integral of |v . F|)")
 left.legend()
 for i in shown:
     middle.plot(
         t_plot[:, 0],
         history["energies"][i],
-        color=cm.Blues(shade(i)),
+        color=blues(shade(i)),
         lw=1.5,
         label=f"iteration {i}",
     )
@@ -262,6 +266,6 @@ middle.axhline(E_S1, ls="--", color="0.4", lw=1)
 middle.set(xlabel="t (position along the path)", ylabel="E")
 middle.legend(fontsize=7)
 right.plot(history["evaluations"], lw=1.5)
-right.set(xlabel="iteration", ylabel="integrand evaluations", yscale="log")
+right.set(xlabel="iteration", ylabel="integrand evaluations")
 fig.tight_layout()
 plt.show()

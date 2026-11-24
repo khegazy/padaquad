@@ -345,10 +345,17 @@ the same text. In short:
 | `scipy.integrate.quad` | ✓ | ✗ | ✗ | classical one-shot smooth quadrature |
 | `torchquad` | ✗ | ✓ | ✓ | fixed-grid methods and Monte Carlo (including VEGAS), also in several dimensions |
 | `torchdiffeq` | adaptive step size | ✓ | ✗ | true state-coupled ODEs $\dot y = f(t, y)$ |
+| `diffrax` | adaptive step size | ✓ | ✗ | state-coupled ODEs in JAX |
+| `quadax` | ✓ | ✓ | ✗ (one subinterval at a time) | adaptive one-dimensional quadrature in JAX |
 | **padaquad** | ✓ | ✓ | ✓ | path integrals, learned-integrand integration, physics-informed residual losses |
 
 torchquad's README (commit fc6f9cd, 2026-10-28) states that it does not
-implement adaptive subdivision. For one-shot scalar quadrature with no
+implement adaptive subdivision. quadax 0.3.1 splits the subinterval with the largest
+error estimate on each pass and evaluates the nodes of one subinterval per call
+of the integrand (its source, `quadax/_adaptive.py`); diffrax 0.7.2, like
+torchdiffeq, takes the steps of an ODE solution one after another. The
+[Performance](https://khegazy.github.io/padaquad/performance.html) page
+measures all of them on the same integrals. For one-shot scalar quadrature with no
 autograd, `scipy.integrate.quad` is fine. The library's value is when the integrand is a learnable
 PyTorch function and many evaluations are needed.
 

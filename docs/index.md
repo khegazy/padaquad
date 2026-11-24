@@ -6,10 +6,6 @@ whose error is too large, and evaluates the integrand at many points of many
 subintervals in one call, on a CPU or a GPU. Gradients flow through the result,
 so the integral can be part of a training loss.
 
-```bash
-pip install padaquad
-```
-
 ::::{grid} 1 2 2 2
 :gutter: 3
 
@@ -17,8 +13,7 @@ pip install padaquad
 :link: getting_started/index
 :link-type: doc
 
-Install padaquad, compute a first integral, and see what it is for and what
-it is not for.
+Install padaquad and compute a first integral.
 :::
 
 :::{grid-item-card} User guide
@@ -46,6 +41,18 @@ Runnable scripts with their output, including the checks of each method's
 accuracy that you can run yourself.
 :::
 ::::
+
+```{include} ../README.md
+:start-after: "<!-- include-start: what-for -->"
+:end-before: "<!-- include-end: what-for -->"
+```
+
+## Comparisons with other libraries
+
+```{include} ../README.md
+:start-after: "<!-- include-start: comparisons -->"
+:end-before: "<!-- include-end: comparisons -->"
+```
 
 ```{toctree}
 :hidden:

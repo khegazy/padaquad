@@ -80,14 +80,29 @@ the padaquad log for them.
   (`docs/_ext/methods_table.py`, from the registries; tested by
   `tests/test_docs_methods_table.py`) and the Performance table
   (`docs/_ext/performance_table.py`, from `docs/performance/results_<device>.json`,
-  written by `examples/speed_test/torchdiffeq_comparison.py`; one section per
+  written by `examples/speed_test/library_comparison.py`; one section per
   file, tested by `tests/test_docs_performance_table.py`).
+- **Benchmark** (Performance page): `examples/speed_test/run_benchmark.sh`
+  (`setup` once, then `run`) on an otherwise idle compute node, never a login
+  node; it builds `$SCRATCH/padaquad_bench` (uv, CUDA torch and JAX, `.[bench]`)
+  and writes `results_cuda.json` then `results_cpu.json`. padaquad vs
+  torchdiffeq, diffrax, scipy (NumPy integrands, CPU) and quadax at
+  `atol = 1e-8`, `rtol = 0`, max norm (the page's "One tolerance for all"
+  explains why); padaquad at a `max_batch` fixed before timing; quadax's
+  `max_ninter` per integrand in `QUADAX_MAX_NINTER` (its loop runs all
+  `max_ninter + 1` iterations, so re-measure it when integrands change).
+  Commit the results from a clean tree (they record the commit; the results
+  files themselves do not count as dirty) and rewrite "What the results show"
+  in `docs/performance.md` by hand. The script imports JAX/diffrax/quadax/
+  torchdiffeq only inside functions (the docs build imports it).
 - README sections reused on the site are marked
   `<!-- include-start: NAME -->` / `<!-- include-end: NAME -->`; the Python
   blocks of the README and of `docs/development/adding_a_method.md`
   (`DOCUMENTS` in `tests/test_examples_run.py`) run in that test unless
   preceded by `<!-- not-tested -->`.
-- The gallery runs `examples/*.py` and `examples/verification/*.py`.
+- The gallery runs the scripts listed in `filename_pattern` (`docs/conf.py`):
+  `examples/*.py` tutorials, `examples/hard_integrals/*.py` and
+  `examples/verification/*.py`; matplotlib figures become the cards' thumbnails.
 
 mypy runs with every function annotated and every body checked
 (`disallow_untyped_defs`, `check_untyped_defs`, `disallow_any_generics`,
@@ -142,7 +157,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_error_integral_reference.py` | The `error_integral_reference` argument of `integrate()` |
 | `test_error_masks.py` | Vector-error machinery (norms, `failure_fraction`, rounding floor) in float32 and float64 |
 | `test_evaluate_f_on_mesh.py` | `_evaluate_f_on_mesh` and its evaluation paths |
-| `test_examples_run.py` | Runs `examples/*.py`, every script in `examples/verification/`, and every ```python block of the files in its `DOCUMENTS` (the README, `docs/development/adding_a_method.md`; except blocks preceded by `<!-- not-tested -->`) |
+| `test_examples_run.py` | Runs `quadrature_basics.py` and `gradient_of_integral.py` (with output markers), the self-checking gallery scripts (`test_example_script_runs`: the two other tutorials and `examples/hard_integrals/*.py`, `MPLBACKEND=Agg`), every script in `examples/verification/`, and every ```python block of the files in its `DOCUMENTS` (the README, `docs/development/adding_a_method.md`; except blocks preceded by `<!-- not-tested -->`) |
 | `test_max_adaptive_splits.py` | The `max_adaptive_splits` depth cap |
 | `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks`; `get_max_batch(f=..., t=...)` (measurement, argument checks) and the measured `result.max_batch` |
 | `test_methods_registry.py` | Registry consistency: table shapes and dtypes, `degree` / `error_exponent` types |
@@ -151,7 +166,8 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance; `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN) |
 | `test_solver_isolation.py` | Solvers do not share method objects or state |
 | `test_tracked_variables.py` | The `tracked_variables` feature |
-| `test_docs_performance_table.py` | The Performance page's rendering of `docs/performance/results_*.json`: no file, one, two (name order, hardware headings), unreadable files named in the error |
+| `test_docs_performance_table.py` | The Performance page's rendering of `docs/performance/results_*.json`: no file, one, two (name order, hardware headings), unreadable files named in the error; per integrand a library table and a padaquad table with one speedup column per library († not converged, — raised) |
+| `test_hard_integrands.py` | Every integrand of `integrand_dict` / `hard_integrand_dict` agrees across torch, NumPy and JAX (`xp`); the hard ones' exact solutions match `scipy.integrate.quad` on two intervals; gk21 reaches `atol = 1e-8` on each |
 | `test_split_statistics.py` | `n_start_steps` / `n_start_steps_split` / `max_split_depth` on integrands with known answers; `converged` against a hand-computed tolerance check (absolute and cumulative, with `y0`), in `failure_fraction` mode (including a NaN component), against the final integral, and its warning (numbers, output component, remedies); `max_adaptive_splits` type check |
 
 **Snapshot tests** are the regression net for internal refactors: the
@@ -186,7 +202,8 @@ padaquad/
 │   ├── uniform.py           # UniformAdaptiveQuadrature
 │   └── variable.py          # VariableAdaptiveQuadrature
 ├── _frontend.py           # user-facing integrate() and adaptive_quadrature() (build a solver, run it)
-├── examples.py            # integrand_dict (test integrands) + wolf_schlegel
+├── examples.py            # integrand_dict, hard_integrand_dict (test integrands,
+│                          #   any array module via xp=) + wolf_schlegel
 └── distributed.py         # multi-GPU / SLURM support (internal)
 ```
 
@@ -612,5 +629,6 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 ## Dependencies
 
 - **Runtime**: torch, numpy, scipy, einops, psutil.
-- **Dev**: pytest, pytest-cov, mypy, pre-commit, ruff, typos,
-  torchdiffeq (for the speed-test benchmark only).
+- **Dev**: pytest, pytest-cov, mypy, pre-commit, ruff, typos, matplotlib
+  (the gallery scripts' figures).
+- **Bench** (`.[bench]`, benchmark only): torchdiffeq, jax, diffrax, quadax.

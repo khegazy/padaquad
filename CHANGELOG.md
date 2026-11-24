@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **A benchmark against four libraries, with a run script.** `examples/speed_test/library_comparison.py` (renamed from `torchdiffeq_comparison.py`) compares padaquad with torchdiffeq, diffrax, scipy's `quad` and quadax on 11 integrands at one tolerance (`atol = 1e-8`, `rtol = 0`, max norm), with padaquad at a batch size fixed before timing. `examples/speed_test/run_benchmark.sh` builds the environment once and runs the GPU and CPU benchmarks on a compute node; the `bench` extra lists the compared libraries (torchdiffeq moves there from `dev`). The Performance page shows, per integrand, a table of the libraries and a table of padaquad's methods with one speedup column per library, measured on an NVIDIA A100 and an AMD EPYC 7763, and explains how each library's tolerance works.
+- **`hard_integrand_dict`**: `oscillatory`, `sharp_peak`, `kink` and `many_outputs` (1,000 outputs), with exact solutions for any bounds. The integrands of `integrand_dict` and `hard_integrand_dict` take the array module as the keyword argument `xp` (`torch` by default, `numpy` or `jax.numpy`).
+- **Examples**: a "Harder integrals" group (one script per integrand of `hard_integrand_dict`, with a plot of where the subintervals became small), integrating a neural network and its gradient, and optimizing a reaction path on the Müller-Brown potential with popcornn's PVRE loss. The gallery now shows matplotlib figures; matplotlib joins the `dev` and `docs` extras.
+
+### Changed
+
+- **Homepage**: no install block; "What padaquad is for" and the comparison with other libraries (now with diffrax and quadax) appear below the four buttons, and the separate "What padaquad is for" page is removed.
+
 ## [2.0.0] - 2026-11-17
 
 This release removes the solver's hidden warm-start state and the memory benchmark that ran before every `integrate` call without `max_batch` (it took longer than many integrals). A call reuses an earlier call's mesh and batch size only when they are passed to it (`result, state = solver.integrate(...)`, then `state=state`), so no call can change what another call reuses, and every call says which interval it integrates. See "Reusing the mesh and batch size" in the README and the user guide.

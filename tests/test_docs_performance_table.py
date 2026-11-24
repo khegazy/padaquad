@@ -150,6 +150,6 @@ def test_one_benchmark_table_and_one_padaquad_table_per_integrand(
     dopri5 = next(line for line in padaquad.splitlines() if line.startswith("| dopri5"))
     # Speedup = the library's median time / padaquad's; † after a library that
     # did not converge; — for one that raised.
-    assert gk21.endswith("| 4.0x | 8.0x † | 16.0x | — |")
-    assert dopri5.endswith("| 2.0x | 4.0x † | 8.0x | — |")
+    assert gk21.endswith("| 4x | 8x † | 16x | — |")
+    assert dopri5.endswith("| 2x | 4x † | 8x | — |")
     assert "| 7 |" in gk21  # the max_batch it ran with

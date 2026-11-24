@@ -54,14 +54,15 @@ for method in ("gk21", "gk7"):
     assert error < 1e-6
 
 # %%
-# The integrand and the width of every subinterval of the last run: the
-# widths drop by orders of magnitude at every peak.
-t = torch.linspace(0.0, 1.0, 200001, dtype=torch.float64).reshape(-1, 1)
+# The integrand and the width of every subinterval of the last run, from
+# t = 0.3 to 0.4 (about 20 of the peaks): the widths drop by an order of
+# magnitude at every peak.
+t = torch.linspace(0.3, 0.4, 20001, dtype=torch.float64).reshape(-1, 1)
 edges = torch.cat([a, a + torch.cumsum(result.h[:, 0], 0)])  # subinterval ends
 fig, (top, bottom) = plt.subplots(2, 1, sharex=True, figsize=(7, 5))
 top.plot(t[:, 0], f(t)[:, 0], lw=0.5)
 top.set_ylabel("f(t)")
 bottom.stairs(result.h[:, 0], edges, baseline=None)
-bottom.set(yscale="log", xlabel="t", ylabel="subinterval width")
+bottom.set(yscale="log", xlabel="t", ylabel="subinterval width", xlim=(0.3, 0.4))
 fig.tight_layout()
 plt.show()

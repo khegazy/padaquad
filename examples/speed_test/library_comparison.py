@@ -823,7 +823,9 @@ def render_markdown(results: dict[str, Any]) -> str:
                     cells.append("—")
                 else:
                     ratio = base["time_median_s"] / r["time_median_s"]
-                    cells.append(f"{ratio:.1f}x" + ("" if base["converged"] else " †"))
+                    # Two significant digits, so 0.004x is not shown as 0.0x.
+                    text = f"{ratio:.2g}" if ratio < 100 else f"{ratio:.0f}"
+                    cells.append(f"{text}x" + ("" if base["converged"] else " †"))
             lines.append("| " + " | ".join(cells) + " |")
         lines.append("")
     return "\n".join(lines) + "\n" + _summary(results)

@@ -9,9 +9,10 @@ step_idxs, method_output)``:
     ``max_mesh_steps >= 1``.
   * ``_evaluate_f_on_split_nodes`` (``take_gradient=False``): evaluates **all**
     waiting subintervals, in ``max_batch``-sized calls of ``f`` that may end
-    inside a subinterval. After each call it integrates the subintervals that
-    call completed and sends their values to ``values_device`` (the solver's
-    device, or ``result_device`` with ``large_f_output``).
+    inside a subinterval. The values of whole subintervals wait until they
+    reach ``buffer_bytes`` (``math.inf``: the whole pass; 0: after every call),
+    are then integrated and sent to ``values_device`` (the solver's device, or
+    ``result_device`` with ``trade_speed_for_memory``; None drops them).
 
 ``method_output`` must equal ``_calculate_integral`` on the returned nodes and
 values bit for bit, however the calls were cut (``_assert_integrated``).
@@ -279,7 +280,8 @@ class TestFullNodes:
 class TestSplitNodes:
     """Direct calls to ``_evaluate_f_on_split_nodes``.
 
-    Signature: ``(f, f_args, mesh, step_idxs, max_batch, values_device)``.
+    Signature: ``(f, f_args, mesh, step_idxs, max_batch, values_device,
+    buffer_bytes)``.
     One call evaluates every panel in ``step_idxs`` (chunking ``f`` into
     ``max_batch``-sized calls only for memory) and integrates them.
     """
@@ -301,7 +303,13 @@ class TestSplitNodes:
         step_idxs = _make_step_idxs()
         with pytest.raises(AssertionError):
             solver._evaluate_f_on_split_nodes(
-                _simple_integrand, (), mesh, step_idxs, values_device=CPU, max_batch=0
+                _simple_integrand,
+                (),
+                mesh,
+                step_idxs,
+                values_device=CPU,
+                buffer_bytes=0,
+                max_batch=0,
             )
 
     # -----------------------------------------------------------------------
@@ -330,6 +338,7 @@ class TestSplitNodes:
                 mesh,
                 step_idxs,
                 values_device=CPU,
+                buffer_bytes=0,
                 max_batch=max_batch,
             )
         )
@@ -363,7 +372,13 @@ class TestSplitNodes:
         )
         # max_batch large enough to hold all nodes -> one chunk.
         nodes_split, f_evals_split, _, _, state = solver._evaluate_f_on_split_nodes(
-            f, (), mesh, step_idxs, values_device=CPU, max_batch=n_panels * C
+            f,
+            (),
+            mesh,
+            step_idxs,
+            values_device=CPU,
+            buffer_bytes=0,
+            max_batch=n_panels * C,
         )
 
         _assert_integrated(solver, nodes_split, f_evals_split, state)
@@ -402,7 +417,13 @@ class TestSplitNodes:
         )
         # Comparison: split path with the loop active.
         nodes_split, f_evals_split, _, _, state = solver._evaluate_f_on_split_nodes(
-            f, (), mesh, step_idxs, values_device=CPU, max_batch=max_batch
+            f,
+            (),
+            mesh,
+            step_idxs,
+            values_device=CPU,
+            buffer_bytes=0,
+            max_batch=max_batch,
         )
 
         _assert_integrated(solver, nodes_split, f_evals_split, state)
@@ -440,7 +461,13 @@ class TestSplitNodes:
             return _simple_integrand(t, *args)
 
         solver._evaluate_f_on_split_nodes(
-            counting_f, (), mesh, step_idxs, values_device=CPU, max_batch=max_batch
+            counting_f,
+            (),
+            mesh,
+            step_idxs,
+            values_device=CPU,
+            buffer_bytes=0,
+            max_batch=max_batch,
         )
 
         total_nodes = n_panels * C
@@ -476,7 +503,13 @@ class TestSplitNodes:
             f, (), mesh, step_idxs, max_mesh_steps=n_panels
         )
         nodes_split, f_evals_split, _, idxs, state = solver._evaluate_f_on_split_nodes(
-            f, (), mesh, step_idxs, values_device=CPU, max_batch=max_batch
+            f,
+            (),
+            mesh,
+            step_idxs,
+            values_device=CPU,
+            buffer_bytes=0,
+            max_batch=max_batch,
         )
 
         _assert_integrated(solver, nodes_split, f_evals_split, state)
@@ -513,7 +546,13 @@ class TestSplitNodes:
 
         # Small max_batch forces the chunking loop.
         nodes_split, f_evals_split, _, _, state = solver._evaluate_f_on_split_nodes(
-            vec_integrand, (), mesh, step_idxs, values_device=CPU, max_batch=2 * C + 1
+            vec_integrand,
+            (),
+            mesh,
+            step_idxs,
+            values_device=CPU,
+            buffer_bytes=0,
+            max_batch=2 * C + 1,
         )
         _assert_integrated(solver, nodes_split, f_evals_split, state)
         assert f_evals_split.shape == (n_panels, C, 3)
@@ -550,7 +589,13 @@ class TestSplitNodes:
         # Small max_batch -> the loop runs several times and tracked variables
         # accumulate across chunks before being concatenated.
         nodes, f_evals, tracked, _idxs, state = solver._evaluate_f_on_split_nodes(
-            tracked_integrand, (), mesh, step_idxs, values_device=CPU, max_batch=C + 1
+            tracked_integrand,
+            (),
+            mesh,
+            step_idxs,
+            values_device=CPU,
+            buffer_bytes=0,
+            max_batch=C + 1,
         )
 
         _assert_integrated(solver, nodes, f_evals, state)
@@ -582,7 +627,13 @@ class TestSplitNodes:
         step_idxs = torch.tensor([1])  # only panel 1
         nodes, f_evals, _tracked, returned_idxs, state = (
             solver._evaluate_f_on_split_nodes(
-                _simple_integrand, (), mesh, step_idxs, values_device=CPU, max_batch=C
+                _simple_integrand,
+                (),
+                mesh,
+                step_idxs,
+                values_device=CPU,
+                buffer_bytes=0,
+                max_batch=C,
             )
         )
         assert nodes.shape == (1, C, 1)
@@ -611,6 +662,7 @@ class TestSplitNodes:
                 mesh,
                 step_idxs,
                 values_device=CPU,
+                buffer_bytes=0,
                 max_batch=max_batch,
             )
 
@@ -654,7 +706,7 @@ class TestIntegration:
             def inner(*args, **kwargs):
                 calls[kind] += 1
                 if kind == "split":
-                    devices.append(args[-1])
+                    devices.append(args[-2])
                 return (
                     torch.zeros(1, C, 1),
                     torch.zeros(1, C, 1),
@@ -674,6 +726,7 @@ class TestIntegration:
             "mesh": mesh,
             "mesh_trackers": mesh_trackers,
             "values_device": CPU,
+            "buffer_bytes": 0,
         }
         solver._batch = 10 * C
 
@@ -712,7 +765,7 @@ class TestIntegration:
             solver._batch = max_batch
             nodes_i, f_evals_i, _tracked, idxs_i, method_output = (
                 solver._evaluate_f_on_mesh(
-                    _simple_integrand, (), mesh, mesh_trackers, take_gradient, CPU
+                    _simple_integrand, (), mesh, mesh_trackers, take_gradient, CPU, 0
                 )
             )
             _assert_integrated(solver, nodes_i, f_evals_i, method_output)
@@ -752,7 +805,7 @@ class TestIntegration:
                     break
                 solver._batch = max_batch
                 ni, ei, _tracked, ii, mo = solver._evaluate_f_on_mesh(
-                    _simple_integrand, (), mesh, mesh_trackers, take_gradient, CPU
+                    _simple_integrand, (), mesh, mesh_trackers, take_gradient, CPU, 0
                 )
                 nodes_acc.append(ni)
                 f_evals_acc.append(ei)

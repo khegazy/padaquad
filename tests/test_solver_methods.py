@@ -293,7 +293,7 @@ class TestIntegrateRouting:
             {"loss_fxn": lambda r: r.integral.sum()},
             {"random_initial_mesh": False},
             {"error_integral_reference": 1.0},
-            {"large_f_output": True, "take_gradient": False},
+            {"trade_speed_for_memory": True, "take_gradient": False},
             {"enforce_convergence": False},
         ],
         ids=lambda o: next(iter(o)),

@@ -22,7 +22,7 @@ Two layers:
   * ``TestSplitNodesOOM`` — direct calls to ``_evaluate_f_on_split_nodes``,
     mirroring the direct-call unit tests in ``test_evaluate_f_on_mesh.py``.
   * ``TestIntegrateOOMRecovery`` — full ``.integrate()`` runs (the real user
-    path), with and without ``large_f_output``.
+    path), with and without ``trade_speed_for_memory``.
 
 The ``take_gradient=True`` path (``_evaluate_f_on_full_nodes``, its backward
 pass and restart) is tested in ``test_memory_state.py``.
@@ -130,7 +130,13 @@ def _make_mesh(n_panels: int) -> torch.Tensor:
 def _evaluate(solver, f, mesh, step_idxs, max_batch):
     """Evaluate and integrate every given subinterval, values on the CPU."""
     return solver._evaluate_f_on_split_nodes(
-        f, (), mesh, step_idxs, max_batch=max_batch, values_device=torch.device("cpu")
+        f,
+        (),
+        mesh,
+        step_idxs,
+        max_batch=max_batch,
+        values_device=torch.device("cpu"),
+        buffer_bytes=0,
     )
 
 
@@ -299,12 +305,12 @@ class TestIntegrateOOMRecovery:
     BIG_BATCH = 100_000  # >> any panel count, so the first batch OOMs
 
     @pytest.mark.parametrize("fail", list(FAILURE_MODES))
-    @pytest.mark.parametrize("large_f_output", [False, True])
-    def test_integrate_recovers_from_oom(self, large_f_output, fail):
+    @pytest.mark.parametrize("trade_speed_for_memory", [False, True])
+    def test_integrate_recovers_from_oom(self, trade_speed_for_memory, fail):
         """A full ``integrate()`` of ``f=1`` completes despite repeated OOMs,
         returns the correct integral (∫₀¹ 1 dt = 1), and returns a converged
         batch size ``<= limit``, with the values kept on the solver's device or
-        moved off it (``large_f_output``); ``take_gradient=False`` keeps us off
+        moved off it (``trade_speed_for_memory``); ``take_gradient=False`` keeps us off
         the full-nodes path. ``fail`` covers every recognized out-of-memory form;
         before 1.2.3 the CPU refusal and ``MemoryError`` crashed ``integrate``."""
         solver = make_uniform_solver(
@@ -316,7 +322,7 @@ class TestIntegrateOOMRecovery:
             mesh_init=T_INIT,
             mesh_final=T_FINAL,
             take_gradient=False,
-            large_f_output=large_f_output,
+            trade_speed_for_memory=trade_speed_for_memory,
         )
 
         assert oom.n_oom >= 1, "the integrand never OOM'd; test setup is wrong"
@@ -327,9 +333,9 @@ class TestIntegrateOOMRecovery:
     @pytest.mark.parametrize("limit_share", [0.3, 0.5, 0.8])
     @pytest.mark.parametrize("max_batch", [30, 60, 100, 150, 200])
     @pytest.mark.parametrize("method", ["bosh3", "gk15", "gk21"])
-    @pytest.mark.parametrize("large_f_output", [False, True])
+    @pytest.mark.parametrize("trade_speed_for_memory", [False, True])
     def test_integral_of_non_constant_f_survives_oom(
-        self, large_f_output, method, max_batch, limit_share
+        self, trade_speed_for_memory, method, max_batch, limit_share
     ):
         """``integrate`` of sin(40 t) + t with batches above ``limit_share`` of
         ``max_batch`` running out of memory: the first batch is retried
@@ -350,7 +356,7 @@ class TestIntegrateOOMRecovery:
             mesh_init=T_INIT,
             mesh_final=T_FINAL,
             take_gradient=False,
-            large_f_output=large_f_output,
+            trade_speed_for_memory=trade_speed_for_memory,
         )
         assert oom.n_oom >= 1, "the integrand never ran out of memory; wrong setup"
         assert result.converged

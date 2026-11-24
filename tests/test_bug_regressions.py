@@ -127,8 +127,9 @@ def test_same_f_is_gone():
 
 
 def test_conserve_memory_is_gone():
-    """conserve_memory was renamed large_f_output; the old name raises TypeError
-    from both entry points (padaquad.integrate routes it to the constructor)."""
+    """conserve_memory was removed (trade_speed_for_memory replaces it); the old
+    name raises TypeError from both entry points (padaquad.integrate routes it
+    to the constructor)."""
     with pytest.raises(TypeError, match="conserve_memory"):
         _solver().integrate(
             f=torch.exp,

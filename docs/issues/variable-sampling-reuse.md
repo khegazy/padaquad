@@ -112,8 +112,10 @@ All in `padaquad/quadrature/base.py`:
 - `_evaluate_f_on_mesh(...)` evaluates the tracked subintervals and integrates
   them. It dispatches to `_evaluate_f_on_full_nodes` (`take_gradient=True`)
   and `_evaluate_f_on_split_nodes` (`take_gradient=False`, which integrates
-  each call's completed subintervals and sends their values to the solver's
-  device or, with `large_f_output=True`, to `result_device`), and places nodes
+  the completed subintervals once per pass or, with
+  `trade_speed_for_memory=True`, whenever `evaluation_buffer` bytes of values
+  wait, and then sends their values to the solver's device or `result_device`),
+  and places nodes
   with `_compute_nodes(...)` at the node fractions.
 - `_record_results(...)` records accepted subintervals in mesh order.
 - With `take_gradient=False`, accepted subintervals are re-checked as the
@@ -188,7 +190,7 @@ the code.
 - `max_batch` smaller than one subinterval's new nodes, and the
   out-of-memory retry path (`tests/test_oom_recovery.py` has a simulated
   out-of-memory integrand).
-- `large_f_output=True` and `max_adaptive_splits`.
+- `trade_speed_for_memory=True` and `max_adaptive_splits`.
 
 ## Documentation to update when fixed
 

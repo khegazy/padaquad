@@ -144,13 +144,13 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_error_integral_reference.py` | The `error_integral_reference` argument of `integrate()`, with `take_gradient=True` (the one path where a batch is judged before the rest of its pass is evaluated) |
 | `test_error_masks.py` | Vector-error machinery (norms, `failure_fraction`, rounding floor) in float32 and float64 |
 | `test_evaluate_f_on_mesh.py` | `_evaluate_f_on_mesh` and its two evaluation paths; the returned `MethodOutput` equals one `_calculate_integral` call bit for bit however the calls of `f` were cut |
-| `test_large_f_output.py` | `large_f_output`: the same calls of `f`, mesh and integral (bit for bit) with and without it, for every `max_batch`, uniform and variable, CPU and CUDA; values on `result_device` in every result `loss_fxn` receives; lower GPU peak; the three `ValueError`s; every feature unchanged |
+| `test_trade_speed_for_memory.py` | `trade_speed_for_memory`, `evaluation_buffer`, `record_evaluations`: the same calls of `f`, mesh and integral (bit for bit) with every setting, for every `max_batch`, uniform and variable, CPU and CUDA; when the values are integrated (once per pass, per call, per buffer); the values' device in every result `loss_fxn` receives; lower GPU peak; the `ValueError`s; the four warnings, on the first call only (no state); without values, `state.mesh` is the `power_law` one; every feature unchanged |
 | `test_examples_run.py` | Runs `examples/*.py` (with output markers, or self-checking with asserts: `SELF_CHECKING_EXAMPLES`, `MPLBACKEND=Agg`), every script in `examples/verification/`, and every ```python block of the files in its `DOCUMENTS` (the README, `docs/development/adding_a_method.md`; except blocks preceded by `<!-- not-tested -->`) |
 | `test_max_adaptive_splits.py` | The `max_adaptive_splits` depth cap |
 | `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks`; `get_max_batch(f=..., t=...)` (measurement, argument checks) and the measured `result.max_batch` |
 | `test_methods_registry.py` | Registry consistency: table shapes and dtypes, `degree` / `error_exponent` types |
 | `test_multi_d_integrand.py` | Integrands with D > 1 outputs |
-| `test_oom_recovery.py` | The out-of-memory catch-and-retry path (direct calls of `_evaluate_f_on_split_nodes`, including retries that end inside a subinterval; `integrate` with and without `large_f_output`) |
+| `test_oom_recovery.py` | The out-of-memory catch-and-retry path (direct calls of `_evaluate_f_on_split_nodes`, including retries that end inside a subinterval; `integrate` with and without `trade_speed_for_memory`) |
 | `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance (with `take_gradient=False` the drift is between passes: `_cancelling_peak` hides its cancelling part in a narrow peak the first passes miss); `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN) |
 | `test_solver_isolation.py` | Solvers do not share method objects or state |
 | `test_tracked_variables.py` | The `tracked_variables` feature |
@@ -301,12 +301,21 @@ is a boolean array where `True` means the panel still needs evaluation.
      the next finishes it). Nodes via `_compute_nodes`; integral + error via
      `_calculate_integral` (weighted sum with the rule's `b` and `b_error`
      weights from `method.weights`; the error estimates are detached), which
-     the split path runs on each call's completed panels as the call returns
-     (bit-identical to one call on the pass: every row depends only on its
-     panel) and then sends the call's values, nodes and tracked variables to
-     `values_device` (the solver's device, or `result_device` with
-     `large_f_output`). Both return `(nodes, y, tracked, step_idxs,
-     MethodOutput)`; the pass's integral is `sum(mesh_quadratures)`.
+     the split path runs on the completed panels once per pass (`buffer_bytes`
+     = inf, the default) or, with `trade_speed_for_memory=True`, whenever
+     `evaluation_buffer` bytes of them wait (0, after every call, when None);
+     bit-identical either way (every row depends only on its panel). It then
+     sends their values and tracked variables to `values_device`: the
+     solver's device by default (the record moves the accepted ones to
+     `result_device` after the decision), `result_device` with
+     `trade_speed_for_memory`, None (dropped) with `record_evaluations=False`
+     (then `state.mesh` uses `merge_rule="power_law"`: `_merge_inputs` with
+     `y=None`). Nodes stay on the solver's device. Both return `(nodes, y,
+     tracked, step_idxs, MethodOutput)`; the pass's integral is
+     `sum(mesh_quadratures)`. `integrate` raises `ValueError` for
+     `trade_speed_for_memory` with `take_gradient=True` and for a misused
+     `evaluation_buffer`, and logs four warnings only when no `state` is given
+     (the first call of a series).
    - Compute error ratios (absolute or cumulative mode).
    - `_adaptively_increase_mesh`: panels with ratio `< 1` are accepted;
      panels with ratio `>= 1` are split at midpoint into two
@@ -528,14 +537,12 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   (`take_gradient=False`) and the `while output is None` loop of
   `_evaluate_f_on_full_nodes` (`take_gradient=True`).
 - **A pass's values are held once** (`take_gradient=False`):
-  `_evaluate_f_on_split_nodes` copies each call's values into one array for
-  the pass on `values_device`; `_adaptively_increase_mesh` does not filter (a
-  copy) the per-node arrays of a batch whose subintervals are all accepted; the
-  loop deletes the batch's values (`kept_y`, `intermediate_results`) after
-  recording. Measured (A100, 1e5 outputs, 1,000 gk21 subintervals): GPU peak
-  37.3 → 22.6 GB by default, 8.2 GB with `large_f_output`
-  (`examples/speed_test/large_f_output_memory.py`; table in
-  `docs/user_guide/devices_memory.md`).
+  `_adaptively_increase_mesh` does not filter (a copy) the per-node arrays of a
+  batch whose subintervals are all accepted; the loop deletes the batch's
+  values (`kept_y`, `intermediate_results`) after recording. The settings'
+  memory and time are measured by
+  `examples/speed_test/trade_speed_for_memory.py` (table in
+  `docs/user_guide/devices_memory.md`, section `ug-trade-speed-for-memory`).
 - `_get_usable_memory = free - buffer`, where
   `buffer = (1 - total_mem_usage) * total_memory`.
 - Supports both CUDA (`torch.cuda.mem_get_info`) and CPU
@@ -565,10 +572,9 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   components (`torch.func.grad` on detached parameters), integrated with
   `take_gradient=False` and no autograd graph; a callable `error_norm`
   chooses which components decide a split. It leaves out the terms of bounds
-  that depend on the parameters. `large_f_output=True` requires it: the
-  option raises `ValueError` with `take_gradient=True`, a bound or mesh that
-  requires grad, or an output that requires grad (`_GRADIENT_AS_OUTPUT_ADVICE`
-  in `quadrature/base.py` is the remedy all three messages give).
+  that depend on the parameters. `trade_speed_for_memory=True` with an
+  output that requires grad logs a warning pointing to it (the graph keeps
+  what `f` saved on the device, so moving the values saves little).
 
 ### `y0` additive offset
 

@@ -97,9 +97,11 @@ class IntegrationResult:
     the split counts are ``None``, and ``nodes``, ``y`` and
     ``tracked_variables`` keep one row per subinterval (shapes ``[N, C, T]``,
     ``[N, C, D]`` and ``[N, C, ...]``) instead of the flattened shapes below.
-    Its tensors are on the solver's device, except ``nodes``, ``y`` and
-    ``tracked_variables`` with ``integrate(large_f_output=True)``, which are on
-    ``result_device`` (see :ref:`ug-large-f-output`).
+    Its tensors are on the solver's device, except ``y`` and
+    ``tracked_variables`` with ``integrate(trade_speed_for_memory=True)``,
+    which are on ``result_device`` (see :ref:`ug-trade-speed-for-memory`).
+    With ``integrate(record_evaluations=False)``, ``y`` and
+    ``tracked_variables`` are ``None`` in both results.
 
     Attributes
     ----------
@@ -120,8 +122,9 @@ class IntegrationResult:
         ``[P, T]``.
     h : torch.Tensor
         Width of each accepted subinterval. Shape ``[N, T]``.
-    y : torch.Tensor
-        Integrand values at ``nodes``. Shape ``[P, D]``.
+    y : torch.Tensor or None
+        Integrand values at ``nodes``. Shape ``[P, D]``. ``None`` with
+        ``integrate(record_evaluations=False)``.
     tracked_variables : tuple of torch.Tensor or None
         Extra values the integrand returned beside its values, at ``nodes``
         and not integrated; ``None`` if it returned none. Each tensor is
@@ -191,7 +194,7 @@ class IntegrationResult:
     mesh_final: torch.Tensor
     nodes: torch.Tensor
     h: torch.Tensor
-    y: torch.Tensor
+    y: torch.Tensor | None
     mesh_quadratures: torch.Tensor
     mesh_quadrature_errors: torch.Tensor
     error_ratios: torch.Tensor

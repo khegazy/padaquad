@@ -46,6 +46,6 @@ written for users first.
 | `ug-reuse` | Reusing the mesh and batch size: `result, state = solver.integrate(...)`, `state=state`, `get_max_batch(f=...)` |
 | `ug-autodiff` | Gradients: `take_gradient` and `loss_fxn` |
 | `ug-memory` | Devices and memory: the memory benchmark, `max_batch`, `get_max_batch`, `total_mem_usage` |
-| `ug-large-f-output` | Devices and memory: `large_f_output`, the gradient as extra outputs |
+| `ug-trade-speed-for-memory` | Devices and memory: `trade_speed_for_memory`, `evaluation_buffer`, `record_evaluations`, the gradient as extra outputs |
 | `ug-convergence` | Troubleshooting: `converged`, `max_adaptive_splits` and the split statistics |
 | `ug-tracked-variables` | Repeated calls: tracked variables |

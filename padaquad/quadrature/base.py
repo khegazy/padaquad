@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+import itertools
 import logging
 import math
 import numbers
@@ -72,21 +73,6 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Iterator
 
     from padaquad.methods import MethodClass
-
-#: The remedy the large_f_output errors of ``integrate`` recommend: the gradient
-#: as extra outputs of f, integrated without an autograd graph.
-_GRADIENT_AS_OUTPUT_ADVICE = (
-    "To integrate a gradient without keeping an autograd graph, pass "
-    "take_gradient=False and let f return the gradient (and the integrand if "
-    "wanted) as extra outputs, computed with torch.func.grad from detached "
-    "parameters (or under torch.no_grad()): the gradient is then integrated like "
-    "any other output, and error_norm can apply the tolerance to the gradient's "
-    "outputs, so the mesh is refined for the gradient's accuracy. This leaves out "
-    "the terms that come from bounds that depend on the parameters. See the "
-    "example examples/gradient_as_output.py and "
-    "https://khegazy.github.io/padaquad/user_guide/devices_memory.html"
-    "#ug-large-f-output"
-)
 
 
 def _RK_integral(
@@ -384,10 +370,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # self.error_on_nonfinite and is (re)set each integrate() call.
         self.init_error_on_nonfinite = error_on_nonfinite
         self.error_on_nonfinite = error_on_nonfinite
-        # integrate(large_f_output=...), (re)set each integrate() call so the
-        # batch loop can check every output of f (_check_output_has_no_graph);
-        # False for direct callers of the evaluation helpers.
-        self.large_f_output = False
         self._check_total_mem_usage(total_mem_usage)
         self.init_total_mem_usage = total_mem_usage
         self.limit_benchmark_time = limit_benchmark_time
@@ -685,7 +667,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         enforce_convergence: bool | None = None,
         mesh_failure_tolerance: float | None = None,
         error_on_nonfinite: bool | None = None,
-        large_f_output: bool = False,
+        trade_speed_for_memory: bool = False,
+        evaluation_buffer: int | None = None,
+        record_evaluations: bool = True,
         result_device: str | torch.device | None = "cpu",
     ) -> tuple[IntegrationResult, IntegrationState]:
         """
@@ -810,15 +794,36 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         error_on_nonfinite : bool or None
             If True, raise ``ValueError`` when f returns NaN or Inf; if False,
             accept those subintervals and let the value reach the result.
-        large_f_output : bool
-            If True, the integrand values are moved to ``result_device`` as soon
-            as each call of f is reduced to its subintervals' contributions and
-            error estimates, so the solver's device holds about one call's
-            values instead of the whole pass's (the contributions and error
-            estimates stay). The mesh, the evaluations and the integral are the
-            same as with False (the default). Only with ``take_gradient=False``
-            and bounds and outputs that do not require grad (see
-            :ref:`the user guide <ug-large-f-output>`).
+        trade_speed_for_memory : bool
+            Only with ``take_gradient=False``. If False (default), a pass's
+            integrand values stay on the solver's device until all its
+            subintervals are evaluated; their contributions and error estimates
+            are then computed at once, and the accepted subintervals' values
+            move to ``result_device`` after the accept-or-split decision. If
+            True, the contributions and error estimates are computed as soon as
+            ``evaluation_buffer`` bytes of values of whole subintervals are
+            waiting, and those values move to ``result_device`` right away, so
+            the solver's device holds about one call's values (plus the
+            buffer) instead of the pass's, at a cost in time per call of f.
+            The calls of f, the mesh and the integral are the same either way
+            (see :ref:`the user guide <ug-trade-speed-for-memory>`).
+        evaluation_buffer : int or None
+            With ``trade_speed_for_memory=True``, how many bytes of integrand
+            values of whole subintervals may wait on the solver's device before
+            their contributions and error estimates are computed and they move
+            to ``result_device``. None (default) computes them after every call
+            of f. A larger buffer costs that much device memory and saves time
+            per call of f.
+        record_evaluations : bool
+            If True (default), the result holds the integrand values and
+            tracked variables at every node. If False, they are dropped as soon
+            as their subintervals' contributions and error estimates are
+            computed, so they are never moved or kept: ``y`` and
+            ``tracked_variables`` are None in the result and in the per-batch
+            results ``loss_fxn`` receives, the nodes stay on the solver's
+            device until the end, and the state's mesh is built with
+            ``merge_rule="power_law"``, because ``"predicted"`` reads the
+            values.
         result_device : str, torch.device or None
             Device of the per-subinterval arrays of the result (default
             ``"cpu"``); None keeps them on the solver's device. The integral and
@@ -845,9 +850,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             return values of shape [N, D]; if both ``mesh`` and ``state`` are
             given; if an option such as ``error_norm`` or
             ``total_mem_usage`` is invalid; if ``enforce_convergence`` is
-            True with ``take_gradient=True``; or if ``large_f_output`` is True
-            with ``take_gradient=True``, with a bound or ``mesh`` that requires
-            grad, or with an integrand whose output requires grad on any call.
+            True with ``take_gradient=True``; if ``trade_speed_for_memory`` is
+            True with ``take_gradient=True``; or if ``evaluation_buffer`` is
+            given with ``trade_speed_for_memory=False`` or is not an int >= 1.
         TypeError
             If ``enforce_convergence`` is neither None nor a bool.
         BackwardOutOfMemoryError
@@ -887,13 +892,18 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         result_device = _resolve_device(
             result_device or self.device, self.device.index or 0
         )
-        # Stored on self so the batch loop can check every output of f
-        # (_check_output_has_no_graph) without threading it through every
-        # signature, as error_on_nonfinite is.
-        self.large_f_output = large_f_output
-        # Where each pass's nodes, integrand values and tracked variables go
-        # once their subintervals are integrated (_evaluate_f_on_split_nodes).
-        values_device = result_device if self.large_f_output else self.device
+        # Where a pass's integrand values and tracked variables go once their
+        # subintervals are integrated (_evaluate_f_on_split_nodes): to
+        # result_device right away with trade_speed_for_memory, else they stay
+        # on the solver's device until the accept-or-split decision, after
+        # which the record moves the accepted ones; None drops them.
+        values_device: torch.device | None = None
+        if record_evaluations:
+            values_device = result_device if trade_speed_for_memory else self.device
+        # Bytes of values of whole subintervals that wait on the solver's
+        # device before they are integrated: the whole pass without
+        # trade_speed_for_memory, else the buffer (0: after every call of f).
+        buffer_bytes = (evaluation_buffer or 0) if trade_speed_for_memory else math.inf
 
         # The bounds: the given ones (they cut or extend a given mesh), else the
         # mesh's ends; without a mesh both must be given.
@@ -939,31 +949,69 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 "twice. Pass take_gradient=False and differentiate "
                 "result.integral, or leave enforce_convergence as None."
             )
-        # large_f_output moves the values off the solver's device; it has
-        # nothing to save with per-batch backward, and it cannot free values
-        # that carry an autograd graph (bounds here, f's parameters at the
-        # test call of f below).
-        if self.large_f_output and take_gradient:
+        # trade_speed_for_memory changes when a pass's values are integrated
+        # and moved; with per-batch backward each batch is one call of f,
+        # integrated and moved after its backward pass, so it has no effect.
+        if trade_speed_for_memory and take_gradient:
             raise ValueError(
-                "large_f_output=True cannot be used with take_gradient=True: with "
-                "take_gradient=True each pass is one call of f on whole "
-                "subintervals, whose values leave the solver's device after the "
-                "batch's backward pass, so there is nothing for large_f_output to "
-                "save. " + _GRADIENT_AS_OUTPUT_ADVICE
+                "trade_speed_for_memory=True cannot be used with "
+                "take_gradient=True: with take_gradient=True each batch is one "
+                "call of f on whole subintervals, integrated at once, whose values "
+                "leave the solver's device after the batch's backward pass, so "
+                "there is nothing to trade. Pass take_gradient=False; to integrate "
+                "a gradient without an autograd graph, see the example "
+                "examples/gradient_as_output.py."
             )
-        if self.large_f_output and (
-            mesh_init.requires_grad
-            or mesh_final.requires_grad
-            or (mesh is not None and mesh.requires_grad)
-        ):
-            raise ValueError(
-                "large_f_output=True cannot be used with a bound or mesh that "
-                "requires grad: every integrand value would carry the autograd "
-                "graph of its node until the end of the integration. The "
-                "derivative of the integral with respect to the upper bound b is "
-                "f(b) times the derivative of b (minus the same at the lower "
-                "bound), one call of f: detach the bounds and add it yourself. "
-                + _GRADIENT_AS_OUTPUT_ADVICE
+        if evaluation_buffer is not None:
+            if not trade_speed_for_memory:
+                raise ValueError(
+                    "evaluation_buffer applies only with trade_speed_for_memory="
+                    "True: with False a pass's values are integrated at once, "
+                    "after its last call of f. Pass trade_speed_for_memory=True, "
+                    "or leave evaluation_buffer as None."
+                )
+            if (
+                isinstance(evaluation_buffer, bool)
+                or operator.index(evaluation_buffer) < 1
+            ):
+                raise ValueError(
+                    "evaluation_buffer must be an int >= 1 (bytes); got "
+                    f"{evaluation_buffer!r}."
+                )
+        # Advice for a setting that works but may not do what it is meant to,
+        # given once, on the first call of a series (no state yet): later calls
+        # pass the state, and repeating it every optimizer step would bury it.
+        guide = (
+            "https://khegazy.github.io/padaquad/user_guide/devices_memory.html"
+            "#ug-trade-speed-for-memory"
+        )
+        if state is None and trade_speed_for_memory and evaluation_buffer is None:
+            logger.warning(
+                "trade_speed_for_memory=True without evaluation_buffer integrates "
+                "the values after every call of f, which costs about 0.1 ms per "
+                "call on a CPU and 0.2 ms on a GPU (measured with cheap "
+                "integrands). With many calls of f, or a fast f, pass "
+                "evaluation_buffer (bytes): values of whole subintervals then "
+                "wait on the solver's device until that many bytes are "
+                "integrated together. See %s",
+                guide,
+            )
+        if state is None and trade_speed_for_memory and result_device == self.device:
+            logger.warning(
+                "trade_speed_for_memory=True with result_device=None (or the "
+                "solver's device) keeps the integrand values on the solver's "
+                "device, so it saves little memory there. Pass result_device="
+                "'cpu' (the default) to move them off. See %s",
+                guide,
+            )
+        if state is None and not record_evaluations and self.merge_rule == "predicted":
+            logger.warning(
+                "record_evaluations=False: the state's mesh is built with "
+                "merge_rule='power_law', because merge_rule='predicted' reads the "
+                "integrand values, which are not kept. It refuses some merges of "
+                "wide subintervals, so a later call starting from the state may "
+                "begin with more subintervals. Construct the solver with "
+                "merge_rule='power_law' to choose it explicitly."
             )
 
         # Per-call error_on_nonfinite takes priority over the constructor value.
@@ -1023,11 +1071,21 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 "f must return values of shape [N, D] for points of shape "
                 f"[N, T]; got shape {list(test_integrand.shape)}."
             )
-        # The bounds do not require grad here with large_f_output (checked
-        # above), so an output that requires grad comes from f's parameters.
-        # Checked here, before any other call of f, and again on every call of
-        # the integration (an f may attach a graph only for some points).
-        self._check_output_has_no_graph(test_integrand)
+        # An output that requires grad (from f's parameters or from bounds that
+        # require grad) carries an autograd graph, which holds what f saved
+        # for its backward pass on the solver's device until result.integral
+        # is differentiated, wherever the values themselves go.
+        if state is None and trade_speed_for_memory and test_integrand.requires_grad:
+            logger.warning(
+                "trade_speed_for_memory=True with an integrand output that "
+                "requires grad: the autograd graph keeps what f saved for the "
+                "backward pass on the solver's device until result.integral is "
+                "differentiated, so moving the values may save little. To "
+                "integrate a gradient without an autograd graph, let f return it "
+                "as extra outputs, computed with torch.func.grad from detached "
+                "parameters (see examples/gradient_as_output.py and %s).",
+                guide,
+            )
         # The reference must match the integrand's D output components (or be
         # one value for all); another shape would broadcast silently.
         if error_integral_reference is not None and (
@@ -1123,8 +1181,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 mesh_trackers,
                 take_gradient,
                 values_device,
+                buffer_bytes,
             )
-            batch_size = y_step_eval.shape[0] * self.C
+            batch_size = len(nodes) * self.C
 
             # The running integral and the cumulative sums, with the record.
             t0 = time.time()
@@ -1179,9 +1238,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             )
             if self.speed_logger:
                 self.speed_logger.debug("calculate errors: %s", time.time() - t0)
-            assert len(y_step_eval) == len(error_ratios)
-            assert len(y_step_eval) - 1 == len(error_ratios_2steps), (
-                f" y: {y_step_eval.shape} | ratios: {error_ratios_2steps.shape} | nodes: {nodes.shape}"
+            assert len(nodes) == len(error_ratios)
+            assert len(nodes) - 1 == len(error_ratios_2steps), (
+                f"ratios: {error_ratios_2steps.shape} | nodes: {nodes.shape}"
             )
             logger.debug("error_ratios: %s", error_ratios)
             logger.debug("error_ratios_2steps: %s", error_ratios_2steps)
@@ -1253,9 +1312,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 extra_split_idxs=extra_split_idxs,
             )
             # The batch data passed in comes back filtered to the accepted steps
-            # (None comes back only for None inputs, as in _get_optimal_mesh).
+            # (None comes back only for None inputs: no values are kept with
+            # record_evaluations=False, and _get_optimal_mesh passes none).
             assert kept_output is not None
-            assert kept_y is not None
             assert kept_nodes is not None
             assert split_counts is not None  # returned non-None for non-None input
             method_output, y_step_eval, nodes = kept_output, kept_y, kept_nodes
@@ -1339,7 +1398,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     take_gradient=take_gradient,
                     results=intermediate_results,
                     mesh_indices=mesh_indices,
-                    result_device=result_device,
+                    # Without record_evaluations nothing large is recorded,
+                    # and the nodes stay on the solver's device until the end.
+                    result_device=result_device if record_evaluations else self.device,
                 )
                 del intermediate_results
 
@@ -1481,25 +1542,27 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         # Prune over-resolved steps and refine under-resolved ones. This re-derives
         # node positions through the method tableau, so it must run with the
-        # tableau and device-bound allocations co-located with its inputs. The
-        # bulky per-step field nodes already lives on result_device, so we
-        # evaluate the whole computation there -- moving the small tableau to
-        # result_device for the duration -- rather than copying it back to the
-        # integration device. The device-resident fields (mesh_quadratures,
-        # mesh_quadrature_errors, integral; see _DEVICE_RESIDENT_KEYS) are the
-        # ones that must be moved to result_device to join it.
-        with self._integration_on_device(result_device):
+        # tableau and device-bound allocations co-located with its inputs. It
+        # runs where the recorded nodes and values are (result_device, or the
+        # integration device with record_evaluations=False), moving the small
+        # tableau there for the duration rather than copying them back. The
+        # device-resident fields (mesh_quadratures, mesh_quadrature_errors,
+        # integral; see _DEVICE_RESIDENT_KEYS) are moved to join them. Without
+        # recorded values (record_evaluations=False) y is None, and
+        # _merge_inputs uses merge_rule="power_law".
+        optimal_device = record["nodes"].device
+        with self._integration_on_device(optimal_device):
             mesh_optimal = self._get_optimal_mesh(
                 nodes=record["nodes"],
-                mesh_quadratures=record["mesh_quadratures"].to(result_device),
+                mesh_quadratures=record["mesh_quadratures"].to(optimal_device),
                 # Absolute values: the merge sums two subintervals' errors,
                 # which signed values could cancel.
                 mesh_quadrature_errors=torch.abs(record["mesh_quadrature_errors"]).to(
-                    result_device
+                    optimal_device
                 ),
-                integral=record["integral"].to(result_device),
-                mesh=mesh.to(result_device),
-                y=record["y"],
+                integral=record["integral"].to(optimal_device),
+                mesh=mesh.to(optimal_device),
+                y=record.get("y"),
             )
         # mesh_optimal is the mesh a later call starts from when the caller
         # passes it as mesh=, so it lives on the integration device (its endpoints
@@ -1510,13 +1573,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # gradient reaches it through this call's nodes, not through the mesh.
         mesh_optimal = mesh_optimal.to(self.device).detach()
 
-        # Move the resident record fields to result_device so the rest of the
-        # returned IntegrationResult lives on result_device. The integration-
-        # output scalars (integral, integral_error) and mesh_optimal stay on the
-        # integration device -- the scalars are the primary answer and
-        # mesh_optimal is reused as the warm-start mesh.
-        for key in self._DEVICE_RESIDENT_KEYS:
-            if key in record and key not in self._RESULT_INTEGRATION_KEYS:
+        # Move the record fields still on the integration device (the resident
+        # ones; every one with record_evaluations=False) to result_device so
+        # the rest of the returned IntegrationResult lives on result_device.
+        # The integration-output scalars (integral, integral_error) and
+        # mesh_optimal stay on the integration device -- the scalars are the
+        # primary answer and mesh_optimal is reused as the warm-start mesh.
+        for key in record:
+            if key not in self._RESULT_INTEGRATION_KEYS:
                 record[key] = record[key].to(result_device)
 
         # Each tracked variable is its own record key (see _record_fields), in
@@ -1537,7 +1601,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh_final=mesh_final,
             nodes=self._flatten_output(record["nodes"]),
             h=record["h"],
-            y=self._flatten_output(record["y"]),
+            y=self._flatten_output(record["y"]) if "y" in record else None,
             # Flatten tracked variables the same way so they stay aligned with
             # the flattened nodes/y.
             tracked_variables=tuple(self._flatten_output(tv) for tv in record_tracked)
@@ -1990,8 +2054,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             method_output.integral_error = torch.sum(
                 method_output.mesh_quadrature_errors, 0
             )
-        # The per-node arrays are on the solver's device, or on result_device
-        # with large_f_output; a mask indexes only a tensor on its own device
+        # The values are on the solver's device, or on result_device with
+        # trade_speed_for_memory; a mask indexes only a tensor on its own device
         # (or a CUDA tensor with a CPU mask), so it follows each array.
         # Indexing copies them, so a batch whose subintervals are all accepted
         # is kept as it is: the copy would hold its values twice (measured: the
@@ -2052,35 +2116,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # apart at the end of the run.
             return integrand, tuple(tracked) or None
         return out, None
-
-    def _check_output_has_no_graph(self, integrand: torch.Tensor) -> None:
-        """
-        Raise ``ValueError`` if f's output requires grad with ``large_f_output``.
-
-        With ``take_gradient=False`` the autograd graph of every value that
-        requires grad is kept on the solver's device until the integral is
-        differentiated, so moving the values to ``result_device`` would save
-        little or nothing. Called on the one-point shape check of f and on every
-        call of the integration's batch loop (``_evaluate_f_in_batches``).
-
-        Parameters
-        ----------
-        integrand : torch.Tensor
-            The integrand values of one call of f. Shape: [B, D].
-
-        Raises
-        ------
-        ValueError
-            If ``self.large_f_output`` is True and ``integrand`` requires grad.
-        """
-        if self.large_f_output and integrand.requires_grad:
-            raise ValueError(
-                "large_f_output=True needs an integrand output that does not "
-                "require grad, on every call of f: with take_gradient=False the "
-                "autograd graph of every value is kept on the solver's device "
-                "until result.integral is differentiated, so moving the values "
-                "saves little or nothing. " + _GRADIENT_AS_OUTPUT_ADVICE
-            )
 
     def _check_f_output_finite(
         self, integrand: torch.Tensor, nodes_flat: torch.Tensor, max_report: int = 5
@@ -2154,10 +2189,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh: torch.Tensor,
         mesh_trackers: torch.Tensor,
         take_gradient: bool,
-        values_device: torch.device,
+        values_device: torch.device | None,
+        buffer_bytes: float,
     ) -> tuple[
         torch.Tensor,
-        torch.Tensor,
+        torch.Tensor | None,
         tuple[torch.Tensor, ...] | None,
         torch.Tensor,
         MethodOutput,
@@ -2184,20 +2220,23 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             that still needs evaluation.
         take_gradient : bool
             If True, evaluate whole subintervals with one call of ``f`` per batch.
-        values_device : torch.device
-            With ``take_gradient`` False, the device the nodes, integrand values
-            and tracked variables are returned on: the solver's device, or
-            ``result_device`` with ``large_f_output``.
+        values_device : torch.device or None
+            The device the integrand values and tracked variables are returned
+            on (with ``take_gradient`` True, always the solver's device); None
+            drops them (``record_evaluations=False``).
+        buffer_bytes : float
+            With ``take_gradient`` False, see ``_evaluate_f_on_split_nodes``.
 
         Returns
         -------
         tuple
             ``(nodes, f_evals, tracked, step_idxs, method_output)``: the nodes
-            [N, C, T] and integrand values [N, C, D] of the N evaluated
-            subintervals, their detached tracked variables (each [N, C, ...]) or
-            None, the indices of their left mesh points [N], ascending, and
-            their integral, error estimate, contributions and widths
-            (``MethodOutput``, on the solver's device).
+            [N, C, T] (on the solver's device) and integrand values [N, C, D] of
+            the N evaluated subintervals, their detached tracked variables (each
+            [N, C, ...]) or None, the indices of their left mesh points [N],
+            ascending, and their integral, error estimate, contributions and
+            widths (``MethodOutput``, on the solver's device). ``f_evals`` and
+            ``tracked`` are None when ``values_device`` is None.
         """
         # The size of the next call of f: this call's batch size, or 10 times
         # it while it has not converged (_batch_for).
@@ -2212,11 +2251,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         step_idxs = step_idxs[mesh_trackers]
 
         if take_gradient:
-            return self._evaluate_f_on_full_nodes(
-                f, f_args, mesh, step_idxs, max_batch // self.C
+            nodes, f_evals, tracked, step_idxs, method_output = (
+                self._evaluate_f_on_full_nodes(
+                    f, f_args, mesh, step_idxs, max_batch // self.C
+                )
             )
+            if values_device is None:
+                return nodes, None, None, step_idxs, method_output
+            return nodes, f_evals, tracked, step_idxs, method_output
         return self._evaluate_f_on_split_nodes(
-            f, f_args, mesh, step_idxs, max_batch, values_device
+            f, f_args, mesh, step_idxs, max_batch, values_device, buffer_bytes
         )
 
     def _evaluate_f_on_full_nodes(
@@ -2379,8 +2423,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         ------
         ValueError
             If f returns another number of values than the points it was
-            given, (with ``error_on_nonfinite``) a NaN or Inf value, or (with
-            ``large_f_output``) values that require grad.
+            given, or (with ``error_on_nonfinite``) a NaN or Inf value.
         torch.OutOfMemoryError
             If one node does not fit in memory (max_batch is already 1).
         """
@@ -2416,7 +2459,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     "for points of shape [N, T]."
                 )
             self._check_f_output_finite(integrand, points)
-            self._check_output_has_no_graph(integrand)
             num_nodes_evaluated += len(integrand)
             # A call that ran is known to fit; the next call may be 10 times
             # larger while the batch size has not converged (_batch_for).
@@ -2434,10 +2476,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh: torch.Tensor,
         step_idxs: torch.Tensor,
         max_batch: int,
-        values_device: torch.device,
+        values_device: torch.device | None,
+        buffer_bytes: float,
     ) -> tuple[
         torch.Tensor,
-        torch.Tensor,
+        torch.Tensor | None,
         tuple[torch.Tensor, ...] | None,
         torch.Tensor,
         MethodOutput,
@@ -2446,13 +2489,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Evaluate and integrate all the given subintervals, max_batch nodes per call.
 
         Used when ``take_gradient`` is False. The calls of f run through the
-        nodes of every given subinterval in order and may end inside one. After
-        each call, the subintervals whose nodes are now all evaluated get their
-        contributions, error estimates and widths (``_calculate_integral``, on
-        the solver's device), and their nodes' integrand values and tracked
-        variables go to ``values_device``. Each subinterval's numbers depend
-        only on its own nodes and values, so they are the same, bit for bit,
-        as if the whole pass were integrated at once; the pass's integral is
+        nodes of every given subinterval in order and may end inside one. The
+        values of the subintervals whose nodes are all evaluated wait on the
+        solver's device until they reach ``buffer_bytes`` (or the last call
+        ends); then their contributions, error estimates and widths are
+        computed (``_calculate_integral``, on the solver's device), and their
+        values and tracked variables go to ``values_device``. Each
+        subinterval's numbers depend only on its own nodes and values, so they
+        are the same, bit for bit, whatever the buffer; the pass's integral is
         their sum.
 
         Parameters
@@ -2468,96 +2512,139 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             evaluation, ascending. Shape: [K].
         max_batch : int
             Largest number of nodes per call of ``f``, at least 1.
-        values_device : torch.device
-            Device of the returned nodes, integrand values and tracked
-            variables: the solver's device, or ``result_device`` with
-            ``large_f_output``, so the solver's device holds about one call's
-            values instead of the whole pass's.
+        values_device : torch.device or None
+            Device of the returned integrand values and tracked variables: the
+            solver's device (``trade_speed_for_memory=False``), or
+            ``result_device`` (True), so the solver's device holds about one
+            call's values plus the buffer instead of the whole pass's. None
+            drops them once integrated (``record_evaluations=False``).
+        buffer_bytes : float
+            Bytes of values of whole subintervals that wait before they are
+            integrated: ``math.inf`` integrates the whole pass at once, after
+            its last call of f (``trade_speed_for_memory=False``); 0 after
+            every call that completes a subinterval.
 
         Returns
         -------
         tuple
             ``(nodes, f_evals, tracked, step_idxs, method_output)``: the nodes
-            [K, C, T] and integrand values [K, C, D] of the K subintervals and
-            their detached tracked variables (each [K, C, ...]) or None, on
-            ``values_device``; ``step_idxs``; and their integral, error
-            estimate, contributions and widths (``MethodOutput``, on the
-            solver's device).
+            [K, C, T] of the K subintervals, on the solver's device; their
+            integrand values [K, C, D] and detached tracked variables (each
+            [K, C, ...]) or None, on ``values_device`` (both None when it is
+            None); ``step_idxs``; and their integral, error estimate,
+            contributions and widths (``MethodOutput``, on the solver's
+            device).
         """
         C = self.C
         nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
         nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
 
-        # Per call: the contributions, error estimates and widths of the
-        # subintervals it completed (solver's device). Their values and tracked
-        # variables are copied into arrays for the whole pass on values_device,
-        # allocated at the first call (once f's output shape is known), so that
-        # device never holds the pass's values twice (pieces and their join).
+        # Per integration of waiting values: the contributions, error estimates
+        # and widths of their subintervals (solver's device). The values and
+        # tracked variables are written into arrays for the whole pass on
+        # values_device, allocated at the first integration, unless the first
+        # integration covers the whole pass, whose values are then kept as
+        # they are (no copy on the same device).
         quadrature_parts: list[torch.Tensor] = []
         error_parts: list[torch.Tensor] = []
         width_parts: list[torch.Tensor] = []
         f_evals: torch.Tensor | None = None
         tracked_out: tuple[torch.Tensor, ...] | None = None
+        # Values (and tracked variables) of whole subintervals not integrated
+        # yet, [n, C, D] each, and their size in bytes.
+        waiting: list[torch.Tensor] = []
+        waiting_tracked: list[tuple[torch.Tensor, ...]] = []
+        waiting_bytes = 0
         # The values (and tracked variables) of a subinterval the last call
         # ended inside: fewer than C rows, joined to the next call's.
         leftover: torch.Tensor | None = None
         leftover_tracked: tuple[torch.Tensor, ...] | None = None
         n_done = 0  # subintervals integrated so far
-        for integrand, tracked in self._evaluate_f_in_batches(
-            f, f_args, nodes_flat, max_batch
+        # A final (None, None) after the last call integrates what still waits.
+        for integrand, tracked in itertools.chain(
+            self._evaluate_f_in_batches(f, f_args, nodes_flat, max_batch),
+            [(None, None)],
         ):
-            values = integrand if leftover is None else torch.cat([leftover, integrand])
-            tracked_values = None
-            if tracked is not None:
-                tracked_values = tuple(tv.detach() for tv in tracked)
-                if leftover_tracked is not None:
-                    tracked_values = tuple(
-                        torch.cat([old, new])
-                        for old, new in zip(
-                            leftover_tracked, tracked_values, strict=True
-                        )
-                    )
-            n_whole = len(values) // C
-            if n_whole > 0:
-                whole_values = values[: n_whole * C].reshape(n_whole, C, -1)
-                out = self._calculate_integral(
-                    nodes[n_done : n_done + n_whole], whole_values
+            if integrand is not None:
+                values = (
+                    integrand if leftover is None else torch.cat([leftover, integrand])
                 )
-                quadrature_parts.append(out.mesh_quadratures)
-                error_parts.append(out.mesh_quadrature_errors)
-                width_parts.append(out.h)
+                tracked_values = None
+                if tracked is not None:
+                    tracked_values = tuple(tv.detach() for tv in tracked)
+                    if leftover_tracked is not None:
+                        tracked_values = tuple(
+                            torch.cat([old, new])
+                            for old, new in zip(
+                                leftover_tracked, tracked_values, strict=True
+                            )
+                        )
+                n_whole = len(values) // C
+                if n_whole > 0:
+                    waiting.append(values[: n_whole * C].reshape(n_whole, C, -1))
+                    waiting_bytes += waiting[-1].numel() * waiting[-1].element_size()
+                    if tracked_values is not None:
+                        waiting_tracked.append(
+                            tuple(
+                                tv[: n_whole * C].reshape(n_whole, C, *tv.shape[1:])
+                                for tv in tracked_values
+                            )
+                        )
+                # The rows past the last whole subinterval; a copy, so the
+                # slice does not keep this call's values alive.
+                has_rest = len(values) > n_whole * C
+                leftover = values[n_whole * C :].clone() if has_rest else None
+                leftover_tracked = (
+                    tuple(tv[n_whole * C :].clone() for tv in tracked_values)
+                    if has_rest and tracked_values is not None
+                    else None
+                )
+                del values, tracked_values, integrand, tracked
+                if waiting_bytes < buffer_bytes or not waiting:
+                    continue
+            elif not waiting:
+                break
+
+            # Integrate the waiting subintervals and send their values on.
+            block = waiting[0] if len(waiting) == 1 else torch.cat(waiting)
+            block_tracked = (
+                None
+                if not waiting_tracked
+                else tuple(
+                    tv[0] if len(tv) == 1 else torch.cat(tv)
+                    for tv in zip(*waiting_tracked, strict=True)
+                )
+            )
+            waiting, waiting_tracked, waiting_bytes = [], [], 0
+            n_block = len(block)
+            out = self._calculate_integral(nodes[n_done : n_done + n_block], block)
+            quadrature_parts.append(out.mesh_quadratures)
+            error_parts.append(out.mesh_quadrature_errors)
+            width_parts.append(out.h)
+            if values_device is not None and n_block == len(step_idxs):
+                f_evals = block.to(values_device)
+                if block_tracked is not None:
+                    tracked_out = tuple(tv.to(values_device) for tv in block_tracked)
+            elif values_device is not None:
                 if f_evals is None:
-                    f_evals = whole_values.new_empty(
-                        (len(step_idxs), *whole_values.shape[1:]), device=values_device
+                    f_evals = block.new_empty(
+                        (len(step_idxs), *block.shape[1:]), device=values_device
                     )
-                f_evals[n_done : n_done + n_whole] = whole_values
-                if tracked_values is not None:
+                f_evals[n_done : n_done + n_block] = block
+                if block_tracked is not None:
                     if tracked_out is None:
                         tracked_out = tuple(
                             tv.new_empty(
-                                (len(step_idxs), C, *tv.shape[1:]), device=values_device
+                                (len(step_idxs), *tv.shape[1:]), device=values_device
                             )
-                            for tv in tracked_values
+                            for tv in block_tracked
                         )
-                    for out_tv, tv in zip(tracked_out, tracked_values, strict=True):
-                        out_tv[n_done : n_done + n_whole] = tv[: n_whole * C].reshape(
-                            n_whole, C, *tv.shape[1:]
-                        )
-                n_done += n_whole
-                del whole_values, out
-            # The rows past the last whole subinterval; a copy, so the slice
-            # does not keep this call's values alive.
-            has_rest = len(values) > n_whole * C
-            leftover = values[n_whole * C :].clone() if has_rest else None
-            leftover_tracked = (
-                tuple(tv[n_whole * C :].clone() for tv in tracked_values)
-                if has_rest and tracked_values is not None
-                else None
-            )
-            del values, tracked_values, integrand, tracked
+                    for out_tv, tv in zip(tracked_out, block_tracked, strict=True):
+                        out_tv[n_done : n_done + n_block] = tv
+            n_done += n_block
+            del block, block_tracked, out
         assert leftover is None
         assert n_done == len(step_idxs)
-        assert f_evals is not None
 
         mesh_quadratures = torch.cat(quadrature_parts)
         mesh_quadrature_errors = torch.cat(error_parts)
@@ -2570,7 +2657,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh_quadrature_errors=mesh_quadrature_errors,
             h=torch.cat(width_parts),
         )
-        return nodes.to(values_device), f_evals, tracked_out, step_idxs, method_output
+        return nodes, f_evals, tracked_out, step_idxs, method_output
 
     #: log2 of a pair's width ratio is rounded to a multiple of 2**-48 before
     #: pairs are grouped by ratio in ``_predict_merged_errors``. Pairs of exactly
@@ -2594,7 +2681,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     def _merge_inputs(
         self,
         nodes: torch.Tensor,
-        y: torch.Tensor,
+        y: torch.Tensor | None,
         mesh_quadratures: torch.Tensor,
     ) -> tuple[torch.Tensor | None, float]:
         """
@@ -2621,14 +2708,17 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
           ``_predict_merged_errors(...) + |e_i| + |e_{i+1}|``, cutoff
           ``remove_cut``. With more than one coordinate (T > 1) no
           interpolation along a subinterval is defined, so a warning is
-          logged and ``"power_law"`` is used.
+          logged and ``"power_law"`` is used; without stored values
+          (``integrate(record_evaluations=False)``, which warns), ``"power_law"``
+          is used too.
 
         Parameters
         ----------
         nodes : torch.Tensor
             Nodes of each subinterval. Shape: [N, C, T].
-        y : torch.Tensor
-            Integrand values at the nodes. Shape: [N, C, D].
+        y : torch.Tensor or None
+            Integrand values at the nodes, shape [N, C, D], or None when they
+            were not kept.
         mesh_quadratures : torch.Tensor
             Integral contribution of each subinterval. Shape: [N, D].
 
@@ -2643,7 +2733,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         if self.merge_rule == "sum":
             return None, self.remove_cut
         power_law_cut = self.remove_cut / 2 ** (self.method.error_exponent - 1)
-        if self.merge_rule == "power_law" or len(nodes) < 2:
+        if self.merge_rule == "power_law" or y is None or len(nodes) < 2:
             return None, power_law_cut
         if nodes.shape[-1] != 1:
             logger.warning(
@@ -2972,7 +3062,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadrature_errors: torch.Tensor,
         integral: torch.Tensor,
         mesh: torch.Tensor,
-        y: torch.Tensor,
+        y: torch.Tensor | None,
     ) -> torch.Tensor:
         """
         Build the optimal mesh from the results of the integration loop.
@@ -3013,9 +3103,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             The final integral. Shape: [D].
         mesh : torch.Tensor
             The mesh at the end of the loop. Shape: [M, T].
-        y : torch.Tensor
-            Integrand values at ``nodes``, used by ``merge_rule="predicted"``.
-            Shape: [N, C, D].
+        y : torch.Tensor or None
+            Integrand values at ``nodes``, used by ``merge_rule="predicted"``,
+            shape [N, C, D]; None (not kept) uses ``"power_law"``.
 
         Returns
         -------
@@ -3868,9 +3958,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             keys and one key per tracked variable.
         """
         assert results.loss is not None, "loss must be set before recording"
+        # y is None without record_evaluations; it is then not recorded.
         fields: dict[str, torch.Tensor] = {
             key: getattr(results, key)
             for key in self._RECORD_SCALAR_KEYS + self._RECORD_STEP_KEYS
+            if getattr(results, key) is not None
         }
         for i, tracked in enumerate(results.tracked_variables or ()):
             fields[f"{self._TRACKED_KEY_PREFIX}{i}"] = tracked
@@ -4184,7 +4276,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         loss_fxn: Callable[[IntegrationResult], torch.Tensor],
         mesh_init: torch.Tensor,
         mesh_final: torch.Tensor,
-        values_device: torch.device,
+        values_device: torch.device | None,
     ) -> dict[str, torch.Tensor]:
         """
         Remove from the record the subintervals that failed the re-check.
@@ -4216,11 +4308,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Lower integration bound, for the removed subintervals' result.
         mesh_final : torch.Tensor
             Upper integration bound, for the removed subintervals' result.
-        values_device : torch.device
-            Device of the removed subintervals' nodes, integrand values and
-            tracked variables in their result: the solver's device, or
-            ``result_device`` with ``large_f_output``, as in the per-batch
-            result ``loss_fxn`` receives.
+        values_device : torch.device or None
+            Device of the removed subintervals' integrand values and tracked
+            variables in their result: the solver's device, or
+            ``result_device`` with ``trade_speed_for_memory``, as in the
+            per-batch result ``loss_fxn`` receives (None: the record holds no
+            values).
 
         Returns
         -------
@@ -4229,14 +4322,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         removed = ~record_keep_mask
         # The removed subintervals' fields, laid out like the per-batch result
-        # loss_fxn receives: the per-node arrays (nodes, y, tracked variables)
-        # on values_device, the per-subinterval ones on the integration device
-        # (in the record, all but mesh_quadratures and mesh_quadrature_errors
-        # live on result_device).
+        # loss_fxn receives: the values (y, tracked variables) on values_device,
+        # the rest on the integration device (in the record, all but
+        # mesh_quadratures and mesh_quadrature_errors live on result_device
+        # unless record_evaluations=False).
         gone = {
             key: value[removed.to(value.device)].to(
                 values_device
-                if key in ("nodes", "y") or key.startswith(self._TRACKED_KEY_PREFIX)
+                if values_device is not None
+                and (key == "y" or key.startswith(self._TRACKED_KEY_PREFIX))
                 else self.device
             )
             for key, value in record.items()
@@ -4249,7 +4343,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             integral_error=removed_err_sum,
             nodes=gone["nodes"],
             h=gone["h"],
-            y=gone["y"],
+            y=gone.get("y"),
             tracked_variables=tuple(
                 value
                 for key, value in gone.items()

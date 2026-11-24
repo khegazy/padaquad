@@ -382,10 +382,10 @@ def test_test_calls_with_both_solvers_and_dtypes(kind, method, dtype):
         (math.inf, 3, False, 3, "cc9"),
     ],
 )
-def test_large_f_output_growth_and_retries_keep_values_aligned(
+def test_trade_speed_for_memory_growth_and_retries_keep_values_aligned(
     limit, start, converged, n, method
 ):
-    """``large_f_output=True`` with growth inside one pass and out-of-memory
+    """``trade_speed_for_memory=True`` with growth inside one pass and out-of-memory
     retries: the integral is right, and every returned value and tracked
     variable is the one f returned for its node."""
 
@@ -399,7 +399,7 @@ def test_large_f_output_growth_and_retries_keep_values_aligned(
         f,
         state=IntegrationState(even_mesh(n), start, converged),
         take_gradient=False,
-        large_f_output=True,
+        trade_speed_for_memory=True,
     )
     assert float(result.integral) == pytest.approx(EXACT, abs=1e-8)
     assert torch.equal(result.y, torch.sin(40 * result.nodes) + result.nodes)

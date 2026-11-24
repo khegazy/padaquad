@@ -14,9 +14,10 @@ gradient has many components, or the graph is large, a third way is often
 better: let ``f`` return the gradient of the integrand as extra outputs. The
 integral of those outputs is the gradient of the integral (the parameters do
 not change the bounds here, so no boundary terms appear), and no graph is kept
-after a call of ``f``. This is also the only way to use ``large_f_output=True``,
-which moves the integrand values off the solver's device as soon as each call
-of ``f`` is integrated.
+after a call of ``f``. It is also what makes ``trade_speed_for_memory=True``
+worthwhile for a gradient: that option moves the integrand values off the
+solver's device as soon as they are integrated, which saves little when an
+autograd graph keeps what ``f`` saved for its backward pass on the device.
 
 The integrand here is ``f(t; a, b) = a sin(b t^2)`` on ``[0, 3]``, with
 parameters ``theta = (a, b)``. Its gradient,
@@ -118,7 +119,6 @@ def run(error_norm, rtol):
         rtol=rtol,
         error_norm=error_norm,
         take_gradient=False,
-        large_f_output=True,
         **BOUNDS,
     )
     error = ((result.integral - exact).abs() / exact.abs()).tolist()

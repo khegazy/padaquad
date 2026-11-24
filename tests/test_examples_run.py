@@ -15,7 +15,7 @@ The examples are also useful as integration smoke tests that exercise:
   - ``take_gradient=True`` autograd flow
   - warm starts across iterations (``state=state``)
   - the analytic-vs-autodiff consistency check (path A vs path B)
-  - the gradient as extra outputs of f, with ``large_f_output=True``
+  - the gradient as extra outputs of f, without an autograd graph
     (``gradient_as_output.py``, which checks itself with assert statements)
 """
 

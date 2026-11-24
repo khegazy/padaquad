@@ -96,7 +96,7 @@ def _run(
     f,
     take_gradient,
     mesh_final=T_FINAL,
-    large_f_output=False,
+    trade_speed_for_memory=False,
     max_batch=MAX_BATCH,
     **kwargs,
 ):
@@ -106,7 +106,7 @@ def _run(
         mesh_final=mesh_final,
         take_gradient=take_gradient,
         max_batch=max_batch,
-        large_f_output=large_f_output,
+        trade_speed_for_memory=trade_speed_for_memory,
         **kwargs,
     )
 
@@ -602,10 +602,10 @@ def _spy_evaluated(solver):
 
 
 @pytest.mark.parametrize("max_batch", [MAX_BATCH, 7, 3])
-@pytest.mark.parametrize("large_f_output", [True, False])
+@pytest.mark.parametrize("trade_speed_for_memory", [True, False])
 @pytest.mark.parametrize("max_adaptive_splits", [None, 4])
 def test_switch_never_evaluates_a_subinterval_twice(
-    large_f_output, max_adaptive_splits, max_batch
+    trade_speed_for_memory, max_adaptive_splits, max_batch
 ):
     """The panels that fail when the reference is dropped are split from their
     stored errors, never evaluated again (f can be expensive).
@@ -628,7 +628,7 @@ def test_switch_never_evaluates_a_subinterval_twice(
         solver,
         f,
         take_gradient=False,
-        large_f_output=large_f_output,
+        trade_speed_for_memory=trade_speed_for_memory,
         max_batch=max_batch,
         error_integral_reference=1.0,
         max_adaptive_splits=max_adaptive_splits,
@@ -640,8 +640,8 @@ def test_switch_never_evaluates_a_subinterval_twice(
 
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
-@pytest.mark.parametrize("large_f_output", [True, False])
-def test_too_large_fixed_reference_converges(device, large_f_output):
+@pytest.mark.parametrize("trade_speed_for_memory", [True, False])
+def test_too_large_fixed_reference_converges(device, trade_speed_for_memory):
     """Once the reference is dropped, the failing panels are refined until
     every panel meets the final integral's tolerance. On CUDA the record's
     nodes stay on the CPU (result_device) while the masks and the mesh are on
@@ -654,7 +654,7 @@ def test_too_large_fixed_reference_converges(device, large_f_output):
             _solver(device),
             _cancelling,
             take_gradient=False,
-            large_f_output=large_f_output,
+            trade_speed_for_memory=trade_speed_for_memory,
             error_integral_reference=1.0,
             enforce_convergence=enforce,
         )

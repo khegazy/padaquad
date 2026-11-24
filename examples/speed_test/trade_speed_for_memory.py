@@ -1,15 +1,18 @@
-"""Measure what ``large_f_output`` saves: device memory, host memory and time.
+"""Measure the memory options of ``integrate``: device memory, host memory, time.
 
 Run on an otherwise idle GPU node (never a login node)::
 
-    python examples/speed_test/large_f_output_memory.py            # the table
-    python examples/speed_test/large_f_output_memory.py --overhead # per-call cost
+    python examples/speed_test/trade_speed_for_memory.py            # the table
+    python examples/speed_test/trade_speed_for_memory.py --overhead # per-call cost
 
-The table integrates three integrands with D outputs, with ``large_f_output``
-off and on (``take_gradient=False``, ``result_device="cpu"``), and reports the
-GPU's peak memory above what was allocated before the call, the process's peak
-resident memory on the host during the call (sampled every 5 ms), the wall time
-and the number of integrand points:
+The table integrates three integrands with D outputs (``take_gradient=False``)
+with every setting in ``SETTINGS`` (``trade_speed_for_memory``,
+``evaluation_buffer``, ``record_evaluations``), for ``result_device`` "cpu" and
+None, and reports the GPU's peak memory above what was allocated before the
+call, during the integration loop (read when each batch is recorded, so the
+result's assembly after the loop does not hide it) and over the whole call, the
+process's peak resident memory on the host during the call (sampled every 5
+ms), the wall time and the number of integrand points:
 
 - ``fixed``: ``sin(t f_d)`` on a fixed mesh of 1,000 subintervals
   (``max_adaptive_splits=0``), gk21: one pass, the values of every subinterval
@@ -20,9 +23,9 @@ and the number of integrand points:
   each call costs a matrix product of size [points, 4096] x [4096, D], so the
   integrand's compute and its own memory dominate.
 
-``--overhead`` times the default path (``large_f_output=False``) on a cheap
-integrand with many small calls, so the cost of integrating each call as it
-returns shows; run it with the padaquad to compare first on ``PYTHONPATH``.
+``--overhead`` times every setting on a cheap integrand with many small calls,
+so the cost of integrating after every call of ``f`` shows; run it with the
+padaquad to compare first on ``PYTHONPATH`` (an older one runs the default).
 
 The integrands' imports stay inside functions so that importing this module is
 cheap (the documentation build imports nothing from here, but keep it so).
@@ -31,6 +34,8 @@ cheap (the documentation build imports nothing from here, but keep it so).
 from __future__ import annotations
 
 import argparse
+import inspect
+import itertools
 import math
 import subprocess
 import threading
@@ -46,6 +51,17 @@ from padaquad import adaptive_quadrature
 
 GB = 2**30
 N_FIXED = 1000
+#: The settings compared, by name: integrate keywords.
+SETTINGS = {
+    "default": {},
+    "trade": {"trade_speed_for_memory": True},
+    "trade, 256 MB buffer": {
+        "trade_speed_for_memory": True,
+        "evaluation_buffer": 256 * 2**20,
+    },
+    "no record": {"record_evaluations": False},
+    "trade, no record": {"trade_speed_for_memory": True, "record_evaluations": False},
+}
 
 
 def _fixed_mesh(device: str) -> torch.Tensor:
@@ -104,8 +120,10 @@ class HostPeak:
         self.peak = max(self.peak, self.process.memory_info().rss)
 
 
-def measure(case: str, n_out: int, large: bool, max_batch: int) -> dict[str, object]:
-    """One integration; its device peak, host peak, time and points."""
+def measure(
+    case: str, n_out: int, setting: str, result_device: str | None, max_batch: int
+) -> dict[str, object]:
+    """One integration; its device peaks, host peak, time and points."""
     device = "cuda"
     f, options = _integrand(case, n_out, device)
     points = [0]
@@ -121,7 +139,14 @@ def measure(case: str, n_out: int, large: bool, max_batch: int) -> dict[str, obj
     torch.cuda.empty_cache()
     base = torch.cuda.memory_allocated()
     torch.cuda.reset_peak_memory_stats()
-    row: dict[str, object] = {"case": case, "D": n_out, "large": large}
+    loop_peak = [0]
+
+    def loss_fxn(r: padaquad.IntegrationResult) -> torch.Tensor:
+        # Called as each batch is recorded: the peak so far covers the pass.
+        loop_peak[0] = max(loop_peak[0], torch.cuda.max_memory_allocated())
+        return r.integral
+
+    row: dict[str, object] = {}
     host_before = psutil.Process().memory_info().rss
     try:
         with HostPeak() as host:
@@ -131,13 +156,15 @@ def measure(case: str, n_out: int, large: bool, max_batch: int) -> dict[str, obj
                 counted,
                 take_gradient=False,
                 max_batch=max_batch,
-                large_f_output=large,
-                result_device="cpu",
+                loss_fxn=loss_fxn,
+                result_device=result_device,
+                **SETTINGS[setting],
                 **options,
             )
             torch.cuda.synchronize()
             seconds = time.perf_counter() - start
         row |= {
+            "loop GB": (loop_peak[0] - base) / GB,
             "device GB": (torch.cuda.max_memory_allocated() - base) / GB,
             "host GB": (host.peak - host_before) / GB,
             "seconds": seconds,
@@ -146,7 +173,7 @@ def measure(case: str, n_out: int, large: bool, max_batch: int) -> dict[str, obj
         }
         del result
     except torch.OutOfMemoryError:
-        row |= {"device GB": "out of memory"}
+        row |= {"loop GB": "out of memory"}
     torch.cuda.empty_cache()
     return row
 
@@ -179,10 +206,10 @@ def table(max_batch: int) -> None:
         f"device-to-host copy {copy_bandwidth():.1f} GB/s"
     )
     print(
-        "| integrand | D | large_f_output | device peak (GB) | host peak (GB) "
-        "| time (s) | points | subintervals |"
+        "| integrand | D | setting | result_device | device peak in the loop (GB) "
+        "| device peak (GB) | host peak (GB) | time (s) | points | subintervals |"
     )
-    print("|---|---|---|---|---|---|---|---|")
+    print("|---|---|---|---|---|---|---|---|---|---|")
     # D = 400,000 only where few subintervals are recorded: the record keeps
     # every value on the host (1,000 gk21 subintervals would be 74 GB), and the
     # network's W2 alone would be 13 GB.
@@ -192,26 +219,39 @@ def table(max_batch: int) -> None:
         "network": (1_000, 10_000, 100_000),
     }
     for case, n_outs in sizes.items():
-        for n_out in n_outs:
-            for large in (False, True):
-                row = measure(case, n_out, large, max_batch)
-                cells = [
-                    row.get(k, "")
-                    for k in (
-                        "device GB",
-                        "host GB",
-                        "seconds",
-                        "points",
-                        "subintervals",
-                    )
-                ]
-                text = [f"{c:.2f}" if isinstance(c, float) else str(c) for c in cells]
-                print(f"| {case} | {n_out:,} | {large} | " + " | ".join(text) + " |")
+        for n_out, setting, result_device in itertools.product(
+            n_outs, SETTINGS, ("cpu", None)
+        ):
+            row = measure(case, n_out, setting, result_device, max_batch)
+            cells = [
+                row.get(k, "")
+                for k in (
+                    "loop GB",
+                    "device GB",
+                    "host GB",
+                    "seconds",
+                    "points",
+                    "subintervals",
+                )
+            ]
+            text = [f"{c:.2f}" if isinstance(c, float) else str(c) for c in cells]
+            print(
+                f"| {case} | {n_out:,} | {setting} | {result_device} | "
+                + " | ".join(text)
+                + " |",
+                flush=True,
+            )
 
 
 def overhead(repeats: int) -> None:
-    """Time the default path on a cheap integrand with many small calls."""
-    for device in ("cpu", "cuda"):
+    """Time every setting on a cheap integrand with many small calls."""
+    has_settings = (
+        "trade_speed_for_memory"
+        in inspect.signature(padaquad.UniformAdaptiveQuadrature.integrate).parameters
+    )
+    for device, setting in itertools.product(
+        ("cpu", "cuda"), SETTINGS if has_settings else ["default"]
+    ):
         times = []
         for _ in range(repeats):
             solver = adaptive_quadrature(
@@ -227,6 +267,7 @@ def overhead(repeats: int) -> None:
                 lambda t: torch.sin(200 * math.pi * t) * torch.exp(-t),
                 take_gradient=False,
                 max_batch=46,
+                **SETTINGS[setting],
                 **bounds,
             )
             if device == "cuda":
@@ -234,7 +275,7 @@ def overhead(repeats: int) -> None:
             times.append(time.perf_counter() - start)
         times.sort()
         print(
-            f"{padaquad.__file__}: {device}: {len(result.h)} subintervals, "
+            f"{padaquad.__file__}: {device}, {setting}: {len(result.h)} subintervals, "
             f"median {times[len(times) // 2]:.3f} s, best {times[0]:.3f} s"
         )
 

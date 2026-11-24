@@ -31,7 +31,7 @@ batch of whole subintervals at a time (each batch's gradient is
 backpropagated before the next), so the running integral accumulates batch by
 batch. With ``take_gradient=False`` every pass evaluates *every* waiting
 subinterval before any accept/reject decision (with or without
-``large_f_output``), so the running integral already covers the whole interval
+``trade_speed_for_memory``), so the running integral already covers the whole interval
 the first time a subinterval is judged and a reference has little to correct.
 """
 

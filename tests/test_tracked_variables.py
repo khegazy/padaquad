@@ -146,11 +146,11 @@ def test_empty_tracked_tuple_is_none():
 
 
 @pytest.mark.parametrize(
-    ("take_gradient", "large_f_output"),
+    ("take_gradient", "trade_speed_for_memory"),
     [(True, False), (False, False), (False, True)],
-    ids=["grad", "nograd", "nograd-large"],
+    ids=["grad", "nograd", "nograd-trade"],
 )
-def test_many_tracked_variables_keep_order(take_gradient, large_f_output):
+def test_many_tracked_variables_keep_order(take_gradient, trade_speed_for_memory):
     """Twelve tracked variables come back in the integrand's order.
 
     Each tracked variable is its own record key (``tracked_variables_<i>``);
@@ -168,7 +168,7 @@ def test_many_tracked_variables_keep_order(take_gradient, large_f_output):
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
         take_gradient=take_gradient,
-        large_f_output=large_f_output,
+        trade_speed_for_memory=trade_speed_for_memory,
         max_batch=solver.C * 2,
     )
     tv = result.tracked_variables

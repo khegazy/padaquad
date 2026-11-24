@@ -6,8 +6,9 @@
 `"cuda:N"` or a `torch.device`; `None` picks the GPU if one is available. The
 solver never changes PyTorch's global default device. `result_device` is where the per-subinterval arrays of the result go (nodes,
 integrand values, contributions, errors), to keep them off the GPU, and, with
-`large_f_output=True`, where the integrand values go during the integration
-({ref}`ug-large-f-output`); `None` keeps them on the solver's device. The integral, its error estimate and the
+`trade_speed_for_memory=True`, where the integrand values go during the
+integration ({ref}`ug-trade-speed-for-memory`); `None` keeps them on the
+solver's device. The integral, its error estimate and the
 state's mesh stay on the solver's device.
 
 The solver computes in the dtype of the bounds or mesh given to `integrate`,
@@ -215,71 +216,124 @@ was measured on Linux or on a GPU.
 15. *Silent messages.* The benchmark's messages are logged at WARNING level, so
     they do not appear when the application sets logging above WARNING.
 
-(ug-large-f-output)=
-## `large_f_output`
+(ug-trade-speed-for-memory)=
+## Trading speed for memory
 
 **How a pass is evaluated.** With `take_gradient=False`, every pass of the
 loop evaluates all the subintervals still waiting, in calls of at most
 `max_batch` points. A call fills `max_batch` even when that ends inside a
-subinterval; the next call finishes it. After each call, the subintervals whose
-nodes are now all evaluated get their contributions and error estimates, and
-once the whole pass is evaluated every subinterval of it is accepted or split.
-(With `take_gradient=True` a call holds whole subintervals, `max_batch // C` of
-them once the batch size has converged, where C is the number of nodes of a
-subinterval, and each call is judged on its own.)
+subinterval; the next call finishes it. The subintervals then get their
+contributions and error estimates, and once the whole pass is evaluated every
+subinterval of it is accepted or split. (With `take_gradient=True` a call
+holds whole subintervals, `max_batch // C` of them once the batch size has
+converged, where C is the number of nodes of a subinterval, and each call is
+judged on its own; the options below apply only to `take_gradient=False`.)
 
-**What the option changes.** By default the integrand values of the whole pass
-stay on the solver's device until the pass is judged: C × D numbers per
-subinterval for an integrand with D outputs. With `large_f_output=True` each
-call's values, nodes and tracked variables go to `result_device` as soon as its
-subintervals are integrated, so the device holds about one call's values
-instead of the whole pass's. Nothing else changes: the calls of the integrand,
-the mesh, the number of evaluations and the integral are the same, bit for bit.
-(One exception: while the batch size still grows until the integrand runs out
-of memory, the room the option frees can let that happen later, at a larger
-call; the calls then differ, while the points evaluated, and so the mesh and
-the integral of an integrand computed point by point, stay the same.)
-The result `loss_fxn` receives for each batch then has its `nodes`, `y` and
-`tracked_variables` on `result_device`; its other tensors stay on the solver's
+**`trade_speed_for_memory`.** By default (`False`) the integrand values of the
+whole pass stay on the solver's device until all its subintervals are
+evaluated: C × D numbers per subinterval for an integrand with D outputs.
+Their contributions and error estimates are then computed at once, every
+subinterval is accepted or split, and only the accepted subintervals' values
+move to `result_device`. With `trade_speed_for_memory=True` the values of
+whole subintervals are integrated as soon as `evaluation_buffer` bytes of them
+are waiting (after every call of the integrand when it is `None`, the default)
+and move to `result_device` right away, so the device holds about one call's
+values plus the buffer instead of the whole pass's; the values of the
+subintervals that are then split are deleted on `result_device`. Nothing else
+changes: the calls of the integrand, the mesh, the number of evaluations and
+the integral are the same, bit for bit. (One exception: while the batch size
+still grows until the integrand runs out of memory, the room the option frees
+can let that happen later, at a larger call; the calls then differ, while the
+points evaluated, and so the mesh and the integral of an integrand computed
+point by point, stay the same.) The result `loss_fxn` receives for each batch
+has its `y` and `tracked_variables` on `result_device` with the option and on
+the solver's device without it; its other tensors stay on the solver's
 device.
+
+**What it costs, and `evaluation_buffer`.** Integrating after every call costs
+time per call of the integrand (see the table below), and the values of the
+subintervals that are split are moved before they are deleted. With many calls,
+or an integrand that is fast, pass `evaluation_buffer` (in bytes): values of
+whole subintervals then wait on the solver's device until that many bytes are
+integrated together, which costs that much device memory and saves most of the
+time per call. The right size depends on the integrand and the device: measure
+it once for an integrand you integrate repeatedly. Without it,
+`trade_speed_for_memory=True` logs a warning that suggests it.
 
 **What it does not change.** Each subinterval's contribution and error
 estimate, D numbers each, stay on the device for every subinterval accepted so
 far, and the accept-or-split decision of a pass uses a few more arrays of that
 size. The option therefore saves most for methods with many nodes and for long
-passes. With `result_device=None`, or on a CPU solver with the default
-`result_device="cpu"`, the values stay on the solver's device and the option
-saves nothing, and when a whole pass fits in one call of the integrand
-there is nothing to save either.
+passes. With `result_device=None` (or a CPU solver with the default
+`result_device="cpu"`) the values stay on the solver's device and the option
+saves little, and when a whole pass fits in one call of the integrand there is
+nothing to save either.
+
+**`record_evaluations=False`.** The integrand values and tracked variables are
+deleted as soon as their subintervals are integrated, so they are never moved
+or kept: `result.y` and `result.tracked_variables` are `None`, also in the
+results `loss_fxn` receives, and the nodes stay on the solver's device until
+the end. The contributions and error estimates decide every split, so the
+calls of the integrand, the mesh and the integral do not change. The state's
+mesh is built with `merge_rule="power_law"`, because the default `"predicted"`
+reads the stored values: `"power_law"` refuses some merges of wide
+subintervals, so a later call starting from the state may begin with more
+subintervals ({ref}`ug-reuse`).
 
 Measured on an NVIDIA A100 (80 GB) with gk21 (C = 23), `max_batch=2300`,
-`result_device="cpu"` and a fixed mesh of 1,000 subintervals
-(`examples/speed_test/large_f_output_memory.py`, 2026-11-24): peak memory above
-what was allocated before the call, and wall time.
+`result_device="cpu"` and a fixed mesh of 1,000 subintervals, integrand
+`sin(t w_d)` with D outputs (`examples/speed_test/trade_speed_for_memory.py`,
+2026-11-24): the GPU's peak memory above what was allocated before the call,
+during the integration loop and over the whole call (including the work after
+the loop: the final error check, the state's mesh and the result), the host's
+peak, and the wall time.
 
-| D outputs | GPU peak, off | GPU peak, on | host peak, off and on | time, off / on |
-|---|---|---|---|---|
-| 1,000 | 0.23 GB | 0.08 GB | 0.8 / 0.5 GB | 0.45 / 0.18 s |
-| 10,000 | 2.3 GB | 0.82 GB | 5.1 GB | 1.2 / 1.2 s |
-| 100,000 | 22.6 GB | 8.2 GB | 51 GB | 9.0 / 8.7 s |
+| D outputs | setting | GPU peak, loop | GPU peak, call | host peak | time |
+|---|---|---|---|---|---|
+| 10,000 | default | 3.6 GB | 3.6 GB | 5.1 GB | 1.1 s |
+| 10,000 | `trade_speed_for_memory=True` | 0.54 GB | 0.82 GB | 5.1 GB | 1.0 s |
+| 10,000 | the same, `evaluation_buffer=256 * 2**20` | 1.0 GB | 1.0 GB | 5.1 GB | 1.0 s |
+| 10,000 | `record_evaluations=False` | 3.6 GB | 3.6 GB | 0.18 GB | 0.08 s |
+| 10,000 | both | 0.54 GB | 0.82 GB | 0.15 GB | 0.06 s |
+| 100,000 | default | 35.8 GB | 35.8 GB | 51.4 GB | 9.4 s |
+| 100,000 | `trade_speed_for_memory=True` | 5.4 GB | 8.2 GB | 51.4 GB | 8.7 s |
+| 100,000 | `record_evaluations=False` | 35.8 GB | 35.8 GB | 2.2 GB | 2.1 s |
+| 100,000 | both | 5.4 GB | 8.2 GB | 2.2 GB | 0.5 s |
 
-The host holds the same in both cases: the result keeps every value on
-`result_device` anyway. An integrand whose cost dominates (a network with 4,096
-hidden units) gave the same peaks for 10,000 and 100,000 outputs. An adaptive
-run whose passes each fit in one call (17 subintervals) gave the same peaks
-with and without the option. Integrating each call as it returns costs about
-0.1 ms per call of the integrand on a CPU and 0.2 ms on the GPU, with or
-without the option.
+At 100,000 outputs one call of 2,300 points already holds 1.8 GB of values,
+more than the 256 MB buffer, so the buffer changes nothing there. Most of the
+default's time is the copy of every value to the host, which
+`record_evaluations=False` skips. With `result_device=None` the loop's peak at
+100,000 outputs is 35.8 GB by default and 22.6 GB with
+`trade_speed_for_memory=True`, and the call's is 54.4 GB for both: the result
+is assembled on the device. An integrand whose cost dominates (a network with
+4,096 hidden units) gave the same peaks, and an adaptive run whose passes each
+fit in one call (17 subintervals) the same peaks with every setting.
 
-**When it raises.** `large_f_output=True` raises `ValueError`:
+The time per call of the integrand, measured on an integral of many small calls
+(gk21, `max_batch=46`, 75 calls): integrating after every call
+(`trade_speed_for_memory=True` without a buffer) took 23 ms on the CPU against
+16 ms by default, and 52 ms against 34 ms on the GPU, about 0.1 ms and 0.2 ms
+per call; with a 256 MB buffer it took the default's time.
 
-- with `take_gradient=True`: each pass is then one call of the integrand on
-  whole subintervals, whose values leave the device after the batch's backward
-  pass, so there is nothing to save;
-- with a bound or mesh that requires grad, or an integrand whose output
-  requires grad on any call (checked on the first point before the integration
-  starts, and on every call after): every value would carry an autograd graph
-  that stays on the device until the integral is differentiated.
+**Errors and warnings.** `integrate` raises `ValueError`, before any call of
+the integrand, when `trade_speed_for_memory=True` is given with
+`take_gradient=True` (each batch is then one call, integrated at once, whose
+values leave the device after its backward pass, so there is nothing to
+trade), and when `evaluation_buffer` is given with
+`trade_speed_for_memory=False` or is not an int of at least 1. It logs a
+warning on the first call of a series (no `state` given; later calls that pass
+the state stay quiet) when:
+
+- `trade_speed_for_memory=True` has no `evaluation_buffer`;
+- `trade_speed_for_memory=True` has `result_device=None`, or `result_device`
+  is the solver's device;
+- `trade_speed_for_memory=True` and the integrand's output requires grad (from
+  its parameters or from bounds that require grad): the autograd graph keeps
+  what the integrand saved for its backward pass on the device until the
+  integral is differentiated, so moving the values may save little;
+- `record_evaluations=False` with the solver's default
+  `merge_rule="predicted"`.
 
 **The gradient as extra outputs.** To get the gradient of an integral without
 an autograd graph, let the integrand return the gradient of the integrand with

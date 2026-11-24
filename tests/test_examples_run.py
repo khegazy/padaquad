@@ -15,6 +15,8 @@ The examples are also useful as integration smoke tests that exercise:
   - ``take_gradient=True`` autograd flow
   - warm starts across iterations (``state=state``)
   - the analytic-vs-autodiff consistency check (path A vs path B)
+  - the gradient as extra outputs of f, with ``large_f_output=True``
+    (``gradient_as_output.py``, which checks itself with assert statements)
 """
 
 from __future__ import annotations
@@ -33,12 +35,17 @@ PY = sys.executable  # the venv-aware interpreter pytest is running under
 
 
 def _run(script: Path) -> subprocess.CompletedProcess[str]:
-    """Run an example script with the test interpreter and capture output."""
+    """Run an example script with the test interpreter and capture output.
+
+    Figures go to matplotlib's non-interactive backend, so ``plt.show()``
+    returns at once.
+    """
     return subprocess.run(
         [PY, str(script)],
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, "MPLBACKEND": "Agg"},
     )
 
 
@@ -100,6 +107,26 @@ def test_gradient_of_integral_runs_and_assertions_pass():
             f"gradient_of_integral.py output missing marker {marker!r}; "
             f"stdout=\n{out.stdout[:500]}"
         )
+
+
+# Gallery scripts that check their own results with assert statements and
+# draw figures.
+SELF_CHECKING_EXAMPLES = [
+    EXAMPLES_DIR / "gradient_as_output.py",
+]
+
+
+@pytest.mark.parametrize(
+    "script", SELF_CHECKING_EXAMPLES, ids=lambda p: str(p.relative_to(EXAMPLES_DIR))
+)
+def test_example_script_runs(script: Path) -> None:
+    """The script exits 0, so every check inside it passed."""
+    assert script.exists(), f"missing example: {script}"
+    out = _run(script)
+    assert out.returncode == 0, (
+        f"{script.name} exited {out.returncode}; stdout=\n{out.stdout}\n"
+        f"stderr=\n{out.stderr}"
+    )
 
 
 VERIFICATION_DIR = EXAMPLES_DIR / "verification"

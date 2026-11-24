@@ -97,6 +97,9 @@ class IntegrationResult:
     the split counts are ``None``, and ``nodes``, ``y`` and
     ``tracked_variables`` keep one row per subinterval (shapes ``[N, C, T]``,
     ``[N, C, D]`` and ``[N, C, ...]``) instead of the flattened shapes below.
+    Its tensors are on the solver's device, except ``nodes``, ``y`` and
+    ``tracked_variables`` with ``integrate(large_f_output=True)``, which are on
+    ``result_device`` (see :ref:`ug-large-f-output`).
 
     Attributes
     ----------

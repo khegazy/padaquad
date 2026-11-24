@@ -228,7 +228,7 @@ class SolverBase(ABC, DistributedEnvironment):
         self,
         t: torch.Tensor,
         y: torch.Tensor,
-        y0: torch.Tensor,
+        y0: torch.Tensor | None = None,
     ) -> MethodOutput:
         """
         Compute the integral and error estimate for a batch of subintervals.
@@ -245,8 +245,9 @@ class SolverBase(ABC, DistributedEnvironment):
         y : torch.Tensor
             Integrand values at the nodes in t. Shape: [N, C, D] (D outputs
             of the integrand).
-        y0 : torch.Tensor
-            Starting value for the integral accumulator. Shape: [D].
+        y0 : torch.Tensor or None
+            Starting value for the integral accumulator. Shape: [D]. None
+            starts from zero.
 
         Returns
         -------

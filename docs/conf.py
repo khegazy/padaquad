@@ -81,13 +81,16 @@ sphinx_gallery_conf = {
     "gallery_dirs": "auto_examples",
     # Only the tutorial scripts and the verification scripts; examples/pode and
     # examples/speed_test are not part of the gallery.
-    "filename_pattern": r"/(quadrature_basics|gradient_of_integral|polynomial_degree|integral_accuracy|merge_prediction)\.py$",
+    "filename_pattern": (
+        r"/(quadrature_basics|gradient_of_integral|gradient_as_output"
+        r"|polynomial_degree|integral_accuracy|merge_prediction)\.py$"
+    ),
     "ignore_pattern": r"(pode|speed_test)",
     "download_all_examples": False,
     "remove_config_comments": True,
-    # The examples print text and draw no figures, so no image scraper (and no
-    # matplotlib) is needed.
-    "image_scrapers": (),
+    # Figures drawn with matplotlib appear on the example's page; the first one
+    # is its thumbnail on the Examples page.
+    "image_scrapers": ("matplotlib",),
     "reset_modules": (),
 }
 

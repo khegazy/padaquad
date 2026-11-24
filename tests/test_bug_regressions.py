@@ -126,6 +126,28 @@ def test_same_f_is_gone():
         )
 
 
+def test_conserve_memory_is_gone():
+    """conserve_memory was renamed large_f_output; the old name raises TypeError
+    from both entry points (padaquad.integrate routes it to the constructor)."""
+    with pytest.raises(TypeError, match="conserve_memory"):
+        _solver().integrate(
+            f=torch.exp,
+            conserve_memory=True,
+            mesh_init=_bound(0.0),
+            mesh_final=_bound(1.0),
+        )
+    with pytest.raises(TypeError, match="conserve_memory"):
+        integrate(
+            torch.exp,
+            "gk21",
+            device="cpu",
+            max_batch=10_000,
+            conserve_memory=True,
+            mesh_init=_bound(0.0),
+            mesh_final=_bound(1.0),
+        )
+
+
 # -----------------------------------------------------------------------------
 # Interval rules: a call needs a mesh or both bounds; bounds inside a given mesh
 # cut it; a bound outside it extends it; a bound within rounding of a mesh end is

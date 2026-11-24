@@ -68,8 +68,12 @@ def _interpolatory3_weights(c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
     b0 = 0.5 - 1.0 / (6 * a)
     ba = 1.0 / (6 * a * (1 - a))
     b1 = (2.0 - 3 * a) / (6 * (1.0 - a))
-    b = torch.stack([b0, ba, b1]).transpose(0, 1)
-    b_error = torch.stack([b0 - 0.5, ba, b1 - 0.5]).transpose(0, 1)
+    # Stacked along the last axis, so each subinterval's weights are contiguous:
+    # a transposed stack gave weights whose memory layout depends on N, and the
+    # CUDA sum over the nodes then depended on how many subintervals one call
+    # held (the last bit changed between a pass computed at once and in parts).
+    b = torch.stack([b0, ba, b1], dim=-1)
+    b_error = torch.stack([b0 - 0.5, ba, b1 - 0.5], dim=-1)
     return b, b_error
 
 

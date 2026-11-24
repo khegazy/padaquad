@@ -5,8 +5,9 @@
 `device` selects where the integrand is evaluated: `"cpu"`, `"cuda"`,
 `"cuda:N"` or a `torch.device`; `None` picks the GPU if one is available. The
 solver never changes PyTorch's global default device. `result_device` is where the per-subinterval arrays of the result go (nodes,
-integrand values, contributions, errors), to keep them off the GPU; `None`
-keeps them on the solver's device. The integral, its error estimate and the
+integrand values, contributions, errors), to keep them off the GPU, and, with
+`large_f_output=True`, where the integrand values go during the integration
+({ref}`ug-large-f-output`); `None` keeps them on the solver's device. The integral, its error estimate and the
 state's mesh stay on the solver's device.
 
 The solver computes in the dtype of the bounds or mesh given to `integrate`,
@@ -214,12 +215,74 @@ was measured on Linux or on a GPU.
 15. *Silent messages.* The benchmark's messages are logged at WARNING level, so
     they do not appear when the application sets logging above WARNING.
 
-## `conserve_memory`
+(ug-large-f-output)=
+## `large_f_output`
 
-`conserve_memory` matters only with `take_gradient=False`. By default each pass
-of the loop evaluates every subinterval still waiting, in calls of at most
-`max_batch` points, and holds all of their values at once. With
-`conserve_memory=True` each pass evaluates one batch of `max_batch` points; a
-subinterval whose nodes do not all fit is finished in the next pass. This
-holds fewer values at once but needs more passes. With `take_gradient=True`
-each pass already evaluates only the whole subintervals that fit in one batch.
+**How a pass is evaluated.** With `take_gradient=False`, every pass of the
+loop evaluates all the subintervals still waiting, in calls of at most
+`max_batch` points. A call fills `max_batch` even when that ends inside a
+subinterval; the next call finishes it. After each call, the subintervals whose
+nodes are now all evaluated get their contributions and error estimates, and
+once the whole pass is evaluated every subinterval of it is accepted or split.
+(With `take_gradient=True` a call holds whole subintervals, `max_batch // C` of
+them once the batch size has converged, where C is the number of nodes of a
+subinterval, and each call is judged on its own.)
+
+**What the option changes.** By default the integrand values of the whole pass
+stay on the solver's device until the pass is judged: C × D numbers per
+subinterval for an integrand with D outputs. With `large_f_output=True` each
+call's values, nodes and tracked variables go to `result_device` as soon as its
+subintervals are integrated, so the device holds about one call's values
+instead of the whole pass's. Nothing else changes: the calls of the integrand,
+the mesh, the number of evaluations and the integral are the same, bit for bit.
+The result `loss_fxn` receives for each batch then has its `nodes`, `y` and
+`tracked_variables` on `result_device`; its other tensors stay on the solver's
+device.
+
+**What it does not change.** Each subinterval's contribution and error
+estimate, D numbers each, stay on the device for every subinterval accepted so
+far, and the accept-or-split decision of a pass uses a few more arrays of that
+size. The option therefore saves most for methods with many nodes and for long
+passes. With `result_device=None` the values stay on the device and the
+option saves nothing, and when a whole pass fits in one call of the integrand
+there is nothing to save either.
+
+Measured on an NVIDIA A100 (80 GB) with gk21 (C = 23), `max_batch=2300`,
+`result_device="cpu"` and a fixed mesh of 1,000 subintervals
+(`examples/speed_test/large_f_output_memory.py`, 2026-11-24): peak memory above
+what was allocated before the call, and wall time.
+
+| D outputs | GPU peak, off | GPU peak, on | host peak, off and on | time, off / on |
+|---|---|---|---|---|
+| 1,000 | 0.23 GB | 0.08 GB | 0.8 / 0.5 GB | 0.45 / 0.18 s |
+| 10,000 | 2.3 GB | 0.82 GB | 5.1 GB | 1.2 / 1.2 s |
+| 100,000 | 22.6 GB | 8.2 GB | 51 GB | 9.0 / 8.7 s |
+
+The host holds the same in both cases: the result keeps every value on
+`result_device` anyway. An integrand whose cost dominates (a network with 4,096
+hidden units) gave the same peaks for 10,000 and 100,000 outputs. An adaptive
+run whose passes each fit in one call (17 subintervals) gave the same peaks
+with and without the option. Integrating each call as it returns costs about
+0.1 ms per call of the integrand on a CPU and 0.2 ms on the GPU, with or
+without the option.
+
+**When it raises.** `large_f_output=True` raises `ValueError`:
+
+- with `take_gradient=True`: each pass is then one call of the integrand on
+  whole subintervals, whose values leave the device after the batch's backward
+  pass, so there is nothing to save;
+- with a bound or mesh that requires grad, or an integrand whose output
+  requires grad: every value would carry an autograd graph that stays on the
+  device until the integral is differentiated.
+
+**The gradient as extra outputs.** To get the gradient of an integral without
+an autograd graph, let the integrand return the gradient of the integrand with
+respect to the parameters as extra outputs, computed with `torch.func.grad`
+from detached parameters (or under `torch.no_grad()`), and integrate with
+`take_gradient=False`. The integral of those outputs is the gradient of the
+integral when the bounds do not depend on the parameters; a bound b that does
+adds f(b) times the derivative of b (minus the same at the lower bound), one
+call of the integrand. `error_norm` chooses which outputs decide a split
+({ref}`ug-error-norm`), so the mesh can be refined for the gradient's
+accuracy. {doc}`../auto_examples/gradient_as_output` shows both;
+{ref}`ug-autodiff` describes the other ways to differentiate an integral.

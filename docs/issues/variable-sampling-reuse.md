@@ -109,11 +109,12 @@ All in `padaquad/quadrature/base.py`:
   inserting midpoints into `mesh` and setting `mesh_trackers` (True = still to
   evaluate); it also maintains `split_counts` (for `max_adaptive_splits` and
   the split statistics). The failed subintervals' `y` values are dropped here.
-- `_evaluate_f_on_mesh(...)` evaluates the tracked subintervals. It dispatches
-  to `_evaluate_f_on_full_nodes` (`take_gradient=True`),
-  `_evaluate_f_on_split_nodes` (default with `take_gradient=False`) and
-  `_evaluate_f_on_split_residual_nodes` (`conserve_memory=True`), and places
-  nodes with `_compute_nodes(...)` at the node fractions.
+- `_evaluate_f_on_mesh(...)` evaluates the tracked subintervals and integrates
+  them. It dispatches to `_evaluate_f_on_full_nodes` (`take_gradient=True`)
+  and `_evaluate_f_on_split_nodes` (`take_gradient=False`, which integrates
+  each call's completed subintervals and sends their values to the solver's
+  device or, with `large_f_output=True`, to `result_device`), and places nodes
+  with `_compute_nodes(...)` at the node fractions.
 - `_record_results(...)` records accepted subintervals in mesh order.
 - With `take_gradient=False`, accepted subintervals are re-checked as the
   running integral changes (`_remove_failed_record_panels`) and split again;
@@ -187,7 +188,7 @@ the code.
 - `max_batch` smaller than one subinterval's new nodes, and the
   out-of-memory retry path (`tests/test_oom_recovery.py` has a simulated
   out-of-memory integrand).
-- `conserve_memory=True` and `max_adaptive_splits`.
+- `large_f_output=True` and `max_adaptive_splits`.
 
 ## Documentation to update when fixed
 

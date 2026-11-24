@@ -301,7 +301,9 @@ def test_converged_matches_a_hand_computed_tolerance_check(
         mesh_final=T_FINAL,
         y0=torch.tensor([5.0], dtype=torch.float64),
         take_gradient=take_gradient,
-        conserve_memory=True,
+        # The values leave the device with take_gradient=False (it raises with
+        # take_gradient=True); converged must not depend on where they are.
+        large_f_output=not take_gradient,
         max_batch=8 * solver.C,
         max_adaptive_splits=cap,
     )
@@ -336,7 +338,7 @@ def test_y0_does_not_loosen_the_converged_tolerance():
 
 def test_cumulative_mode_recheck_uses_the_running_integral():
     """In cumulative mode the re-check of accepted steps judges each one against
-    the running integral through it, including the current batch. Judging
+    the running integral through it, including the current pass. Judging
     against the record alone (the previous behaviour) left this run with a
     failing step (converged=False)."""
     solver = adaptive_quadrature(
@@ -353,7 +355,7 @@ def test_cumulative_mode_recheck_uses_the_running_integral():
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
         take_gradient=False,
-        conserve_memory=True,
+        large_f_output=True,
         max_batch=16 * solver.C,
     )
     assert out.converged is True

@@ -105,9 +105,13 @@ by its own error ratio. SciPy has no `"rms"` or `"failure_fraction"` option.
 The relative tolerance multiplies a reference value of the integral:
 
 - **Absolute mode** (`use_absolute_error_ratio=True`): the whole integral.
-  During the integration only part of it is known, so the solver uses the
-  running total of the subintervals evaluated so far, and early batches get a
-  different tolerance than they would with the final integral. When the
+  During the integration only an estimate of it is known, so the solver uses
+  the running total of the subintervals evaluated so far: with
+  `take_gradient=False` the whole interval, evaluated on the current mesh,
+  which is coarse in the first passes; with `take_gradient=True` also only part
+  of the interval, since each batch is judged as soon as it is evaluated. Early
+  subintervals therefore get a different tolerance than they would with the
+  final integral. When the
   running total is smaller than the final integral, early subintervals are
   refined more than needed. When it is larger, for example when positive and
   negative parts of the integrand cancel, early subintervals are accepted

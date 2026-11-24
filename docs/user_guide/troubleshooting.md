@@ -60,7 +60,8 @@ backward pass ran out of memory and the integrand uses a custom autograd
 function: pass `parameters=` (the tensors, or their optimizer) so padaquad can
 restart, or reset the gradients and call again with `state=error.state`. Else
 pass a smaller `max_batch`, use `take_gradient=True` (which does not keep the
-whole graph), or set `conserve_memory=True`.
+whole graph), or, with `take_gradient=False` and an integrand with many outputs,
+set `large_f_output=True` ({ref}`ug-large-f-output`).
 
 ## The error estimate seems unreliable
 
@@ -78,6 +79,9 @@ removes an accepted subinterval, its signed estimate is subtracted, so
   ({ref}`ug-reuse`).
 - The constructor's `mesh_init` and `mesh_final` were removed (2.0.0):
   pass the bounds, or a mesh, to every `integrate` call.
+- `conserve_memory` was renamed `large_f_output` (2.0.0). It no longer changes
+  the mesh: every pass is judged whole, and the option only moves the
+  integrand values off the solver's device ({ref}`ug-large-f-output`).
 - `max_path_change` was removed; use `max_adaptive_splits` to limit refinement
   and read the split statistics above.
 - Solver options are keyword-only, and `integrate()` accepts every option of

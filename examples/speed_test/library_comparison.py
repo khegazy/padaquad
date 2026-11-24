@@ -106,9 +106,40 @@ FEATURE_FREQUENCIES = 2.0 ** np.arange(10)  # 1, 2, 4, ..., 512 periods on [0, 1
 # after a warm-up run of w seconds, min(--repeats, max(1, TIME_BUDGET_S // w))
 # runs, so a slow solver (torchdiffeq on thousands of steps) is timed once.
 TIME_BUDGET_S = 60.0
-# padaquad's batch size for the analytic integrands; the networks' is measured
-# before timing (solver.get_max_batch(f=...)).
-MAX_BATCH_ANALYTIC = 100_000
+# padaquad's max_batch per device and integrand: what padaquad's memory
+# benchmark (solver.get_max_batch(f=...)) measured on MAX_BATCH_HARDWARE, run
+# once with --measure-max-batch and never during a timed run. 1_000_000_000 is
+# that benchmark's ceiling (memory never limits those integrands). A timed run
+# never reaches these values: no case needs more than about 110,000
+# evaluations in all. On other hardware, measure again and replace the table.
+MAX_BATCH_HARDWARE = {
+    "cuda": "NVIDIA A100-SXM4-80GB",
+    "cpu": "AMD EPYC 7763 64-Core Processor",
+}
+MAX_BATCH = {
+    "cuda": {
+        "chirp": 1_000_000_000,
+        "spectrum": 11_864_617,
+        "oscillatory": 1_000_000_000,
+        "many_outputs": 3_500_635,
+        "feature_network": 3_501_229,
+        "feature_network_wide": 1_737_867,
+        "damped_sine": 1_000_000_000,
+        "sharp_peak": 1_000_000_000,
+        "neural_network_wide": 2_881_643,
+    },
+    "cpu": {
+        "chirp": 1_000_000_000,
+        "spectrum": 71_992_844,
+        "oscillatory": 1_000_000_000,
+        "many_outputs": 21_619_908,
+        "feature_network": 53_228_062,
+        "feature_network_wide": 13_806_404,
+        "damped_sine": 1_000_000_000,
+        "sharp_peak": 1_000_000_000,
+        "neural_network_wide": 23_917_426,
+    },
+}
 # Budgets large enough that no case stops on them: scipy's subintervals
 # (QUADPACK allocates them but does no work for those it does not use) and
 # diffrax's steps (its default, 4096, is below what dopri5 needs for the
@@ -138,7 +169,6 @@ class Case(NamedTuple):
 
     build: Callable[[ModuleType, str], Callable[[Any], Any]]
     exact: np.ndarray
-    analytic: bool
 
 
 def network_weights(
@@ -260,7 +290,6 @@ def cases() -> dict[str, Case]:
             out[name] = Case(
                 lambda xp, _device, f=f: functools.partial(f, xp=xp),
                 exact,
-                analytic=True,
             )
             continue
         widths, features = NETWORKS[name]
@@ -281,7 +310,6 @@ def cases() -> dict[str, Case]:
         out[name] = Case(
             functools.partial(build_network, weights, frequencies),
             np.array([reference]),
-            analytic=False,
         )
     return out
 
@@ -590,7 +618,7 @@ def measure(
 
 def padaquad_max_batch(case: Case, device: str) -> int:
     """
-    Return padaquad's fixed batch size for an integrand, measured before timing.
+    Measure padaquad's batch size for an integrand (``--measure-max-batch``).
 
     Parameters
     ----------
@@ -602,11 +630,9 @@ def padaquad_max_batch(case: Case, device: str) -> int:
     Returns
     -------
     int
-        ``MAX_BATCH_ANALYTIC`` for an analytic integrand; for a network, the
-        batch size padaquad's memory benchmark gives (``get_max_batch(f=...)``).
+        The batch size padaquad's memory benchmark gives
+        (``get_max_batch(f=...)``), for ``MAX_BATCH``.
     """
-    if case.analytic:
-        return MAX_BATCH_ANALYTIC
     solver = padaquad.adaptive_quadrature(
         method="gk21", atol=ATOL, rtol=RTOL, device=device
     )
@@ -721,7 +747,7 @@ def metadata(device: str, repeats: int) -> dict[str, Any]:
         "rtol": RTOL,
         "repeats": repeats,
         "time_budget_s": TIME_BUDGET_S,
-        "max_batch_analytic": MAX_BATCH_ANALYTIC,
+        "max_batch_hardware": MAX_BATCH_HARDWARE[device],
         "scipy_limit": SCIPY_LIMIT,
         "diffrax_max_steps": DIFFRAX_MAX_STEPS,
         "quadax_max_ninter": QUADAX_MAX_NINTER,
@@ -882,6 +908,12 @@ def main() -> None:
     parser.add_argument("--device", default="cpu", choices=["cpu", "cuda"])
     parser.add_argument("--repeats", type=int, default=7)
     parser.add_argument("--out", type=Path, required=True, help="output JSON file")
+    parser.add_argument(
+        "--measure-max-batch",
+        action="store_true",
+        help="measure padaquad's max_batch per integrand (for MAX_BATCH) and "
+        "write it to --out instead of running the benchmark",
+    )
     args = parser.parse_args()
     if args.repeats < 1:
         parser.error("--repeats must be at least 1")
@@ -898,13 +930,27 @@ def main() -> None:
             "JAX_PLATFORMS (run_benchmark.sh does)."
         )
 
+    if args.measure_max_batch:
+        measured = {
+            name: padaquad_max_batch(c, args.device) for name, c in cases().items()
+        }
+        args.out.write_text(json.dumps({args.device: measured}, indent=1) + "\n")
+        print(measured)
+        return
+    hardware = torch.cuda.get_device_name(0) if args.device == "cuda" else cpu_model()
+    if hardware != MAX_BATCH_HARDWARE[args.device]:
+        raise RuntimeError(
+            f"MAX_BATCH was measured on {MAX_BATCH_HARDWARE[args.device]}, this is "
+            f"{hardware}: run with --measure-max-batch here and replace the table."
+        )
+
     rows, integrands = [], {}
     for name, case in cases().items():
         integrands[name] = {
             "outputs": len(case.exact),
             "largest_abs": float(np.max(np.abs(case.exact))),
         }
-        max_batch = padaquad_max_batch(case, args.device)
+        max_batch = MAX_BATCH[args.device][name]
         solvers = [*LIBRARIES, *(f"padaquad {m}" for m in PADAQUAD_METHODS)]
         for library in solvers:
             solver_name = LIBRARIES.get(library, library)

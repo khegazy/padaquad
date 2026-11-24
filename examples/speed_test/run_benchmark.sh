@@ -15,7 +15,9 @@
 #   examples/speed_test/run_benchmark.sh dry       # one timed run of each, to a scratch folder
 #
 # On Perlmutter, for example:
-#   salloc -A <account> -q interactive -C gpu -N 1 --gpus 4 -t 01:00:00
+#   salloc -A <account> -q interactive -C "gpu&hbm80g" -N 1 --gpus 4 -t 01:00:00
+# (the 80 GB A100 nodes: padaquad's MAX_BATCH in library_comparison.py was
+# measured there; on other hardware the script stops and asks to re-measure).
 #   examples/speed_test/run_benchmark.sh
 #
 # Environment variables:

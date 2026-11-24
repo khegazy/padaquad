@@ -68,9 +68,11 @@ evaluated (for diffrax, counted while it runs, in an untimed run); whether the
 solver reported success (a † marks one that did not); and the error against
 the exact integral, absolute and relative to the largest exact value.
 padaquad runs through `padaquad.integrate`, which builds a new solver on every
-call, with `take_gradient=False` and a `max_batch` fixed before any timing:
-100,000 for the analytic integrands, and for the networks the value of
-`get_max_batch(f=...)`, so the search for a batch size is never timed. The
+call, with `take_gradient=False` and a fixed `max_batch` for each integrand
+and device: the value padaquad's memory benchmark (`get_max_batch(f=...)`)
+measured once on the hardware of the results (`MAX_BATCH` in the script), so
+no run measures memory. No case needs more than about 110,000 evaluations in
+all, so no call of the integrand is limited by it. The
 benchmark runs on an otherwise idle compute node, never on a shared login
 node.
 

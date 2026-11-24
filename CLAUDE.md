@@ -91,8 +91,10 @@ the padaquad log for them.
   explains why). Mostly integrands that need many subintervals (the user's
   choice: padaquad's intended case), listed in `MANY_SUBINTERVALS`, plus three
   in `FEW_SUBINTERVALS` for contrast; a solver whose warm-up run is slow is
-  timed fewer times (`TIME_BUDGET_S`). padaquad at a `max_batch` fixed before
-  timing; quadax's
+  timed fewer times (`TIME_BUDGET_S`). padaquad's `max_batch` per device and
+  integrand is the table `MAX_BATCH`, measured once on the 80 GB A100 node
+  (`--measure-max-batch`, padaquad's `get_max_batch`); the script refuses other
+  hardware (`MAX_BATCH_HARDWARE`), so re-measure there. quadax's
   `max_ninter` per integrand in `QUADAX_MAX_NINTER` (its loop runs all
   `max_ninter + 1` iterations, so re-measure it when integrands change).
   Commit the results from a clean tree (they record the commit; the results

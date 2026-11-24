@@ -235,6 +235,10 @@ call's values, nodes and tracked variables go to `result_device` as soon as its
 subintervals are integrated, so the device holds about one call's values
 instead of the whole pass's. Nothing else changes: the calls of the integrand,
 the mesh, the number of evaluations and the integral are the same, bit for bit.
+(One exception: while the batch size still grows until the integrand runs out
+of memory, the room the option frees can let that happen later, at a larger
+call; the calls then differ, while the points evaluated, and so the mesh and
+the integral of an integrand computed point by point, stay the same.)
 The result `loss_fxn` receives for each batch then has its `nodes`, `y` and
 `tracked_variables` on `result_device`; its other tensors stay on the solver's
 device.
@@ -243,8 +247,9 @@ device.
 estimate, D numbers each, stay on the device for every subinterval accepted so
 far, and the accept-or-split decision of a pass uses a few more arrays of that
 size. The option therefore saves most for methods with many nodes and for long
-passes. With `result_device=None` the values stay on the device and the
-option saves nothing, and when a whole pass fits in one call of the integrand
+passes. With `result_device=None`, or on a CPU solver with the default
+`result_device="cpu"`, the values stay on the solver's device and the option
+saves nothing, and when a whole pass fits in one call of the integrand
 there is nothing to save either.
 
 Measured on an NVIDIA A100 (80 GB) with gk21 (C = 23), `max_batch=2300`,

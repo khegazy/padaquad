@@ -384,14 +384,18 @@ FEATURES = {
 }
 
 
+@pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("max_batch", [7, 50])
 @pytest.mark.parametrize("feature", list(FEATURES))
-def test_features_unchanged(feature, max_batch):
+def test_features_unchanged(feature, max_batch, device):
+    """On the CPU result_device is the solver's device, so the option moves
+    nothing there; the CUDA cases are the ones where the values leave the
+    solver's device."""
     kwargs = dict(FEATURES[feature])
-    off, n_off = _run(False, max_batch=max_batch, **dict(kwargs))
-    on, n_on = _run(True, max_batch=max_batch, **dict(kwargs))
+    off, n_off = _run(False, max_batch=max_batch, device=device, **dict(kwargs))
+    on, n_on = _run(True, max_batch=max_batch, device=device, **dict(kwargs))
     assert n_off == n_on
-    for field in ("h", "nodes", "mesh_quadratures", "integral_error"):
+    for field in ("h", "nodes", "y", "mesh_quadratures", "integral_error"):
         assert torch.equal(
             torch.nan_to_num(getattr(off, field), nan=7.0),
             torch.nan_to_num(getattr(on, field), nan=7.0),

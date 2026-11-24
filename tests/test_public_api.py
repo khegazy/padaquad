@@ -27,6 +27,7 @@ from padaquad import (
     UniformAdaptiveQuadrature,
     VariableAdaptiveQuadrature,
     adaptive_quadrature,
+    hard_integrand_dict,
     integrand_dict,
     integrate,
     steps,
@@ -53,6 +54,8 @@ class TestPublicExports:
         assert len(VARIABLE_METHODS) > 0
         assert isinstance(integrand_dict, dict)
         assert len(integrand_dict) > 0
+        assert isinstance(hard_integrand_dict, dict)
+        assert len(hard_integrand_dict) > 0
         assert callable(wolf_schlegel)
 
     def test_steps_enum(self):

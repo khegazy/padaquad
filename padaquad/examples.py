@@ -8,12 +8,30 @@ Test integrands, most with an exact integral.
 
 ``integrand_dict`` maps each name to a tuple ``(integrand, solution,
 error_cutoff)``, where ``error_cutoff`` is the largest relative error
-``|computed - exact| / |exact|`` the tests accept.
+``|computed - exact| / |exact|`` the tests accept. ``hard_integrand_dict`` has
+the same form for harder integrands: many oscillations, a sharp peak, an
+infinite derivative, and 1,000 outputs at once.
+
+The integrands in both dictionaries take the array module as the keyword
+argument ``xp`` (``torch`` by default; also ``numpy`` or ``jax.numpy``), so
+one definition serves padaquad and libraries that use NumPy or JAX arrays.
+The ``*_solution`` functions take torch tensors.
 """
 
 from __future__ import annotations
 
+from functools import partial
+from typing import TYPE_CHECKING, Any, TypeVar
+
+import numpy as np
+import numpy.typing as npt
 import torch
+
+if TYPE_CHECKING:
+    from types import ModuleType
+
+# A torch tensor or a NumPy array; JAX arrays also work at run time.
+Array = TypeVar("Array", torch.Tensor, npt.NDArray[np.floating[Any]])
 
 
 def identity(_t: torch.Tensor, _y: torch.Tensor | None = None) -> int:
@@ -58,7 +76,12 @@ def identity_solution(
     return mesh_final - mesh_init
 
 
-def t(t: torch.Tensor, _y: torch.Tensor | None = None) -> torch.Tensor:
+def t(
+    t: Array,
+    _y: torch.Tensor | None = None,
+    *,
+    xp: ModuleType = torch,  # noqa: ARG001 (every integrand takes xp)
+) -> Array:
     """
     Linear integrand ``f(t) = t``.
 
@@ -66,14 +89,16 @@ def t(t: torch.Tensor, _y: torch.Tensor | None = None) -> torch.Tensor:
 
     Parameters
     ----------
-    t : torch.Tensor
+    t : torch.Tensor or numpy.ndarray
         Points of the integration variable t. Shape: [N, T].
     _y : torch.Tensor or None
         Unused.
+    xp : module
+        The array module of t (unused here; accepted like every integrand).
 
     Returns
     -------
-    torch.Tensor
+    torch.Tensor or numpy.ndarray
         The input t unchanged. Shape: [N, T].
     """
     return t
@@ -98,7 +123,12 @@ def t_solution(mesh_init: torch.Tensor, mesh_final: torch.Tensor) -> torch.Tenso
     return 0.5 * (mesh_final**2 - mesh_init**2)
 
 
-def t_squared(t: torch.Tensor, _y: torch.Tensor | None = None) -> torch.Tensor:
+def t_squared(
+    t: Array,
+    _y: torch.Tensor | None = None,
+    *,
+    xp: ModuleType = torch,  # noqa: ARG001 (every integrand takes xp)
+) -> Array:
     """
     Quadratic integrand ``f(t) = t**2``.
 
@@ -106,14 +136,16 @@ def t_squared(t: torch.Tensor, _y: torch.Tensor | None = None) -> torch.Tensor:
 
     Parameters
     ----------
-    t : torch.Tensor
+    t : torch.Tensor or numpy.ndarray
         Points of the integration variable t. Shape: [N, T].
     _y : torch.Tensor or None
         Unused.
+    xp : module
+        The array module of t (unused here; accepted like every integrand).
 
     Returns
     -------
-    torch.Tensor
+    torch.Tensor or numpy.ndarray
         The square of t. Shape: [N, T].
     """
     return t**2
@@ -141,8 +173,12 @@ def t_squared_solution(
 
 
 def sine_squared(
-    t: torch.Tensor, w: float = 3.7, _y: torch.Tensor | None = None
-) -> torch.Tensor:
+    t: Array,
+    w: float = 3.7,
+    _y: torch.Tensor | None = None,
+    *,
+    xp: ModuleType = torch,
+) -> Array:
     """
     Oscillating integrand ``f(t) = sin(2*pi*w*t)**2``.
 
@@ -151,19 +187,21 @@ def sine_squared(
 
     Parameters
     ----------
-    t : torch.Tensor
+    t : torch.Tensor or numpy.ndarray
         Points of the integration variable t. Shape: [N, T].
     w : float
         Frequency: number of periods of ``sin(2*pi*w*t)`` per unit of t.
     _y : torch.Tensor or None
         Unused.
+    xp : module
+        The array module of t: ``torch`` (default), ``numpy`` or ``jax.numpy``.
 
     Returns
     -------
-    torch.Tensor
+    torch.Tensor or numpy.ndarray
         ``sin(2*pi*w*t)**2`` at each point. Shape: [N, T].
     """
-    return torch.sin(t * w * 2 * torch.pi) ** 2
+    return xp.sin(t * w * 2 * xp.pi) ** 2
 
 
 def sine_squared_solution(
@@ -196,7 +234,13 @@ def sine_squared_solution(
     ) / (2 * _w)
 
 
-def exp(t: torch.Tensor, a: float = 5, _y: torch.Tensor | None = None) -> torch.Tensor:
+def exp(
+    t: Array,
+    a: float = 5,
+    _y: torch.Tensor | None = None,
+    *,
+    xp: ModuleType = torch,
+) -> Array:
     """
     Exponential integrand ``f(t) = exp(a*t)``.
 
@@ -205,19 +249,21 @@ def exp(t: torch.Tensor, a: float = 5, _y: torch.Tensor | None = None) -> torch.
 
     Parameters
     ----------
-    t : torch.Tensor
+    t : torch.Tensor or numpy.ndarray
         Points of the integration variable t. Shape: [N, T].
     a : float
         Growth rate.
     _y : torch.Tensor or None
         Unused.
+    xp : module
+        The array module of t: ``torch`` (default), ``numpy`` or ``jax.numpy``.
 
     Returns
     -------
-    torch.Tensor
+    torch.Tensor or numpy.ndarray
         ``exp(a*t)`` at each point. Shape: [N, T].
     """
-    return torch.exp(a * t)
+    return xp.exp(a * t)
 
 
 def exp_solution(
@@ -249,8 +295,13 @@ def exp_solution(
 
 
 def damped_sine(
-    t: torch.Tensor, w: float = 3.7, a: float = 5, _y: torch.Tensor | None = None
-) -> torch.Tensor:
+    t: Array,
+    w: float = 3.7,
+    a: float = 5,
+    _y: torch.Tensor | None = None,
+    *,
+    xp: ModuleType = torch,
+) -> Array:
     """
     Damped oscillating integrand ``f(t) = exp(-a*t) * sin(2*pi*w*t)``.
 
@@ -259,7 +310,7 @@ def damped_sine(
 
     Parameters
     ----------
-    t : torch.Tensor
+    t : torch.Tensor or numpy.ndarray
         Points of the integration variable t. Shape: [N, T].
     w : float
         Frequency: number of periods of ``sin(2*pi*w*t)`` per unit of t.
@@ -267,13 +318,15 @@ def damped_sine(
         Decay rate of the amplitude ``exp(-a*t)``.
     _y : torch.Tensor or None
         Unused.
+    xp : module
+        The array module of t: ``torch`` (default), ``numpy`` or ``jax.numpy``.
 
     Returns
     -------
-    torch.Tensor
+    torch.Tensor or numpy.ndarray
         ``exp(-a*t) * sin(2*pi*w*t)`` at each point. Shape: [N, T].
     """
-    return torch.exp(-a * t) * torch.sin(w * t * 2 * torch.pi)
+    return xp.exp(-a * t) * xp.sin(w * t * 2 * xp.pi)
 
 
 def damped_sine_solution(
@@ -330,6 +383,197 @@ def damped_sine_solution(
         -1
         * (numerator(mesh_final, _w, a) - numerator(mesh_init, _w, a))
         / (a**2 + _w**2)
+    )
+
+
+def sharp_peak(
+    t: Array,
+    c: float = 0.37,
+    eps: float = 1e-3,
+    *,
+    xp: ModuleType = torch,  # noqa: ARG001 (every integrand takes xp)
+) -> Array:
+    """
+    Lorentzian peak ``f(t) = 1 / (1 + ((t - c) / eps)**2)`` of width ``eps``.
+
+    Away from ``c`` the integrand is nearly 0, so the subintervals have to be
+    refined only in a region about ``eps`` wide.
+
+    Parameters
+    ----------
+    t : torch.Tensor or numpy.ndarray
+        Points of the integration variable t. Shape: [N, T].
+    c : float
+        Position of the peak.
+    eps : float
+        Half width of the peak at half its height.
+    xp : module
+        The array module of t (unused here; accepted like every integrand).
+
+    Returns
+    -------
+    torch.Tensor or numpy.ndarray
+        The peak at each point. Shape: [N, T].
+    """
+    return 1 / (1 + ((t - c) / eps) ** 2)
+
+
+def sharp_peak_solution(
+    mesh_init: torch.Tensor,
+    mesh_final: torch.Tensor,
+    c: float = 0.37,
+    eps: float = 1e-3,
+) -> torch.Tensor:
+    """
+    Exact integral of ``sharp_peak`` from mesh_init to mesh_final.
+
+    An antiderivative is ``eps * arctan((t - c) / eps)``.
+
+    Parameters
+    ----------
+    mesh_init : torch.Tensor
+        Lower integration bound. Shape: [T].
+    mesh_final : torch.Tensor
+        Upper integration bound. Shape: [T].
+    c : float
+        Position of the peak (must match the integrand).
+    eps : float
+        Half width of the peak (must match the integrand).
+
+    Returns
+    -------
+    torch.Tensor
+        Exact integral value. Shape: [T].
+    """
+    return eps * (
+        torch.arctan((mesh_final - c) / eps) - torch.arctan((mesh_init - c) / eps)
+    )
+
+
+def kink(t: Array, c: float = 1 / 3, *, xp: ModuleType = torch) -> Array:
+    """
+    Integrand ``f(t) = sqrt(|t - c|)``, whose derivative is infinite at ``c``.
+
+    The integrand is finite everywhere, so every method can evaluate it at
+    any point, but no polynomial approximates it well near ``c``.
+
+    Parameters
+    ----------
+    t : torch.Tensor or numpy.ndarray
+        Points of the integration variable t. Shape: [N, T].
+    c : float
+        Where the derivative is infinite.
+    xp : module
+        The array module of t: ``torch`` (default), ``numpy`` or ``jax.numpy``.
+
+    Returns
+    -------
+    torch.Tensor or numpy.ndarray
+        ``sqrt(|t - c|)`` at each point. Shape: [N, T].
+    """
+    return xp.sqrt(xp.abs(t - c))
+
+
+def kink_solution(
+    mesh_init: torch.Tensor, mesh_final: torch.Tensor, c: float = 1 / 3
+) -> torch.Tensor:
+    """
+    Exact integral of ``kink`` from mesh_init to mesh_final.
+
+    An antiderivative is ``(2/3) * sign(t - c) * |t - c|**1.5``.
+
+    Parameters
+    ----------
+    mesh_init : torch.Tensor
+        Lower integration bound. Shape: [T].
+    mesh_final : torch.Tensor
+        Upper integration bound. Shape: [T].
+    c : float
+        Where the derivative is infinite (must match the integrand).
+
+    Returns
+    -------
+    torch.Tensor
+        Exact integral value. Shape: [T].
+    """
+
+    def antiderivative(x: torch.Tensor) -> torch.Tensor:
+        """
+        Evaluate ``(2/3) * sign(x - c) * |x - c|**1.5``.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            A bound of the integral. Shape: [T].
+
+        Returns
+        -------
+        torch.Tensor
+            The antiderivative at x. Shape: [T].
+        """
+        return 2 / 3 * torch.sign(x - c) * torch.abs(x - c) ** 1.5
+
+    return antiderivative(mesh_final) - antiderivative(mesh_init)
+
+
+def many_outputs(t: Array, n: int = 1000, *, xp: ModuleType = torch) -> Array:
+    """
+    Vector-valued integrand ``f_k(t) = sin(k*t)`` for ``k = 1, ..., n``.
+
+    Each of the n outputs is one integral; the highest frequencies set the
+    size of the subintervals for all of them.
+
+    Parameters
+    ----------
+    t : torch.Tensor or numpy.ndarray
+        Points of the integration variable t. Shape: [N, 1].
+    n : int
+        Number of outputs.
+    xp : module
+        The array module of t: ``torch`` (default), ``numpy`` or ``jax.numpy``.
+
+    Returns
+    -------
+    torch.Tensor or numpy.ndarray
+        ``sin(k*t)`` for every k at each point. Shape: [N, n].
+    """
+    k = xp.arange(1, n + 1, dtype=t.dtype)
+    if xp is torch:
+        k = k.to(t.device)  # torch.arange builds on the CPU by default
+    return xp.sin(t * k)
+
+
+def many_outputs_solution(
+    mesh_init: torch.Tensor, mesh_final: torch.Tensor, n: int = 1000
+) -> torch.Tensor:
+    """
+    Exact integrals of ``many_outputs`` from mesh_init to mesh_final.
+
+    The integral of ``sin(k*t)`` is ``(cos(k*a) - cos(k*b)) / k``, written as
+    ``2 * sin(k*(a + b)/2) * sin(k*(b - a)/2) / k``: the difference of two
+    cosines loses up to 8 digits to cancellation where it is small (k = 710
+    on [0, 1]); the product does not.
+
+    Parameters
+    ----------
+    mesh_init : torch.Tensor
+        Lower integration bound a. Shape: [1].
+    mesh_final : torch.Tensor
+        Upper integration bound b. Shape: [1].
+    n : int
+        Number of outputs (must match the integrand).
+
+    Returns
+    -------
+    torch.Tensor
+        Exact integral of each output. Shape: [n].
+    """
+    k = torch.arange(1, n + 1, dtype=mesh_init.dtype, device=mesh_init.device)
+    return (
+        2
+        * torch.sin(k * (mesh_init + mesh_final) / 2)
+        * torch.sin(k * (mesh_final - mesh_init) / 2)
+        / k
     )
 
 
@@ -404,4 +648,17 @@ integrand_dict = {
     "sine_squared": (sine_squared, sine_squared_solution, 1e-6),
     "exp": (exp, exp_solution, 1e-6),
     "damped_sine": (damped_sine, damped_sine_solution, 1e-6),
+}
+
+# Harder integrands, in the same form. "oscillatory" is damped_sine with 100
+# periods and a decay rate of 1: exp(-t) * sin(200*pi*t).
+hard_integrand_dict = {
+    "oscillatory": (
+        partial(damped_sine, w=100, a=1),
+        partial(damped_sine_solution, w=100, a=1),
+        1e-6,
+    ),
+    "sharp_peak": (sharp_peak, sharp_peak_solution, 1e-6),
+    "kink": (kink, kink_solution, 1e-6),
+    "many_outputs": (many_outputs, many_outputs_solution, 1e-6),
 }

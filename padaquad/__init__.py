@@ -11,7 +11,7 @@ and ``VariableAdaptiveQuadrature``, the result type ``IntegrationResult`` and th
 ``IntegrationState`` it hands to the next call, the error
 ``BackwardOutOfMemoryError``, the
 method registries ``UNIFORM_METHODS`` and ``VARIABLE_METHODS``, the test
-integrands ``integrand_dict`` and ``wolf_schlegel``, and the sampling-mode enum
+integrands ``integrand_dict``, ``hard_integrand_dict`` and ``wolf_schlegel``, and the sampling-mode enum
 ``steps``.
 """
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from ._frontend import adaptive_quadrature, integrate
 from .base import steps
-from .examples import integrand_dict, wolf_schlegel
+from .examples import hard_integrand_dict, integrand_dict, wolf_schlegel
 from .methods import UNIFORM_METHODS, VARIABLE_METHODS
 from .quadrature import UniformAdaptiveQuadrature, VariableAdaptiveQuadrature
 from .quadrature.memory import BackwardOutOfMemoryError
@@ -34,6 +34,7 @@ __all__ = [
     "UniformAdaptiveQuadrature",
     "VariableAdaptiveQuadrature",
     "adaptive_quadrature",
+    "hard_integrand_dict",
     "integrand_dict",
     "integrate",
     "steps",

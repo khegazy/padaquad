@@ -17,9 +17,11 @@
 
    Harder test integrands with known integrals, in the same form:
    ``oscillatory`` (``damped_sine`` with ``w=100``, ``a=1``: 100 periods of
-   ``exp(-t) * sin(200*pi*t)`` on [0, 1]), ``sharp_peak`` (a peak of width
-   1e-3), ``kink`` (``sqrt(|t - 1/3|)``, whose derivative is infinite at 1/3)
-   and ``many_outputs`` (``sin(k*t)`` for k = 1 to 1,000 at once). Their
+   ``exp(-t) * sin(200*pi*t)`` on [0, 1]), ``chirp`` (``2*t*sin(1e4*t**2)``,
+   about 1,600 periods of growing frequency), ``sharp_peak`` (a peak of width
+   1e-3), ``spectrum`` (``sharp_peak`` with 200 peaks of width 1e-4), ``kink``
+   (``sqrt(|t - 1/3|)``, whose derivative is infinite at 1/3) and
+   ``many_outputs`` (``sin(k*t)`` for k = 1 to 1,000 at once). Their
    integrands, like those of ``integrand_dict``, take the array module as the
    keyword argument ``xp`` (``torch``, ``numpy`` or ``jax.numpy``).
 

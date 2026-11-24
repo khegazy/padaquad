@@ -12,7 +12,7 @@
 #   examples/speed_test/run_benchmark.sh [run]     # GPU run, then CPU run
 #   examples/speed_test/run_benchmark.sh cuda      # GPU run only
 #   examples/speed_test/run_benchmark.sh cpu       # CPU run only
-#   examples/speed_test/run_benchmark.sh dry       # one timed repeat of each, to /tmp
+#   examples/speed_test/run_benchmark.sh dry       # one timed run of each, to a scratch folder
 #
 # On Perlmutter, for example:
 #   salloc -A <account> -q interactive -C gpu -N 1 --gpus 4 -t 01:00:00

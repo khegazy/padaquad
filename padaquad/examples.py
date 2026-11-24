@@ -9,7 +9,8 @@ Test integrands, most with an exact integral.
 ``integrand_dict`` maps each name to a tuple ``(integrand, solution,
 error_cutoff)``, where ``error_cutoff`` is the largest relative error
 ``|computed - exact| / |exact|`` the tests accept. ``hard_integrand_dict`` has
-the same form for harder integrands: many oscillations, a sharp peak, an
+the same form for harder integrands: many oscillations (of one frequency, or
+of a frequency that grows), a sharp peak, a spectrum of 200 sharp peaks, an
 infinite derivative, and 1,000 outputs at once.
 
 The integrands in both dictionaries take the array module as the keyword
@@ -388,66 +389,131 @@ def damped_sine_solution(
 
 def sharp_peak(
     t: Array,
-    c: float = 0.37,
+    c: float | npt.ArrayLike = 0.37,
     eps: float = 1e-3,
     *,
-    xp: ModuleType = torch,  # noqa: ARG001 (every integrand takes xp)
+    xp: ModuleType = torch,
 ) -> Array:
     """
-    Lorentzian peak ``f(t) = 1 / (1 + ((t - c) / eps)**2)`` of width ``eps``.
+    Lorentzian peaks ``f(t) = sum_j 1 / (1 + ((t - c_j) / eps)**2)`` of width ``eps``.
 
-    Away from ``c`` the integrand is nearly 0, so the subintervals have to be
-    refined only in a region about ``eps`` wide.
+    Away from the peak positions ``c_j`` the integrand is nearly 0, so the
+    subintervals have to be refined only in regions about ``eps`` wide around
+    each of them.
 
     Parameters
     ----------
     t : torch.Tensor or numpy.ndarray
-        Points of the integration variable t. Shape: [N, T].
-    c : float
-        Position of the peak.
+        Points of the integration variable t. Shape: [N, 1].
+    c : float or array_like
+        Position of the peak, or a 1-D sequence of positions (one peak each).
     eps : float
-        Half width of the peak at half its height.
+        Half width of each peak at half its height.
     xp : module
-        The array module of t (unused here; accepted like every integrand).
+        The array module of t: ``torch`` (default), ``numpy`` or ``jax.numpy``.
 
     Returns
     -------
     torch.Tensor or numpy.ndarray
-        The peak at each point. Shape: [N, T].
+        The sum of the peaks at each point. Shape: [N, 1].
     """
-    return 1 / (1 + ((t - c) / eps) ** 2)
+    if isinstance(t, torch.Tensor):
+        centers = torch.as_tensor(c, dtype=t.dtype, device=t.device)
+    else:
+        centers = xp.asarray(c, dtype=t.dtype)
+    return (1 / (1 + ((t - centers) / eps) ** 2)).sum(-1)[:, None]
 
 
 def sharp_peak_solution(
     mesh_init: torch.Tensor,
     mesh_final: torch.Tensor,
-    c: float = 0.37,
+    c: float | npt.ArrayLike = 0.37,
     eps: float = 1e-3,
 ) -> torch.Tensor:
     """
     Exact integral of ``sharp_peak`` from mesh_init to mesh_final.
 
-    An antiderivative is ``eps * arctan((t - c) / eps)``.
+    An antiderivative of one peak is ``eps * arctan((t - c) / eps)``; the
+    integral is the sum over the peaks.
 
     Parameters
     ----------
     mesh_init : torch.Tensor
-        Lower integration bound. Shape: [T].
+        Lower integration bound. Shape: [1].
     mesh_final : torch.Tensor
-        Upper integration bound. Shape: [T].
-    c : float
-        Position of the peak (must match the integrand).
+        Upper integration bound. Shape: [1].
+    c : float or array_like
+        Position or positions of the peaks (must match the integrand).
     eps : float
-        Half width of the peak (must match the integrand).
+        Half width of the peaks (must match the integrand).
+
+    Returns
+    -------
+    torch.Tensor
+        Exact integral value. Shape: [1].
+    """
+    centers = torch.as_tensor(c, dtype=mesh_init.dtype, device=mesh_init.device)
+    return (
+        eps
+        * (
+            torch.arctan((mesh_final - centers) / eps)
+            - torch.arctan((mesh_init - centers) / eps)
+        )
+    ).sum(-1, keepdim=True)
+
+
+def chirp(t: Array, w: float = 1e4, *, xp: ModuleType = torch) -> Array:
+    """
+    Chirp ``f(t) = 2*t*sin(w*t**2)``, whose frequency grows along t.
+
+    The phase ``w*t**2`` goes through ``w / (2*pi)`` periods on [0, 1] (about
+    1,600 for the default ``w``), each shorter than the one before, so the
+    subintervals have to shrink steadily from left to right.
+
+    Parameters
+    ----------
+    t : torch.Tensor or numpy.ndarray
+        Points of the integration variable t. Shape: [N, T].
+    w : float
+        Angular frequency of the phase ``w*t**2``.
+    xp : module
+        The array module of t: ``torch`` (default), ``numpy`` or ``jax.numpy``.
+
+    Returns
+    -------
+    torch.Tensor or numpy.ndarray
+        ``2*t*sin(w*t**2)`` at each point. Shape: [N, T].
+    """
+    return 2 * t * xp.sin(w * t**2)
+
+
+def chirp_solution(
+    mesh_init: torch.Tensor, mesh_final: torch.Tensor, w: float = 1e4
+) -> torch.Tensor:
+    """
+    Exact integral of ``chirp`` from mesh_init to mesh_final.
+
+    An antiderivative is ``-cos(w*t**2) / w``, so the integral from a to b is
+    ``(cos(w*a**2) - cos(w*b**2)) / w``, written as
+    ``2 * sin(w*(a**2 + b**2)/2) * sin(w*(b**2 - a**2)/2) / w`` to avoid the
+    cancellation of the two cosines (as in ``many_outputs_solution``).
+
+    Parameters
+    ----------
+    mesh_init : torch.Tensor
+        Lower integration bound a. Shape: [T].
+    mesh_final : torch.Tensor
+        Upper integration bound b. Shape: [T].
+    w : float
+        Angular frequency (must match the integrand).
 
     Returns
     -------
     torch.Tensor
         Exact integral value. Shape: [T].
     """
-    return eps * (
-        torch.arctan((mesh_final - c) / eps) - torch.arctan((mesh_init - c) / eps)
-    )
+    a2, b2 = mesh_init**2, mesh_final**2
+    return 2 * torch.sin(w * (a2 + b2) / 2) * torch.sin(w * (b2 - a2) / 2) / w
 
 
 def kink(t: Array, c: float = 1 / 3, *, xp: ModuleType = torch) -> Array:
@@ -650,15 +716,27 @@ integrand_dict = {
     "damped_sine": (damped_sine, damped_sine_solution, 1e-6),
 }
 
+# The 200 peak positions of "spectrum": the golden-ratio sequence
+# frac(0.5 + j*g), g = (sqrt(5) - 1)/2, spreads them evenly over [0, 1]
+# without a pattern a regular starting mesh could line up with.
+_SPECTRUM_CENTERS = (0.5 + (5**0.5 - 1) / 2 * np.arange(200)) % 1.0
+
 # Harder integrands, in the same form. "oscillatory" is damped_sine with 100
-# periods and a decay rate of 1: exp(-t) * sin(200*pi*t).
+# periods and a decay rate of 1: exp(-t) * sin(200*pi*t). "spectrum" is
+# sharp_peak with 200 peaks of width 1e-4.
 hard_integrand_dict = {
     "oscillatory": (
         partial(damped_sine, w=100, a=1),
         partial(damped_sine_solution, w=100, a=1),
         1e-6,
     ),
+    "chirp": (chirp, chirp_solution, 1e-6),
     "sharp_peak": (sharp_peak, sharp_peak_solution, 1e-6),
+    "spectrum": (
+        partial(sharp_peak, c=_SPECTRUM_CENTERS, eps=1e-4),
+        partial(sharp_peak_solution, c=_SPECTRUM_CENTERS, eps=1e-4),
+        1e-6,
+    ),
     "kink": (kink, kink_solution, 1e-6),
     "many_outputs": (many_outputs, many_outputs_solution, 1e-6),
 }

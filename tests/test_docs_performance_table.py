@@ -64,12 +64,14 @@ def test_unreadable_file_is_named(tmp_path: Path, content: str) -> None:
 
 def _synthetic_results() -> dict:
     """A results file with known times: padaquad gk21 takes 1 ms, dopri5 2 ms;
-    torchdiffeq 4 ms, diffrax 8 ms (not converged), scipy 16 ms, quadax raised."""
+    torchdiffeq 4 ms (timed once), diffrax 8 ms (not converged), scipy 16 ms,
+    quadax raised."""
     meta = json.loads(COMMITTED.read_text())["metadata"]
     row = {
         "device": "cpu",
         "time_min_s": 0.0,
         "time_max_s": 1.0,
+        "repeats": meta["repeats"],
         "evaluations": 10,
         "abs_error": 1e-9,
         "rel_error": 1e-9,
@@ -82,6 +84,7 @@ def _synthetic_results() -> dict:
             "integrand": "f",
             "solver": "torchdiffeq dopri5",
             "time_median_s": 4e-3,
+            "repeats": 1,
         },
         {
             **row,
@@ -136,6 +139,9 @@ def test_one_benchmark_table_and_one_padaquad_table_per_integrand(
         assert benchmark.count(solver) == 1
     assert "padaquad" not in benchmark.split("\n", 1)[1]
     assert "failed: ValueError: boom" in benchmark
+    # A range from fewer timed runs than the others says how many.
+    assert "| 0-1e+03 (1 run) |" in benchmark
+    assert benchmark.count(" run") == 1
     # The padaquad table: one speedup column per library, never vs itself.
     assert padaquad.splitlines()[0].endswith(
         "| vs torchdiffeq | vs diffrax | vs scipy | vs quadax |"

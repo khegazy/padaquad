@@ -88,7 +88,11 @@ the padaquad log for them.
   and writes `results_cuda.json` then `results_cpu.json`. padaquad vs
   torchdiffeq, diffrax, scipy (NumPy integrands, CPU) and quadax at
   `atol = 1e-8`, `rtol = 0`, max norm (the page's "One tolerance for all"
-  explains why); padaquad at a `max_batch` fixed before timing; quadax's
+  explains why). Mostly integrands that need many subintervals (the user's
+  choice: padaquad's intended case), listed in `MANY_SUBINTERVALS`, plus three
+  in `FEW_SUBINTERVALS` for contrast; a solver whose warm-up run is slow is
+  timed fewer times (`TIME_BUDGET_S`). padaquad at a `max_batch` fixed before
+  timing; quadax's
   `max_ninter` per integrand in `QUADAX_MAX_NINTER` (its loop runs all
   `max_ninter + 1` iterations, so re-measure it when integrands change).
   Commit the results from a clean tree (they record the commit; the results

@@ -32,21 +32,36 @@ section's device, as torchdiffeq and padaquad do with PyTorch versions. All
 versions come from one definition per integrand (the `xp` argument of the
 integrands in `padaquad.examples`).
 
-The integrands:
+The integrands are chosen for the case padaquad is built for: most of them
+need hundreds to thousands of subintervals at this tolerance (the heading of
+each table gives the number quadax needed), so padaquad can evaluate the nodes
+of many subintervals at once, while an ODE solver takes thousands of steps in
+sequence and scipy and quadax split one subinterval at a time.
 
-- the five of `integrand_dict` (`t`, `t_squared`, `sine_squared`, `exp`,
-  `damped_sine`);
-- the four of `hard_integrand_dict`: `oscillatory` (100 periods of
-  $e^{-t}\sin(200\pi t)$), `sharp_peak` (a peak of width $10^{-3}$), `kink`
-  ($\sqrt{|t - 1/3|}$, whose derivative is infinite at $1/3$) and
-  `many_outputs` ($\sin(kt)$ for $k = 1, \dots, 1000$ at once); the
-  {doc}`examples <auto_examples/index>` show each of them;
-- two tanh networks with fixed weights, `neural_network` (two hidden layers
-  of 64 units) and `neural_network_wide` (four of 512), whose reference
-  integrals come from `scipy.integrate.quad` at a tolerance of $10^{-14}$.
+- **Many subintervals:**
+  - `chirp`: $2t\sin(10^4 t^2)$, about 1,600 periods whose frequency grows
+    along $t$;
+  - `spectrum`: 200 peaks of width $10^{-4}$ spread over $[0, 1]$;
+  - `oscillatory`: 100 periods of $e^{-t}\sin(200\pi t)$;
+  - `many_outputs`: $\sin(kt)$ for $k = 1, \dots, 1000$ at once;
+  - `feature_network` and `feature_network_wide`: tanh networks with fixed
+    random weights whose input is $\sin(2\pi k t)$ and $\cos(2\pi k t)$
+    for $k = 1, 2, 4, \dots, 512$ (two hidden layers of 256 units; three of
+    1,024). They are expensive to evaluate and oscillate up to 512 times.
+- **Few subintervals, for contrast:** `damped_sine` (3.7 periods of a decaying
+  sine), `sharp_peak` (one peak of width $10^{-3}$) and `neural_network_wide`
+  (a tanh network of $4t$ with four hidden layers of 512 units: expensive but
+  smooth).
+
+The analytic integrands come from `hard_integrand_dict` and `integrand_dict`,
+and the {doc}`examples <auto_examples/index>` show those of
+`hard_integrand_dict`. The networks' reference integrals come from
+`scipy.integrate.quad` at a tolerance of $10^{-14}$.
 
 For each case the script records the median wall time of 7 runs after one
-untimed warm-up run (which also compiles the JAX solvers), with
+untimed warm-up run (which also compiles the JAX solvers), or of fewer runs
+(at least one; the table says how many) when the warm-up run shows that 7 would
+take more than a minute, with
 `torch.cuda.synchronize` or `jax.block_until_ready` around each run on a GPU;
 the smallest and largest time; the number of points at which the integrand was
 evaluated (for diffrax, counted while it runs, in an untimed run); whether the

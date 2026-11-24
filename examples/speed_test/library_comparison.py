@@ -2,7 +2,9 @@
 Benchmark padaquad against torchdiffeq, diffrax, scipy and quadax.
 
 Every library integrates the same integrands over [0, 1], each with a known
-integral, at one tolerance: ``atol = 1e-8`` and ``rtol = 0`` (the
+integral; most of them need hundreds to thousands of subintervals (the case
+padaquad is built for), and three need only a few, for contrast. All run at
+one tolerance: ``atol = 1e-8`` and ``rtol = 0`` (the
 Performance page explains the choice), with the error of a vector-valued
 integrand measured by the largest component (the max norm) everywhere.
 
@@ -21,7 +23,8 @@ whose integrands take the array module ``xp``).
 
 For every (integrand, solver) the script records the median wall time of
 ``--repeats`` runs after one untimed warm-up run (which also compiles the JAX
-solvers), the smallest and largest time, the number of points at which the
+solvers), fewer when the warm-up run took long (``TIME_BUDGET_S``), the
+smallest and largest time, the number of points at which the
 integrand was evaluated, whether the solver reported success, and the error
 against the exact answer. padaquad runs with a fixed ``max_batch``, chosen
 before any timing, so no batch-size search is timed.
@@ -78,8 +81,33 @@ LIBRARIES = {
     "quadax": "quadax quadgk",
 }
 PADAQUAD_METHODS = ("dopri5", "gk21")
-# padaquad's batch size for the cheap analytic integrands; the networks' is
-# measured before timing (solver.get_max_batch(f=...)).
+# The integrands, in the order of the tables: first those that need many
+# subintervals, then three that need few (a smooth one, one sharp peak, and an
+# expensive smooth network). Analytic ones come from hard_integrand_dict or
+# integrand_dict; the networks are built in cases().
+MANY_SUBINTERVALS = (
+    "chirp",
+    "spectrum",
+    "oscillatory",
+    "many_outputs",
+    "feature_network",
+    "feature_network_wide",
+)
+FEW_SUBINTERVALS = ("damped_sine", "sharp_peak", "neural_network_wide")
+# The networks: layer widths after the input, and whether the input is
+# sine and cosine features of t (frequencies FEATURE_FREQUENCIES) or 4 t.
+NETWORKS = {
+    "feature_network": ([256, 256, 1], True),
+    "feature_network_wide": ([1024, 1024, 1024, 1], True),
+    "neural_network_wide": ([512, 512, 512, 512, 1], False),
+}
+FEATURE_FREQUENCIES = 2.0 ** np.arange(10)  # 1, 2, 4, ..., 512 periods on [0, 1]
+# The timed runs of one (integrand, solver) stop at about this many seconds:
+# after a warm-up run of w seconds, min(--repeats, max(1, TIME_BUDGET_S // w))
+# runs, so a slow solver (torchdiffeq on thousands of steps) is timed once.
+TIME_BUDGET_S = 60.0
+# padaquad's batch size for the analytic integrands; the networks' is measured
+# before timing (solver.get_max_batch(f=...)).
 MAX_BATCH_ANALYTIC = 100_000
 # Budgets large enough that no case stops on them: scipy's subintervals
 # (QUADPACK allocates them but does no work for those it does not use) and
@@ -92,16 +120,14 @@ DIFFRAX_MAX_STEPS = 100_000
 # costs time on every call: each value is the smallest power of 2 at least
 # twice the number of subintervals quadax needed here (the "ninter" of a run).
 QUADAX_MAX_NINTER = {
-    "t": 2,
-    "t_squared": 2,
-    "sine_squared": 8,
-    "exp": 2,
-    "damped_sine": 4,
+    "chirp": 2048,
+    "spectrum": 4096,
     "oscillatory": 128,
-    "sharp_peak": 32,
-    "kink": 16,
     "many_outputs": 256,
-    "neural_network": 8,
+    "feature_network": 2048,
+    "feature_network_wide": 2048,
+    "damped_sine": 4,
+    "sharp_peak": 32,
     "neural_network_wide": 8,
 }
 QUADAX_DEFAULT_MAX_NINTER = 1024  # for an integrand not listed above
@@ -119,12 +145,12 @@ def network_weights(
     widths: list[int], seed: int
 ) -> list[tuple[np.ndarray, np.ndarray]]:
     """
-    Draw the weights of a tanh network t -> R with the given layer widths.
+    Draw the weights of a tanh network with the given layer widths.
 
     Parameters
     ----------
     widths : list of int
-        Layer widths, input (1) to output (1).
+        Layer widths, input to output (1).
     seed : int
         Seed of the NumPy generator.
 
@@ -141,7 +167,10 @@ def network_weights(
 
 
 def build_network(
-    weights: list[tuple[np.ndarray, np.ndarray]], xp: ModuleType, device: str
+    weights: list[tuple[np.ndarray, np.ndarray]],
+    frequencies: np.ndarray | None,
+    xp: ModuleType,
+    device: str,
 ) -> Callable[[Any], Any]:
     """
     Return the network as an integrand of the array module xp.
@@ -150,6 +179,10 @@ def build_network(
     ----------
     weights : list of tuple
         From ``network_weights``.
+    frequencies : numpy.ndarray or None
+        If given, the network's input is ``sin(2 pi k t)`` and
+        ``cos(2 pi k t)`` for each frequency k (the first layer then has
+        ``2 * len(frequencies)`` inputs); if None, it is ``4 t``.
     xp : module
         ``torch``, ``numpy`` or ``jax.numpy``.
     device : str
@@ -165,8 +198,10 @@ def build_network(
             (torch.as_tensor(w, device=device), torch.as_tensor(b, device=device))
             for w, b in weights
         ]
+        k = None if frequencies is None else torch.as_tensor(frequencies, device=device)
     else:
         layers = [(xp.asarray(w), xp.asarray(b)) for w, b in weights]
+        k = None if frequencies is None else xp.asarray(frequencies)
 
     def f(t: Any) -> Any:
         """
@@ -182,7 +217,11 @@ def build_network(
         array
             Values [N, 1].
         """
-        x = 4 * t  # stretch [0, 1] so that the network varies over it
+        if k is None:
+            x = 4 * t  # stretch [0, 1] so that the network varies over it
+        else:
+            phase = 2 * np.pi * t * k
+            x = xp.concatenate([xp.sin(phase), xp.cos(phase)], axis=-1)
         for i, (w, b) in enumerate(layers):
             x = x @ w.T + b
             if i < len(layers) - 1:
@@ -194,15 +233,16 @@ def build_network(
 
 def cases() -> dict[str, Case]:
     """
-    Return every integrand of the benchmark, by name.
+    Return every integrand of the benchmark, by name, in the order of the tables.
 
     Returns
     -------
     dict
-        Name -> ``Case``: the ``integrand_dict`` and ``hard_integrand_dict``
-        integrands (exact integrals from their solution functions) and two
-        tanh networks (two hidden layers of 64 units, four of 512; reference
-        integrals from ``scipy.integrate.quad`` at a tolerance of 1e-14).
+        Name -> ``Case`` for the names in ``MANY_SUBINTERVALS`` and
+        ``FEW_SUBINTERVALS``: the analytic integrands (exact integrals from
+        their solution functions) and the tanh networks of ``NETWORKS``
+        (reference integrals from ``scipy.integrate.quad`` at a tolerance of
+        1e-14).
 
     Raises
     ------
@@ -211,30 +251,35 @@ def cases() -> dict[str, Case]:
     """
     lo = torch.tensor([0.0], dtype=torch.float64)
     hi = torch.tensor([1.0], dtype=torch.float64)
+    analytic = {**integrand_dict, **hard_integrand_dict}
     out = {}
-    for name, (f, solution, _) in {**integrand_dict, **hard_integrand_dict}.items():
-        exact = solution(lo, hi).reshape(-1).numpy()
-        out[name] = Case(
-            lambda xp, _device, f=f: functools.partial(f, xp=xp), exact, analytic=True
-        )
-    for name, widths in (
-        ("neural_network", [1, 64, 64, 1]),
-        ("neural_network_wide", [1, 512, 512, 512, 512, 1]),
-    ):
-        weights = network_weights(widths, seed=0)
-        f_np = build_network(weights, np, "cpu")
+    for name in (*MANY_SUBINTERVALS, *FEW_SUBINTERVALS):
+        if name in analytic:
+            f, solution, _ = analytic[name]
+            exact = solution(lo, hi).reshape(-1).numpy()
+            out[name] = Case(
+                lambda xp, _device, f=f: functools.partial(f, xp=xp),
+                exact,
+                analytic=True,
+            )
+            continue
+        widths, features = NETWORKS[name]
+        frequencies = FEATURE_FREQUENCIES if features else None
+        inputs = 1 if frequencies is None else 2 * len(frequencies)
+        weights = network_weights([inputs, *widths], seed=0)
+        f_np = build_network(weights, frequencies, np, "cpu")
         reference, ref_error = scipy.integrate.quad(
             lambda s, f_np=f_np: float(f_np(np.array([[s]]))[0, 0]),
             0.0,
             1.0,
             epsabs=1e-14,
             epsrel=1e-14,
-            limit=1000,
+            limit=SCIPY_LIMIT,
         )
         if ref_error > 1e-12:
             raise RuntimeError(f"{name}: reference integral error {ref_error:.1e}")
         out[name] = Case(
-            functools.partial(build_network, weights),
+            functools.partial(build_network, weights, frequencies),
             np.array([reference]),
             analytic=False,
         )
@@ -491,7 +536,10 @@ def measure(
     solve: Callable[[], Outcome], exact: np.ndarray, device: str, repeats: int
 ) -> dict[str, Any]:
     """
-    Time one solver on one integrand: one untimed warm-up, then ``repeats`` runs.
+    Time one solver on one integrand: one untimed warm-up, then the timed runs.
+
+    The timed runs are ``repeats``, or fewer when the warm-up run took more
+    than ``TIME_BUDGET_S / repeats`` seconds (at least one).
 
     Parameters
     ----------
@@ -502,17 +550,23 @@ def measure(
     device : str
         The device to synchronize around each run.
     repeats : int
-        Number of timed runs.
+        Largest number of timed runs.
 
     Returns
     -------
     dict
-        Median, smallest and largest time (s), evaluations, absolute and
-        relative error (max norm over the outputs), convergence, extras.
+        Median, smallest and largest time (s), number of timed runs,
+        evaluations, absolute and relative error (max norm over the outputs),
+        convergence, extras.
     """
+    synchronize(device)
+    start = time.perf_counter()
     solve()  # warm-up, not timed
+    synchronize(device)
+    warm_up = time.perf_counter() - start
+    runs = min(repeats, max(1, int(TIME_BUDGET_S // warm_up)))
     times, outcome = [], None
-    for _ in range(repeats):
+    for _ in range(runs):
         synchronize(device)
         start = time.perf_counter()
         outcome = solve()
@@ -524,6 +578,7 @@ def measure(
         "time_median_s": statistics.median(times),
         "time_min_s": min(times),
         "time_max_s": max(times),
+        "repeats": runs,
         "evaluations": int(outcome.evaluations),
         "abs_error": abs_error,
         "rel_error": abs_error / float(np.max(np.abs(exact))),
@@ -665,6 +720,7 @@ def metadata(device: str, repeats: int) -> dict[str, Any]:
         "atol": ATOL,
         "rtol": RTOL,
         "repeats": repeats,
+        "time_budget_s": TIME_BUDGET_S,
         "max_batch_analytic": MAX_BATCH_ANALYTIC,
         "scipy_limit": SCIPY_LIMIT,
         "diffrax_max_steps": DIFFRAX_MAX_STEPS,
@@ -681,9 +737,11 @@ def render_markdown(results: dict[str, Any]) -> str:
     """
     Render a results file as the Performance page's tables for one device.
 
-    For every integrand: a table of the four libraries, then a table of
+    For every integrand: a heading with its integral and the number of
+    subintervals quadax needed, a table of the four libraries, then a table of
     padaquad's methods with one speedup column per library (the library's
-    median time over padaquad's). A solver that did not report success is
+    median time over padaquad's). A range from fewer timed runs than the
+    others says how many. A solver that did not report success is
     marked "†" (and so is every speedup against it); one that raised has no
     time, and every speedup against it is "—".
 
@@ -704,7 +762,9 @@ def render_markdown(results: dict[str, Any]) -> str:
         f"{meta['torch_threads']} torch threads), {meta['date_utc']}, padaquad commit "
         f"`{meta['git_commit'][:7]}`{' (uncommitted changes)' if meta['git_dirty'] else ''}. "
         f"atol = {meta['atol']:g}, rtol = {meta['rtol']:g}. Times are medians of "
-        f"{meta['repeats']} runs after one untimed warm-up run. Versions: {versions}."
+        f"{meta['repeats']} runs after one untimed warm-up run, or of fewer runs "
+        f"(at least one) when the warm-up run took more than "
+        f"{meta['time_budget_s'] / meta['repeats']:.3g} s. Versions: {versions}."
     )
     lines = [caption, ""]
     rows = results["rows"]
@@ -716,6 +776,9 @@ def render_markdown(results: dict[str, Any]) -> str:
             what = (
                 f"{info['outputs']} outputs, largest integral {info['largest_abs']:.3g}"
             )
+        quadax = mine.get(LIBRARIES["quadax"])
+        if quadax is not None and quadax["error"] is None:
+            what += f"; quadax needed {quadax['ninter']:,} subintervals"
         lines += [f"#### `{name}` ({what})", ""]
         lines += [
             "| Library | Device | Median time (ms) | Range (ms) | Evaluations | Abs. error | Rel. error |",
@@ -731,10 +794,12 @@ def render_markdown(results: dict[str, Any]) -> str:
                 )
                 continue
             mark = "" if r["converged"] else " †"
+            n = r["repeats"]
+            runs = "" if n == meta["repeats"] else f" ({n} run{'s' * (n > 1)})"
             lines.append(
                 f"| {solver}{mark} | {r['device']} | {_ms(r['time_median_s'])} | "
-                f"{_ms(r['time_min_s'])}-{_ms(r['time_max_s'])} | {r['evaluations']} | "
-                f"{r['abs_error']:.1e} | {r['rel_error']:.1e} |"
+                f"{_ms(r['time_min_s'])}-{_ms(r['time_max_s'])}{runs} | "
+                f"{r['evaluations']} | {r['abs_error']:.1e} | {r['rel_error']:.1e} |"
             )
         header = "| padaquad | max_batch | Median time (ms) | Evaluations | Abs. error | Rel. error | "
         header += " | ".join(f"vs {library}" for library in LIBRARIES) + " |"

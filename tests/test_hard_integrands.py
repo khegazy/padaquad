@@ -19,8 +19,13 @@ from padaquad import hard_integrand_dict, integrand_dict, integrate
 ALL = {**integrand_dict, **hard_integrand_dict}
 F64 = torch.float64
 POINTS = torch.linspace(0.0, 1.7, 1000, dtype=F64).reshape(-1, 1)
-# Points where an integrand is not smooth, for scipy.integrate.quad.
-BREAKS = {"sharp_peak": [0.37], "kink": [1 / 3]}
+# Points where an integrand is not smooth or has a narrow peak, for
+# scipy.integrate.quad (the spectrum's peak positions, from its partial).
+BREAKS = {
+    "sharp_peak": [0.37],
+    "spectrum": list(hard_integrand_dict["spectrum"][0].keywords["c"]),
+    "kink": [1 / 3],
+}
 # Output components of many_outputs checked against quad: the first, one
 # where (1 - cos k)/k cancels badly on [0, 1] (k = 710), and the last.
 COMPONENTS = {"many_outputs": [0, 709, 999]}

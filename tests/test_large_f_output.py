@@ -320,6 +320,23 @@ def test_output_that_requires_grad_raises():
     assert calls == [1]
 
 
+def test_output_that_requires_grad_on_some_calls_raises():
+    """An f that attaches a graph only to calls whose points are all above 0.5
+    passes the one-point check at t = 0; every call of the integration is
+    checked, so it raises there instead of keeping the graph (before the fix,
+    the integration ran to the end with result.y requiring grad)."""
+    theta = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
+
+    def f(t):
+        if bool((t > 0.5).all()):
+            return theta * torch.sin(t)
+        return torch.sin(t)
+
+    message, calls = _refused(f=f, max_batch=23)
+    assert "every call of f" in message
+    assert len(calls) > 1  # past the one-point check: raised in the batch loop
+
+
 # ---------------------------------------------------------------------------
 # (d) result_device=None keeps everything on the solver's device
 # ---------------------------------------------------------------------------

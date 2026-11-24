@@ -277,8 +277,9 @@ without the option.
   whole subintervals, whose values leave the device after the batch's backward
   pass, so there is nothing to save;
 - with a bound or mesh that requires grad, or an integrand whose output
-  requires grad: every value would carry an autograd graph that stays on the
-  device until the integral is differentiated.
+  requires grad on any call (checked on the first point before the integration
+  starts, and on every call after): every value would carry an autograd graph
+  that stays on the device until the integral is differentiated.
 
 **The gradient as extra outputs.** To get the gradient of an integral without
 an autograd graph, let the integrand return the gradient of the integrand with

@@ -384,6 +384,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # self.error_on_nonfinite and is (re)set each integrate() call.
         self.init_error_on_nonfinite = error_on_nonfinite
         self.error_on_nonfinite = error_on_nonfinite
+        # integrate(large_f_output=...), (re)set each integrate() call so the
+        # batch loop can check every output of f (_check_output_has_no_graph);
+        # False for direct callers of the evaluation helpers.
+        self.large_f_output = False
         self._check_total_mem_usage(total_mem_usage)
         self.init_total_mem_usage = total_mem_usage
         self.limit_benchmark_time = limit_benchmark_time
@@ -843,7 +847,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             ``total_mem_usage`` is invalid; if ``enforce_convergence`` is
             True with ``take_gradient=True``; or if ``large_f_output`` is True
             with ``take_gradient=True``, with a bound or ``mesh`` that requires
-            grad, or with an integrand whose output requires grad.
+            grad, or with an integrand whose output requires grad on any call.
         TypeError
             If ``enforce_convergence`` is neither None nor a bool.
         BackwardOutOfMemoryError
@@ -883,9 +887,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         result_device = _resolve_device(
             result_device or self.device, self.device.index or 0
         )
+        # Stored on self so the batch loop can check every output of f
+        # (_check_output_has_no_graph) without threading it through every
+        # signature, as error_on_nonfinite is.
+        self.large_f_output = large_f_output
         # Where each pass's nodes, integrand values and tracked variables go
         # once their subintervals are integrated (_evaluate_f_on_split_nodes).
-        values_device = result_device if large_f_output else self.device
+        values_device = result_device if self.large_f_output else self.device
 
         # The bounds: the given ones (they cut or extend a given mesh), else the
         # mesh's ends; without a mesh both must be given.
@@ -935,7 +943,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # nothing to save with per-batch backward, and it cannot free values
         # that carry an autograd graph (bounds here, f's parameters at the
         # test call of f below).
-        if large_f_output and take_gradient:
+        if self.large_f_output and take_gradient:
             raise ValueError(
                 "large_f_output=True cannot be used with take_gradient=True: with "
                 "take_gradient=True each pass is one call of f on whole "
@@ -943,7 +951,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 "batch's backward pass, so there is nothing for large_f_output to "
                 "save. " + _GRADIENT_AS_OUTPUT_ADVICE
             )
-        if large_f_output and (
+        if self.large_f_output and (
             mesh_init.requires_grad
             or mesh_final.requires_grad
             or (mesh is not None and mesh.requires_grad)
@@ -1017,14 +1025,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             )
         # The bounds do not require grad here with large_f_output (checked
         # above), so an output that requires grad comes from f's parameters.
-        if large_f_output and test_integrand.requires_grad:
-            raise ValueError(
-                "large_f_output=True needs an integrand output that does not "
-                "require grad: with take_gradient=False the autograd graph of "
-                "every value is kept on the solver's device until "
-                "result.integral is differentiated, so moving the values saves "
-                "little or nothing. " + _GRADIENT_AS_OUTPUT_ADVICE
-            )
+        # Checked here, before any other call of f, and again on every call of
+        # the integration (an f may attach a graph only for some points).
+        self._check_output_has_no_graph(test_integrand)
         # The reference must match the integrand's D output components (or be
         # one value for all); another shape would broadcast silently.
         if error_integral_reference is not None and (
@@ -2050,6 +2053,35 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             return integrand, tuple(tracked) or None
         return out, None
 
+    def _check_output_has_no_graph(self, integrand: torch.Tensor) -> None:
+        """
+        Raise ``ValueError`` if f's output requires grad with ``large_f_output``.
+
+        With ``take_gradient=False`` the autograd graph of every value that
+        requires grad is kept on the solver's device until the integral is
+        differentiated, so moving the values to ``result_device`` would save
+        little or nothing. Called on the one-point shape check of f and on every
+        call of the integration's batch loop (``_evaluate_f_in_batches``).
+
+        Parameters
+        ----------
+        integrand : torch.Tensor
+            The integrand values of one call of f. Shape: [B, D].
+
+        Raises
+        ------
+        ValueError
+            If ``self.large_f_output`` is True and ``integrand`` requires grad.
+        """
+        if self.large_f_output and integrand.requires_grad:
+            raise ValueError(
+                "large_f_output=True needs an integrand output that does not "
+                "require grad, on every call of f: with take_gradient=False the "
+                "autograd graph of every value is kept on the solver's device "
+                "until result.integral is differentiated, so moving the values "
+                "saves little or nothing. " + _GRADIENT_AS_OUTPUT_ADVICE
+            )
+
     def _check_f_output_finite(
         self, integrand: torch.Tensor, nodes_flat: torch.Tensor, max_report: int = 5
     ) -> None:
@@ -2347,7 +2379,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         ------
         ValueError
             If f returns another number of values than the points it was
-            given, or (with ``error_on_nonfinite``) a NaN or Inf value.
+            given, (with ``error_on_nonfinite``) a NaN or Inf value, or (with
+            ``large_f_output``) values that require grad.
         torch.OutOfMemoryError
             If one node does not fit in memory (max_batch is already 1).
         """
@@ -2383,6 +2416,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     "for points of shape [N, T]."
                 )
             self._check_f_output_finite(integrand, points)
+            self._check_output_has_no_graph(integrand)
             num_nodes_evaluated += len(integrand)
             # A call that ran is known to fit; the next call may be 10 times
             # larger while the batch size has not converged (_batch_for).

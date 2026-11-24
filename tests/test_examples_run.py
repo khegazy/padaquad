@@ -1,12 +1,11 @@
 """Run example scripts end-to-end to catch documentation rot.
 
-Phase 6 added two example scripts (``examples/quadrature_basics.py``
-and ``examples/gradient_of_integral.py``) as user-facing tutorials.
-They live outside ``tests/`` and are not exercised by the rest of
-the test suite, so a future API rename or signature change could
-silently break them. These tests subprocess each example and assert
-non-zero output and a 0 exit code, plus a few markers to confirm the
-specific scripted assertions inside each example were reached.
+The gallery's scripts (``examples/*.py``, ``examples/hard_integrals/*.py``
+and ``examples/verification/*.py``) live outside ``tests/`` and are not
+exercised by the rest of the test suite, so a future API rename or signature
+change could silently break them. These tests run each one in a subprocess and
+assert a 0 exit code; for the first two tutorials they also check a few
+markers of their output.
 
 The examples are also useful as integration smoke tests that exercise:
 
@@ -33,12 +32,17 @@ PY = sys.executable  # the venv-aware interpreter pytest is running under
 
 
 def _run(script: Path) -> subprocess.CompletedProcess[str]:
-    """Run an example script with the test interpreter and capture output."""
+    """Run an example script with the test interpreter and capture output.
+
+    Figures go to matplotlib's non-interactive backend, so ``plt.show()``
+    returns at once.
+    """
     return subprocess.run(
         [PY, str(script)],
         capture_output=True,
         text=True,
         check=False,
+        env={**os.environ, "MPLBACKEND": "Agg"},
     )
 
 
@@ -100,6 +104,28 @@ def test_gradient_of_integral_runs_and_assertions_pass():
             f"gradient_of_integral.py output missing marker {marker!r}; "
             f"stdout=\n{out.stdout[:500]}"
         )
+
+
+# Gallery scripts that check their own results with assert statements and
+# draw figures: the two tutorials and every harder-integral example.
+SELF_CHECKING_EXAMPLES = [
+    EXAMPLES_DIR / "neural_network_integral.py",
+    EXAMPLES_DIR / "path_optimization_muller_brown.py",
+    *sorted((EXAMPLES_DIR / "hard_integrals").glob("[!_]*.py")),
+]
+
+
+@pytest.mark.parametrize(
+    "script", SELF_CHECKING_EXAMPLES, ids=lambda p: str(p.relative_to(EXAMPLES_DIR))
+)
+def test_example_script_runs(script: Path) -> None:
+    """The script exits 0, so every check inside it passed."""
+    assert script.exists(), f"missing example: {script}"
+    out = _run(script)
+    assert out.returncode == 0, (
+        f"{script.name} exited {out.returncode}; stdout=\n{out.stdout}\n"
+        f"stderr=\n{out.stderr}"
+    )
 
 
 VERIFICATION_DIR = EXAMPLES_DIR / "verification"

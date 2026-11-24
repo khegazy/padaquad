@@ -132,3 +132,34 @@
   doi     = {10.1137/S0036144502417715},
   checked = {PDF opened 2026-11-14 (author copy, people.maths.ox.ac.uk/trefethen/barycentric.pdf) by the adversarial review of the merge-rule plan (PR #69); equation numbers re-checked in its saved text. Eq. (3.2): weights w_j = 1/prod_{k != j}(x_j - x_k). Eq. (4.2): the second (true) barycentric formula p(x) = sum_j w_j f_j/(x - x_j) / sum_j w_j/(x - x_j), with w still defined by (3.2); a common factor of the weights cancels. Eq. (4.1) is only the identity 1 = l(x) sum_j w_j/(x - x_j). Sec. 5: equispaced weights grow like 2^n (ill-conditioned); nodes clustered toward the ends keep them of comparable size.}
 }
+
+@phdthesis{kidger2021,
+  author       = {Kidger, Patrick},
+  title        = {On Neural Differential Equations},
+  school       = {University of Oxford},
+  year         = {2021},
+  url          = {https://arxiv.org/abs/2202.02435},
+  checked      = {The diffrax README (github.com/patrick-kidger/diffrax, opened 2026-11-23) asks users of diffrax to cite this thesis and gives this BibTeX; the thesis itself was not opened. diffrax 0.7.2 source read (installed wheel): _step_size_controller/pid.py lines 483-492 (a step is accepted when norm(y_error / (atol + rtol max(|y0|, |y1|))) < 1), line 300 (default norm optx.rms_norm), lines 33-80 (initial step selection); _integrate.py (default max_steps 4096, l.903).}
+}
+
+@misc{quadax,
+  author       = {Conlin, Rory},
+  title        = {quadax},
+  howpublished = {Python package, version 0.3.1},
+  year         = {2026},
+  doi          = {10.5281/zenodo.10035983},
+  url          = {https://github.com/f0uriest/quadax},
+  checked      = {README and CITATION.cff opened 2026-11-23 (author, master DOI, "Globally adaptive Gauss-Kronrod and Clenshaw-Curtis quadrature ... similar to scipy.integrate.quad"); PyPI page of 0.3.1 opened (released Oct 22, 2026). Source of 0.3.1 read (installed wheel): _adaptive.py lines 114-128 (quadgk signature), 1474/1596/1659 (stops when the summed error is at most max(epsabs, epsrel norm(I))), the subinterval with the largest error bisected on each pass, l.1741 and _utils.py lines 1299-1328 (a scan of fixed length max_ninter + 1); _fixed_order.py l.32 and lines 316-331 (QUADPACK's error rescaling).}
+}
+
+@article{muller1979,
+  author       = {M{\"u}ller, Klaus and Brown, Leo D.},
+  title        = {Location of saddle points and minimum energy paths by a constrained simplex optimization procedure},
+  journal      = {Theoretica Chimica Acta},
+  volume       = {53},
+  number       = {1},
+  pages        = {75--93},
+  year         = {1979},
+  doi          = {10.1007/BF00547608},
+  checked      = {Crossref record of the DOI opened 2026-11-23 (title, authors, journal, volume, issue, pages, year). The article itself was not opened (the publisher's page asks for a sign-in), so the potential's parameters were not checked against it: examples/path_optimization_muller_brown.py takes them from popcornn (popcornn/potentials/muller_brown.py, commit a2581fc).}
+}

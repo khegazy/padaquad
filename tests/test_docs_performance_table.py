@@ -27,6 +27,11 @@ def _render(results_dir: Path) -> str:
     return module.render(results_dir)
 
 
+def _device_headings(text: str) -> int:
+    """Count the sections, one per results file (``### device``, not ``####``)."""
+    return sum(line.startswith("### ") for line in text.splitlines())
+
+
 def test_no_results_file_raises(tmp_path: Path) -> None:
     with pytest.raises(FileNotFoundError, match="results_"):
         _render(tmp_path)
@@ -37,7 +42,7 @@ def test_one_file_is_headed_by_its_hardware(tmp_path: Path) -> None:
     meta = json.loads(COMMITTED.read_text())["metadata"]
     text = _render(tmp_path)
     assert text.startswith(f"### {meta['device_name']} ({meta['device']})\n")
-    assert text.count("### ") == 1
+    assert _device_headings(text) == 1
 
 
 def test_two_files_render_in_name_order(tmp_path: Path) -> None:
@@ -46,7 +51,7 @@ def test_two_files_render_in_name_order(tmp_path: Path) -> None:
     results["metadata"].update(device="cuda", device_name="Test GPU")
     (tmp_path / "results_cuda.json").write_text(json.dumps(results))
     text = _render(tmp_path)
-    assert text.count("### ") == 2
+    assert _device_headings(text) == 2
     assert text.index("(cpu)\n") < text.index("### Test GPU (cuda)\n")
 
 
@@ -55,3 +60,90 @@ def test_unreadable_file_is_named(tmp_path: Path, content: str) -> None:
     (tmp_path / "results_bad.json").write_text(content)
     with pytest.raises(ValueError, match=r"results_bad\.json"):
         _render(tmp_path)
+
+
+def _synthetic_results() -> dict:
+    """A results file with known times: padaquad gk21 takes 1 ms, dopri5 2 ms;
+    torchdiffeq 4 ms, diffrax 8 ms (not converged), scipy 16 ms, quadax raised."""
+    meta = json.loads(COMMITTED.read_text())["metadata"]
+    row = {
+        "device": "cpu",
+        "time_min_s": 0.0,
+        "time_max_s": 1.0,
+        "evaluations": 10,
+        "abs_error": 1e-9,
+        "rel_error": 1e-9,
+        "converged": True,
+        "error": None,
+    }
+    rows = [
+        {
+            **row,
+            "integrand": "f",
+            "solver": "torchdiffeq dopri5",
+            "time_median_s": 4e-3,
+        },
+        {
+            **row,
+            "integrand": "f",
+            "solver": "diffrax Dopri5",
+            "time_median_s": 8e-3,
+            "converged": False,
+        },
+        {**row, "integrand": "f", "solver": "scipy quad", "time_median_s": 16e-3},
+        {
+            **row,
+            "integrand": "f",
+            "solver": "quadax quadgk",
+            "converged": False,
+            "error": "ValueError: boom",
+        },
+        {
+            **row,
+            "integrand": "f",
+            "solver": "padaquad dopri5",
+            "time_median_s": 2e-3,
+            "max_batch": 7,
+        },
+        {
+            **row,
+            "integrand": "f",
+            "solver": "padaquad gk21",
+            "time_median_s": 1e-3,
+            "max_batch": 7,
+        },
+    ]
+    return {
+        "metadata": meta,
+        "integrands": {"f": {"outputs": 1, "largest_abs": 1.0}},
+        "rows": rows,
+    }
+
+
+def test_one_benchmark_table_and_one_padaquad_table_per_integrand(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "results_cpu.json").write_text(json.dumps(_synthetic_results()))
+    text = _render(tmp_path)
+    benchmark, padaquad = text.split("#### `f`")[1].split("\n\n")[1:3]
+    # The benchmark table lists each library once and no padaquad method.
+    for solver in (
+        "torchdiffeq dopri5",
+        "diffrax Dopri5 †",
+        "scipy quad",
+        "quadax quadgk",
+    ):
+        assert benchmark.count(solver) == 1
+    assert "padaquad" not in benchmark.split("\n", 1)[1]
+    assert "failed: ValueError: boom" in benchmark
+    # The padaquad table: one speedup column per library, never vs itself.
+    assert padaquad.splitlines()[0].endswith(
+        "| vs torchdiffeq | vs diffrax | vs scipy | vs quadax |"
+    )
+    gk21 = next(line for line in padaquad.splitlines() if line.startswith("| gk21"))
+    dopri5 = next(line for line in padaquad.splitlines() if line.startswith("| dopri5"))
+    # Speedup = the library's median time / padaquad's; † after a library that
+    # did not converge; — for one that raised.
+    assert gk21.endswith("| 4.0x | 8.0x † | 16.0x | — |")
+    assert dopri5.endswith("| 2.0x | 4.0x † | 8.0x | — |")
+    assert "| 7 |" in gk21  # the max_batch it ran with

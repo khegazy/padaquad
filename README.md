@@ -373,6 +373,9 @@ list).
 - Fehlberg, Erwin (1969). **Low-Order Classical Runge-Kutta Formulas with Stepsize Control and Their Application to Some Heat Transfer Problems.** *NASA Marshall Space Flight Center, TR R-315*. <https://ntrs.nasa.gov/citations/19690021375>
 - Gander, Walter, Gautschi, Walter (2000). **Adaptive Quadrature--Revisited.** *BIT Numerical Mathematics* 40(1), 84-101. [doi:10.1023/A:1022318402393](https://doi.org/10.1023/A:1022318402393)
 - Gonnet, Pedro (2012). **A Review of Error Estimation in Adaptive Quadrature.** *ACM Computing Surveys* 44(4), 22:1-22:36. arXiv:1003.4629. [doi:10.1145/2333112.2333117](https://doi.org/10.1145/2333112.2333117)
+- Kidger, Patrick (2021). **On Neural Differential Equations.** <https://arxiv.org/abs/2202.02435>
+- M\"uller, Klaus, Brown, Leo D. (1979). **Location of saddle points and minimum energy paths by a constrained simplex optimization procedure.** *Theoretica Chimica Acta* 53(1), 75-93. [doi:10.1007/BF00547608](https://doi.org/10.1007/BF00547608)
+- Conlin, Rory (2026). **quadax.** *Python package, version 0.3.1*. [doi:10.5281/zenodo.10035983](https://doi.org/10.5281/zenodo.10035983)
 - Piessens, Robert, de Doncker, Elise (1983). **QUADPACK routines dqk15, dqk21, dqk31 (double-precision Gauss-Kronrod quadrature).** *Netlib*. <https://netlib.org/quadpack/>
 - Sanderse, B., Veldman, A. E. P. (2019). **Constraint-Consistent Runge-Kutta Methods for One-Dimensional Incompressible Multiphase Flow.** *Journal of Computational Physics* 384, 170-199. arXiv:1809.06114. [doi:10.1016/j.jcp.2019.02.001](https://doi.org/10.1016/j.jcp.2019.02.001)
 - The SciPy community (2026). **SciPy source file scipy/integrate/_quad_vec.py and scipy/integrate/_ivp/rk.py.** *GitHub, tags v1.18.1 (tag object c2df8ace) and v1.17.0 (tag object e2f9e521)*. <https://github.com/scipy/scipy/blob/v1.18.1/scipy/integrate/_quad_vec.py>

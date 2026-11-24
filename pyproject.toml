@@ -45,11 +45,22 @@ dev = [
   "pre-commit",
   "ruff>=0.4.0",
   "typos",
-  # torchdiffeq is needed for the speed-test benchmark in
-  # examples/speed_test/torchdiffeq_comparison.py. Not used by the library.
-  "torchdiffeq",
+  # The example scripts that tests/test_examples_run.py runs draw figures.
+  "matplotlib>=3.8",
+]
+bench = [
+  # The libraries examples/speed_test/library_comparison.py compares with,
+  # at the versions the committed results were measured with. Not used by
+  # the library. On a GPU, install JAX's CUDA build as well (jax[cuda12]);
+  # examples/speed_test/run_benchmark.sh does.
+  "torchdiffeq==0.2.5",
+  "jax>=0.7",
+  "diffrax==0.7.2",
+  "quadax==0.3.1",
 ]
 docs = [
+  # The gallery draws the examples' figures (sphinx-gallery's matplotlib scraper).
+  "matplotlib>=3.8",
   # The combination the documentation is built and tested with.
   "sphinx>=9.1",
   "numpydoc>=1.11",

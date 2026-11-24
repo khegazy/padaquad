@@ -3,7 +3,7 @@ Sphinx extension: render the Performance page's table from the benchmark results
 
 The numbers on the Performance page come only from the files
 ``docs/performance/results_<device>.json`` (for example ``results_cpu.json``,
-``results_cuda.json``), which ``examples/speed_test/torchdiffeq_comparison.py``
+``results_cuda.json``), which ``examples/speed_test/library_comparison.py``
 writes. At every build this extension renders each file, in name order, with
 the benchmark's own ``render_markdown``, so the page shows measured numbers and
 the table has one definition.
@@ -21,7 +21,7 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parents[2]
 RESULTS_DIR = ROOT / "docs" / "performance"
-BENCHMARK = ROOT / "examples" / "speed_test" / "torchdiffeq_comparison.py"
+BENCHMARK = ROOT / "examples" / "speed_test" / "library_comparison.py"
 OUTPUT = ROOT / "docs" / "reference" / "generated" / "performance_table.md"
 
 
@@ -33,7 +33,7 @@ def render(results_dir: Path = RESULTS_DIR) -> str:
     Raises ``FileNotFoundError`` when there is no results file, and
     ``ValueError`` naming the file when one cannot be read or rendered.
     """
-    spec = importlib.util.spec_from_file_location("torchdiffeq_comparison", BENCHMARK)
+    spec = importlib.util.spec_from_file_location("library_comparison", BENCHMARK)
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load {BENCHMARK}")
     module = importlib.util.module_from_spec(spec)

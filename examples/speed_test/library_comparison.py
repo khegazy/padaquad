@@ -621,7 +621,18 @@ def metadata(device: str, repeats: int) -> dict[str, Any]:
     return {
         "date_utc": dt.datetime.now(dt.UTC).isoformat(timespec="seconds"),
         "git_commit": git("rev-parse", "HEAD"),
-        "git_dirty": bool(git("status", "--porcelain", "--untracked-files=no")),
+        # Uncommitted changes to tracked files, except the results files this
+        # script writes (one device's run must not mark the next as dirty).
+        "git_dirty": bool(
+            git(
+                "status",
+                "--porcelain",
+                "--untracked-files=no",
+                "--",
+                ".",
+                ":!docs/performance",
+            )
+        ),
         "device": device,
         "device_name": torch.cuda.get_device_name(device)
         if device.startswith("cuda")

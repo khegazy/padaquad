@@ -81,7 +81,10 @@ the padaquad log for them.
   `tests/test_docs_methods_table.py`) and the Performance table
   (`docs/_ext/performance_table.py`, from `docs/performance/results_<device>.json`,
   written by `examples/speed_test/torchdiffeq_comparison.py`; one section per
-  file, tested by `tests/test_docs_performance_table.py`).
+  file, tested by `tests/test_docs_performance_table.py`), and, by the same
+  extension, the memory options tables of the user guide (from
+  `docs/performance/memory_options.json`, written by
+  `examples/speed_test/trade_speed_for_memory.py`).
 - README sections reused on the site are marked
   `<!-- include-start: NAME -->` / `<!-- include-end: NAME -->`; the Python
   blocks of the README and of `docs/development/adding_a_method.md`
@@ -154,7 +157,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance (with `take_gradient=False` the drift is between passes: `_cancelling_peak` hides its cancelling part in a narrow peak the first passes miss); `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN) |
 | `test_solver_isolation.py` | Solvers do not share method objects or state |
 | `test_tracked_variables.py` | The `tracked_variables` feature |
-| `test_docs_performance_table.py` | The Performance page's rendering of `docs/performance/results_*.json`: no file, one, two (name order, hardware headings), unreadable files named in the error |
+| `test_docs_performance_table.py` | The Performance page's rendering of `docs/performance/results_*.json`: no file, one, two (name order, hardware headings), unreadable files named in the error; the memory options tables from `docs/performance/memory_options.json` (every setting of every integrand, defaults first, missing and unreadable files) |
 | `test_split_statistics.py` | `n_start_steps` / `n_start_steps_split` / `max_split_depth` on integrands with known answers; `converged` against a hand-computed tolerance check (absolute and cumulative, with `y0`), in `failure_fraction` mode (including a NaN component), against the final integral, and its warning (numbers, output component, remedies); `max_adaptive_splits` type check |
 
 **Snapshot tests** are the regression net for internal refactors: the
@@ -542,9 +545,11 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   values (`kept_y`, `intermediate_results`) after recording. The settings'
   memory and time are measured by
   `examples/speed_test/trade_speed_for_memory.py` (every setting, from speed to
-  memory, on a light integrand and two Fourier-feature networks; asserts the
-  same integral and subintervals bit for bit; writes JSON; table in
-  `docs/user_guide/devices_memory.md`, section `ug-trade-speed-for-memory`).
+  memory, on a light integrand and two Fourier-feature networks of ~10,000 and
+  ~1,000,000 parameters; asserts the same integral and subintervals bit for
+  bit; writes `docs/performance/memory_options.json`, rendered by its
+  `render_markdown` into `docs/user_guide/devices_memory.md`, section
+  `ug-trade-speed-for-memory`).
 - `_get_usable_memory = free - buffer`, where
   `buffer = (1 - total_mem_usage) * total_memory`.
 - Supports both CUDA (`torch.cuda.mem_get_info`) and CPU

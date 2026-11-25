@@ -217,139 +217,168 @@ was measured on Linux or on a GPU.
     they do not appear when the application sets logging above WARNING.
 
 (ug-trade-speed-for-memory)=
-## Trading speed for memory
+## Memory efficiency and speed options for `integrate()`
 
-**How a pass is evaluated.** With `take_gradient=False`, every pass of the
-loop evaluates all the subintervals still waiting, in calls of at most
-`max_batch` points. A call fills `max_batch` even when that ends inside a
-subinterval; the next call finishes it. The subintervals then get their
-contributions and error estimates, and once the whole pass is evaluated every
-subinterval of it is accepted or split. (With `take_gradient=True` a call
-holds whole subintervals, `max_batch // C` of them once the batch size has
-converged, where C is the number of nodes of a subinterval, and each call is
-judged on its own; the options below apply only to `take_gradient=False`.)
+PadaQuad's memory management can integrate any integrand as long as a single
+integrand evaluation fits on your device. However, memory management can come
+at the cost of speed when it is not needed. Specifically, improved memory
+management speeds up integration with expensive integrand evaluations while
+slowing down integration with cheap integrand evaluations. This section
+describes the four arguments that control memory management and tests various
+combinations of them on three integrands of increasing cost.
 
-**`trade_speed_for_memory`.** By default (`False`) the integrand values of the
-whole pass stay on the solver's device until all its subintervals are
-evaluated: C × D numbers per subinterval for an integrand with D outputs.
-Their contributions and error estimates are then computed at once, every
-subinterval is accepted or split, and only the accepted subintervals' values
-move to `result_device`. With `trade_speed_for_memory=True` the values of
-whole subintervals are integrated as soon as `evaluation_buffer` bytes of them
-are waiting (after every call of the integrand when it is `None`, the default)
-and move to `result_device` right away, so the device holds about one call's
-values plus the buffer instead of the whole pass's; the values of the
-subintervals that are then split are deleted on `result_device`. Nothing else
-changes: the calls of the integrand, the mesh, the number of evaluations and
-the integral are the same, bit for bit. (One exception: while the batch size
-still grows until the integrand runs out of memory, the room the option frees
-can let that happen later, at a larger call; the calls then differ, while the
-points evaluated, and so the mesh and the integral of an integrand computed
-point by point, stay the same.) The result `loss_fxn` receives for each batch
-has its `y` and `tracked_variables` on `result_device` with the option and on
-the solver's device without it; its other tensors stay on the solver's
-device.
+None of these options change which points are evaluated, the subintervals, or
+the integral. Every combination measured below gave the same integral and
+subintervals, bit for bit.
 
-**What it costs, and `evaluation_buffer`.** Integrating after every call costs
-time per call of the integrand (see the table below), and the values of the
-subintervals that are split are moved before they are deleted. With many calls,
-or an integrand that is fast, pass `evaluation_buffer` (in bytes): values of
-whole subintervals then wait on the solver's device until that many bytes are
-integrated together, which costs that much device memory and saves most of the
-time per call. The right size depends on the integrand and the device: measure
-it once for an integrand you integrate repeatedly. Without it,
-`trade_speed_for_memory=True` logs a warning that suggests it.
+This section uses the words of the {doc}`../glossary` (subinterval, node) and
+these:
 
-**What it does not change.** Each subinterval's contribution and error
-estimate, D numbers each, stay on the device for every subinterval accepted so
-far, and the accept-or-split decision of a pass uses a few more arrays of that
-size. The option therefore saves most for methods with many nodes and for long
-passes. With `result_device=None` (or a CPU solver with the default
-`result_device="cpu"`) the values stay on the solver's device and the option
-saves little, and when a whole pass fits in one call of the integrand there is
-nothing to save either.
+Integrand values
+: The outputs of the integrand `f` at the nodes.
 
-**`record_evaluations=False`.** The integrand values and tracked variables are
-deleted as soon as their subintervals are integrated, so they are never moved
-or kept: `result.y` and `result.tracked_variables` are `None`, also in the
-results `loss_fxn` receives, and the nodes stay on the solver's device until
-the end. The contributions and error estimates decide every split, so the
-calls of the integrand, the mesh and the integral do not change. The state's
-mesh is built with `merge_rule="power_law"`, because the default `"predicted"`
-reads the stored values: `"power_law"` refuses some merges of wide
-subintervals, so a later call starting from the state may begin with more
-subintervals ({ref}`ug-reuse`).
+Pass
+: One iteration of the integration loop. In a pass, subintervals are
+  evaluated, in calls of `f` of at most `max_batch` points; then each
+  subinterval is accepted or split.
 
-Measured on an NVIDIA A100 (80 GB) by
-`examples/speed_test/trade_speed_for_memory.py` (2026-11-25), which integrates
-a Fourier-feature network (64 frequencies up to 20,000, two hidden layers,
-fixed random weights, gradients off) over [0, 1] in float32 with gk21, rtol
-1e-5 and `max_batch=4600`: 1,904 subintervals in 25 calls. It reports the
-GPU's peak memory above what was allocated before the call, during the
-integration loop and over the whole call (including the work after the loop:
-the final error check, the state's mesh and the result), the host's peak, and
-the best wall time of two runs. The rows run from speed to memory.
+Solver device
+: The device on which the solver evaluates `f` and computes the integral. The
+  options matter when it is a GPU, so the text below says GPU.
 
-| network | setting | GPU peak, loop | GPU peak, call | host peak | time |
-|---|---|---|---|---|---|
-| 1,024 hidden, 10,000 outputs | `result_device=None` | 2.9 GB | 5.0 GB | 0 | 0.43 s |
-| | default | 2.4 GB | 2.4 GB | 4.8 GB | 1.8 s |
-| | `trade_speed_for_memory=True`, 256 MB buffer | 1.2 GB | 1.2 GB | 4.8 GB | 2.0 s |
-| | `trade_speed_for_memory=True` | 0.78 GB | 0.78 GB | 4.8 GB | 2.0 s |
-| | `record_evaluations=False` | 2.4 GB | 2.4 GB | 0.14 GB | 0.23 s |
-| | both | 0.78 GB | 0.78 GB | 0.21 GB | 0.22 s |
-| 4,096 hidden, 100,000 outputs | `result_device=None` | 29.1 GB | 50.2 GB | 0 | 7.6 s |
-| | default | 23.9 GB | 23.9 GB | 48.9 GB | 18.2 s |
-| | `trade_speed_for_memory=True`, 256 MB buffer | 7.8 GB | 7.8 GB | 48.9 GB | 20.4 s |
-| | `trade_speed_for_memory=True` | 7.8 GB | 7.8 GB | 48.9 GB | 20.4 s |
-| | `record_evaluations=False` | 23.9 GB | 23.9 GB | 2.1 GB | 4.7 s |
-| | both | 7.8 GB | 7.8 GB | 2.1 GB | 4.6 s |
+The options apply only with `take_gradient=False`. With `take_gradient=True`
+each call of `f` holds whole subintervals and its quadrature is calculated at
+once.
 
-With 100,000 outputs one call of 4,600 points already holds 1.8 GB of values,
-more than the 256 MB buffer, so the buffer changes nothing there. Most of the
-time with `result_device="cpu"` is the copy of every value to the host, which
-`result_device=None` and `record_evaluations=False` avoid; with
-`result_device=None`, the result is assembled on the device, which sets the
-call's peak, and `trade_speed_for_memory=True` saves nothing because the values
-have nowhere to go (same peaks as the default). A light integrand with two
-outputs (a chirp and 50 narrow peaks, float64, rtol 1e-10, 2,911 subintervals
-in 66 calls, also in the script) ran in 0.06 to 0.10 s with every setting, with
-no measurable memory.
+### `trade_speed_for_memory`
 
-The time per call of the integrand was measured by the script's earlier
-version (commit cc77e8b, `--overhead`) on an integral of many small calls (gk21,
-`max_batch=46`, 75 calls): integrating after every call
-(`trade_speed_for_memory=True` without a buffer) took 23 ms on the CPU against
-16 ms by default, and 52 ms against 34 ms on the GPU, about 0.1 ms and 0.2 ms
-per call; with a 256 MB buffer it took the default's time.
+When False, the quadrature is calculated once per pass, after all subintervals
+are evaluated, which is fastest for cheap integrands. When True, it is
+calculated early, so integrand values can be deleted or moved to
+`result_device` to free GPU memory; `evaluation_buffer` sets how early (after
+every call of `f` by default). For expensive integrands True is faster: the
+freed memory fits a larger batch, so `f` is called fewer times (when
+`max_batch` is not given). It applies only with `take_gradient=False`, and
+saves GPU memory only when `result_device` is another device or
+`record_evaluations` is False.
 
-**Errors and warnings.** `integrate` raises `ValueError`, before any call of
-the integrand, when `trade_speed_for_memory=True` is given with
-`take_gradient=True` (each batch is then one call, integrated at once, whose
-values leave the device after its backward pass, so there is nothing to
-trade), and when `evaluation_buffer` is given with
-`trade_speed_for_memory=False` or is not an int of at least 1. It logs a
-warning on the first call of a series (no `state` given; later calls that pass
-the state stay quiet) when:
+| Value | Speed | GPU memory | Host memory |
+|---|---|---|---|
+| `False` (default) | Fastest for cheap integrands: one quadrature calculation per pass. | Holds all integrand values of the pass, plus a temporary copy during the quadrature calculation. | Receives the values of accepted subintervals after each pass. |
+| `True` | Faster for expensive integrands, because the freed memory fits a larger batch (when `max_batch` is not given). Slower for cheap integrands, because each extra quadrature calculation costs time: about 0.2 ms per call of `f` on an A100 without a buffer. | Holds the values of about one call of `f`, or up to `evaluation_buffer` bytes. | Receives the values of every evaluated subinterval right away; values of subintervals that are later split are deleted. The peak is the same as with False. |
+
+The cost per call was measured with the script below at commit cc77e8b, on 75
+calls of 46 points (gk21): 52 ms against 34 ms by default on an A100, and
+23 ms against 16 ms on a CPU. With a 256 MB buffer it took the default's time.
+
+### `evaluation_buffer`
+
+Sets how many bytes of integrand values can wait on the GPU before the
+quadrature is calculated and the values are moved. It balances speed and
+memory between the two values of `trade_speed_for_memory` and is meant for
+advanced users. Use it only with `trade_speed_for_memory=True`; otherwise it
+raises `ValueError`.
+
+| Value | Speed | GPU memory | Host memory |
+|---|---|---|---|
+| `None` (default) | The quadrature is calculated after every call of `f`, so its cost is paid on every call. | Holds the values of about one call of `f`. | No effect. |
+| a number of bytes | The quadrature is calculated once that many bytes of values are waiting, so its cost is paid less often. | Holds up to the buffer plus one call's values. If a pass never fills the buffer, the quadrature is calculated once per pass, as with `trade_speed_for_memory=False`. | No effect. |
+
+### `result_device`
+
+Where the integrand values of accepted subintervals and the per-subinterval
+results are stored. The integral and its error estimate stay on the solver
+device. It works independently of the other options.
+
+| Value | Speed | GPU memory | Host memory |
+|---|---|---|---|
+| `"cpu"` (default) | Copying values to the host takes time that grows with their size; for integrands with many outputs it is most of the run time. | Holds only the values waiting for their quadrature calculation. | Holds the values of every accepted subinterval. |
+| `None` | Fastest, since nothing is copied. `None` means the solver device. | Holds the values of every accepted subinterval until the end, which gives the highest peak. | Nothing. |
+
+The result `loss_fxn` receives for each batch has its `y` and
+`tracked_variables` on `result_device` with `trade_speed_for_memory=True`, and
+on the solver device without it; its other tensors stay on the solver device.
+
+### `record_evaluations`
+
+Whether integrand values are kept after their quadrature is calculated. The
+quadrature alone decides which subintervals are accepted or split, so the
+values are needed only if you use them (`result.y`) or to build the best mesh
+for a later call.
+
+| Value | Speed | GPU memory | Host memory |
+|---|---|---|---|
+| `True` (default) | Values are copied to `result_device`, which takes time when it is the host. | Set by the other options. | Holds the values of every accepted subinterval when `result_device="cpu"`. |
+| `False` | Fastest with `result_device="cpu"`, since nothing is copied. `result.y` and `result.tracked_variables` are `None`. | Values are deleted right after their quadrature is calculated. With `trade_speed_for_memory=True` this lowers the peak even when `result_device=None`. | Holds no values. |
+
+With False, the mesh returned for a later call is built with
+`merge_rule="power_law"`, because the default `"predicted"` merge rule needs
+the stored values. `"power_law"` merges fewer wide subintervals, so the later
+call may start with more subintervals ({ref}`ug-reuse`).
+
+### Errors and warnings
+
+`integrate` raises `ValueError`, before any call of `f`, when
+`trade_speed_for_memory=True` is given with `take_gradient=True`, and when
+`evaluation_buffer` is given with `trade_speed_for_memory=False` or is not an
+int of at least 1. It logs a warning on the first call of a series (no `state`
+given; later calls that pass the state stay quiet) when:
 
 - `trade_speed_for_memory=True` has no `evaluation_buffer`;
 - `trade_speed_for_memory=True` has `result_device=None`, or `result_device`
-  is the solver's device;
+  is the solver device;
 - `trade_speed_for_memory=True` and the integrand's output requires grad (from
   its parameters or from bounds that require grad): the autograd graph keeps
-  what the integrand saved for its backward pass on the device until the
-  integral is differentiated, so moving the values may save little;
-- `record_evaluations=False` with the solver's default
-  `merge_rule="predicted"`.
+  what `f` saved for its backward pass on the GPU until the integral is
+  differentiated, so moving the values may save little;
+- `record_evaluations=False` with the solver's default `merge_rule="predicted"`.
 
-**The gradient as extra outputs.** To get the gradient of an integral without
-an autograd graph, let the integrand return the gradient of the integrand with
-respect to the parameters as extra outputs, computed with `torch.func.grad`
-from detached parameters (or under `torch.no_grad()`), and integrate with
-`take_gradient=False`. The integral of those outputs is the gradient of the
-integral when the bounds do not depend on the parameters; a bound b that does
-adds f(b) times the derivative of b (minus the same at the lower bound), one
-call of the integrand. `error_norm` chooses which outputs decide a split
-({ref}`ug-error-norm`), so the mesh can be refined for the gradient's
-accuracy. {doc}`../auto_examples/gradient_as_output` shows both;
+### The gradient as extra outputs
+
+To get the gradient of an integral without an autograd graph, let the
+integrand return its gradient with respect to the parameters as extra outputs,
+computed with `torch.func.grad` from detached parameters (or under
+`torch.no_grad()`), and integrate with `take_gradient=False`. The integral of
+those outputs is the gradient of the integral when the bounds do not depend on
+the parameters; a bound b that does adds f(b) times the derivative of b (minus
+the same at the lower bound), one call of `f`. `error_norm` chooses which
+outputs decide a split ({ref}`ug-error-norm`), so the mesh can be refined for
+the gradient's accuracy. {doc}`../auto_examples/gradient_as_output` shows both;
 {ref}`ug-autodiff` describes the other ways to differentiate an integral.
+
+### Measurements
+
+`examples/speed_test/trade_speed_for_memory.py` integrates three integrands
+over [0, 1] with every combination of the four options. Each network is a
+multilayer perceptron with two tanh hidden layers, fixed random weights and
+gradients turned off; its inputs are sin(ωt) and cos(ωt) for 64 frequencies ω
+from 1 to 20,000. The script records the GPU's peak memory above what was
+allocated before the call, during the integration loop and over the whole call
+(which also includes the final error check, the state's mesh and the result),
+the host's peak resident memory, sampled every 5 ms, and the wall time. The
+tables below are rendered from `docs/performance/memory_options.json`, which
+the script writes.
+
+In each table, rows are ordered by `trade_speed_for_memory`, then
+`evaluation_buffer`, `result_device` and `record_evaluations`, with the
+default value first. Values that differ from the default are in bold, so the
+first row is the default setting. The measurements use a fixed `max_batch`, so
+they do not show the speed-up that `trade_speed_for_memory=True` gives
+expensive integrands through a larger batch.
+
+What the tables show:
+
+- **Light integrand.** All its integrand values take about 1 MB, so no
+  combination changes the memory measurably, and the defaults are appropriate.
+- **Medium network.** All its integrand values take about 14 MB; the options
+  make no practical difference at this size.
+- **Large network.** Keeping everything on the GPU (`result_device=None`) is
+  fastest and uses the most GPU memory. The defaults halve the GPU peak, and
+  calculating the quadrature after every call (`trade_speed_for_memory=True`)
+  lowers it to a third of the defaults' in the same time. The 256 MB buffer
+  has no effect, because no pass fills it. Most of the time with
+  `result_device="cpu"` is spent copying values to the host, which
+  `record_evaluations=False` avoids.
+
+```{include} ../reference/generated/memory_options_table.md
+```

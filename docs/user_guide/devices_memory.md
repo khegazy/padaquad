@@ -280,38 +280,45 @@ reads the stored values: `"power_law"` refuses some merges of wide
 subintervals, so a later call starting from the state may begin with more
 subintervals ({ref}`ug-reuse`).
 
-Measured on an NVIDIA A100 (80 GB) with gk21 (C = 23), `max_batch=2300`,
-`result_device="cpu"` and a fixed mesh of 1,000 subintervals, integrand
-`sin(t w_d)` with D outputs (`examples/speed_test/trade_speed_for_memory.py`,
-2026-11-24): the GPU's peak memory above what was allocated before the call,
-during the integration loop and over the whole call (including the work after
-the loop: the final error check, the state's mesh and the result), the host's
-peak, and the wall time.
+Measured on an NVIDIA A100 (80 GB) by
+`examples/speed_test/trade_speed_for_memory.py` (2026-11-25), which integrates
+a Fourier-feature network (64 frequencies up to 20,000, two hidden layers,
+fixed random weights, gradients off) over [0, 1] in float32 with gk21, rtol
+1e-5 and `max_batch=4600`: 1,904 subintervals in 25 calls. It reports the
+GPU's peak memory above what was allocated before the call, during the
+integration loop and over the whole call (including the work after the loop:
+the final error check, the state's mesh and the result), the host's peak, and
+the best wall time of two runs. The rows run from speed to memory.
 
-| D outputs | setting | GPU peak, loop | GPU peak, call | host peak | time |
+| network | setting | GPU peak, loop | GPU peak, call | host peak | time |
 |---|---|---|---|---|---|
-| 10,000 | default | 3.6 GB | 3.6 GB | 5.1 GB | 1.1 s |
-| 10,000 | `trade_speed_for_memory=True` | 0.54 GB | 0.82 GB | 5.1 GB | 1.0 s |
-| 10,000 | the same, `evaluation_buffer=256 * 2**20` | 1.0 GB | 1.0 GB | 5.1 GB | 1.0 s |
-| 10,000 | `record_evaluations=False` | 3.6 GB | 3.6 GB | 0.18 GB | 0.08 s |
-| 10,000 | both | 0.54 GB | 0.82 GB | 0.15 GB | 0.06 s |
-| 100,000 | default | 35.8 GB | 35.8 GB | 51.4 GB | 9.4 s |
-| 100,000 | `trade_speed_for_memory=True` | 5.4 GB | 8.2 GB | 51.4 GB | 8.7 s |
-| 100,000 | `record_evaluations=False` | 35.8 GB | 35.8 GB | 2.2 GB | 2.1 s |
-| 100,000 | both | 5.4 GB | 8.2 GB | 2.2 GB | 0.5 s |
+| 1,024 hidden, 10,000 outputs | `result_device=None` | 2.9 GB | 5.0 GB | 0 | 0.43 s |
+| | default | 2.4 GB | 2.4 GB | 4.8 GB | 1.8 s |
+| | `trade_speed_for_memory=True`, 256 MB buffer | 1.2 GB | 1.2 GB | 4.8 GB | 2.0 s |
+| | `trade_speed_for_memory=True` | 0.78 GB | 0.78 GB | 4.8 GB | 2.0 s |
+| | `record_evaluations=False` | 2.4 GB | 2.4 GB | 0.14 GB | 0.23 s |
+| | both | 0.78 GB | 0.78 GB | 0.21 GB | 0.22 s |
+| 4,096 hidden, 100,000 outputs | `result_device=None` | 29.1 GB | 50.2 GB | 0 | 7.6 s |
+| | default | 23.9 GB | 23.9 GB | 48.9 GB | 18.2 s |
+| | `trade_speed_for_memory=True`, 256 MB buffer | 7.8 GB | 7.8 GB | 48.9 GB | 20.4 s |
+| | `trade_speed_for_memory=True` | 7.8 GB | 7.8 GB | 48.9 GB | 20.4 s |
+| | `record_evaluations=False` | 23.9 GB | 23.9 GB | 2.1 GB | 4.7 s |
+| | both | 7.8 GB | 7.8 GB | 2.1 GB | 4.6 s |
 
-At 100,000 outputs one call of 2,300 points already holds 1.8 GB of values,
+With 100,000 outputs one call of 4,600 points already holds 1.8 GB of values,
 more than the 256 MB buffer, so the buffer changes nothing there. Most of the
-default's time is the copy of every value to the host, which
-`record_evaluations=False` skips. With `result_device=None` the loop's peak at
-100,000 outputs is 35.8 GB by default and 22.6 GB with
-`trade_speed_for_memory=True`, and the call's is 54.4 GB for both: the result
-is assembled on the device. An integrand whose cost dominates (a network with
-4,096 hidden units) gave the same peaks, and an adaptive run whose passes each
-fit in one call (17 subintervals) the same peaks with every setting.
+time with `result_device="cpu"` is the copy of every value to the host, which
+`result_device=None` and `record_evaluations=False` avoid; with
+`result_device=None`, the result is assembled on the device, which sets the
+call's peak, and `trade_speed_for_memory=True` saves nothing because the values
+have nowhere to go (same peaks as the default). A light integrand with two
+outputs (a chirp and 50 narrow peaks, float64, rtol 1e-10, 2,911 subintervals
+in 66 calls, also in the script) ran in 0.06 to 0.10 s with every setting, with
+no measurable memory.
 
-The time per call of the integrand, measured on an integral of many small calls
-(gk21, `max_batch=46`, 75 calls): integrating after every call
+The time per call of the integrand was measured by the script's earlier
+version (commit cc77e8b, `--overhead`) on an integral of many small calls (gk21,
+`max_batch=46`, 75 calls): integrating after every call
 (`trade_speed_for_memory=True` without a buffer) took 23 ms on the CPU against
 16 ms by default, and 52 ms against 34 ms on the GPU, about 0.1 ms and 0.2 ms
 per call; with a 256 MB buffer it took the default's time.

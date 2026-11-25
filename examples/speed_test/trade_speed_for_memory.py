@@ -1,97 +1,149 @@
-"""Measure the memory options of ``integrate``: device memory, host memory, time.
+"""Measure the memory options of ``integrate``, from speed to memory.
 
 Run on an otherwise idle GPU node (never a login node)::
 
-    python examples/speed_test/trade_speed_for_memory.py            # the table
-    python examples/speed_test/trade_speed_for_memory.py --overhead # per-call cost
+    python examples/speed_test/trade_speed_for_memory.py --out results.json
 
-The table integrates three integrands with D outputs (``take_gradient=False``)
-with every setting in ``SETTINGS`` (``trade_speed_for_memory``,
-``evaluation_buffer``, ``record_evaluations``), for ``result_device`` "cpu" and
-None, and reports the GPU's peak memory above what was allocated before the
-call, during the integration loop (read when each batch is recorded, so the
-result's assembly after the loop does not hide it) and over the whole call, the
-process's peak resident memory on the host during the call (sampled every 5
-ms), the wall time and the number of integrand points:
+Three integrands are integrated with ``take_gradient=False`` and every setting
+of ``SETTINGS``, which go from speed to memory:
 
-- ``fixed``: ``sin(t f_d)`` on a fixed mesh of 1,000 subintervals
-  (``max_adaptive_splits=0``), gk21: one pass, the values of every subinterval
-  at once.
-- ``adaptive``: a Lorentzian of width 1e-3 times D weights, from the default
-  starting mesh, gk21, rtol 1e-6: many passes.
-- ``network``: ``tanh(t W1) W2`` with 4,096 hidden units, on the fixed mesh:
-  each call costs a matrix product of size [points, 4096] x [4096, D], so the
-  integrand's compute and its own memory dominate.
+1. ``trade_speed_for_memory=False``: a pass's values stay on the GPU until all
+   its subintervals are evaluated, and are integrated at once.
+2. ``trade_speed_for_memory=True`` with ``evaluation_buffer``: values are
+   integrated once that many bytes wait.
+3. ``trade_speed_for_memory=True`` without a buffer: after every call of f.
 
-``--overhead`` times every setting on a cheap integrand with many small calls,
-so the cost of integrating after every call of ``f`` shows; run it with the
-padaquad to compare first on ``PYTHONPATH`` (an older one runs the default).
+each with ``result_device=None`` (everything stays on the GPU) and ``"cpu"``,
+and each with ``record_evaluations`` True and False (the values are deleted as
+soon as they are integrated). The integrands:
 
-The integrands' imports stay inside functions so that importing this module is
-cheap (the documentation build imports nothing from here, but keep it so).
+- ``light``: a chirp and 50 narrow peaks, 2 outputs in float64 at rtol 1e-10:
+  little memory, but many subintervals and calls of f.
+- ``medium network``: a multilayer perceptron with Fourier features of t,
+  1,024 hidden units and 10,000 outputs, float32.
+- ``large network``: the same with 4,096 hidden units and 100,000 outputs.
+
+For each setting the script records the GPU's peak memory above what was
+allocated before the call, during the integration loop (read when each batch is
+recorded, so the work after the loop does not hide it) and over the whole call;
+the process's peak resident memory on the host (sampled every 5 ms); the best
+wall time of ``--repeats`` runs; and the points, calls of f and subintervals.
+It checks that every setting gives the same integral and subintervals, bit for
+bit, prints a Markdown table and writes everything to ``--out`` as JSON.
 """
 
 from __future__ import annotations
 
 import argparse
-import inspect
+import datetime as dt
 import itertools
+import json
 import math
 import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Self
+from typing import Any, Self
 
 import psutil
 import torch
+from torch import nn
 
 import padaquad
 from padaquad import adaptive_quadrature
 
 GB = 2**30
-N_FIXED = 1000
-#: The settings compared, by name: integrate keywords.
-SETTINGS = {
-    "default": {},
-    "trade": {"trade_speed_for_memory": True},
-    "trade, 256 MB buffer": {
-        "trade_speed_for_memory": True,
-        "evaluation_buffer": 256 * 2**20,
-    },
-    "no record": {"record_evaluations": False},
-    "trade, no record": {"trade_speed_for_memory": True, "record_evaluations": False},
+#: The buffer of the ``evaluation_buffer`` settings, in bytes.
+BUFFER = 256 * 2**20
+
+
+def _settings() -> list[dict[str, Any]]:
+    """Return every setting, from speed to memory, as integrate keywords."""
+    settings = []
+    for record, (trade, buffer), result_device in itertools.product(
+        (True, False), ((False, None), (True, BUFFER), (True, None)), (None, "cpu")
+    ):
+        setting: dict[str, Any] = {
+            "trade_speed_for_memory": trade,
+            "result_device": result_device,
+            "record_evaluations": record,
+        }
+        if buffer is not None:
+            setting["evaluation_buffer"] = buffer
+        settings.append(setting)
+    return settings
+
+
+SETTINGS = _settings()
+
+
+class FourierMLP(nn.Module):
+    """A multilayer perceptron of the features sin(w t) and cos(w t).
+
+    The 64 frequencies w run from 1 to ``max_frequency``, so the outputs
+    oscillate on the scale 1 / max_frequency and need many subintervals.
+    """
+
+    def __init__(self, hidden: int, outputs: int, max_frequency: float) -> None:
+        super().__init__()
+        self.register_buffer("frequencies", torch.linspace(1.0, max_frequency, 64))
+        self.layers = nn.Sequential(
+            nn.Linear(128, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, hidden),
+            nn.Tanh(),
+            nn.Linear(hidden, outputs),
+        )
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        """Evaluate the network at points t of shape [N, 1]; shape [N, outputs]."""
+        phase = t * self.frequencies
+        return self.layers(torch.cat([torch.sin(phase), torch.cos(phase)], -1))
+
+
+def _light(device: str) -> tuple[Any, dict[str, Any]]:
+    """Return a chirp sin(10^4 pi t^2) and 50 Gaussians of width 1e-3, float64."""
+    gen = torch.Generator().manual_seed(0)
+    centers = torch.rand(50, generator=gen, dtype=torch.float64).to(device)
+
+    def f(t: torch.Tensor) -> torch.Tensor:
+        peaks = torch.exp(-(((t - centers) / 1e-3) ** 2)).sum(-1, keepdim=True)
+        return torch.cat([torch.sin(1e4 * math.pi * t**2), peaks], -1)
+
+    return f, {"dtype": torch.float64, "atol": 1e-12, "rtol": 1e-10, "max_batch": 2300}
+
+
+def _network(hidden: int, outputs: int, device: str) -> tuple[Any, dict[str, Any]]:
+    """Return a FourierMLP in float32 with fixed random weights and no gradient."""
+    torch.manual_seed(0)
+    net = FourierMLP(hidden, outputs, max_frequency=2e4).to(device)
+    net.requires_grad_(False)  # the integral of a trained network, no autograd
+    return net, {"dtype": torch.float32, "atol": 1e-6, "rtol": 1e-5, "max_batch": 4600}
+
+
+EXAMPLES = {
+    "light": (
+        (
+            "A chirp and 50 narrow peaks: 2 outputs, float64, rtol 1e-10, gk21, "
+            "max_batch 2,300"
+        ),
+        _light,
+    ),
+    "medium network": (
+        (
+            "Fourier-feature network, 1,024 hidden units, 10,000 outputs, float32, "
+            "rtol 1e-5, gk21, max_batch 4,600"
+        ),
+        lambda device: _network(1024, 10_000, device),
+    ),
+    "large network": (
+        (
+            "Fourier-feature network, 4,096 hidden units, 100,000 outputs, float32, "
+            "rtol 1e-5, gk21, max_batch 4,600"
+        ),
+        lambda device: _network(4096, 100_000, device),
+    ),
 }
-
-
-def _fixed_mesh(device: str) -> torch.Tensor:
-    """Return the fixed mesh of N_FIXED equal subintervals of [0, 1], shape [M, 1]."""
-    return torch.linspace(0.0, 1.0, N_FIXED + 1, dtype=torch.float64, device=device)[
-        :, None
-    ]
-
-
-def _integrand(case: str, n_out: int, device: str):
-    """Return the integrand of a case and its integrate options."""
-    weights = torch.linspace(1.0, 2.0, n_out, dtype=torch.float64, device=device)
-    if case == "fixed":
-        return (lambda t: torch.sin(t * weights)), {
-            "mesh": _fixed_mesh(device),
-            "max_adaptive_splits": 0,
-        }
-    if case == "adaptive":
-        bounds = {
-            "mesh_init": torch.tensor([0.0], dtype=torch.float64, device=device),
-            "mesh_final": torch.tensor([1.0], dtype=torch.float64, device=device),
-        }
-        return (lambda t: weights / (1.0 + ((t - 0.37) / 1e-3) ** 2)), bounds
-    gen = torch.Generator(device=device).manual_seed(0)
-    w1 = torch.randn(1, 4096, generator=gen, dtype=torch.float64, device=device)
-    w2 = torch.randn(4096, n_out, generator=gen, dtype=torch.float64, device=device)
-    return (lambda t: torch.tanh(t @ w1) @ w2 / 64.0), {
-        "mesh": _fixed_mesh(device),
-        "max_adaptive_splits": 0,
-    }
 
 
 class HostPeak:
@@ -120,25 +172,17 @@ class HostPeak:
         self.peak = max(self.peak, self.process.memory_info().rss)
 
 
-def measure(
-    case: str, n_out: int, setting: str, result_device: str | None, max_batch: int
-) -> dict[str, object]:
-    """One integration; its device peaks, host peak, time and points."""
+def measure(f: Any, options: dict[str, Any], setting: dict[str, Any]) -> dict[str, Any]:
+    """One integration on the GPU: its peaks, time, counts and result."""
     device = "cuda"
-    f, options = _integrand(case, n_out, device)
-    points = [0]
+    dtype, max_batch = options["dtype"], options["max_batch"]
+    counts = {"points": 0, "calls": 0}
 
     def counted(t: torch.Tensor) -> torch.Tensor:
-        points[0] += t.shape[0]
+        counts["points"] += t.shape[0]
+        counts["calls"] += 1
         return f(t)
 
-    solver = adaptive_quadrature(
-        "uniform", method="gk21", device=device, atol=1e-10, rtol=1e-6
-    )
-    torch.cuda.synchronize()
-    torch.cuda.empty_cache()
-    base = torch.cuda.memory_allocated()
-    torch.cuda.reset_peak_memory_stats()
     loop_peak = [0]
 
     def loss_fxn(r: padaquad.IntegrationResult) -> torch.Tensor:
@@ -146,52 +190,96 @@ def measure(
         loop_peak[0] = max(loop_peak[0], torch.cuda.max_memory_allocated())
         return r.integral
 
-    row: dict[str, object] = {}
-    host_before = psutil.Process().memory_info().rss
-    try:
-        with HostPeak() as host:
-            start = time.perf_counter()
-            torch.manual_seed(0)
-            result, _ = solver.integrate(
-                counted,
-                take_gradient=False,
-                max_batch=max_batch,
-                loss_fxn=loss_fxn,
-                result_device=result_device,
-                **SETTINGS[setting],
-                **options,
-            )
-            torch.cuda.synchronize()
-            seconds = time.perf_counter() - start
-        row |= {
-            "loop GB": (loop_peak[0] - base) / GB,
-            "device GB": (torch.cuda.max_memory_allocated() - base) / GB,
-            "host GB": (host.peak - host_before) / GB,
-            "seconds": seconds,
-            "points": points[0],
-            "subintervals": len(result.h),
-        }
-        del result
-    except torch.OutOfMemoryError:
-        row |= {"loop GB": "out of memory"}
+    solver = adaptive_quadrature(
+        "uniform",
+        method="gk21",
+        device=device,
+        atol=options["atol"],
+        rtol=options["rtol"],
+    )
+    bounds = {
+        "mesh_init": torch.tensor([0.0], dtype=dtype, device=device),
+        "mesh_final": torch.tensor([1.0], dtype=dtype, device=device),
+    }
+    torch.cuda.synchronize()
     torch.cuda.empty_cache()
-    return row
+    base = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    host_before = psutil.Process().memory_info().rss
+    with HostPeak() as host:
+        start = time.perf_counter()
+        torch.manual_seed(0)  # the starting mesh is random
+        result, _ = solver.integrate(
+            counted,
+            take_gradient=False,
+            max_batch=max_batch,
+            loss_fxn=loss_fxn,
+            **bounds,
+            **setting,
+        )
+        torch.cuda.synchronize()
+        seconds = time.perf_counter() - start
+    row = {
+        "loop GB": (loop_peak[0] - base) / GB,
+        "call GB": (torch.cuda.max_memory_allocated() - base) / GB,
+        "host GB": (host.peak - host_before) / GB,
+        "seconds": seconds,
+        "points": counts["points"],
+        "calls": counts["calls"],
+        "subintervals": len(result.h),
+        "converged": bool(result.converged),
+    }
+    integral, widths = result.integral.cpu(), result.h.cpu()
+    del result
+    torch.cuda.empty_cache()
+    return row | {"integral": integral, "h": widths}
 
 
-def copy_bandwidth() -> float:
-    """Measured device-to-host bandwidth for a 1 GB copy to pageable memory, GB/s."""
-    x = torch.ones(GB // 8, dtype=torch.float64, device="cuda")
-    x.cpu()
-    torch.cuda.synchronize()
-    start = time.perf_counter()
-    for _ in range(3):
-        x.cpu()
-    torch.cuda.synchronize()
-    return 3.0 / (time.perf_counter() - start)
+def run_example(name: str, repeats: int) -> dict[str, Any]:
+    """Every setting on one integrand; the same result bit for bit is checked."""
+    description, build = EXAMPLES[name]
+    f, options = build("cuda")
+    measure(f, options, SETTINGS[1])  # warm-up: CUDA and cuBLAS start-up
+    rows = []
+    reference = None
+    for setting in SETTINGS:
+        runs = [measure(f, options, setting) for _ in range(repeats)]
+        row = min(runs, key=lambda r: r["seconds"])
+        integral, widths = row.pop("integral"), row.pop("h")
+        if reference is None:
+            reference = (integral, widths)
+        assert torch.equal(integral, reference[0]), (name, setting)
+        assert torch.equal(widths, reference[1]), (name, setting)
+        rows.append({"setting": {k: str(v) for k, v in setting.items()}} | row)
+        print(
+            name,
+            setting,
+            {k: row[k] for k in ("loop GB", "call GB", "host GB", "seconds")},
+            flush=True,
+        )
+    del f
+    torch.cuda.empty_cache()
+    return {"description": description, "rows": rows}
 
 
-def table(max_batch: int) -> None:
-    """Print the Markdown table of every case."""
+def _label(setting: dict[str, str]) -> str:
+    """Return a short label of a setting for the Markdown table."""
+    parts = ["trade" if setting["trade_speed_for_memory"] == "True" else "no trade"]
+    if "evaluation_buffer" in setting:
+        parts.append(f"buffer {int(setting['evaluation_buffer']) // 2**20} MB")
+    parts.append(f"result_device {setting['result_device']}")
+    if setting["record_evaluations"] == "False":
+        parts.append("no record")
+    return ", ".join(parts)
+
+
+def main() -> None:
+    """Run every example; print the Markdown tables and write the JSON file."""
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    parser.add_argument("--out", type=Path, default=Path("trade_speed_for_memory.json"))
+    parser.add_argument("--repeats", type=int, default=2)
+    parser.add_argument("--examples", nargs="*", default=list(EXAMPLES))
+    args = parser.parse_args()
     commit = subprocess.run(
         ["git", "rev-parse", "--short", "HEAD"],
         capture_output=True,
@@ -199,94 +287,33 @@ def table(max_batch: int) -> None:
         check=False,
         cwd=Path(__file__).resolve().parent,
     ).stdout.strip()
-    print(
-        f"GPU: {torch.cuda.get_device_name()}, "
-        f"{torch.cuda.get_device_properties(0).total_memory / GB:.0f} GB; "
-        f"torch {torch.__version__}; commit {commit}; max_batch {max_batch}; "
-        f"device-to-host copy {copy_bandwidth():.1f} GB/s"
-    )
-    print(
-        "| integrand | D | setting | result_device | device peak in the loop (GB) "
-        "| device peak (GB) | host peak (GB) | time (s) | points | subintervals |"
-    )
-    print("|---|---|---|---|---|---|---|---|---|---|")
-    # D = 400,000 only where few subintervals are recorded: the record keeps
-    # every value on the host (1,000 gk21 subintervals would be 74 GB), and the
-    # network's W2 alone would be 13 GB.
-    sizes = {
-        "fixed": (1_000, 10_000, 100_000),
-        "adaptive": (1_000, 10_000, 100_000, 400_000),
-        "network": (1_000, 10_000, 100_000),
+    meta = {
+        "gpu": torch.cuda.get_device_name(),
+        "gpu GB": round(torch.cuda.get_device_properties(0).total_memory / GB),
+        "torch": torch.__version__,
+        "commit": commit,
+        "date": dt.datetime.now(tz=dt.UTC).date().isoformat(),
+        "buffer bytes": BUFFER,
+        "repeats": args.repeats,
     }
-    for case, n_outs in sizes.items():
-        for n_out, setting, result_device in itertools.product(
-            n_outs, SETTINGS, ("cpu", None)
-        ):
-            row = measure(case, n_out, setting, result_device, max_batch)
-            cells = [
-                row.get(k, "")
-                for k in (
-                    "loop GB",
-                    "device GB",
-                    "host GB",
-                    "seconds",
-                    "points",
-                    "subintervals",
-                )
-            ]
-            text = [f"{c:.2f}" if isinstance(c, float) else str(c) for c in cells]
-            print(
-                f"| {case} | {n_out:,} | {setting} | {result_device} | "
-                + " | ".join(text)
-                + " |",
-                flush=True,
-            )
-
-
-def overhead(repeats: int) -> None:
-    """Time every setting on a cheap integrand with many small calls."""
-    has_settings = (
-        "trade_speed_for_memory"
-        in inspect.signature(padaquad.UniformAdaptiveQuadrature.integrate).parameters
-    )
-    for device, setting in itertools.product(
-        ("cpu", "cuda"), SETTINGS if has_settings else ["default"]
-    ):
-        times = []
-        for _ in range(repeats):
-            solver = adaptive_quadrature(
-                "uniform", method="gk21", device=device, atol=1e-12, rtol=1e-10
-            )
-            bounds = {
-                "mesh_init": torch.tensor([0.0], dtype=torch.float64, device=device),
-                "mesh_final": torch.tensor([1.0], dtype=torch.float64, device=device),
-            }
-            torch.manual_seed(0)
-            start = time.perf_counter()
-            result, _ = solver.integrate(
-                lambda t: torch.sin(200 * math.pi * t) * torch.exp(-t),
-                take_gradient=False,
-                max_batch=46,
-                **SETTINGS[setting],
-                **bounds,
-            )
-            if device == "cuda":
-                torch.cuda.synchronize()
-            times.append(time.perf_counter() - start)
-        times.sort()
+    results = {"meta": meta, "examples": {}}
+    for name in args.examples:
+        results["examples"][name] = run_example(name, args.repeats)
+        args.out.write_text(json.dumps(results, indent=1))
+    print(json.dumps(meta))
+    for name, example in results["examples"].items():
+        print(f"\n### {name}: {example['description']}\n")
         print(
-            f"{padaquad.__file__}: {device}, {setting}: {len(result.h)} subintervals, "
-            f"median {times[len(times) // 2]:.3f} s, best {times[0]:.3f} s"
+            "| setting | GPU peak, loop (GB) | GPU peak, call (GB) | host peak (GB) | time (s) | calls | subintervals |"
         )
+        print("|---|---|---|---|---|---|---|")
+        for row in example["rows"]:
+            print(
+                f"| {_label(row['setting'])} | {row['loop GB']:.2f} | {row['call GB']:.2f} "
+                f"| {row['host GB']:.2f} | {row['seconds']:.2f} | {row['calls']} "
+                f"| {row['subintervals']} |"
+            )
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    parser.add_argument("--overhead", action="store_true")
-    parser.add_argument("--max-batch", type=int, default=2300)
-    parser.add_argument("--repeats", type=int, default=7)
-    args = parser.parse_args()
-    if args.overhead:
-        overhead(args.repeats)
-    else:
-        table(args.max_batch)
+    main()

@@ -541,7 +541,9 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   batch whose subintervals are all accepted; the loop deletes the batch's
   values (`kept_y`, `intermediate_results`) after recording. The settings'
   memory and time are measured by
-  `examples/speed_test/trade_speed_for_memory.py` (table in
+  `examples/speed_test/trade_speed_for_memory.py` (every setting, from speed to
+  memory, on a light integrand and two Fourier-feature networks; asserts the
+  same integral and subintervals bit for bit; writes JSON; table in
   `docs/user_guide/devices_memory.md`, section `ug-trade-speed-for-memory`).
 - `_get_usable_memory = free - buffer`, where
   `buffer = (1 - total_mem_usage) * total_memory`.

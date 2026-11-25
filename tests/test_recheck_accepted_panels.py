@@ -721,7 +721,7 @@ def test_switch_with_nonfinite_terminates():
     def f(t, *args):
         return torch.where(t > 0.9, torch.nan, _cancelling(t))
 
-    solver = _solver(error_on_nonfinite=False)
+    solver = _solver(runtime_checks=False)
     n_split = []  # one entry per call: how many recorded panels it splits
     find = solver._failed_record_positions
 
@@ -878,17 +878,17 @@ def test_custom_loss_exact_after_removals(reference):
     assert abs(float(theta.grad[0]) - 0.6) < 1e-6
 
 
-def test_nonfinite_warning_names_error_on_nonfinite(caplog):
+def test_nonfinite_warning_names_runtime_checks(caplog):
     """When NaN/Inf values make the run fail, calling again cannot help: the
-    warning points at the integrand (error_on_nonfinite=True) instead."""
+    warning points at the integrand (runtime_checks=True) instead."""
 
     def f(t, *args):
         return torch.where(t > 0.9, torch.nan, _cancelling(t))
 
     torch.manual_seed(0)
     with caplog.at_level(logging.WARNING, logger="padaquad"):
-        _run(_solver(error_on_nonfinite=False), f, take_gradient=False)
-    assert "error_on_nonfinite=True" in caplog.text
+        _run(_solver(runtime_checks=False), f, take_gradient=False)
+    assert "runtime_checks=True" in caplog.text
     assert "call again" not in caplog.text
 
 

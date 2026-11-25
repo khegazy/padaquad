@@ -393,15 +393,6 @@ def test_buffer_that_is_not_an_integer_raises():
 THETA = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
 WARNINGS = {
     "no_buffer": ({"trade_speed_for_memory": True}, torch.sin, "evaluation_buffer"),
-    "same_device": (
-        {
-            "trade_speed_for_memory": True,
-            "evaluation_buffer": 10**6,
-            "result_device": None,
-        },
-        torch.sin,
-        "saves little memory",
-    ),
     "requires_grad": (
         {"trade_speed_for_memory": True, "evaluation_buffer": 10**6},
         lambda t: THETA * torch.sin(t),
@@ -425,10 +416,23 @@ def test_warning_on_first_call_only(name, caplog):
     assert not [r for r in caplog.records if text in r.getMessage()]
 
 
-def test_no_warning_by_default(caplog):
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        # The values stay on the solver's device: no warning (the author's choice).
+        {
+            "trade_speed_for_memory": True,
+            "evaluation_buffer": 10**6,
+            "result_device": None,
+        },
+    ],
+    ids=["default", "trade_same_device"],
+)
+def test_no_warning(options, caplog):
     solver = adaptive_quadrature("uniform", method="gk21", device="cpu")
     with caplog.at_level(logging.WARNING, logger="padaquad.quadrature.base"):
-        solver.integrate(torch.sin, **BOUNDS, take_gradient=False)
+        solver.integrate(torch.sin, **BOUNDS, take_gradient=False, **options)
     assert not caplog.records
 
 
@@ -533,7 +537,7 @@ FEATURES = {
         "error_integral_reference": 1.0,
     },
     "split_cap": {"f": _peak, "method": "bosh3", "max_adaptive_splits": 3},
-    "nonfinite": {"f": _nan_tail, "error_on_nonfinite": False},
+    "nonfinite": {"f": _nan_tail, "runtime_checks": False},
     "tracked": {"f": _tracked},
     "three_outputs": {"f": _three_outputs},
     "failure_fraction": {"f": _three_outputs, "error_norm": "failure_fraction"},

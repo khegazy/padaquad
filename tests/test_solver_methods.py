@@ -233,7 +233,7 @@ class TestConstructorSignature:
             use_absolute_error_ratio=False,
             error_norm="max",
             mesh_failure_tolerance=0.25,
-            error_on_nonfinite=False,
+            runtime_checks=False,
             dtype=torch.float32,
             device="cpu",
             output_speed_info=False,
@@ -248,7 +248,7 @@ class TestConstructorSignature:
         assert solver.use_absolute_error_ratio is False
         assert solver.init_error_norm == "max"
         assert solver.init_mesh_failure_tolerance == 0.25
-        assert solver.init_error_on_nonfinite is False
+        assert solver.init_runtime_checks is False
         assert float(solver.init_y0) == 2.0
 
     def test_positional_arguments_raise(self):

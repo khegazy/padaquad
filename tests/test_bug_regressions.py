@@ -156,6 +156,65 @@ def test_conserve_memory_is_gone():
 # -----------------------------------------------------------------------------
 
 
+def test_error_on_nonfinite_is_gone():
+    """error_on_nonfinite was merged into runtime_checks; the old name raises
+    TypeError from the constructor and from integrate."""
+    with pytest.raises(TypeError, match="error_on_nonfinite"):
+        adaptive_quadrature("uniform", "gk21", device="cpu", error_on_nonfinite=False)
+    with pytest.raises(TypeError, match="error_on_nonfinite"):
+        _solver().integrate(
+            f=torch.exp,
+            error_on_nonfinite=False,
+            mesh_init=_bound(0.0),
+            mesh_final=_bound(1.0),
+        )
+
+
+@pytest.mark.parametrize("sampling", ["uniform", "variable"])
+def test_runtime_checks_off_skips_checks_and_keeps_result(sampling, monkeypatch):
+    """runtime_checks=False skips the order checks of every pass (fewer calls of
+    _mesh_order, which only the checks use after the merge and the sort) and the
+    finite check of f's output, and changes nothing else: the same mesh and
+    integral, bit for bit."""
+
+    def f(t):
+        return torch.exp(3 * t) * torch.sin(20 * t)
+
+    results, mesh_order_calls = {}, {}
+    for checks in (True, False):
+        solver = adaptive_quadrature(sampling, device="cpu", max_batch=10_000)
+        calls = []
+        original = solver._mesh_order
+        monkeypatch.setattr(
+            solver,
+            "_mesh_order",
+            lambda *a, _o=original, _c=calls: (_c.append(1), _o(*a))[1],
+        )
+        finite_calls = []
+        monkeypatch.setattr(torch, "isfinite", _counting(torch.isfinite, finite_calls))
+        torch.manual_seed(0)
+        result, state = solver.integrate(
+            f, mesh_init=_bound(0.0), mesh_final=_bound(1.0), runtime_checks=checks
+        )
+        monkeypatch.undo()
+        results[checks] = (result.integral, result.h, state.mesh)
+        mesh_order_calls[checks] = (len(calls), len(finite_calls))
+    for a, b in zip(results[True], results[False], strict=True):
+        assert torch.equal(a, b)
+    assert mesh_order_calls[False][0] < mesh_order_calls[True][0]
+    assert mesh_order_calls[False][1] < mesh_order_calls[True][1]
+
+
+def _counting(fn, calls):
+    """Wrap fn so each call appends to calls."""
+
+    def wrapper(*args, **kwargs):
+        calls.append(1)
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
 def _bound(x, dtype=torch.float64):
     """An integration bound of shape [1]."""
     return torch.tensor([x], dtype=dtype)
@@ -745,7 +804,7 @@ _NAN_SIDE_IDS = ["nan_left", "nan_right"]
 @pytest.mark.parametrize(("sampling", "method"), _NONFINITE_CASES, ids=_NONFINITE_IDS)
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 def test_nonfinite_integrand_does_not_hang(nan_f, sampling, method, take_gradient):
-    """With ``error_on_nonfinite=False`` a NaN-returning integrand must
+    """With ``runtime_checks=False`` a NaN-returning integrand must
     terminate (not hang) and return a NaN-containing result, whether the NaN
     falls in the first panels (nan_left) or the last panels (nan_right).
 
@@ -762,7 +821,7 @@ def test_nonfinite_integrand_does_not_hang(nan_f, sampling, method, take_gradien
             mesh_init=torch.tensor([0.0], dtype=torch.float64),
             mesh_final=torch.tensor([1.0], dtype=torch.float64),
             take_gradient=take_gradient,
-            error_on_nonfinite=False,
+            runtime_checks=False,
             # Pin CPU so this NaN-logic regression is deterministic regardless
             # of whether a GPU is visible (NaN handling is device-agnostic).
             device="cpu",
@@ -781,7 +840,7 @@ def test_nonfinite_integrand_does_not_hang(nan_f, sampling, method, take_gradien
 @pytest.mark.parametrize(("sampling", "method"), _NONFINITE_CASES, ids=_NONFINITE_IDS)
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 def test_nonfinite_integrand_raises_by_default(nan_f, sampling, method, take_gradient):
-    """By default (``error_on_nonfinite=True``) a NaN/Inf integrand raises a
+    """By default (``runtime_checks=True``) a NaN/Inf integrand raises a
     clear, located ``ValueError`` instead of hanging or silently returning NaN,
     for NaN in either the first or last panels.
     """
@@ -821,7 +880,7 @@ def test_nonfinite_cumulative_error_mode_terminates(nan_f):
             mesh_init=torch.tensor([0.0], dtype=torch.float64),
             mesh_final=torch.tensor([1.0], dtype=torch.float64),
             take_gradient=False,
-            error_on_nonfinite=False,
+            runtime_checks=False,
             use_absolute_error_ratio=False,
             device="cpu",
             max_batch=cached_max_batch(),
@@ -856,15 +915,15 @@ def test_finite_integrand_unaffected_by_nonfinite_check(take_gradient):
 def test_check_f_output_finite_helper():
     """Unit-test the finiteness helper directly across its branches.
 
-    The helper reads ``self.error_on_nonfinite`` (set from the
-    ``integrate(error_on_nonfinite=...)`` argument), so toggle it on the solver.
+    The helper reads ``self.runtime_checks`` (set from the
+    ``integrate(runtime_checks=...)`` argument), so toggle it on the solver.
     """
     solver = make_uniform_solver("gk21", atol=1e-6, rtol=1e-6)
     nodes = torch.tensor([[0.1], [0.2], [0.3]], dtype=torch.float64)
     good = torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float64)
     bad = torch.tensor([[1.0], [float("nan")], [3.0]], dtype=torch.float64)
 
-    solver.error_on_nonfinite = True
+    solver.runtime_checks = True
     # Finite tensor: never raises.
     solver._check_f_output_finite(good, nodes)
     # Non-finite tensor with the flag on: raises and localizes the offending t.
@@ -873,12 +932,12 @@ def test_check_f_output_finite_helper():
     assert "0.2" in str(excinfo.value), f"offending t not reported: {excinfo.value}"
 
     # Flag off: no raise (the guard keeps the run alive instead).
-    solver.error_on_nonfinite = False
+    solver.runtime_checks = False
     solver._check_f_output_finite(bad, nodes)
 
     # Bare-scalar branch (e.g. f returning a Python number): finite passes,
     # non-finite raises.
-    solver.error_on_nonfinite = True
+    solver.runtime_checks = True
     solver._check_f_output_finite(1.0, nodes)
     with pytest.raises(ValueError, match=r"non-finite"):
         solver._check_f_output_finite(float("inf"), nodes)

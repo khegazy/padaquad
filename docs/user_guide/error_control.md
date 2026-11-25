@@ -68,10 +68,13 @@ solver could not tell whether a subinterval meets its tolerance.
 ### Non-finite values
 
 If the integrand returns NaN or Inf, `integrate` raises a `ValueError` naming
-the offending points (`error_on_nonfinite=True`, the default). With
-`error_on_nonfinite=False`, subintervals with a non-finite error ratio are
+the offending points (`runtime_checks=True`, the default). With
+`runtime_checks=False`, subintervals with a non-finite error ratio are
 accepted instead of split, the non-finite value reaches the returned integral,
-and `converged` is `False`. Either way the run ends.
+and `converged` is `False`. Either way the run ends. `runtime_checks=False`
+also skips the checks of the order of the nodes and the mesh made on every
+pass; together with the finite check, these cost time and, for integrands with
+many outputs, memory as large as a call's output.
 
 (ug-error-norm)=
 ## Integrands with several outputs

@@ -18,8 +18,8 @@ of the error is logged. Common causes:
   final integral ({ref}`ug-error-reference`). Use `take_gradient=False`, with
   which `enforce_convergence` is on by default, or pass an
   `error_integral_reference` no larger than |integral|.
-- **A non-finite value** with `error_on_nonfinite=False`. Refining cannot
-  remove it; pass `error_on_nonfinite=True` to raise where it first appears.
+- **A non-finite value** with `runtime_checks=False`. Refining cannot
+  remove it; pass `runtime_checks=True` to raise where it first appears.
 
 `result.error_ratios` holds each subinterval's ratio when it was accepted, so
 every entry can be below 1 while `converged` is `False`. With

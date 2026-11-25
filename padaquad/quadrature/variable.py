@@ -197,8 +197,9 @@ class VariableAdaptiveQuadrature(AdaptiveQuadrature):
         """
         if len(remove_idxs) == 0 or len(nodes) == 1:
             return nodes, mesh_quadratures, mesh_quadrature_errors
-        nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=1)
-        assert torch.all(nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0)
+        if self.runtime_checks:
+            nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=1)
+            assert torch.all(nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0)
 
         # Concatenate points from both steps (skip first point of second step
         # since it equals the last point of the first step), giving 2C-1 points
@@ -230,15 +231,16 @@ class VariableAdaptiveQuadrature(AdaptiveQuadrature):
         mesh_quadrature_errors_pruned[update_idxs] = mesh_quadrature_errors_replace
 
         # Verify time ordering and step continuity after merging
-        nodes_pruned_flat = torch.flatten(nodes_pruned, start_dim=0, end_dim=1)
-        assert torch.all(
-            nodes_pruned_flat[1:] - nodes_pruned_flat[:-1] + self.atol_assert >= 0
-        )
-        assert torch.allclose(
-            nodes_pruned[:-1, -1, :],
-            nodes_pruned[1:, 0, :],
-            atol=self.atol_assert,
-            rtol=self.rtol_assert,
-        )
+        if self.runtime_checks:
+            nodes_pruned_flat = torch.flatten(nodes_pruned, start_dim=0, end_dim=1)
+            assert torch.all(
+                nodes_pruned_flat[1:] - nodes_pruned_flat[:-1] + self.atol_assert >= 0
+            )
+            assert torch.allclose(
+                nodes_pruned[:-1, -1, :],
+                nodes_pruned[1:, 0, :],
+                atol=self.atol_assert,
+                rtol=self.rtol_assert,
+            )
 
         return nodes_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned

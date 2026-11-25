@@ -197,11 +197,12 @@ class UniformAdaptiveQuadrature(AdaptiveQuadrature):
         )
 
         # Verify time ordering is preserved after merging
-        nodes_pruned_flat = torch.flatten(nodes_pruned, start_dim=0, end_dim=1)
-        assert torch.all(
-            nodes_pruned_flat[1:] - nodes_pruned_flat[:-1] + self.atol_assert >= 0
-        )
-        nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=1)
-        assert torch.all(nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0)
+        if self.runtime_checks:
+            nodes_pruned_flat = torch.flatten(nodes_pruned, start_dim=0, end_dim=1)
+            assert torch.all(
+                nodes_pruned_flat[1:] - nodes_pruned_flat[:-1] + self.atol_assert >= 0
+            )
+            nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=1)
+            assert torch.all(nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0)
 
         return nodes_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned

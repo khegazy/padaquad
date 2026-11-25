@@ -203,7 +203,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         use_absolute_error_ratio: bool = True,
         error_norm: str | Callable[[torch.Tensor], torch.Tensor] = "2",
         mesh_failure_tolerance: float = 0.0,
-        error_on_nonfinite: bool = True,
+        runtime_checks: bool = True,
         dtype: torch.dtype = torch.float64,
         device: str | torch.device | None = None,
         output_speed_info: bool = False,
@@ -282,10 +282,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             With ``error_norm="failure_fraction"``, the fraction of output
             components, in [0, 1], that may fail while a subinterval is still
             accepted. Default 0.0 (every component must pass).
-        error_on_nonfinite : bool
-            If True (default), raise ``ValueError`` naming the points where
-            ``f`` returned NaN or Inf. If False, accept those subintervals and
-            let the non-finite value reach the result.
+        runtime_checks : bool
+            If True (default), check while integrating: raise ``ValueError``
+            naming the points where ``f`` returned NaN or Inf, and check on
+            every pass that the nodes and the mesh are in order. If False, skip
+            these checks to save time and memory; subintervals where ``f``
+            returned NaN or Inf are then accepted and the non-finite value
+            reaches the result.
         dtype : torch.dtype
             ``torch.float64`` (default) or ``torch.float32``; ``torch.float16``
             is refused. ``integrate`` switches to the dtype of the mesh or the
@@ -367,9 +370,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         self.init_mesh_failure_tolerance = mesh_failure_tolerance
         self.mesh_failure_tolerance = mesh_failure_tolerance
         # Construction-time default; the active value lives in
-        # self.error_on_nonfinite and is (re)set each integrate() call.
-        self.init_error_on_nonfinite = error_on_nonfinite
-        self.error_on_nonfinite = error_on_nonfinite
+        # self.runtime_checks and is (re)set each integrate() call.
+        self.init_runtime_checks = runtime_checks
+        self.runtime_checks = runtime_checks
         self._check_total_mem_usage(total_mem_usage)
         self.init_total_mem_usage = total_mem_usage
         self.limit_benchmark_time = limit_benchmark_time
@@ -666,7 +669,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         error_integral_reference: float | torch.Tensor | None = None,
         enforce_convergence: bool | None = None,
         mesh_failure_tolerance: float | None = None,
-        error_on_nonfinite: bool | None = None,
+        runtime_checks: bool | None = None,
         trade_speed_for_memory: bool = False,
         evaluation_buffer: int | None = None,
         record_evaluations: bool = True,
@@ -791,9 +794,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             With ``error_norm="failure_fraction"``, the fraction of output
             components that may fail while a subinterval is still accepted
             (see :ref:`the user guide <ug-error-norm>`).
-        error_on_nonfinite : bool or None
-            If True, raise ``ValueError`` when f returns NaN or Inf; if False,
-            accept those subintervals and let the value reach the result.
+        runtime_checks : bool or None
+            The constructor's ``runtime_checks`` for this call: if True, raise
+            ``ValueError`` when f returns NaN or Inf and check the order of the
+            nodes and the mesh on every pass; if False, skip these checks. None
+            (default) keeps the constructor's value.
         trade_speed_for_memory : bool
             Only with ``take_gradient=False``. If False (default), a pass's
             integrand values stay on the solver's device until all its
@@ -996,14 +1001,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 "integrated together. See %s",
                 guide,
             )
-        if state is None and trade_speed_for_memory and result_device == self.device:
-            logger.warning(
-                "trade_speed_for_memory=True with result_device=None (or the "
-                "solver's device) keeps the integrand values on the solver's "
-                "device, so it saves little memory there. Pass result_device="
-                "'cpu' (the default) to move them off. See %s",
-                guide,
-            )
         if state is None and not record_evaluations and self.merge_rule == "predicted":
             logger.warning(
                 "record_evaluations=False: the state's mesh is built with "
@@ -1014,13 +1011,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 "merge_rule='power_law' to choose it explicitly."
             )
 
-        # Per-call error_on_nonfinite takes priority over the constructor value.
+        # Per-call runtime_checks takes priority over the constructor value.
         # Stored on self so the evaluation helpers can read it without threading
         # it through every signature.
-        self.error_on_nonfinite = (
-            self.init_error_on_nonfinite
-            if error_on_nonfinite is None
-            else error_on_nonfinite
+        self.runtime_checks = (
+            self.init_runtime_checks if runtime_checks is None else runtime_checks
         )
 
         # Per-call error_norm / mesh_failure_tolerance take priority over the
@@ -1322,13 +1317,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # Any-T invariant: consecutive barriers are distinct (no
             # zero-length panels), which is all that is meaningful for a
             # multi-dimensional path.
-            assert torch.all(torch.any(mesh[1:] != mesh[:-1], dim=-1))
-            # For 1-D time the barriers must additionally be monotonic.
-            if mesh.shape[-1] == 1:
-                mesh_diff = mesh[1:, 0] - mesh[:-1, 0]
-                assert torch.all(mesh_diff + self.atol_assert > 0) or torch.all(
-                    mesh_diff - self.atol_assert < 0
-                )
+            if self.runtime_checks:
+                assert torch.all(torch.any(mesh[1:] != mesh[:-1], dim=-1))
+                # For 1-D time the barriers must additionally be monotonic.
+                if mesh.shape[-1] == 1:
+                    mesh_diff = mesh[1:, 0] - mesh[:-1, 0]
+                    assert torch.all(mesh_diff + self.atol_assert > 0) or torch.all(
+                        mesh_diff - self.atol_assert < 0
+                    )
 
             # --- Step 5b: Drop re-split recorded panels from the record ---
             # The recorded panels flagged above were just bisected in the mesh
@@ -1811,7 +1807,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         if bool((final_fails & nonfinite).any()):
             remedies.append(
                 "find where the integrand or the integral is NaN/Inf "
-                "(error_on_nonfinite=True raises at the first such value); "
+                "(runtime_checks=True raises at the first such value); "
                 "refining cannot remove it"
             )
         logger.warning(
@@ -1995,7 +1991,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # Batch (tracker True) and recorded (tracker False) positions are
             # disjoint, so the combined set must be strictly ascending; a
             # duplicate would corrupt the midpoint-offset math below.
-            assert torch.all(split_idxs[1:] > split_idxs[:-1])
+            if self.runtime_checks:
+                assert torch.all(split_idxs[1:] > split_idxs[:-1])
             mesh_trackers[split_idxs] = True
 
         N_t_add = len(split_idxs)
@@ -2026,7 +2023,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         idxs_new = split_idxs + torch.arange(N_t_add, device=mesh.device) + 1
         t_add_barriers = 0.5 * (mesh_new[idxs_new - 1] + mesh_new[idxs_new + 1])
         mesh_new[idxs_new] = t_add_barriers
-        assert torch.sum(torch.isnan(mesh_new)) == 0
+        if self.runtime_checks:
+            assert torch.sum(torch.isnan(mesh_new)) == 0
         assert len(idxs_new) + len(idxs_transfer) == len(mesh_new)
 
         # Expand the per-panel split counts the same way as the barriers: carry
@@ -2126,8 +2124,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         A NaN or Inf integrand value makes the subinterval's error ratio
         non-finite. Detecting it where it arises, instead of letting it reach a
         NaN result, gives the user an error that names the offending ``t``.
-        Runs only when ``self.error_on_nonfinite`` is True (set from the
-        ``integrate(error_on_nonfinite=...)`` argument or the constructor).
+        Runs only when ``self.runtime_checks`` is True (set from the
+        ``integrate(runtime_checks=...)`` argument or the constructor).
 
         Parameters
         ----------
@@ -2145,12 +2143,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Raises
         ------
         ValueError
-            If ``self.error_on_nonfinite`` is True and any value is NaN or
+            If ``self.runtime_checks`` is True and any value is NaN or
             Inf. When it is False this check does nothing, and
             ``_accept_reject_masks`` accepts the non-finite subintervals so
             the loop still ends.
         """
-        if not self.error_on_nonfinite:
+        if not self.runtime_checks:
             return
         if not torch.is_tensor(integrand):
             # Bare scalar (e.g. examples.identity returns int 1). math.isfinite
@@ -2158,7 +2156,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             if not math.isfinite(integrand):
                 raise ValueError(
                     f"Integrand f returned a non-finite scalar value "
-                    f"({integrand}). Pass error_on_nonfinite=False to return a "
+                    f"({integrand}). Pass runtime_checks=False to return a "
                     f"NaN-containing result instead of raising."
                 )
             return
@@ -2178,7 +2176,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             f"{integrand.shape[0]} evaluation node(s). First offending t "
             f"value(s): {bad_t}{suffix}. This usually means f is singular there "
             f"(e.g. a boundary singularity or degenerate parameters). Pass "
-            f"error_on_nonfinite=False to accept the affected panels and return "
+            f"runtime_checks=False to accept the affected panels and return "
             f"a NaN-containing result instead of raising."
         )
 
@@ -2328,7 +2326,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             idxs = step_idxs[:max_mesh_steps]
             nodes = self._compute_nodes(mesh[idxs], mesh[idxs + 1])
             nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
-            assert torch.all(nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0)
+            if self.runtime_checks:
+                assert torch.all(
+                    nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0
+                )
             if cuda:
                 torch.cuda.reset_peak_memory_stats(self.device)
                 before = torch.cuda.memory_allocated(self.device)
@@ -2423,7 +2424,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         ------
         ValueError
             If f returns another number of values than the points it was
-            given, or (with ``error_on_nonfinite``) a NaN or Inf value.
+            given, or (with ``runtime_checks``) a NaN or Inf value.
         torch.OutOfMemoryError
             If one node does not fit in memory (max_batch is already 1).
         """
@@ -3015,7 +3016,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         ratio_idxs_cut = torch.where(self._rec_remove(error_ratios_2steps < merge_cut))[
             0
         ]
-        assert not torch.any(ratio_idxs_cut[:-1] + 1 == ratio_idxs_cut[1:])
+        if self.runtime_checks:
+            assert not torch.any(ratio_idxs_cut[:-1] + 1 == ratio_idxs_cut[1:])
 
         if len(ratio_idxs_cut) == 0:
             return nodes, mesh_quadratures, mesh_quadrature_errors
@@ -3443,11 +3445,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh = torch.flatten(mesh, start_dim=0, end_dim=1)
             mesh[0] = mesh_init
             mesh[-1] = mesh_final
-            # Any-T: consecutive barriers are distinct (no zero-length panels).
-            assert torch.all(torch.any(mesh[1:] != mesh[:-1], dim=-1))
-            # 1-D: additionally strictly increasing.
-            if mesh.shape[-1] == 1:
-                assert torch.all(mesh[1:] - mesh[:-1] > 0)
+            if self.runtime_checks:
+                # Any-T: consecutive barriers are distinct (no zero-length panels).
+                assert torch.all(torch.any(mesh[1:] != mesh[:-1], dim=-1))
+                # 1-D: additionally strictly increasing.
+                if mesh.shape[-1] == 1:
+                    assert torch.all(mesh[1:] - mesh[:-1] > 0)
         mesh_trackers = torch.ones(len(mesh), device=self.device).to(torch.bool)
         mesh_trackers[-1] = False  # mesh_final cannot be a step starting point
         mesh_indices = self._get_mesh_indices(mesh)
@@ -4210,11 +4213,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 )
         # General (any-T) invariant: the record is in strictly increasing mesh
         # order after the merge.
-        merged_order = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
-        assert torch.all(merged_order[1:] - merged_order[:-1] > 0)
-        # For 1-D time the left-node coordinate must also be strictly ascending.
-        if record["nodes"].shape[-1] == 1:
-            assert torch.all(record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] > 0)
+        if self.runtime_checks:
+            merged_order = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
+            assert torch.all(merged_order[1:] - merged_order[:-1] > 0)
+            # For 1-D time the left-node coordinate must also be strictly ascending.
+            if record["nodes"].shape[-1] == 1:
+                left = record["nodes"][:, 0, 0]
+                assert torch.all(left[1:] - left[:-1] > 0)
 
         return record
 
@@ -4253,20 +4258,18 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         for key, value in record.items():
             if key not in self._RECORD_SCALAR_KEYS:
                 record[key] = value[sorted_idxs.to(value.device)]
-        # General (any-T) invariant: strictly increasing mesh order.
-        sorted_order = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
-        assert torch.all(sorted_order[1:] - sorted_order[:-1] > 0)
-        # For 1-D time the left-node coordinate must be strictly monotonic.
-        if record["nodes"].shape[-1] == 1:
-            all_ascending = torch.all(
-                record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] > 0
-            )
-            all_descending = torch.all(
-                record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] < 0
-            )
-            assert all_ascending or all_descending, (
-                "Nodes are required to be either in ascending or descending order"
-            )
+        if self.runtime_checks:
+            # General (any-T) invariant: strictly increasing mesh order.
+            sorted_order = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
+            assert torch.all(sorted_order[1:] - sorted_order[:-1] > 0)
+            # For 1-D time the left-node coordinate must be strictly monotonic.
+            if record["nodes"].shape[-1] == 1:
+                left = record["nodes"][:, 0, 0]
+                all_ascending = torch.all(left[1:] - left[:-1] > 0)
+                all_descending = torch.all(left[1:] - left[:-1] < 0)
+                assert all_ascending or all_descending, (
+                    "Nodes are required to be either in ascending or descending order"
+                )
         return record
 
     def _remove_failed_record_panels(

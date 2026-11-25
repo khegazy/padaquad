@@ -413,7 +413,7 @@ def test_failure_fraction_nan_component_is_not_converged(absolute):
         ),
         mesh=torch.linspace(0.0, 1.0, 5, dtype=torch.float64).unsqueeze(-1),
         take_gradient=False,
-        error_on_nonfinite=False,
+        runtime_checks=False,
     )
     assert torch.isnan(out.integral[1])
     assert out.converged is False

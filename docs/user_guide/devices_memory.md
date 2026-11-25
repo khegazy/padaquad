@@ -325,8 +325,6 @@ int of at least 1. It logs a warning on the first call of a series (no `state`
 given; later calls that pass the state stay quiet) when:
 
 - `trade_speed_for_memory=True` has no `evaluation_buffer`;
-- `trade_speed_for_memory=True` has `result_device=None`, or `result_device`
-  is the solver device;
 - `trade_speed_for_memory=True` and the integrand's output requires grad (from
   its parameters or from bounds that require grad): the autograd graph keeps
   what `f` saved for its backward pass on the GPU until the integral is

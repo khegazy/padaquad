@@ -1,4 +1,4 @@
-"""Sphinx configuration for the padaquad documentation.
+"""Sphinx configuration for the PadaQuad documentation.
 
 Build locally (from the repository root)::
 
@@ -20,7 +20,7 @@ DOCS = Path(__file__).resolve().parent
 ROOT = DOCS.parent
 sys.path.insert(0, str(DOCS / "_ext"))
 
-project = "padaquad"
+project = "PadaQuad"
 author = "Kareem Hegazy"
 copyright = "2024-2026, Kareem Hegazy"  # noqa: A001 (Sphinx setting name)
 release = importlib.metadata.version("padaquad")
@@ -95,7 +95,7 @@ sphinx_gallery_conf = {
 }
 
 html_theme = "pydata_sphinx_theme"
-html_title = f"padaquad {release}"
+html_title = f"PadaQuad {release}"
 html_theme_options = {
     "github_url": "https://github.com/khegazy/padaquad",
     "use_edit_page_button": True,

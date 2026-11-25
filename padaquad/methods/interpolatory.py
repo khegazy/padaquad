@@ -17,7 +17,7 @@ The registry ``INTERPOLATORY_METHODS`` holds:
   Eq. (119), Sec. 5.2, with their :math:`c_2` equal to a
   :cite:p:`sanderse2019`. Degree 2 for general a; degree 3 at a = 1/2, where
   the weights are Simpson's rule. The error estimate subtracts the trapezoidal
-  rule (degree 1); this pairing is padaquad's choice.
+  rule (degree 1); this pairing is PadaQuad's choice.
 
 References
 ----------
@@ -48,7 +48,7 @@ def _interpolatory3_weights(c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
 
     At a = 1/2 this is Simpson's rule [1/6, 2/3, 1/6] (exact through
     degree 3). The error weights are b minus the trapezoidal rule
-    [1/2, 0, 1/2] on the end nodes (exact through degree 1; padaquad's
+    [1/2, 0, 1/2] on the end nodes (exact through degree 1; PadaQuad's
     choice), written out per node so no constant tensor is built (or copied
     to the GPU) per call.
 
@@ -79,7 +79,7 @@ def _interpolatory3_weights(c: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor
 
 # Interpolatory 3-node method (degree 2; 3 at a = 1/2), weights from Sanderse and
 # Veldman 2019, Eq. (119); error estimate against the trapezoidal rule (degree 1,
-# padaquad's choice).
+# PadaQuad's choice).
 _INTERPOLATORY_3 = VariableMethodClass(
     references=("sanderse2019",),
     degree=2,

@@ -13,12 +13,12 @@ exactly. ``ccN`` has N = n + 1 nodes and degree N: cc5,
 cc9, cc17, cc33 and cc65 have n = 4, 8, 16, 32 and 64.
 ``tests/test_exactness.py`` measures the degrees from the stored tables.
 
-Two properties padaquad uses:
+Two properties PadaQuad uses:
 
 1. The nodes are nested: the nodes of CC_(n/2) are every other node of CC_n.
    The error estimate pairs CC_n with CC_(n/2) at no extra cost: the error
    weights are the CC_n weights minus the CC_(n/2) weights, with weight 0 at
-   the nodes only CC_n has. This pairing is padaquad's choice; Gonnet 2012,
+   the nodes only CC_n has. This pairing is PadaQuad's choice; Gonnet 2012,
    Sec. 6 :cite:p:`gonnet2012`, discusses nested Clenshaw-Curtis pairs in
    general.
 2. The nodes include both ends of the subinterval (:math:`x_0 = 1` and
@@ -95,7 +95,7 @@ def _clenshaw_curtis_weights_unit(n: int) -> list[float]:
 def _build_clenshaw_curtis_tableau(n: int) -> _Tableau:
     """Construct a Clenshaw-Curtis _Tableau on [0, 1] for n+1 nodes.
 
-    The error estimate pairs CC_n with CC_(n/2) (padaquad's choice). The nodes
+    The error estimate pairs CC_n with CC_(n/2) (PadaQuad's choice). The nodes
     of CC_(n/2) are every other node of CC_n, so the CC_(n/2) weights extended
     to the CC_n nodes are the CC_(n/2) weight at shared nodes and 0 at the
     nodes only CC_n has.

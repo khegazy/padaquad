@@ -1,6 +1,6 @@
 # Writing docstrings
 
-padaquad's docstrings follow the [numpydoc](https://numpydoc.readthedocs.io/)
+PadaQuad's docstrings follow the [numpydoc](https://numpydoc.readthedocs.io/)
 format and these rules. The documentation site is built from them, so they are
 written for users first.
 
@@ -26,8 +26,8 @@ written for users first.
    `torch.Tensor | None` in public docstrings.
 7. **Citations** use ``:cite:p:`key` `` with a key of `docs/references.bib`.
    A source is added there only after it has been opened and the cited number,
-   table or equation found in it. A formula that is padaquad's own is labeled
-   "(padaquad's own derivation)" and derived where it is used.
+   table or equation found in it. A formula that is PadaQuad's own is labeled
+   "(PadaQuad's own derivation)" and derived where it is used.
 8. **Examples** sections run as doctests. They pass `device="cpu"`, an explicit
    `max_batch` (this skips the memory benchmark) and float64 bounds, print
    rounded Python floats rather than tensors, and never print a mesh size,

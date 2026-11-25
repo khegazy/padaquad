@@ -1,8 +1,8 @@
 """pytest configuration for the docstring examples (doctests) in padaquad/.
 
 The test suite's own fixtures are in tests/conftest.py. Here, every docstring
-example starts from the same random seed (padaquad's starting mesh is random)
-and runs with padaquad's log quieted, so its printed output is the same on
+example starts from the same random seed (PadaQuad's starting mesh is random)
+and runs with PadaQuad's log quieted, so its printed output is the same on
 every machine.
 """
 
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 @pytest.fixture(autouse=True)
 def _doctest_environment(request: pytest.FixtureRequest) -> Iterator[None]:
-    """Seed torch and silence padaquad's log for doctests; no-op for tests."""
+    """Seed torch and silence PadaQuad's log for doctests; no-op for tests."""
     if type(request.node).__name__ != "DoctestItem":
         yield
         return

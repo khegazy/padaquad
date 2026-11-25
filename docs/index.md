@@ -1,6 +1,6 @@
-# padaquad
+# PadaQuad
 
-padaquad computes definite integrals $\int_a^b f(t)\,dt$ of a function you can
+PadaQuad computes definite integrals $\int_a^b f(t)\,dt$ of a function you can
 evaluate, in PyTorch. It splits $[a, b]$ into subintervals, refines the ones
 whose error is too large, and evaluates the integrand at many points of many
 subintervals in one call, on a CPU or a GPU. Gradients flow through the result,
@@ -17,7 +17,7 @@ pip install padaquad
 :link: getting_started/index
 :link-type: doc
 
-Install padaquad, compute a first integral, and see what it is for and what
+Install PadaQuad, compute a first integral, and see what it is for and what
 it is not for.
 :::
 

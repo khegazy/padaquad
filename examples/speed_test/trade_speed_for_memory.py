@@ -295,7 +295,7 @@ def render_markdown(results: dict[str, Any]) -> str:
     lines = [
         (
             f"Measured on an {meta['gpu']} ({meta['gpu GB']} GB) with torch "
-            f"{meta['torch']}, padaquad at commit {meta['commit']}, on {meta['date']}. "
+            f"{meta['torch']}, PadaQuad at commit {meta['commit']}, on {meta['date']}. "
             f"Time is the best of {meta['repeats']} runs after a warm-up."
         )
     ]

@@ -1,4 +1,4 @@
-# padaquad
+# PadaQuad
 
 **A PyTorch library for adaptive numerical quadrature — computing
 $\int_{a}^{b} f(t)\, dt$ for a known integrand $f$, in parallel batches,
@@ -16,7 +16,7 @@ integration where the next state depends on the previous), so it must
 evaluate steps sequentially even when the integrand has no
 state-coupling.
 
-padaquad fills the gap: it is **adaptive quadrature**, not ODE
+PadaQuad fills the gap: it is **adaptive quadrature**, not ODE
 solving, and it exploits the lack of state coupling to **evaluate many
 subintervals in parallel** on GPU. With full autograd through the integration
 loop, it is suitable for:
@@ -345,7 +345,7 @@ the same text. In short:
 | `scipy.integrate.quad` | ✓ | ✗ | ✗ | classical one-shot smooth quadrature |
 | `torchquad` | ✗ | ✓ | ✓ | fixed-grid methods and Monte Carlo (including VEGAS), also in several dimensions |
 | `torchdiffeq` | adaptive step size | ✓ | ✗ | true state-coupled ODEs $\dot y = f(t, y)$ |
-| **padaquad** | ✓ | ✓ | ✓ | path integrals, learned-integrand integration, physics-informed residual losses |
+| **PadaQuad** | ✓ | ✓ | ✓ | path integrals, learned-integrand integration, physics-informed residual losses |
 
 torchquad's README (commit fc6f9cd, 2026-10-28) states that it does not
 implement adaptive subdivision. For one-shot scalar quadrature with no
@@ -376,7 +376,7 @@ list).
 
 ## Citing
 
-To cite padaquad, use [`CITATION.cff`](CITATION.cff) (GitHub shows it under
+To cite PadaQuad, use [`CITATION.cff`](CITATION.cff) (GitHub shows it under
 "Cite this repository").
 
 ## License

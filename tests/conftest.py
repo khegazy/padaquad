@@ -16,7 +16,7 @@ from _helpers import SEED
 def seed():
     """Start every test from the same random seed.
 
-    padaquad's starting mesh is random. Without this, a test that does not seed
+    PadaQuad's starting mesh is random. Without this, a test that does not seed
     itself starts from whatever state the tests before it left, which changes
     with the tests selected and their order, so a failure could not be
     reproduced. Tests that request ``seed`` explicitly get the same seeding.

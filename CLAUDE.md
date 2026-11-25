@@ -5,7 +5,7 @@ with code in this repository.
 
 ## Project overview
 
-**padaquad** is a PyTorch library for **adaptive numerical
+**PadaQuad** is a PyTorch library for **adaptive numerical
 quadrature**: it computes definite integrals
 $\int_a^b f(t)\,dt$ for a known integrand $f$ by evaluating many
 quadrature panels in parallel batches on GPU, with full autograd through
@@ -59,7 +59,7 @@ sphinx-build -b linkcheck docs docs/_build/linkcheck
 
 `pytest` also runs the docstring Examples (`--doctest-modules`, testpaths
 include `padaquad/`); the repository-root `conftest.py` seeds torch and quiets
-the padaquad log for them.
+the PadaQuad log for them.
 
 ## Documentation
 
@@ -353,7 +353,7 @@ reducing to `|error| / max(atol, rtol*|I|) < 1` (norm family) or
   vector to a scalar with the norm, compare to `max(atol, rtol * norm(integral))`
   (scipy `quad_vec` uses `max(epsabs, epsrel*norm(I))`).
   Accept when `< 1`. Options: `"2"` (default, L2 = `sqrt(sum(e²))`), `"max"`
-  (L∞), `"rms"` (`sqrt(mean(e²))`, padaquad's historical reduction), or a
+  (L∞), `"rms"` (`sqrt(mean(e²))`, PadaQuad's historical reduction), or a
   callable reducing the last (`D`) axis.
 - **`"failure_fraction"`** — *per-component*: each output element is compared
   against its own `atol + rtol*|I_d|`; a panel is accepted when the fraction of
@@ -401,7 +401,7 @@ None) and the cutoff for the constructor option `merge_rule`:
   (log2 ratio quantized to 2^-48), cached on the solver
   (`_merge_weight_cache`, reset in `_set_solver_dtype`). With T > 1 it falls
   back to `"power_law"` with a warning.
-- `"power_law"` (padaquad 1.3.0 and 1.4.0): summed errors, cutoff `remove_cut / 2^(k-1)`
+- `"power_law"` (PadaQuad 1.3.0 and 1.4.0): summed errors, cutoff `remove_cut / 2^(k-1)`
   (assumes the estimate scales as h^k, k = `error_exponent`; on wide steps it
   grows far less, so safe merges are refused).
 - `"sum"` (1.2.2): summed errors, cutoff `remove_cut`.

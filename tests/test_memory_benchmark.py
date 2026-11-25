@@ -19,7 +19,7 @@ expected value is exact and independent of the machine:
   adds a known number of bytes per call, so M is known exactly (a reading is
   never below the bytes of the call's input and output, 16 bytes per point
   for the fakes here).
-- ``FakeClock`` stands in for the ``time`` module of padaquad's memory module,
+- ``FakeClock`` stands in for the ``time`` module of PadaQuad's memory module,
   so slow calls take the time the test says, without sleeping.
 
 GPU tests use the real CUDA peak counters with buffers of known size.

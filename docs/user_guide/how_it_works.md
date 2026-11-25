@@ -30,7 +30,7 @@ it ({ref}`ug-reuse`).
 (ug-optimal-mesh)=
 ## The optimal mesh and the merge rule
 
-After the integration converges, padaquad builds the optimal mesh,
+After the integration converges, PadaQuad builds the optimal mesh,
 `state.mesh`, the mesh a later call starts from when the state is passed as
 `state=` ({ref}`ug-reuse`). Pairs of neighbouring subintervals
 whose merged subinterval is predicted to pass with a margin are merged, so that a
@@ -51,7 +51,7 @@ where `merge_rule` sets $P$ and the cutoff $\texttt{remove\_cut}'$.
 
 **`merge_rule="predicted"` (the default).** Every method places its nodes at
 fixed fractions of a subinterval, including both ends, and the integrand values
-at those nodes are already stored. On each neighbour, padaquad replaces the
+at those nodes are already stored. On each neighbour, PadaQuad replaces the
 integrand by the polynomial through that neighbour's values (barycentric
 interpolation, {cite:t}`berrut2004`, Eqs. (3.2) and (4.2)), evaluates it at the
 nodes the merged subinterval would have, and applies the method's weights. This
@@ -76,11 +76,11 @@ and the cutoff is `remove_cut` itself.
   error is many times the tolerance.
 - $|e_1| + |e_2|$ keeps a margin for the neighbours' own errors.
 
-**`merge_rule="power_law"`** (padaquad 1.3.0 and 1.4.0). $P = |e_1| + |e_2|$ and the cutoff
+**`merge_rule="power_law"`** (PadaQuad 1.3.0 and 1.4.0). $P = |e_1| + |e_2|$ and the cutoff
 is $\texttt{remove\_cut} / 2^{k-1}$, with $k$ the method's `error_exponent`. If
 the error estimate of a subinterval of width $h$ scaled as $K h^k$ with the same
 $K$ for both halves, the merged subinterval of width $2h$ would have the error
-$K (2h)^k = 2^{k-1}(|e_1| + |e_2|)$ (padaquad's own derivation,
+$K (2h)^k = 2^{k-1}(|e_1| + |e_2|)$ (PadaQuad's own derivation,
 {ref}`ug-error-control`). That holds only when the subintervals are small enough
 for the leading Taylor term to dominate. On wider subintervals the error grows by
 far less than $2^{k-1}$ (measured: about $2^8$ to $2^9$ where $2^{20}$ is assumed
@@ -89,7 +89,7 @@ calls keep more subintervals than they need. When the estimates are at the
 level of rounding error (high-degree methods at tight tolerances, or float32),
 they do not shrink with $h$ and few pairs are merged.
 
-**`merge_rule="sum"`** (padaquad 1.2.2). $P = |e_1| + |e_2|$ and the cutoff is
+**`merge_rule="sum"`** (PadaQuad 1.2.2). $P = |e_1| + |e_2|$ and the cutoff is
 `remove_cut`. It ignores how the error grows when two subintervals merge, so
 merged subintervals often fail when the next call evaluates them and are split
 again.

@@ -1,5 +1,5 @@
 """
-Sphinx extension: build the methods table from padaquad's method registries.
+Sphinx extension: build the methods table from PadaQuad's method registries.
 
 The table on the methods page is generated from ``UNIFORM_METHODS`` and
 ``VARIABLE_METHODS`` when the documentation is built, so it cannot disagree with

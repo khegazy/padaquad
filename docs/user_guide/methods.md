@@ -16,7 +16,7 @@ smooth integrand, the error of the method on one subinterval of width $h$ is of
 order $h^{\text{degree}+2}$ ({doc}`error_control`), and there are about $1/h$
 subintervals, so the total error falls like $h^\text{order}$ (derivation). The
 "Sources" column lists where each method's nodes and weights come from; for
-`gk7` it cites only the method's degree, because its digits are padaquad's own
+`gk7` it cites only the method's degree, because its digits are PadaQuad's own
 80-digit computation (see below). The last numeric column is the degree of the lower-degree
 method in the error estimate; the solver assumes the error estimate shrinks like
 $h$ to the power of that degree plus 2.
@@ -81,7 +81,7 @@ e = K_{2n+1} - G_n ,
 $$ (gk-error)
 
 the difference QUADPACK starts from {cite:p}`quadpack_netlib` (QUADPACK then
-rescales it; padaquad does not), described by {cite:t}`gonnet2012`, Eq. (24).
+rescales it; PadaQuad does not), described by {cite:t}`gonnet2012`, Eq. (24).
 The Kronrod method has degree at least $3n + 1$ {cite:p}`gonnet2012`, Sec. 2.4.
 For odd $n$ that number is even, and a method with symmetric nodes and weights
 integrates every odd power of $x$ exactly (both sides are zero), so the degree
@@ -119,7 +119,7 @@ moment equations in the test suite.
 Every other node of `ccN` is a node of the Clenshaw-Curtis method with
 $(N + 1)/2$ points {cite:p}`trefethen2008`, Sec. 2, so that method costs no
 extra evaluations, and the error estimate is the difference between the two.
-Choosing this nested pair is padaquad's choice; {cite:t}`gonnet2012`, Sec. 6,
+Choosing this nested pair is PadaQuad's choice; {cite:t}`gonnet2012`, Sec. 6,
 discusses nested Clenshaw-Curtis pairs in general.
 
 ## Runge-Kutta methods
@@ -176,5 +176,5 @@ $$ (interp3-weights)
 which integrate $1$, $t$ and $t^2$ exactly for any $a$ in $(0, 1)$; they are
 the weights of {cite:t}`sanderse2019`, Eq. (119), with $c_2 = a$. The method has
 degree 2 in general and degree 3 at $a = 1/2$, where it is Simpson's rule. Its
-error estimate subtracts the trapezoidal rule on the end nodes (padaquad's
+error estimate subtracts the trapezoidal rule on the end nodes (PadaQuad's
 choice).

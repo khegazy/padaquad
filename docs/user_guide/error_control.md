@@ -29,10 +29,10 @@ the subinterval rather than the absolute value of the subinterval's
 contribution; it raises the error estimate rather than the tolerance; and it
 applies the floor only when it is larger than the smallest positive double.
 QUADPACK also rescales its error estimate {cite:p}`quadpack_netlib`, which
-padaquad does not.
+PadaQuad does not.
 
 The error estimate measures the embedded method's error, so it is usually much
-larger than the error of the integral padaquad returns, which uses the
+larger than the error of the integral PadaQuad returns, which uses the
 higher-degree method {cite:p}`gonnet2012`, footnote 20. The script
 {doc}`examples/verification/integral_accuracy.py <../auto_examples/verification/integral_accuracy>`
 compares actual errors with the tolerances; for the Gauss-Kronrod and
@@ -60,7 +60,7 @@ $k = d + 2$ against the measured degree of every embedded method.
 
 ### Precision
 
-padaquad runs in float64 (the default) or float32, following the dtype of the
+PadaQuad runs in float64 (the default) or float32, following the dtype of the
 bounds or mesh given to `integrate`. float16 is refused with a `ValueError`:
 its rounding error, about $10^{-3}$, is larger than typical tolerances, so the
 solver could not tell whether a subinterval meets its tolerance.
@@ -88,7 +88,7 @@ $e_k$, and `error_norm` turns it into one accept-or-split decision:
   $\text{atol} + \text{rtol}\,|I_d|$, and the subinterval is accepted when the
   fraction of failing components is at most `mesh_failure_tolerance` (0 means
   every component must pass). This bounds the error of every output, not
-  an aggregate. This scheme is padaquad's own.
+  an aggregate. This scheme is PadaQuad's own.
 
 For $D = 1$ the norm options all reduce to Eq. {eq}`error-ratio`.
 
@@ -96,7 +96,7 @@ For $D = 1$ the norm options all reduce to Eq. {eq}`error-ratio`.
 $\max(\text{epsabs}, \text{epsrel}\cdot\text{norm}(I))$ are those of
 `scipy.integrate.quad_vec` {cite:p}`scipy_quadvec`. The acceptance differs:
 `quad_vec` stops when the *sum* of the errors of all subintervals is below
-one eighth of that tolerance, while padaquad accepts or splits each subinterval
+one eighth of that tolerance, while PadaQuad accepts or splits each subinterval
 by its own error ratio. SciPy has no `"rms"` or `"failure_fraction"` option.
 
 (ug-error-reference)=

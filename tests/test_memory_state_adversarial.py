@@ -65,7 +65,7 @@ def _leaves(t: torch.Tensor) -> list[torch.Tensor]:
 
 
 def test_restart_releases_the_failed_batch():
-    """After a backward out-of-memory error, padaquad restarts the integral by
+    """After a backward out-of-memory error, PadaQuad restarts the integral by
     calling ``integrate`` again from inside the failed call. The tensors the
     failed batch saved for its backward pass (here ``u``, saved by the product
     ``w * u``) must be freed before the restarted call evaluates f: the error
@@ -105,7 +105,7 @@ def test_saved_gradients_do_not_keep_every_batch_alive(leaf):
     leaf tensor of every batch's graph for the whole call. Two cases:
     ``made_in_f``, an integrand that differentiates with respect to its input
     (a new leaf ``x = t.detach().requires_grad_()`` per batch, common in
-    physics-informed losses), and ``mesh_copy``, padaquad's own detached copy
+    physics-informed losses), and ``mesh_copy``, PadaQuad's own detached copy
     of the mesh (``mesh_eval``) made per batch when a bound requires grad.
     Each batch's leaves should be freed once the batch is done (on ``main``
     at most the previous batch's is alive); with the bug all of them are,
@@ -230,7 +230,7 @@ def test_small_unconverged_state_grows_to_one_subinterval_with_gradients():
 def test_refused_restart_puts_back_gradients_it_can():
     """The backward pass of the third batch (one gk21 subinterval each, the
     given ``max_batch=23``) fails; a smaller batch cannot hold a subinterval,
-    so padaquad raises ``BackwardOutOfMemoryError`` and asks the user to reset
+    so PadaQuad raises ``BackwardOutOfMemoryError`` and asks the user to reset
     the gradients. The walk had saved every gradient, so it could put them
     back first: here ``w.grad`` held 1.0 from an earlier loss before the call,
     and resetting it as advised loses that 1.0. Expected: ``w.grad`` is 1.0

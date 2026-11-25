@@ -2,7 +2,7 @@
 
 ## Quadrature, not ODE solving
 
-padaquad computes
+PadaQuad computes
 
 $$
 I = \int_a^b f(t)\,dt
@@ -13,9 +13,9 @@ variable $t$. The integrand may depend on extra arguments (`f_args`) and on
 learnable parameters, but never on the running value of the integral. That is
 the difference from an ODE solver such as torchdiffeq, which solves
 $\dot y = f(t, y)$: there each step needs the state $y$ that the previous step
-produced, so the steps run one after another. Because padaquad's integrand
+produced, so the steps run one after another. Because PadaQuad's integrand
 does not depend on $y$, the integrals over different subintervals are
-independent, and padaquad evaluates the nodes of many subintervals in one call
+independent, and PadaQuad evaluates the nodes of many subintervals in one call
 of $f$.
 
 (ug-shapes)=
@@ -41,7 +41,7 @@ solver, and its output must match them. `f(t, *f_args)` is called when
 
 ## Subintervals, nodes and methods
 
-padaquad splits $[a, b]$ into {term}`subintervals <subinterval>`, given by the
+PadaQuad splits $[a, b]$ into {term}`subintervals <subinterval>`, given by the
 {term}`mesh`. On each subinterval $[l, r]$ of width $h = r - l$ a
 {term}`method` evaluates the integrand at $C$ {term}`nodes <node>`
 $t_i = l + c_i h$ and forms
@@ -53,5 +53,5 @@ $$ (concepts-method)
 where the $c_i$ are the method's node fractions and the $b_i$ its weights. The
 sum of these over all subintervals is the integral. How accurate a method is on
 one subinterval is described by its {term}`degree`; see
-{doc}`methods`. How padaquad decides where to split is described in
+{doc}`methods`. How PadaQuad decides where to split is described in
 {doc}`error_control`.

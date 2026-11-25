@@ -208,7 +208,7 @@ class BackwardOutOfMemoryError(torch.OutOfMemoryError):
     """
     Raised when a backward pass of ``integrate(take_gradient=True)`` ran out of memory.
 
-    padaquad restarts the integral by itself after such an error when it can
+    PadaQuad restarts the integral by itself after such an error when it can
     put back the gradients the failed attempt added. It raises this error
     instead when it cannot: the integrand uses a custom autograd function and
     ``parameters=`` was not given, a parameter has a hook that runs after its

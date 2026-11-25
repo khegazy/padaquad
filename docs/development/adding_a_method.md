@@ -1,6 +1,6 @@
 # Adding a method
 
-A quadrature method in padaquad is an object, not a subclass: an instance of
+A quadrature method in PadaQuad is an object, not a subclass: an instance of
 `UniformMethodClass` (fixed node fractions and weights) or `VariableMethodClass`
 (node fractions and a function that computes the weights from the actual node
 positions). The solvers reach a method only through the interface of the
@@ -80,7 +80,7 @@ function, so that solvers can be copied and pickled.
 `_interpolatory3_weights` in `padaquad/methods/interpolatory.py` is the
 pattern to follow; register the method in `VARIABLE_METHODS`.
 
-## Adding a method to padaquad itself
+## Adding a method to PadaQuad itself
 
 1. Define it in the module of its family (`padaquad/methods/runge_kutta.py`,
    `gauss_kronrod.py`, `clenshaw_curtis.py` or `interpolatory.py`) and add it to

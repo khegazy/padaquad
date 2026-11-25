@@ -1,5 +1,5 @@
 """
-Base class and sampling modes shared by the padaquad solvers.
+Base class and sampling modes shared by the PadaQuad solvers.
 
 - ``steps``: the enum of sampling modes, and ``get_sampling_type``, which turns a
   name such as ``"uniform"`` into a ``steps`` member.

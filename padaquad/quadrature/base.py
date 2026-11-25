@@ -245,11 +245,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
               already stored for the two neighbors, by interpolating them onto
               the merged subinterval's nodes. Use this one.
             - ``"power_law"``: the neighbors' summed error times
-              ``2**(error_exponent - 1)``, the merge rule of padaquad 1.3.0
+              ``2**(error_exponent - 1)``, the merge rule of PadaQuad 1.3.0
               and 1.4.0. It assumes the error shrinks like a power of the width
               and refuses many safe merges on wide subintervals.
             - ``"sum"``: the neighbors' summed error, the merge rule of
-              padaquad 1.2.2. Merged subintervals often fail when evaluated
+              PadaQuad 1.2.2. Merged subintervals often fail when evaluated
               again.
 
             The older two are kept to reproduce meshes of earlier versions.
@@ -755,7 +755,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             activation checkpointing with ``use_reentrant=True``, or a function
             compiled with ``torch.compile``) and ``take_gradient=True``: the tensors f's gradients reach, or their
             optimizer. After an out-of-memory error in a backward pass,
-            padaquad puts back the gradients the call added and restarts the
+            PadaQuad puts back the gradients the call added and restarts the
             integral; it finds them by walking each batch's autograd graph,
             which a custom autograd function can hide them from. Without it,
             such a call raises ``BackwardOutOfMemoryError`` instead of
@@ -856,7 +856,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         TypeError
             If ``enforce_convergence`` is neither None nor a bool.
         BackwardOutOfMemoryError
-            If a backward pass ran out of memory and padaquad cannot restart
+            If a backward pass ran out of memory and PadaQuad cannot restart
             the integral (see ``parameters``); its ``state`` is the state to
             call again with, after resetting the gradients.
 
@@ -2692,13 +2692,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         from ``_compute_error_ratios``) is below the cutoff. ``merge_rule``
         decides both. With e_i the error estimate of subinterval i:
 
-        - ``"sum"`` (padaquad 1.2.2): pair error ``|e_i| + |e_{i+1}|``,
+        - ``"sum"`` (PadaQuad 1.2.2): pair error ``|e_i| + |e_{i+1}|``,
           cutoff ``remove_cut``.
-        - ``"power_law"`` (padaquad 1.3.0 and 1.4.0): the same pair error, cutoff
+        - ``"power_law"`` (PadaQuad 1.3.0 and 1.4.0): the same pair error, cutoff
           ``remove_cut / 2**(k - 1)`` with ``k = method.error_exponent``. If a
           subinterval's error estimate scaled as ``h**k`` with its width h,
           the merged subinterval of width 2h would have about ``2**(k - 1)``
-          times the pair's summed error (padaquad's own derivation; the
+          times the pair's summed error (PadaQuad's own derivation; the
           ``h**k`` scaling of an embedded pair's estimate is that of its
           lower-degree method, :cite:p:`gonnet2012` Eqs. (4)-(5) and
           footnote 20). It holds only once the subintervals are narrow enough
@@ -3544,16 +3544,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         which differs in three ways:
 
         - scipy computes ``round_err = norm(50 * eps * h * s_k_abs)``, with
-          ``h * s_k_abs`` the subinterval's quadrature of ``abs(f)``; padaquad
+          ``h * s_k_abs`` the subinterval's quadrature of ``abs(f)``; PadaQuad
           uses the absolute value of the signed contribution, which is smaller
           where f changes sign.
         - scipy raises the error estimate to the floor,
           ``err = max(err, round_err)``, and only when ``round_err`` exceeds the
-          smallest positive double; padaquad raises the tolerance instead and
+          smallest positive double; PadaQuad raises the tolerance instead and
           has no such underflow guard.
         - scipy first rescales the error estimate as QUADPACK does,
           ``resasc * min(1, (200 * err / resasc)**1.5)`` (:cite:p:`quadpack_netlib`,
-          dqk21.f lines 177-178); padaquad does not.
+          dqk21.f lines 177-178); PadaQuad does not.
 
         Parameters
         ----------
@@ -3674,7 +3674,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         (v1.18.1): the tolerance ``max(epsabs, epsrel * norm(I))`` is the same
         (lines 373 and 409), but the acceptance rule differs. quad_vec stops
         when the sum of the errors of all subintervals is below ``tol / 8``
-        (line 410). padaquad accepts or splits each subinterval by its own
+        (line 410). PadaQuad accepts or splits each subinterval by its own
         error ratio.
 
         The pair ratio ``error_ratio_2steps[k] = R(p[k]) / tol_2steps[k]``,

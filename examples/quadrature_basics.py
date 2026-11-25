@@ -7,7 +7,7 @@ Run with::
     python examples/quadrature_basics.py
 
 Each example computes a definite integral with ``integrate(f, ...)`` and
-compares it with the exact value. Every call passes float64 bounds (padaquad
+compares it with the exact value. Every call passes float64 bounds (PadaQuad
 computes in the dtype of the bounds), ``device="cpu"`` and a fixed
 ``max_batch``, so every batch has the same size.
 """

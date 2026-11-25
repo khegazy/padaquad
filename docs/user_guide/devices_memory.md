@@ -18,7 +18,7 @@ makes the integration run in float32.
 (ug-memory)=
 ## Batch size and the memory benchmark
 
-padaquad evaluates the nodes of many subintervals in one call of the
+PadaQuad evaluates the nodes of many subintervals in one call of the
 integrand. The number of points per call is the batch size, `max_batch`.
 
 **How `integrate` chooses it.** A `max_batch` given to the call (or to the
@@ -42,21 +42,21 @@ the integrand once per state (measured on an A100, for a network filling the
 GPU: 0.6 s more than a run with the right batch size from the start, 1.4 s
 from a cold call).
 
-**With `take_gradient=True`.** padaquad backpropagates every batch right after
+**With `take_gradient=True`.** PadaQuad backpropagates every batch right after
 evaluating it. On a GPU, before each backward pass it compares the memory
 still usable (keeping `1 - total_mem_usage` of the total free) with what the
 backward pass is predicted to need: the batch's forward peak memory, times the
 ratio of backward to forward peak memory the previous batch measured (1 for
 the first batch). If it does not fit, the batch is dropped before any gradient
 is written and evaluated again, smaller. If a backward pass still runs out of
-memory, padaquad puts back the gradients the call added, lowers the batch
+memory, PadaQuad puts back the gradients the call added, lowers the batch
 size, and restarts the integral from its starting mesh, with a warning. It
 finds those gradients by walking each batch's autograd graph. A custom
 autograd function (for example activation checkpointing with
 `use_reentrant=True`, or a function compiled with `torch.compile`) can hide
 parameters from that walk; pass
 `parameters=model.parameters()` (or the optimizer) in that case, else
-padaquad raises `BackwardOutOfMemoryError`, whose `state` is the state to call
+PadaQuad raises `BackwardOutOfMemoryError`, whose `state` is the state to call
 again with after resetting the gradients. It raises it also when a parameter
 has a post-accumulate-grad hook, or when `torch.distributed` runs more than one
 process. An out-of-memory error in `loss_fxn` is handled the same way as one in
@@ -86,7 +86,7 @@ error from the integrand is raised unchanged.
   an out-of-memory error. On a CPU an allocation that does not fit can get the
   process killed instead (Linux accepts most allocations and kills the process
   when memory runs out), and a GPU driver that falls back to system memory
-  (NVIDIA's on Windows) slows down instead of failing. padaquad is meant for
+  (NVIDIA's on Windows) slows down instead of failing. PadaQuad is meant for
   GPUs; on a CPU, pass `max_batch` when memory matters.
 - *Memory is not kept free.* The forward calls fill the memory until they
   fail; other processes on the same GPU can run out of memory meanwhile.

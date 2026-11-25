@@ -52,12 +52,12 @@ returned to the next call, which starts from the size that fit.
 
 ## Out of memory
 
-padaquad shrinks the batch and retries when an evaluation runs out of memory,
+PadaQuad shrinks the batch and retries when an evaluation runs out of memory,
 and with `take_gradient=True` restarts the integral when a backward pass does
 ({ref}`ug-memory`). If a single evaluation of the integrand does not fit, it
 raises `torch.OutOfMemoryError`. It raises `BackwardOutOfMemoryError` when a
 backward pass ran out of memory and the integrand uses a custom autograd
-function: pass `parameters=` (the tensors, or their optimizer) so padaquad can
+function: pass `parameters=` (the tensors, or their optimizer) so PadaQuad can
 restart, or reset the gradients and call again with `state=error.state`. Else
 pass a smaller `max_batch`, use `take_gradient=True` (which does not keep the
 whole graph), or, with `take_gradient=False` and an integrand with many outputs,

@@ -181,7 +181,7 @@ def test_document_python_block_runs(where_and_code: tuple[str, str]) -> None:
     """Each tested Python block of ``DOCUMENTS`` runs without error on the CPU.
 
     The block runs after ``torch.manual_seed(SEED)`` (one line prepended, so a
-    traceback's line numbers are one higher than the block's): padaquad's
+    traceback's line numbers are one higher than the block's): PadaQuad's
     starting mesh is random, and an unseeded block would run on a different mesh
     in every run, so a failure could not be reproduced."""
     where, code = where_and_code

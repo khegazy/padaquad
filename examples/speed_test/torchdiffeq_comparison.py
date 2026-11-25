@@ -1,9 +1,9 @@
 """
-Benchmark padaquad against torchdiffeq on integrals with known answers.
+Benchmark PadaQuad against torchdiffeq on integrals with known answers.
 
 torchdiffeq solves an ODE: to compute an integral it solves dy/dt = f(t) with
 y(a) = 0, one step after another, because in general each step needs the state
-the previous one produced. padaquad uses the fact that an integrand does not
+the previous one produced. PadaQuad uses the fact that an integrand does not
 depend on y: it evaluates many nodes of many subintervals in one call of f.
 The comparison shows what that buys, and what it costs, on this machine.
 
@@ -12,7 +12,7 @@ over [0, 1] several times. The script records the median wall time (one
 warm-up call excluded), the spread (smallest and largest time), the number of
 integrand evaluations (points at which f was evaluated) and the absolute error
 against the exact answer. The two libraries apply the tolerance differently
-(torchdiffeq per step against ``atol + rtol |y|``; padaquad per subinterval
+(torchdiffeq per step against ``atol + rtol |y|``; PadaQuad per subinterval
 against ``max(atol, rtol |I|)``), so equal tolerances do not mean equal
 accuracy: compare the errors as well as the times.
 
@@ -53,7 +53,7 @@ if TYPE_CHECKING:
 
 TOLERANCES = (1e-6, 1e-9)
 SOLVERS = ("torchdiffeq dopri5", "padaquad dopri5", "padaquad gk21")
-# A fixed batch size skips padaquad's memory benchmark, which is a one-time
+# A fixed batch size skips PadaQuad's memory benchmark, which is a one-time
 # cost per call without max_batch and is not what this benchmark measures.
 MAX_BATCH = 100_000
 
@@ -176,7 +176,7 @@ def measure(
     times, evaluations, value = [], 0, 0.0
     for _ in range(repeats):
         counted.points = 0
-        torch.manual_seed(0)  # padaquad's random starting mesh
+        torch.manual_seed(0)  # PadaQuad's random starting mesh
         synchronize(device)
         start = time.perf_counter()
         value = run_once(solver, counted, tol, device)
@@ -251,7 +251,7 @@ def render_markdown(results: dict[str, Any]) -> str:
     meta = results["metadata"]
     caption = (
         f"Measured on {meta['device_name']} ({meta['device']}, {meta['torch_threads']} torch "
-        f"threads), {meta['date_utc']}, padaquad commit `{meta['git_commit'][:7]}`"
+        f"threads), {meta['date_utc']}, PadaQuad commit `{meta['git_commit'][:7]}`"
         f"{' (uncommitted changes)' if meta['git_dirty'] else ''}; torch {meta['torch']}, "
         f"torchdiffeq {meta['torchdiffeq']}, Python {meta['python']}. Times are medians of "
         f"{results['repeats']} runs after one warm-up run."

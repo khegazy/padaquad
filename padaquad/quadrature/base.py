@@ -1245,29 +1245,36 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             )
             batch_size = len(nodes) * self.C
 
-            # The running integral and the cumulative sums, with the record.
+            # The running integral, and in cumulative mode the running sums.
+            # Error control only decides; it reads detached values (the error
+            # estimates are detached already), so the error ratios hold no
+            # autograd graph, nor the arrays its nodes would save.
             t0 = time.time()
-            if len(record) == 0:
-                # First batch: integral is just this batch's contribution
-                current_integral = method_output.integral.detach()
-                all_mesh_quadratures = method_output.mesh_quadratures.detach()
-                cum_mesh_quadratures = torch.cumsum(all_mesh_quadratures, 0)
-            else:
-                # Subsequent batches: add to previously recorded integral
-                current_integral = record["integral"] + method_output.integral.detach()
-                # Merge the batch with the record in mesh order to compute
-                # cumulative sums, from the left mesh index of every recorded
-                # and evaluated subinterval (integers, for any time dimension).
+            quads = method_output.mesh_quadratures.detach()
+            current_integral = method_output.integral.detach()
+            if record:
+                current_integral = record["integral"].detach() + current_integral
+            # Absolute mode judges against the integral alone. Cumulative mode
+            # judges each subinterval, evaluated or recorded, against the
+            # running integral through it: the record and the batch merged in
+            # mesh order by the left mesh index of each (integers, for any time
+            # dimension; on the first turn the record is empty), one sum for
+            # both.
+            cum_mesh_quadratures = recorded_cum = None
+            if not self.use_absolute_error_ratio:
                 idxs_keep, idxs_input = self._merge_positions(
-                    record["mesh_index"], step_idxs
+                    record.get("mesh_index", step_idxs[:0]), step_idxs
                 )
-                all_mesh_quadratures = self._insert_sorted_results(
-                    record["mesh_quadratures"],
-                    idxs_keep,
-                    method_output.mesh_quadratures,
-                    idxs_input,
+                cum = torch.cumsum(
+                    self._insert_sorted_results(
+                        record.get("mesh_quadratures", quads[:0]).detach(),
+                        idxs_keep,
+                        quads,
+                        idxs_input,
+                    ),
+                    0,
                 )
-                cum_mesh_quadratures = torch.cumsum(all_mesh_quadratures, 0)[idxs_input]
+                cum_mesh_quadratures, recorded_cum = cum[idxs_input], cum[idxs_keep]
             if self.speed_logger:
                 self.speed_logger.debug("merge with record: %s", time.time() - t0)
 
@@ -1297,13 +1304,22 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                         f"{list(error_integral_reference.shape)}."
                     )
                 reference_integral = error_integral_reference
-            error_ratios, error_ratios_2steps, error_ratios_per_dim = (
-                self._compute_error_ratios(
-                    mesh_quadrature_errors=method_output.mesh_quadrature_errors,
-                    mesh_quadratures=method_output.mesh_quadratures,
-                    cum_mesh_quadratures=cum_mesh_quadratures,
-                    integral=reference_integral,
-                )
+            # The norm family judges a subinterval by its reduced error and
+            # rounding floor, which never change once it is evaluated: the
+            # record keeps them, so Step 4b, Step 7 and the final check judge
+            # it by the numbers it was accepted with. "failure_fraction"
+            # compares each output with its own tolerance and keeps none.
+            reduced_errors = (
+                None
+                if self._is_failure_fraction
+                else self._reduced_errors(method_output.mesh_quadrature_errors, quads)
+            )
+            error_ratios, _, error_ratios_per_dim = self._compute_error_ratios(
+                mesh_quadrature_errors=method_output.mesh_quadrature_errors,
+                mesh_quadratures=quads,
+                cum_mesh_quadratures=cum_mesh_quadratures,
+                integral=reference_integral,
+                reduced_errors=reduced_errors,
             )
             keep_mask, _, _ = self._accept_reject_masks(
                 error_ratios, error_ratios_per_dim
@@ -1311,11 +1327,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             if self.speed_logger:
                 self.speed_logger.debug("calculate errors: %s", time.time() - t0)
             assert len(nodes) == len(error_ratios)
-            assert len(nodes) - 1 == len(error_ratios_2steps), (
-                f"ratios: {error_ratios_2steps.shape} | nodes: {nodes.shape}"
-            )
             logger.debug("error_ratios: %s", error_ratios)
-            logger.debug("error_ratios_2steps: %s", error_ratios_2steps)
 
             # --- Step 4b: Re-check already-accepted (recorded) panels ---
             # The accept/reject denominator (built from reference_integral, Step 4)
@@ -1338,15 +1350,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 # All inputs are integration-device-resident (mesh_quadratures
                 # and mesh_quadrature_errors are in _RECORD_LOOP_KEYS;
                 # reference_integral is on self.device) -- no host<->device copy.
-                # The record is non-empty here, so Step 3 took its merge branch
-                # and set idxs_keep. Cumulative mode judges each recorded step
-                # against the running integral through it, which includes this
-                # batch's steps to its left: the merged record+batch cumsum,
-                # restricted to the recorded positions (a cumsum over the record
-                # alone would leave the batch out).
+                # Cumulative mode judges each recorded step against the running
+                # integral through it, which includes this batch's steps to its
+                # left (recorded_cum, from the sum above; None in absolute
+                # mode).
                 extra_split_idxs, record_keep_mask, _ = self._failed_record_positions(
                     record,
-                    torch.cumsum(all_mesh_quadratures.detach(), 0)[idxs_keep],
+                    recorded_cum,
                     reference_integral,
                     mesh,
                     split_counts,
@@ -1409,8 +1419,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # update; remove their now-stale entries (their children will be
             # re-evaluated as fresh panels). Done before _record_results, whose
             # rows record_keep_mask does not cover.
-            # record_keep_mask is set exactly when recheck_active.
-            if record_keep_mask is not None and not bool(torch.all(record_keep_mask)):
+            # Both are set exactly when recheck_active, and record_keep_mask
+            # drops exactly the subintervals of extra_split_idxs, whose size is
+            # known on the host (no read of the device).
+            if extra_split_idxs is not None and len(extra_split_idxs) > 0:
+                assert record_keep_mask is not None
                 record = self._remove_failed_record_panels(
                     record,
                     record_keep_mask,
@@ -1475,6 +1488,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     results=intermediate_results,
                     mesh_index=idxs_transfer[step_idxs[keep_idx]],
                     result_device=result_device,
+                    reduced_errors=None
+                    if reduced_errors is None
+                    else reduced_errors[keep_idx],
                 )
                 del intermediate_results
 
@@ -1626,11 +1642,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # _prune_excess_mesh can merge one with a right neighbour whose running
         # integral, and so its tolerance, is much larger. Runs before the record
         # is moved to result_device, so all inputs are on the integration device.
+        # The record is in mesh order, so in cumulative mode its own running
+        # sum (None) is the final running integral.
         final_ratios, final_fails, nonfinite = self._record_error_check(
-            record,
-            torch.cumsum(record["mesh_quadratures"].detach(), 0),
-            record["integral"].detach(),
+            record, None, record["integral"].detach()
         )
+        # Read only by the checks above; not moved to result_device.
+        record.pop("reduced_errors", None)
         final_fails = final_fails | nonfinite
         # The split statistics and the check in one read of the device.
         n_unsplit, max_split_depth, failed = torch.stack(
@@ -1750,7 +1768,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         in-loop re-check of accepted subintervals (Step 4b of ``integrate``)
         and by the final ``converged`` check. It uses the same error ratios and
         accept rule as a freshly evaluated batch (``_compute_error_ratios``,
-        ``_accept_reject_masks``).
+        ``_accept_reject_masks``), and for the norm family the reduced error
+        and rounding floor each subinterval was accepted with (the record's
+        ``reduced_errors``), so only the tolerance can change its decision.
 
         Parameters
         ----------
@@ -1780,6 +1800,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh_quadratures=record["mesh_quadratures"].detach(),
             cum_mesh_quadratures=cum_mesh_quadratures,
             integral=integral,
+            reduced_errors=record.get("reduced_errors"),
         )
         _, reject_mask, nonfinite_mask = self._accept_reject_masks(
             error_ratios, error_ratios_per_dim
@@ -3037,9 +3058,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         -------
         tuple[torch.Tensor | None, float]
             ``(merge_prediction, merge_cut)``: ``_predict_merged_errors`` for
-            ``"predicted"``, shape [N-1, D], which ``_compute_error_ratios``
-            adds to the summed errors, or None; and the cutoff on the pair
-            ratio.
+            ``"predicted"``, shape [N-1, D], which ``_get_optimal_mesh`` adds
+            to the summed errors, or None; and the cutoff on the pair ratio.
         """
         if self.merge_rule == "sum":
             return None, self.remove_cut
@@ -3426,7 +3446,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadratures : torch.Tensor
             Integral contribution of each subinterval. Shape: [N, D].
         mesh_quadrature_errors : torch.Tensor
-            Error estimate of each subinterval. Shape: [N, D].
+            Absolute value of the error estimate of each subinterval (a merge
+            sums two of them, which signed values could cancel). Shape: [N, D].
         integral : torch.Tensor
             The final integral. Shape: [D].
         mesh : torch.Tensor
@@ -3443,15 +3464,19 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             The optimal mesh. Shape: [M_opt, T].
         """
         # Merge pairs of over-resolved neighbors: the one place where the pair
-        # ratio (error_ratios_2steps) decides anything (the loop only checks
-        # its length and logs it).
+        # ratio (error_ratios_2steps) is computed and decides anything. Its
+        # numerator is each pair's summed errors, plus the merge prediction
+        # (adding a Python 0 is exact, so both cases sum in the same order).
         merge_prediction, merge_cut = self._merge_inputs(y, mesh_quadratures, mesh)
         _, error_ratios_2steps, _ = self._compute_error_ratios(
             mesh_quadrature_errors=mesh_quadrature_errors,
             mesh_quadratures=mesh_quadratures,
             integral=integral.detach(),
-            merge_prediction=merge_prediction,
+            pair_errors=(0 if merge_prediction is None else merge_prediction)
+            + mesh_quadrature_errors[:-1]
+            + mesh_quadrature_errors[1:],
         )
+        assert error_ratios_2steps is not None  # computed with pair_errors
         mesh_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned = (
             self._prune_excess_mesh(
                 mesh,
@@ -3802,7 +3827,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
           ``_max_norm``).
         - ``"rms"``: the root-mean-square ``sqrt(mean(x**2))``; scipy has no
           such option.
-        - a callable: ``error_norm(x)``, which must reduce the last axis.
+        - a callable: ``error_norm(x)``, which must reduce the last axis,
+          each row on its own: the record keeps a subinterval's reduced error
+          from its batch (``_reduced_errors``), so a row's value must not
+          depend on the other rows.
 
         For D = 1 every string option equals ``torch.abs(x)``.
 
@@ -3876,8 +3904,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadratures: torch.Tensor | None = None,
         cum_mesh_quadratures: torch.Tensor | None = None,
         integral: torch.Tensor | None = None,
-        merge_prediction: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        pair_errors: torch.Tensor | None = None,
+        reduced_errors: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         Compute the error ratio of each subinterval, choosing by ``self.error_norm``.
 
@@ -3900,28 +3929,34 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Error estimate of each subinterval. [N, D].
         mesh_quadratures : torch.Tensor or None
             Contribution of each subinterval (``s_k``), used for the rounding
-            floor and, in cumulative mode, the running integral. [N, D].
+            floor and, in cumulative mode without ``cum_mesh_quadratures``,
+            the running integral (then in mesh order). [N, D]. None gives no
+            rounding floor.
         cum_mesh_quadratures : torch.Tensor or None
             Precomputed running integral through each subinterval [N, D]
             (cumulative mode only).
         integral : torch.Tensor or None
             Current total integral [D] (absolute mode only; required there).
-        merge_prediction : torch.Tensor or None
-            Predicted error of merging each pair of neighbors [N-1, D]
-            (``merge_rule="predicted"``, see ``_merge_inputs``), added to the
-            pair's summed errors ``abs(e[k]) + abs(e[k+1])`` in the numerator
-            of ``error_ratios_2steps``. None (default) adds nothing.
+        pair_errors : torch.Tensor or None
+            Error of each pair of neighbors merged into one [N-1, D], the
+            numerator of ``error_ratios_2steps``, built by its one reader,
+            ``_get_optimal_mesh``. None (default) skips the pair ratio.
+        reduced_errors : torch.Tensor or None
+            The norm family's reduced error and rounding floor of each
+            subinterval [N, 2] (``_reduced_errors``), as the record keeps them;
+            None (default) computes them from the arrays. Ignored by
+            ``"failure_fraction"``, whose tolerance is per component.
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
+        tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]
             Tuple ``(error_ratios, error_ratios_2steps, error_ratios_per_dim)``:
 
             - error_ratios: accept-or-split quantity of each subinterval [N]
               (the reduced ratio for the norm family; the failure fraction for
               ``"failure_fraction"``).
             - error_ratios_2steps: merge indicator of each pair of neighbors
-              [N-1].
+              [N-1] when ``pair_errors`` is given, else None.
             - error_ratios_per_dim: ratio of each element [N, D] for
               ``"failure_fraction"`` (so non-finite subintervals can be
               found), else None.
@@ -3935,30 +3970,73 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         if self.use_absolute_error_ratio and integral is None:
             raise ValueError("Must give integral when use_absolute_error_ratio=True")
-        abs_err = torch.abs(mesh_quadrature_errors)
-        # Numerator of the pair ratio. Adding a Python 0 is exact, so both
-        # cases sum in the same order.
-        pair_errors = (
-            (0 if merge_prediction is None else merge_prediction)
-            + abs_err[:-1]
-            + abs_err[1:]
-        )
+        if not self.use_absolute_error_ratio and cum_mesh_quadratures is None:
+            if mesh_quadratures is None:
+                raise ValueError("Must give mesh_quadratures or cum_mesh_quadratures")
+            cum_mesh_quadratures = torch.cumsum(mesh_quadratures, dim=0)
+        if mesh_quadratures is None:
+            # No rounding floor: a zero floor leaves every tolerance as it is.
+            mesh_quadratures = torch.zeros_like(mesh_quadrature_errors)
         if self._is_failure_fraction:
             return self._error_ratios_failure_fraction(
-                abs_err, mesh_quadratures, cum_mesh_quadratures, integral, pair_errors
+                torch.abs(mesh_quadrature_errors),
+                mesh_quadratures,
+                cum_mesh_quadratures,
+                integral,
+                pair_errors,
+            )
+        if reduced_errors is None:
+            reduced_errors = self._reduced_errors(
+                mesh_quadrature_errors, mesh_quadratures
             )
         return self._error_ratios_norm(
-            abs_err, mesh_quadratures, cum_mesh_quadratures, integral, pair_errors
+            reduced_errors, cum_mesh_quadratures, integral, pair_errors
+        )
+
+    def _reduced_errors(
+        self, mesh_quadrature_errors: torch.Tensor, mesh_quadratures: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Reduce each subinterval's error estimate and rounding floor with the norm.
+
+        These are the two numbers of the norm family's error ratio that never
+        change once a subinterval is evaluated, ``R(abs(e[k]))`` and
+        ``R(floor[k])`` (``_error_ratios_norm``), with R the configured norm
+        (``_reduce_norm``) and the rounding floor of ``_round_floor``; only the
+        tolerance changes. The integration loop computes them for each batch
+        and the record keeps them, so every later judgement of a recorded
+        subinterval (the re-check and the final check, ``_record_error_check``)
+        uses the very numbers it was accepted with and reduces no [N, D] array
+        again.
+
+        Parameters
+        ----------
+        mesh_quadrature_errors : torch.Tensor
+            Error estimate of each subinterval. Shape: [N, D].
+        mesh_quadratures : torch.Tensor
+            Contribution of each subinterval. Shape: [N, D].
+
+        Returns
+        -------
+        torch.Tensor
+            ``R(abs(e[k]))`` and ``R(floor[k])`` of each subinterval. Shape:
+            [N, 2].
+        """
+        return torch.stack(
+            [
+                self._reduce_norm(torch.abs(mesh_quadrature_errors)),
+                self._reduce_norm(self._round_floor(mesh_quadratures)),
+            ],
+            dim=-1,
         )
 
     def _error_ratios_norm(
         self,
-        abs_err: torch.Tensor,
-        mesh_quadratures: torch.Tensor | None,
+        reduced_errors: torch.Tensor,
         cum_mesh_quadratures: torch.Tensor | None,
         integral: torch.Tensor | None,
-        pair_errors: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, None]:
+        pair_errors: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, None]:
         """
         Error ratios of the norm family: reduce the error vector, then compare.
 
@@ -3996,32 +4074,26 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         Parameters
         ----------
-        abs_err : torch.Tensor
-            Absolute error estimate of each subinterval. Shape: [N, D].
-        mesh_quadratures : torch.Tensor | None
-            Contribution of each subinterval (for the rounding floor). Shape:
-            [N, D].
+        reduced_errors : torch.Tensor
+            ``R(abs(e[k]))`` and ``R(floor[k])`` of each subinterval
+            (``_reduced_errors``). Shape: [N, 2].
         cum_mesh_quadratures : torch.Tensor | None
-            Running integral through each subinterval (cumulative mode).
-            Shape: [N, D].
+            Running integral through each subinterval (cumulative mode;
+            required there). Shape: [N, D].
         integral : torch.Tensor | None
             Total integral (absolute mode). Shape: [D].
-        pair_errors : torch.Tensor
+        pair_errors : torch.Tensor | None
             Error of each pair of neighbors merged into one, the numerator of
-            the pair ratio (see ``_compute_error_ratios``). Shape: [N-1, D].
+            the pair ratio (see ``_compute_error_ratios``), or None to skip the
+            pair ratio. Shape: [N-1, D].
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor, None]
-            ``(error_ratio, error_ratio_2steps, None)``, shapes [N], [N-1].
+        tuple[torch.Tensor, torch.Tensor | None, None]
+            ``(error_ratio, error_ratio_2steps, None)``, shapes [N] and [N-1]
+            (None without ``pair_errors``).
         """
-        err = self._reduce_norm(abs_err)
-        floor = (
-            self._reduce_norm(self._round_floor(mesh_quadratures))
-            if mesh_quadratures is not None
-            else None
-        )
-
+        err, floor = reduced_errors.unbind(-1)
         if self.use_absolute_error_ratio:
             assert integral is not None  # checked in _compute_error_ratios
             error_tol = torch.clamp(
@@ -4029,38 +4101,31 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             )
             error_tol_2steps = error_tol
         else:
-            if cum_mesh_quadratures is not None:
-                cum_steps = cum_mesh_quadratures
-            elif mesh_quadratures is not None:
-                cum_steps = torch.cumsum(mesh_quadratures, dim=0)
-            else:
-                raise ValueError("Must give mesh_quadratures or cum_mesh_quadratures")
+            assert cum_mesh_quadratures is not None  # set in _compute_error_ratios
             error_tol = torch.clamp(
-                self.rtol * self._reduce_norm(torch.abs(cum_steps)), min=self.atol
+                self.rtol * self._reduce_norm(torch.abs(cum_mesh_quadratures)),
+                min=self.atol,
             )
             # A merged pair (i, i+1) ends where step i+1 ends, so it is judged
             # against step i+1's cumulative tolerance (not the larger of the
             # two, which under-predicts the merged ratio when |cum| falls).
             error_tol_2steps = error_tol[1:]
 
-        if floor is not None:
-            # Broadcasts a scalar (absolute mode) or per-step (cumulative) tol.
-            error_tol = torch.maximum(error_tol, floor)
-            error_tol_2steps = torch.maximum(error_tol_2steps, floor[:-1] + floor[1:])
-
-        error_ratio = err / error_tol
-        err_2steps = self._reduce_norm(pair_errors)
-        error_ratio_2steps = err_2steps / error_tol_2steps
-        return error_ratio, error_ratio_2steps, None
+        # Broadcasts a scalar (absolute mode) or per-step (cumulative) tol.
+        error_ratio = err / torch.maximum(error_tol, floor)
+        if pair_errors is None:
+            return error_ratio, None, None
+        error_tol_2steps = torch.maximum(error_tol_2steps, floor[:-1] + floor[1:])
+        return error_ratio, self._reduce_norm(pair_errors) / error_tol_2steps, None
 
     def _error_ratios_failure_fraction(
         self,
         abs_err: torch.Tensor,
-        mesh_quadratures: torch.Tensor | None,
+        mesh_quadratures: torch.Tensor,
         cum_mesh_quadratures: torch.Tensor | None,
         integral: torch.Tensor | None,
-        pair_errors: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        pair_errors: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """
         Error ratios of ``"failure_fraction"``: the fraction of failing components.
 
@@ -4088,57 +4153,49 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         ----------
         abs_err : torch.Tensor
             Absolute error estimate of each subinterval. Shape: [N, D].
-        mesh_quadratures : torch.Tensor | None
+        mesh_quadratures : torch.Tensor
             Contribution of each subinterval (for the rounding floor). Shape:
             [N, D].
         cum_mesh_quadratures : torch.Tensor | None
-            Running integral through each subinterval (cumulative mode).
-            Shape: [N, D].
+            Running integral through each subinterval (cumulative mode;
+            required there). Shape: [N, D].
         integral : torch.Tensor | None
             Total integral (absolute mode). Shape: [D].
-        pair_errors : torch.Tensor
+        pair_errors : torch.Tensor | None
             Error of each pair of neighbors merged into one, the numerator of
-            the pair ratio (see ``_compute_error_ratios``). Shape: [N-1, D].
+            the pair ratio (see ``_compute_error_ratios``), or None to skip the
+            pair ratio. Shape: [N-1, D].
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]
             ``(failure_fraction, error_ratio_2steps, ratio)``, shapes [N],
-            [N-1], [N, D].
+            [N-1] (None without ``pair_errors``) and [N, D].
         """
         if self.use_absolute_error_ratio:
             assert integral is not None  # checked in _compute_error_ratios
             error_tol = self.atol + self.rtol * torch.abs(integral)  # [D]
             error_tol_2steps = error_tol
         else:
-            if cum_mesh_quadratures is not None:
-                cum_steps = cum_mesh_quadratures
-            elif mesh_quadratures is not None:
-                cum_steps = torch.cumsum(mesh_quadratures, dim=0)
-            else:
-                raise ValueError("Must give mesh_quadratures or cum_mesh_quadratures")
-            error_tol = self.atol + self.rtol * torch.abs(cum_steps)  # [N, D]
+            assert cum_mesh_quadratures is not None  # set in _compute_error_ratios
+            error_tol = self.atol + self.rtol * torch.abs(cum_mesh_quadratures)
             # Merged pair's tolerance: step i+1's (see _error_ratios_norm).
             error_tol_2steps = error_tol[1:]
 
-        if mesh_quadratures is not None:
-            floor = self._round_floor(mesh_quadratures)  # [N, D]
-            error_tol = torch.maximum(error_tol * torch.ones_like(floor), floor)
-            error_tol_2steps = torch.maximum(
-                error_tol_2steps * torch.ones_like(floor[:-1]),
-                floor[:-1] + floor[1:],
-            )
-
-        ratio = abs_err / error_tol  # [N, D]
+        # torch.maximum broadcasts the [D] or [N, D] tolerance with the floor.
+        floor = self._round_floor(mesh_quadratures)  # [N, D]
+        ratio = abs_err / torch.maximum(error_tol, floor)  # [N, D]
         finite = torch.isfinite(ratio)
         failed = (ratio >= 1.0) & finite
         failure_fraction = failed.to(self.dtype).mean(dim=-1)  # [N]
+        if pair_errors is None:
+            return failure_fraction, None, ratio
 
         # Merge/prune indicator: conservative max-norm of the combined 2-step
         # ratio (compared against remove_cut < 1, so a magnitude is needed here
         # rather than a fraction).
-        ratio_2steps = pair_errors / error_tol_2steps
-        error_ratio_2steps = torch.amax(ratio_2steps, dim=-1)  # [N-1]
+        error_tol_2steps = torch.maximum(error_tol_2steps, floor[:-1] + floor[1:])
+        error_ratio_2steps = torch.amax(pair_errors / error_tol_2steps, dim=-1)
         return failure_fraction, error_ratio_2steps, ratio
 
     @property
@@ -4213,11 +4270,19 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     # Per-subinterval record keys the loop reads, each kept as one tensor on
     # the integration device and appended to every turn: the left mesh index
     # of each recorded subinterval in the current mesh (the order of the
-    # cumulative sums, the re-check's mesh positions), and the contributions
-    # and error estimates (cumulative sums and the re-check of accepted
-    # subintervals in ``integrate``). Every other per-subinterval field is
-    # kept as one chunk per batch (``_record_results``).
-    _RECORD_LOOP_KEYS = ("mesh_index", "mesh_quadratures", "mesh_quadrature_errors")
+    # cumulative sums, the re-check's mesh positions), the contributions and
+    # error estimates (cumulative sums, removals and the re-check of
+    # "failure_fraction"), and for the norm family the reduced error and
+    # rounding floor (``_reduced_errors``; the re-check and the final check),
+    # which ``integrate`` drops after the final check. Every other
+    # per-subinterval field is kept as one chunk per batch
+    # (``_record_results``).
+    _RECORD_LOOP_KEYS = (
+        "mesh_index",
+        "mesh_quadratures",
+        "mesh_quadrature_errors",
+        "reduced_errors",
+    )
 
     # Cumulative scalar keys whose final output stays on the integration device.
     # The integral and its error estimate are the primary answer, so they remain
@@ -4346,6 +4411,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         results: IntegrationResult,
         mesh_index: torch.Tensor,
         result_device: str | torch.device | None = None,
+        reduced_errors: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Append the accepted subintervals of a batch to the record.
@@ -4386,6 +4452,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         result_device : str | torch.device | None
             Device for the values (``y`` and the tracked variables). None keeps
             them on the integration device.
+        reduced_errors : torch.Tensor or None
+            The norm family's reduced error and rounding floor of each of them
+            [N, 2] (``_reduced_errors``), recorded under the key
+            ``reduced_errors``; None (``"failure_fraction"``) records none.
 
         Returns
         -------
@@ -4404,6 +4474,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             result_device = self.device
         fields = self._record_fields(results)
         fields["mesh_index"] = mesh_index
+        if reduced_errors is not None:
+            fields["reduced_errors"] = reduced_errors
         if record and fields.keys() != record.keys() | chunks.keys():
             raise ValueError(
                 "The integrand returned a different set of tracked variables "

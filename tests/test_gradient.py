@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 from _helpers import (
     ATOL_LOOSE,
@@ -14,6 +15,7 @@ from _helpers import (
     make_variable_solver_for_unit_test,
 )
 
+from padaquad import adaptive_quadrature
 from padaquad.quadrature.base import _RK_integral
 
 # ---------------------------------------------------------------------------
@@ -188,6 +190,50 @@ class TestErrorDetaching:
         assert method_output.integral_error.grad_fn is None
         assert method_output.mesh_quadrature_errors.grad_fn is None
         assert method_output.integral.grad_fn is not None
+
+    @pytest.mark.parametrize("absolute", [True, False], ids=["absolute", "cumulative"])
+    @pytest.mark.parametrize("bound_grad", [False, True], ids=["param", "bound"])
+    def test_error_ratios_carry_no_graph(self, absolute, bound_grad):
+        """With take_gradient=False and an integrand that depends on a
+        parameter (or a bound that requires grad), the error ratios, returned
+        and in every batch result loss_fxn receives, hold no autograd graph:
+        error control works on detached values. The integral keeps its graph,
+        and its gradients are those of theta * integral of g over [0, b]:
+        the integral of g, and theta * g(b)."""
+        theta = torch.tensor(1.5, dtype=torch.float64, requires_grad=True)
+        b = torch.tensor([1.0], dtype=torch.float64, requires_grad=bound_grad)
+        seen = []
+
+        def loss(batch):
+            seen.append(batch.error_ratios.requires_grad)
+            return batch.integral.sum()
+
+        solver = adaptive_quadrature(
+            "uniform",
+            "gk21",
+            atol=1e-12,
+            rtol=1e-10,
+            device=DEVICE,
+            dtype=torch.float64,
+            use_absolute_error_ratio=absolute,
+        )
+        torch.manual_seed(SEED)
+        result, _ = solver.integrate(
+            lambda t: theta * torch.sin(1.0 / (t + 0.01)),
+            mesh_init=torch.tensor([0.0], dtype=torch.float64),
+            mesh_final=b,
+            take_gradient=False,
+            loss_fxn=loss,
+        )
+        assert len(seen) > 1  # several batches
+        assert not any(seen)
+        assert not result.error_ratios.requires_grad
+        result.integral.sum().backward()
+        g_integral = result.integral.detach().sum() / 1.5
+        assert torch.allclose(theta.grad, g_integral, rtol=1e-12, atol=0)
+        if bound_grad:
+            g_b = torch.sin(torch.tensor([1.0 / 1.01], dtype=torch.float64))
+            assert torch.allclose(b.grad, 1.5 * g_b, rtol=1e-12, atol=0)
 
 
 # ---------------------------------------------------------------------------

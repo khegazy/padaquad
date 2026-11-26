@@ -132,19 +132,19 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_public_api.py` | Smoke test of every public symbol and `IntegrationResult` fields |
 | `test_rk_integral.py` | `_RK_integral`: constant / linear / multi-step / multi-dim / zero-width / variable-b inputs; the weighted sum in blocks of rows (`_BLOCK_BYTES`) equals one sum bit for bit, N = 0 included |
 | `test_base_and_methods.py` | `get_sampling_type`, the tableau's dtype conversion (`MethodClass.to`), `_get_method` factory (unknown name raises `ValueError`), `error_exponent`, weight formulas |
-| `test_error_computation.py` | `_error_norm`, `_rec_remove`, `_compute_error_ratios_absolute`/`_cumulative` |
+| `test_error_computation.py` | `_reduce_norm`, `_round_floor`, `_rec_remove`, `_compute_error_ratios` (absolute, cumulative, `failure_fraction`; the pair ratio only with `pair_errors`) |
 | `test_interpolation.py` | `_compute_nodes`: endpoints, shapes, monotonicity, tableau-c matching |
 | `test_sorted_insert.py` | `_merge_positions` (ranks of mesh indices, the record's in any order) and `_insert_sorted_results` (a new array; the old record is read, not cloned) |
-| `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables` (f and y0; the bound defaults through `_setup_integral_bounds`), `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects); `atol`/`rtol` stored as floats, `ValueError` when not one finite number >= 0 (a list or tensor per output component included), unchanged by a dtype round trip (the error ratios of a float64 call after a float32 one); host waits on CUDA (none to build a solver, one for the check of a fresh starting mesh, one per mesh update (the number accepted and the number split in four, also with four-way splits) plus one per array kept on the CPU, none in `_evaluate_f_on_mesh` but the finite check of each call of `f`; counted by source line (`_lines`): one per pass at the loop's condition and one when none is left, none in `_record_results` with the record on the GPU and one per value field with `result_device="cpu"`, two in `_sort_record`) |
+| `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables` (f and y0; the bound defaults through `_setup_integral_bounds`), `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects); `atol`/`rtol` stored as floats, `ValueError` when not one finite number >= 0 (a list or tensor per output component included), unchanged by a dtype round trip (the error ratios of a float64 call after a float32 one); host waits on CUDA (none to build a solver, one for the check of a fresh starting mesh, one per mesh update (the number accepted and the number split in four, also with four-way splits) plus one per array kept on the CPU, none in `_evaluate_f_on_mesh` but the finite check of each call of `f`; counted by source line (`_lines`): one per pass at the loop's condition and one when none is left, none in `_record_results` with the record on the GPU and one per value field with `result_device="cpu"`, two in `_sort_record`; the error control of a pass, one per re-check) |
 | `test_methods_extra.py` | Variable-mode `adaptive_heun` (the uniform heun object) weights, the generic `VariableMethodClass` (normalized nodes reach the weight function, shape check), node-fraction validation, `MethodClass.to` (device and dtype) |
 | `test_solver_methods.py` | `adaptive_quadrature` factory, `method.weights` through both solvers, per-step node count `solver.C` |
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed accept masks (`_keep_mask`, the loop's rule), midpoint placement, the returned `keep_idx` and `idxs_transfer` (T = 1 and 2), extra split positions in any order, the split cap, a subinterval one ULP wide accepted (`_splittable`, T = 1 and 2); four-way splits with `error_ratios` (`TestFourPieces`): bit for bit two halving updates, the rule's conditions, the cap, extra positions halved, two ULPs wide halved |
 | `test_record_and_sort.py` | `_record_results` (appends in acceptance order: one tensor per loop field, one chunk per batch for the rest; a view of a larger array is copied) and `_sort_record` (rows to their mesh index, T = 1 and 2; one batch in order is not copied; chunk fields moved to the given device; a record that does not cover the mesh once raises; the gradient passes); a removal and the final ordering copy one field at a time (GPU peak); end to end, every path of the record (removals, Step 7, cumulative, tracked, trade, no record, split cap, `take_gradient`, gk21) returns mesh order and the same numbers without `runtime_checks`; `_flatten_output` equals the concatenation, values and gradient |
 | `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; `build_state_mesh=False` (no build, `state.mesh` None, the rest bit for bit, the next call needs bounds); end to end: the state's mesh re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
-| `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
+| `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops; `error_ratios` (returned and per batch) hold no autograd graph |
 | `test_error_integral_reference.py` | The `error_integral_reference` argument of `integrate()`, with `take_gradient=True` (the one path where a batch is judged before the rest of its pass is evaluated) |
-| `test_error_masks.py` | Vector-error machinery (norms, `failure_fraction`, rounding floor) in float32 and float64; the float tolerances act as 0-d tensors of the values' dtype, bit for bit (CPU and CUDA) |
+| `test_error_masks.py` | Vector-error machinery (norms, `failure_fraction`, rounding floor) in float32 and float64; the float tolerances act as 0-d tensors of the values' dtype, bit for bit (CPU and CUDA); pair errors set only the pair ratio; the record is judged by the reduced errors of acceptance, bit for bit the batch's ratios and masks (every `error_norm`, both modes, a NaN row) |
 | `test_evaluate_f_on_mesh.py` | `_evaluate_f_on_mesh` and its two evaluation paths; the returned `MethodOutput` equals one `_calculate_integral` call bit for bit however the calls of `f` were cut |
 | `test_trade_speed_for_memory.py` | `trade_speed_for_memory`, `evaluation_buffer`, `record_evaluations`: the same calls of `f`, mesh and integral (bit for bit) with every setting, for every `max_batch`, uniform and variable, CPU and CUDA; when the values are integrated (once per pass, per call, per buffer); the values' device in every result `loss_fxn` receives; lower GPU peak; the `ValueError`s; the three warnings, on the first call only (no state), none for `result_device` on the solver's device; without values, `state.mesh` is the `power_law` one; every feature unchanged; the default holds a pass once (GPU peak < 1.8 × the pass's values); an out-of-memory error at the pass's array names the remedies; `_keep_rows` in place equals indexing |
 | `test_examples_run.py` | Runs `examples/*.py` (with output markers, or self-checking with asserts: `SELF_CHECKING_EXAMPLES`, `MPLBACKEND=Agg`), every script in `examples/verification/`, and every ```python block of the files in its `DOCUMENTS` (the README, `docs/development/adding_a_method.md`; except blocks preceded by `<!-- not-tested -->`) |
@@ -155,7 +155,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_interior_nodes.py` | Gauss-Kronrod (nodes all interior): C points of `f` per subinterval, none at a mesh point, no call of `f` before the first pass, `1/sqrt(t)` and `log(t)` at a bound converge, result rows = evaluated points, bound gradients against the closed form |
 | `test_multi_d_integrand.py` | Integrands with D > 1 outputs |
 | `test_oom_recovery.py` | The out-of-memory catch-and-retry path (direct calls of `_evaluate_f_on_split_nodes`, including retries that end inside a subinterval; `integrate` with and without `trade_speed_for_memory`) |
-| `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance (with `take_gradient=False` the drift is between passes: `_cancelling_peak` hides its cancelling part in a narrow peak the first passes miss); `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN); the re-check with `split_rule="accelerate"` (fewer passes, no step evaluated twice) |
+| `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance (with `take_gradient=False` the drift is between passes: `_cancelling_peak` hides its cancelling part in a narrow peak the first passes miss); `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN); the norm family's record carries each step's `reduced_errors` into every re-check and the final check; the re-check with `split_rule="accelerate"` (fewer passes, no step evaluated twice) |
 | `test_solver_isolation.py` | Solvers of different dtypes keep their own tables; the registry is never changed; `MethodClass.to` returns one shared copy per (method, device, dtype), sharing no memory with its source, dropped with its source (deep copies and pickles of a solver, CUDA); `_Tableau` frozen; no integration writes into a method's tensors (version counters); a replaced registry entry reaches new solvers only; `_integration_on_device` restores the solver's method object, and leaves the solver's device and method when the conversion raises (CUDA) |
 | `test_tracked_variables.py` | The `tracked_variables` feature |
 | `test_docs_performance_table.py` | The Performance page's rendering of `docs/performance/results_*.json`: no file, one, two (name order, hardware headings), unreadable files named in the error; the memory options tables from `docs/performance/memory_options.json` (every setting of every integrand, the field's `EXAMPLE_SETTINGS` in order of `max_batch`, defaults first, missing and unreadable files) |
@@ -325,7 +325,15 @@ is a boolean array where `True` means the panel still needs evaluation.
      `trade_speed_for_memory` with `take_gradient=True` and for a misused
      `evaluation_buffer`, and logs three warnings only when no `state` is given
      (the first call of a series).
-   - Compute error ratios (absolute or cumulative mode).
+   - Compute error ratios (`_compute_error_ratios`, absolute or cumulative
+     mode) from detached values, so `error_ratios` holds no autograd graph.
+     The running sums only in cumulative mode: the record (empty on the first
+     turn) and the batch merged in mesh order by their mesh indices
+     (`_merge_positions`, `_insert_sorted_results`), one `cumsum` for the
+     batch and the re-check. For the norm family the batch's reduced error
+     and rounding floor (`_reduced_errors`, [N, 2]) are computed once and
+     recorded (`reduced_errors`); every later judgement of the subinterval
+     reads them.
    - `_adaptively_increase_mesh(method_output, keep_mask, ...)`: the steps of
      `keep_mask` (`_accept_reject_masks`) are accepted, the others split at
      the midpoint into two sub-steps for re-evaluation, except those
@@ -357,7 +365,8 @@ is a boolean array where `True` means the panel still needs evaluation.
      integers, for any T). The sums and the loop's fields
      (`_RECORD_LOOP_KEYS`: `mesh_index`, `mesh_quadratures`,
      `mesh_quadrature_errors`, read by the cumulative sums through
-     `_merge_positions` and by the re-check) are one tensor each on the
+     `_merge_positions`, removals and the re-check, and `reduced_errors`
+     (norm family only; dropped after the final check)) are one tensor each on the
      solver's device; `nodes`, `h`, `y`, `error_ratios` and the tracked
      variables are one chunk per batch in `chunks` (the values on
      `result_device`, the rest on the solver's device until the end), never
@@ -385,7 +394,7 @@ reduction scheme** (`error_norm`).
 
 **Tolerance reference** (`use_absolute_error_ratio`):
 - **Absolute** (default): denominator is `max(atol, rtol * |total_integral|)` (`atol + rtol * |I_d|` for `"failure_fraction"`, below). Every panel uses the same denominator. Best for path integrals where the total is the meaningful quantity.
-- **Cumulative**: the same with `|cumsum_to_step|` (the running integral through the panel) in place of `|total_integral|` (traditional ODE-style). Per-panel ratios *decrease* as integration progresses.
+- **Cumulative**: the same with `|cumsum_to_step|` (the running integral through the panel) in place of `|total_integral|` (traditional ODE-style). Per-panel ratios *decrease* as integration progresses. On CUDA, `torch.cumsum` of a float64 `[N, 1]` tensor is not reproducible run to run from about N = 40,000 (A100, torch 2.8; `[N, 2]` and wider, and the CPU, are), so a cumulative-mode call with one output and that many subintervals can differ between runs in the last bits of its ratios (user guide, `ug-error-reference`); `torch.use_deterministic_algorithms(True)` makes it reproducible.
 
 **Vector-error reduction** (`error_norm`, modeled on
 `scipy.integrate.quad_vec`'s `norm`): for vector-valued integrands (`D > 1`)
@@ -407,10 +416,18 @@ reducing to `|error| / max(atol, rtol*|I|) < 1` (norm family) or
 **Re-check of accepted steps** (`enforce_convergence`, an `integrate`
 argument; None means `not take_gradient`, True with `take_gradient=True` raises
 `ValueError`): Step 4b judges every recorded step, from its stored
-`mesh_quadratures` / `mesh_quadrature_errors` (no call of `f`), against the same
-reference as the batch, via `_failed_record_positions`, and the failures that
-`_splittable` allows are split in the same mesh update (`extra_split_idxs`)
-and removed from the record (`_remove_failed_record_panels`). A fixed
+`mesh_quadratures` / `mesh_quadrature_errors` (no call of `f`; for the norm
+family from its stored `reduced_errors`, the numbers it was accepted with, so
+only the tolerance is new and no [N, D] array is reduced), against the same
+reference as the batch, via `_failed_record_positions` (the re-check's one
+read of the device: the positions of the failures that `_splittable` allows;
+the loop learns from their count, on the host, whether any is split), and
+those failures are split in the same mesh update (`extra_split_idxs`)
+and removed from the record (`_remove_failed_record_panels`). Step 7 and the
+final `converged` check use the same `_record_error_check`, so in absolute
+mode the three cannot disagree through rounding (in cumulative mode the
+tolerance, the norm of the running sums, is reduced as rows of different
+arrays and can still differ in its last bit for D > 1). A fixed
 `error_integral_reference` turns Step 4b off; with `enforce_convergence`, Step 7
 drops it once no tracker is True: the record is judged against its own
 integral, the failures are split directly (`_adaptively_increase_mesh` with an
@@ -428,8 +445,9 @@ panel's error is at/below round-off. The scheme is set at construction
 `_error_ratios_failure_fraction`; `_accept_reject_masks` turns the result into
 keep/split masks consumed by `_adaptively_increase_mesh`.
 
-`error_ratios_2steps`: the pair ratio of consecutive step pairs, used only by
-`_get_optimal_mesh` to merge pairs: a pair error divided by the tolerance the
+`error_ratios_2steps`: the pair ratio of consecutive step pairs, computed and
+used only by `_get_optimal_mesh` to merge pairs (it passes `pair_errors` to
+`_compute_error_ratios`, which skips the pair ratio without them): a pair error divided by the tolerance the
 merged step gets (in cumulative mode the right step's `|cumsum|`, where the
 merged step ends). The pair error is `|e_i| + |e_{i+1}|` plus, for
 `"predicted"`, the merge prediction; `_merge_inputs` returns that prediction (or

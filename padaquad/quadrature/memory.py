@@ -752,11 +752,13 @@ class _MemoryManagement:
         can_shrink: bool,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...] | None] | None:
         """
-        Call f on points, or return None when it runs out of memory.
+        Call f on points and check its output, or return None when it runs out of memory.
 
-        The one place where the integration loop catches an out-of-memory
-        error of f (``_is_out_of_memory``). After one, the memory f held is
-        released, so the caller can try again with fewer points.
+        Every call of f in the integration loop goes through it, so it is the
+        one place that checks the shape of f's output and that catches an
+        out-of-memory error of f (``_is_out_of_memory``). After one, the
+        memory f held is released, so the caller can try again with fewer
+        points.
 
         Parameters
         ----------
@@ -778,12 +780,14 @@ class _MemoryManagement:
 
         Raises
         ------
+        ValueError
+            If ``f``'s values are not one row per point, shape [N, D].
         torch.OutOfMemoryError
             If ``f`` ran out of memory and ``can_shrink`` is False.
         """
         outside = False
         try:
-            return self._split_f_output(f(points, *f_args))
+            integrand, tracked = self._split_f_output(f(points, *f_args))
         except (RuntimeError, MemoryError) as e:
             if not _is_out_of_memory(e):
                 raise
@@ -795,6 +799,17 @@ class _MemoryManagement:
             # An error from outside PyTorch's allocator (a CUDA library's, or
             # the CPU's) is helped by emptying PyTorch's GPU cache too.
             outside = not isinstance(e, torch.OutOfMemoryError)
+        else:
+            # Checked outside the try, so this error is never taken for an
+            # out-of-memory error. A [N] output, or one with another number
+            # of rows, would otherwise be reshaped into wrong subintervals.
+            if integrand.dim() < 2 or len(integrand) != len(points):
+                raise ValueError(
+                    "f must return values of shape [N, D] for points of shape "
+                    f"[N, T], one row per point; got shape "
+                    f"{list(integrand.shape)} for {len(points)} points."
+                )
+            return integrand, tracked
         # Released here, after the except block: inside it the error's
         # traceback still holds f's tensors, so they cannot be freed.
         self._release_memory(empty_cache=outside)

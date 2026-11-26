@@ -539,13 +539,23 @@ def test_bound_of_wrong_shape_with_mesh_raises(bound):
         _solver().integrate(f=torch.exp, mesh=_MESH, mesh_final=bound)
 
 
-def test_integrand_output_must_be_two_dimensional():
+@pytest.mark.parametrize("take_gradient", [False, True])
+@pytest.mark.parametrize(
+    ("f", "got"),
+    [
+        (lambda t: torch.exp(t)[:, 0], r"got shape \[\d+\] for"),
+        (lambda t: torch.exp(t).repeat(2, 1), r"got shape \[\d+, 1\] for"),
+    ],
+    ids=["one_dimensional", "two_rows_per_point"],
+)
+def test_integrand_output_must_be_one_row_per_point(f, got, take_gradient):
     """An integrand returning shape [N] instead of [N, D] raises ValueError
-    (the check was an assert, which python -O removes)."""
-    with pytest.raises(ValueError, match="shape"):
-        _solver().integrate(
-            f=lambda t: torch.exp(t)[:, 0], mesh=_MESH, take_gradient=False
-        )
+    (the check was an assert, which python -O removes), and so does one with
+    another number of rows than points, which with take_gradient=True was
+    reshaped into wrong subintervals without an error. The check is in
+    _call_f, which every call of f in the loop goes through."""
+    with pytest.raises(ValueError, match="one row per point; " + got):
+        _solver().integrate(f=f, mesh=_MESH, take_gradient=take_gradient)
 
 
 def test_float32_bound_at_a_float64_mesh_end_replaces_it():

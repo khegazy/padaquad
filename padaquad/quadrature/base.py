@@ -1061,12 +1061,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         probe = self._compute_nodes(
             mesh_init.reshape(1, -1), mesh_final.reshape(1, -1)
         )[:, 0]
-        test_integrand, _ = self._split_f_output(f(probe, *f_args))
-        if test_integrand.dim() < 2:
-            raise ValueError(
-                "f must return values of shape [N, D] for points of shape "
-                f"[N, T]; got shape {list(test_integrand.shape)}."
-            )
+        test_output = self._call_f(f, f_args, probe, False)
+        assert test_output is not None  # can_shrink=False raises instead
+        test_integrand = test_output[0]
+        del test_output
         # An output that requires grad (from f's parameters or from bounds that
         # require grad) carries an autograd graph, which holds what f saved
         # for its backward pass on the solver's device until result.integral
@@ -2444,8 +2442,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Raises
         ------
         ValueError
-            If f returns another number of values than the points it was
-            given, or (with ``runtime_checks``) a NaN or Inf value.
+            If f's values are not one row per point (``_call_f``), or (with
+            ``runtime_checks``) contain a NaN or Inf.
         torch.OutOfMemoryError
             If one node does not fit in memory (max_batch is already 1).
         """
@@ -2474,12 +2472,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 continue
 
             integrand, tracked = f_output
-            if len(integrand) != len(points):
-                raise ValueError(
-                    f"f returned {len(integrand)} values for {len(points)} points; "
-                    "it must return one row of values per point, shape [N, D] "
-                    "for points of shape [N, T]."
-                )
             self._check_f_output_finite(integrand, points)
             num_nodes_evaluated += len(integrand)
             # A call that ran is known to fit; the next call may be 10 times

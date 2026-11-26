@@ -547,7 +547,8 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   raises `torch.OutOfMemoryError` ("cannot be reduced") when the caller cannot
   shrink. Its two callers retry smaller: `_evaluate_f_in_batches`
   (`take_gradient=False`) and the `while output is None` loop of
-  `_evaluate_f_on_full_nodes` (`take_gradient=True`).
+  `_evaluate_f_on_full_nodes` (`take_gradient=True`). It is also the one
+  check of the output's shape (`ValueError` unless [N, D], one row per point).
 - **A pass's values are held once** (`take_gradient=False`):
   when the values stay on the solver's device for the pass (`values_device`
   is it, or None with no buffer) and f's output does not require grad, `_evaluate_f_on_split_nodes` writes each call's whole subintervals

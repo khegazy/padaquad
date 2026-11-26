@@ -29,7 +29,10 @@ solver runs at `atol = rtol` of $10^{-6}$ and $10^{-9}$.
 For each case the script records the median wall time of 7 runs after one
 warm-up run (with `torch.cuda.synchronize` around each run on a GPU), the
 smallest and largest time, the number of points at which $f$ was evaluated,
-and the absolute error against the exact answer. PadaQuad runs with a fixed
+and the absolute error against the exact answer. It collects Python's garbage
+before each case, keeps every run's time in the results file, and records the
+number of PyTorch threads and of CPUs the process could use, which change the
+times ({ref}`ug-cpu-threads`). PadaQuad runs with a fixed
 `max_batch`, so its one-time memory benchmark is not timed, and with
 `take_gradient=False`, because no gradient is computed (torchdiffeq's forward
 solve is timed without one too).

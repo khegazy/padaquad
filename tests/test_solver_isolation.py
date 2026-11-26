@@ -34,7 +34,7 @@ from tests._helpers import DEVICE, make_uniform_solver, needs_cuda
 
 from padaquad import UNIFORM_METHODS, VARIABLE_METHODS, adaptive_quadrature
 from padaquad.base import steps
-from padaquad.methods import UniformMethodClass, _get_method, _Tableau
+from padaquad.methods import MethodClass, UniformMethodClass, _get_method, _Tableau
 
 
 def _b_values(solver):
@@ -238,3 +238,23 @@ def test_optimal_mesh_on_another_device_keeps_the_solvers_method():
         steps.ADAPTIVE_UNIFORM, "gk21", solver.device, torch.float64
     )
     assert method is UNIFORM_METHODS["gk21"].to("cuda", torch.float64)
+
+
+@needs_cuda
+def test_failed_conversion_for_result_device_keeps_the_solvers_device(monkeypatch):
+    """When converting the method to result_device raises (for example out
+    of memory there), the solver keeps its device and method: a later call
+    runs where the solver was built."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cuda")
+    device, method = solver.device, solver.method
+
+    def fail(*args):
+        raise RuntimeError("conversion failed")
+
+    a, b = (torch.tensor([x], dtype=torch.float64) for x in (0.0, 1.0))
+    with monkeypatch.context() as patch:
+        patch.setattr(MethodClass, "to", fail)
+        with pytest.raises(RuntimeError, match="conversion failed"):
+            solver.integrate(torch.sin, mesh_init=a, mesh_final=b, result_device="cpu")
+    assert solver.device == device
+    assert solver.method is method

@@ -3216,8 +3216,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             yield
             return
         original_device, original_method = self.device, self.method
-        self.device = device
+        # Converted before self.device changes: if the conversion raises, the
+        # solver is left as it was.
         self.method = original_method.to(device, self.dtype)
+        self.device = device
         try:
             yield
         finally:

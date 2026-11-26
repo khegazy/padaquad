@@ -415,7 +415,7 @@ since each is below the run-to-run variation of a turn (about 2-3 %).
 | 5 | Fold the finite check into the turn's read (D2b) | 1 wait per call of `f`, about 15 µs (0.7 %) | Forbidden by the task (when the error is raised). |
 | 6 | The loop's condition from the mesh update's counts (`torch.nonzero_static` with the number of waiting subintervals computed on the host) | 1 wait, about 15 µs (0.7 %) | A second record of the waiting count on the host, kept in step with the trackers by hand. |
 | 7 | `_splittable`: compare consecutive points with one `stack`, `!=`, `any`, `all` instead of a list | 2 operations per call, 4 per turn (1.2 %) | `_splittable` is edited by the running `split_waste` follow-up. |
-| 8 | One `torch.cuda.memory_stats` call in `_get_cuda_memory` instead of `memory_reserved` and `memory_allocated` (`take_gradient=True` only) | about 65 µs of a 3.3 ms turn (2 %); all six statistics calls about 0.4 ms (12 %) | Host-side, not a GPU operation or wait (outside this plan); reading fewer statistics per batch needs the private `torch._C._cuda_memoryStats` or fewer checks, a change to the backward-memory machinery. |
+| 8 | One `torch.cuda.memory_stats` call in `_get_cuda_memory` instead of `memory_reserved` and `memory_allocated` (`take_gradient=True` only) | about 65 µs of a 3.3 ms turn (2 %); all six statistics calls about 0.4 ms (12 %) | Done in review (`bdbadd8`, below). The other five calls read values at different moments (before and after `f`, before and after the backward pass), so none is a duplicate. Reading them cheaper does not need a private function: the public `torch.cuda.memory_stats_as_nested_dict` costs 11 µs against 62 µs for each of the others (it skips the flattening and sorting), at the price of indexing PyTorch's nested keys in four places. |
 
 Items 1, 2 and 7 together would remove about 16 operations, about 7 % of a
 turn; with item 3 about 15 %. None reaches the targets of section 6.
@@ -569,6 +569,10 @@ capture and compilation are blocked as in 3.1, and that quadax costs about
 | Review | `454a1af` | This plan corrected against `bc5b4a1` with measurements (section 2), stage 1 rewritten as measured candidates (5.2), D2 and route (d) measured by prototypes (5.3, 5.4), the targets compared (6). |
 | 5.1, item 1 | `df96ba0` | `_adaptively_increase_mesh`: one tensor `split_left = step_transfer[split_idxs]` for the split counts' left child and the midpoint's left neighbour; `idxs_new = split_left + 1`. Removes `torch.arange(N_t_add)`, one addition, one subtraction and one gather per halving. |
 | 5.1, item 2 | `e71775e` | `tests/test_base_solver.py::TestHostWaits::test_loop_reads_only_where_pinned`. |
+| Merge | `94104d7` | `speedups_integration` at `3eb4507` merged (no conflict). |
+| Review | `86f1276` | The mesh update no longer sorts the split positions before a four-way split: `step_transfer[split_idxs]` is the left point's new position in any order of `split_idxs`. |
+| Review | `d578ab4` | The test requires one pass more, not three (the margin failed for 6 of 200 seeds of the starting mesh), and asserts that neither integral splits a recorded subinterval. |
+| Review, 5.2 item 8 | `bdbadd8` | `_get_cuda_memory` reads both values from one `torch.cuda.memory_stats` build: the same integral, gradient and batch size bit for bit; `take_gradient=True` `chirp` 45.5 to 44.1 ms per call (A100, interleaved, median of 150 pairs). |
 
 Results unchanged, bit for bit: `impl/bitgrid_ct.py` (2,396 integrations,
 every returned tensor, the state's mesh, the re-checks' decisions and the
@@ -590,13 +594,22 @@ About 1-2 % on the multi-turn integrands, at the edge of the run-to-run
 variation; nothing on a one-turn integral. (`sharp_peak` here is the solver
 called directly, as in 5.4, not through `padaquad.integrate`.)
 
+Review, A100 (`nid200309`, idle), `adv/time_interleaved.py`: one process
+alternating the mesh update of `3eb4507` and of the branch call by call, 150
+pairs; median of the paired differences with a bootstrap 95 % interval.
+The gain is small but not noise: `chirp` −352 µs [−364, −341] (−1.0 %),
+`oscillatory` −335 µs [−350, −328] (−1.0 %), `sharp_peak` −147 µs
+[−184, −100] (−0.8 %), `damped_sine` −19 µs [−23, −12] (−0.4 %); the mesh
+update alone (200 subintervals) 579 to 556 µs.
+
 ### Not done
 
 - **5.2, items 1-8**: measured or estimated, not implemented (reasons in the
   table). The largest without a new code path is item 3 (judge the batch and
   the record together, 4-6 % of a turn, estimate), which should wait for the
-  `split_waste` follow-up; item 8 (memory statistics with `take_gradient=True`,
-  up to 12 % of such a turn) is the largest of all but outside this plan.
+  `split_waste` follow-up. Item 8 was done in review (`bdbadd8`); the rest of
+  the memory statistics (five builds per `take_gradient=True` batch, about
+  0.3 ms) read different moments and stay.
 - **D2** (5.3): prototype only. Worth it for many outputs (25-35 % of a call at
   10,000-100,000 outputs); needs pinned host memory as large as the recorded
   values and a synchronization before every host read of the record during

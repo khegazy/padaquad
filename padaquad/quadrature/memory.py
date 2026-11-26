@@ -1783,9 +1783,9 @@ class _MemoryManagement:
             again = (
                 f"call again with state=error.state (batch size {restart.max_batch})."
                 if restart.max_batch >= self.C
-                else f"the backward pass of one subinterval ({self.C} points) "
-                f"does not fit: free memory on {self.device}, or use a method "
-                "with fewer points per subinterval."
+                else f"free memory on {self.device}, or use a method with fewer "
+                "points per subinterval: the backward pass of one subinterval "
+                f"({self.C} points) does not fit."
             )
             error = BackwardOutOfMemoryError(
                 f"The backward pass of a batch of {failed_batch} points ran out "

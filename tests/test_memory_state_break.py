@@ -236,6 +236,37 @@ def test_backward_that_never_fits_ends_in_an_error_after_few_restarts(caplog):
     assert float(w.grad) == 5.0
 
 
+def test_backward_of_one_subinterval_that_cannot_restart_says_what_to_do():
+    """Both reasons not to restart at once: the gradients cannot be put back
+    (a post-accumulate-grad hook) and the batch that failed is one
+    subinterval (max_batch=21), so no smaller batch exists. The message names
+    the hook in the parenthesis and then says, in order, to reset the
+    gradients and to free memory or use a method with fewer points, because
+    one subinterval's backward pass does not fit (it read "reset them ...,
+    then the backward pass of one subinterval (21 points) does not fit")."""
+    w = torch.tensor([1.3], dtype=torch.float64, requires_grad=True)
+    w.register_post_accumulate_grad_hook(lambda p: None)
+
+    def fail(grad):
+        raise torch.OutOfMemoryError("simulated backward")
+
+    def f(t):
+        y = w * torch.sin(40 * t)
+        y.register_hook(fail)
+        return y
+
+    with pytest.raises(BackwardOutOfMemoryError) as info:
+        solver().integrate(f, mesh=even_mesh(4), max_batch=21)
+    message = str(info.value)
+    assert "cannot restart the integral (a parameter has a post-accumulate" in message
+    assert message.endswith(
+        "reset them (for example optimizer.zero_grad()), then free memory on "
+        "cpu, or use a method with fewer points per subinterval: the backward "
+        "pass of one subinterval (21 points) does not fit."
+    )
+    assert info.value.state.max_batch < 21
+
+
 def test_restart_of_a_compiled_integrand_with_parameters():
     """With ``parameters=`` the compiled integrand restarts and its gradient
     equals an uninterrupted run's."""

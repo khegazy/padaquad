@@ -75,6 +75,14 @@ whole graph), or, with `take_gradient=False` and an integrand with many outputs,
 set `trade_speed_for_memory=True` or `record_evaluations=False`
 ({ref}`ug-trade-speed-for-memory`).
 
+## A call is slower than expected, or its time varies
+
+On the CPU, and for the host's share of a GPU solver's work, the number of
+threads PyTorch uses changes the time of a call: on one 64-core node, PyTorch's
+default of 64 threads was up to 33 % slower than 4 to 8 threads bound one per
+core, and its slowest calls took up to 2.5 times its median. Set and bind the
+thread count ({ref}`ug-cpu-threads`).
+
 ## The error estimate seems unreliable
 
 `integral_error` is the sum of the subintervals' signed error estimates, an

@@ -138,3 +138,19 @@ class TestInsertSortedResults:
             assert val in merged, f"Record value {val} missing from merged"
         for val in result:
             assert val in merged, f"Result value {val} missing from merged"
+
+    def test_record_is_read_not_changed(self):
+        """The merged record is a new tensor and the old record is unchanged."""
+        record = torch.tensor([[10.0], [30.0], [50.0]], dtype=torch.float64)
+        before = record.clone()
+        result = torch.tensor([[20.0], [40.0]], dtype=torch.float64)
+        idxs_keep, idxs_input = self.solver._merge_positions(record[:, 0], result[:, 0])
+        merged = self.solver._insert_sorted_results(
+            record, idxs_keep, result, idxs_input
+        )
+        assert torch.equal(record, before)
+        assert merged.data_ptr() != record.data_ptr()
+        assert torch.equal(
+            merged[:, 0],
+            torch.tensor([10.0, 20.0, 30.0, 40.0, 50.0], dtype=torch.float64),
+        )

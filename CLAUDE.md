@@ -134,12 +134,12 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_base_and_methods.py` | `get_sampling_type`, `_Tableau` dtype conversion, `_get_method` factory (unknown name raises `ValueError`), `error_exponent`, weight formulas |
 | `test_error_computation.py` | `_error_norm`, `_rec_remove`, `_compute_error_ratios_absolute`/`_cumulative` |
 | `test_interpolation.py` | `_compute_nodes`: endpoints, shapes, monotonicity, tableau-c matching |
-| `test_sorted_insert.py` | `_get_sorted_indices` and `_insert_sorted_results` |
+| `test_sorted_insert.py` | `_get_sorted_indices` and `_insert_sorted_results` (a new array; the old record is read, not cloned) |
 | `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables` (f and y0; the bound defaults through `_setup_integral_bounds`), `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects) |
 | `test_methods_extra.py` | Variable-mode `adaptive_heun` (the uniform heun object) weights, the generic `VariableMethodClass` (normalized nodes reach the weight function, shape check), node-fraction validation, `to_device`, dtype conversion |
 | `test_solver_methods.py` | `adaptive_quadrature` factory, `method.weights` through both solvers, per-step node count `solver.C` |
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed error ratios, midpoint placement |
-| `test_record_and_sort.py` | `_record_results` and `_sort_record` |
+| `test_record_and_sort.py` | `_record_results` and `_sort_record` (a record in order is not copied); `_flatten_output` equals the concatenation, values and gradient |
 | `test_evaluate_and_merge.py` | `_evaluate_adaptive_nodes` + `_merge_excess_nodes` for both uniform and variable solvers |
 | `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: the state's mesh re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
@@ -566,7 +566,7 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   runs out of memory), and a `SteppedField` of 512² outputs with
   `FIELD_SETTINGS` (`max_batch` 3,000, 4,000, 5,550 × `trade_speed_for_memory`,
   `record_evaluations=False`; on a 40 GB A100 the default runs out of memory in
-  f at 4,000 and 5,550 and retries smaller, rendered in bold); out-of-memory
+  f at 4,000 and 5,550 and retries smaller, rendered as "ran out of memory" in bold); out-of-memory
   rows are recorded; asserts the same integral to 10×
   the tolerance and records whether it is the same bit for bit; writes `docs/performance/memory_options.json`, rendered by its
   `render_markdown` into `docs/user_guide/devices_memory.md`, section

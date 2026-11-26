@@ -1,6 +1,8 @@
-"""Unit tests for _record_results and _sort_record."""
+"""Unit tests for _record_results, _sort_record and _flatten_output."""
 
 from __future__ import annotations
+
+import math
 
 import pytest
 import torch
@@ -259,6 +261,13 @@ class TestSortRecord:
         record = self.solver._sort_record(record, mi)
         assert torch.equal(record["nodes"], original_t)
 
+    def test_already_sorted_is_not_copied(self):
+        """A record in mesh order keeps its tensors: no field is copied."""
+        record = self._make_record([0.1, 0.3, 0.5])
+        before = {key: value for key, value in record.items()}
+        record = self.solver._sort_record(record, self._mesh_indices(record))
+        assert all(record[key] is value for key, value in before.items())
+
     def test_reverse_order(self):
         """Descending times: sorted to ascending."""
         record = self._make_record([0.5, 0.3, 0.1])
@@ -339,3 +348,39 @@ class TestSortRecord:
         # Coordinate 0 alone is not monotonic -> sort followed mesh, not coord 0.
         coord0 = record["nodes"][:, 0, 0]
         assert not torch.all(coord0[1:] - coord0[:-1] > 0)
+
+
+class TestFlattenOutput:
+    """_flatten_output writes the joined values into one array."""
+
+    @staticmethod
+    def _joined(panel_array):
+        """The former two-copy formula, as the reference."""
+        return torch.concatenate(
+            [panel_array[0], torch.flatten(panel_array[1:, 1:], 0, 1)], dim=0
+        )
+
+    @pytest.mark.parametrize("n", [1, 2, 5])
+    @pytest.mark.parametrize("c", [2, 4])
+    @pytest.mark.parametrize("rest", [(), (3,), (2, 3)])
+    @pytest.mark.parametrize("dtype", [torch.float64, torch.float32, torch.int64])
+    def test_equals_concatenation(self, n, c, rest, dtype):
+        panel_array = torch.arange(n * c * math.prod(rest)).reshape(n, c, *rest)
+        panel_array = panel_array.to(dtype)
+        solver = make_solver_for_unit_test()
+        out = solver._flatten_output(panel_array)
+        assert out.dtype == dtype
+        assert torch.equal(out, self._joined(panel_array))
+
+    def test_gradient_equals_concatenation(self):
+        """The gradient reaches every value as through the concatenation."""
+        g = torch.Generator().manual_seed(0)
+        values = torch.randn(4, 3, 2, generator=g, dtype=torch.float64)
+        weights = torch.randn(4 * 2 + 1, 2, generator=g, dtype=torch.float64)
+        solver = make_solver_for_unit_test()
+        grads = []
+        for flatten in (solver._flatten_output, self._joined):
+            panel_array = values.clone().requires_grad_()
+            (flatten(panel_array) * weights).sum().backward()
+            grads.append(panel_array.grad)
+        assert torch.equal(grads[0], grads[1])

@@ -225,7 +225,7 @@ at the cost of speed when it is not needed. Specifically, improved memory
 management speeds up integration with expensive integrand evaluations while
 slowing down integration with cheap integrand evaluations. This section
 describes the four arguments that control memory management and tests various
-combinations of them on three integrands of increasing cost.
+combinations of them on four integrands of increasing cost.
 
 None of these options change which points are evaluated, the subintervals, or
 the integral. Every combination measured below gave the same integral and
@@ -419,9 +419,10 @@ fits, and keeps that smaller batch size for the rest of the integration.
 Without `max_batch` it also lets each call grow to up to 10 times the
 largest call so far, limited by the points waiting, until a call runs out of
 memory, so for the light integrand and the networks the Actual Batch is the
-largest call that ran. In the field's table, an Actual Batch below
-`max_batch` is in bold: those calls ran out of memory, and the points include
-the points of the calls that were evaluated again.
+largest call that ran. In the field's table, "ran out of memory" in the
+Actual Batch column means that a call of `max_batch` points ran out of memory
+and PadaQuad continued with a smaller batch; the points include the points of
+the calls that were evaluated again.
 
 What the tables show:
 

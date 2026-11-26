@@ -384,8 +384,8 @@ def render_markdown(results: dict[str, Any]) -> str:
     The examples in ``EXAMPLE_SETTINGS`` show ``max_batch`` and
     ``trade_speed_for_memory``, ordered by ``max_batch``, the points
     evaluated and one GPU peak, the whole call's; a final batch below
-    ``max_batch`` (f ran out of memory and the call was retried smaller) is in
-    bold.
+    ``max_batch`` (f ran out of memory and the call was retried smaller) is
+    shown as "ran out of memory", in bold.
     """
     meta = results["meta"]
     lines = [
@@ -452,7 +452,7 @@ def render_markdown(results: dict[str, Any]) -> str:
                 batch = f"{row['batch']:,}"
                 if row["batch"] < int(row["setting"].get("max_batch", row["batch"])):
                     # f ran out of memory and the call was retried smaller.
-                    batch = f"**{batch}, after running out of memory**"
+                    batch = "**ran out of memory**"
                 cells += [batch, str(row["calls"])]
                 cells += [f"{row['points']:,}"] if short else []
                 cells += [_memory(row[key]) for _, key in peaks]

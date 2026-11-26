@@ -241,7 +241,6 @@ def test_every_method_integrates_constants_and_lines_on_an_uneven_mesh(
         out = solver._calculate_integral(nodes, y, mesh[:-1], mesh[1:])
         assert abs(float(out.integral) - exact) < 1e-13, (name, float(out.integral))
         assert torch.equal(out.h, mesh[1:] - mesh[:-1])
-        assert torch.equal(out.mesh_left, mesh[:-1])
 
 
 def _gauss2() -> UniformMethodClass:

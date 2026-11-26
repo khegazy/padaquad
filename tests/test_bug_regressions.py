@@ -171,25 +171,19 @@ def test_error_on_nonfinite_is_gone():
 
 @pytest.mark.parametrize("sampling", ["uniform", "variable"])
 def test_runtime_checks_off_skips_checks_and_keeps_result(sampling, monkeypatch):
-    """runtime_checks=False skips the order checks of every pass (fewer calls of
-    _mesh_order, which only the checks use after the merge and the sort) and the
+    """runtime_checks=False skips the check that the record covers the final
+    mesh once (fewer calls of torch.sort, which the check makes once) and the
     finite check of f's output, and changes nothing else: the same mesh and
     integral, bit for bit."""
 
     def f(t):
         return torch.exp(3 * t) * torch.sin(20 * t)
 
-    results, mesh_order_calls = {}, {}
+    results, check_calls = {}, {}
     for checks in (True, False):
         solver = adaptive_quadrature(sampling, device="cpu", max_batch=10_000)
-        calls = []
-        original = solver._mesh_order
-        monkeypatch.setattr(
-            solver,
-            "_mesh_order",
-            lambda *a, _o=original, _c=calls: (_c.append(1), _o(*a))[1],
-        )
-        finite_calls = []
+        sort_calls, finite_calls = [], []
+        monkeypatch.setattr(torch, "sort", _counting(torch.sort, sort_calls))
         monkeypatch.setattr(torch, "isfinite", _counting(torch.isfinite, finite_calls))
         torch.manual_seed(0)
         result, state = solver.integrate(
@@ -197,11 +191,11 @@ def test_runtime_checks_off_skips_checks_and_keeps_result(sampling, monkeypatch)
         )
         monkeypatch.undo()
         results[checks] = (result.integral, result.h, state.mesh)
-        mesh_order_calls[checks] = (len(calls), len(finite_calls))
+        check_calls[checks] = (len(sort_calls), len(finite_calls))
     for a, b in zip(results[True], results[False], strict=True):
         assert torch.equal(a, b)
-    assert mesh_order_calls[False][0] < mesh_order_calls[True][0]
-    assert mesh_order_calls[False][1] < mesh_order_calls[True][1]
+    assert check_calls[False][0] == check_calls[True][0] - 1
+    assert check_calls[False][1] < check_calls[True][1]
 
 
 def _counting(fn, calls):

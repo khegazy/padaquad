@@ -415,9 +415,11 @@ def test_recheck_determinism():
 # ---------------------------------------------------------------------------
 
 
-def _make_record(solver, n_panels=4, result_device=None):
-    """Build an initialized record (via _record_results) with known per-step
-    quadratures/errors and integral == sum(quadratures)."""
+def _make_record(solver, n_panels=4, result_device=None, order=None):
+    """Build a record (via _record_results) with known per-step
+    quadratures/errors and integral == sum(quadratures); its rows, one batch
+    each, are recorded in ``order`` (mesh positions; default ascending)."""
+    order = list(range(n_panels)) if order is None else order
     boundaries = torch.linspace(0.0, 1.0, n_panels + 1, dtype=torch.float64)
     t_left, t_right = boundaries[:-1], boundaries[1:]
     C = 4
@@ -426,55 +428,62 @@ def _make_record(solver, n_panels=4, result_device=None):
     h = (t_right - t_left).unsqueeze(-1)
     quad_vals = torch.arange(1, n_panels + 1, dtype=torch.float64).unsqueeze(-1) * 0.1
     err_vals = torch.arange(1, n_panels + 1, dtype=torch.float64).unsqueeze(-1) * 0.01
-    results = IntegrationResult(
-        integral=quad_vals.sum(0),
-        integral_error=err_vals.sum(0),
-        nodes=nodes,
-        h=h,
-        y=torch.ones(n_panels, C, 1, dtype=torch.float64),
-        mesh_quadratures=quad_vals,
-        mesh_quadrature_errors=err_vals,
-        error_ratios=torch.full((n_panels,), 0.5, dtype=torch.float64),
-        loss=quad_vals.sum(0),
-        mesh_init=torch.tensor([0.0], dtype=torch.float64),
-        mesh_final=torch.tensor([1.0], dtype=torch.float64),
-        gradient_taken=False,
-        y0=torch.zeros(1, dtype=torch.float64),
-    )
-    mesh = torch.cat(
-        [nodes[:, 0, :], torch.tensor([[1.0]], dtype=torch.float64)], dim=0
-    )
-    mi = solver._get_mesh_indices(mesh)
-    record = solver._record_results(
-        {}, False, results, nodes[:, 0, :], mi, result_device
-    )
-    return record, quad_vals, err_vals
+    record, chunks = {}, {}
+    for i in order:
+        rows = slice(i, i + 1)
+        results = IntegrationResult(
+            integral=quad_vals[rows].sum(0),
+            integral_error=err_vals[rows].sum(0),
+            nodes=nodes[rows],
+            h=h[rows],
+            y=torch.ones(1, C, 1, dtype=torch.float64),
+            mesh_quadratures=quad_vals[rows],
+            mesh_quadrature_errors=err_vals[rows],
+            error_ratios=torch.full((1,), 0.5, dtype=torch.float64),
+            loss=quad_vals[rows].sum(0),
+            mesh_init=torch.tensor([0.0], dtype=torch.float64),
+            mesh_final=torch.tensor([1.0], dtype=torch.float64),
+            gradient_taken=False,
+            y0=torch.zeros(1, dtype=torch.float64),
+        )
+        record = solver._record_results(
+            record, chunks, False, results, torch.tensor([i]), result_device
+        )
+    return record, chunks, quad_vals, err_vals, nodes
 
 
 def test_remove_failed_record_panels_subset():
-    """Subset removal: exact integral rebuild, signed-error subtraction, loss,
-    and per-step filtering."""
+    """Subset removal from a record not in mesh order: exact integral rebuild,
+    signed-error subtraction, loss, per-step filtering in the record's row
+    order, and loss_fxn receives the removed subintervals in mesh order."""
     solver = make_solver_for_unit_test()
-    record, quad_vals, err_vals = _make_record(solver)
-    orig_nodes = record["nodes"].clone()
+    order = [3, 0, 2, 1]
+    record, chunks, quad_vals, err_vals, nodes = _make_record(solver, order=order)
     orig_err_total = record["integral_error"].clone()
-    keep = torch.tensor([True, False, True, False])
+    keep = torch.tensor([False, True, True, False])  # removes mesh positions 3, 1
+    seen = []
+
+    def loss_fxn(result):
+        seen.append(result.nodes[:, 0, 0])
+        return result.integral
 
     record = solver._remove_failed_record_panels(
-        record, keep, solver._integral_loss, T_INIT, T_FINAL, solver.device
+        record, keep, chunks, loss_fxn, T_INIT, T_FINAL, solver.device
     )
 
-    assert record["mesh_quadratures"].shape[0] == 2
-    assert torch.allclose(record["integral"], quad_vals[keep].sum(0))
+    assert torch.equal(seen[0], nodes[[1, 3], 0, 0])
+    assert record["mesh_index"].tolist() == [0, 2]
+    assert torch.allclose(record["integral"], quad_vals[[0, 2]].sum(0))
     # integral_error subtracts the removed panels' signed errors.
     assert torch.allclose(
-        record["integral_error"], orig_err_total - err_vals[~keep].sum(0)
+        record["integral_error"], orig_err_total - err_vals[[1, 3]].sum(0)
     )
-    # The default loss loses the removed panels' integral, so it tracks the
-    # rebuilt integral.
+    # The default-like loss loses the removed panels' integral, so it tracks
+    # the rebuilt integral.
     assert torch.allclose(record["loss"], record["integral"])
-    assert torch.allclose(record["nodes"], orig_nodes[keep])
-    assert record["error_ratios"].shape[0] == 2
+    assert len(chunks["nodes"]) == 1
+    assert torch.equal(chunks["nodes"][0], nodes[[0, 2]])
+    assert chunks["error_ratios"][0].shape[0] == 2
 
 
 @pytest.mark.parametrize(
@@ -482,18 +491,18 @@ def test_remove_failed_record_panels_subset():
 )
 def test_remove_all_then_record_does_not_crash(result_device):
     """Removing every recorded panel empties the per-step fields; the next
-    _record_results must still merge a fresh batch without crashing (the
+    _record_results must still append a fresh batch without crashing (the
     record-emptying regression), including when the record's loss lives on a
     result_device other than the solver's (the cross-device loss regression)."""
     solver = make_solver_for_unit_test()
-    record, _, _ = _make_record(solver, result_device=result_device)
+    record, chunks, _, _, _ = _make_record(solver, result_device=result_device)
     keep = torch.zeros(4, dtype=torch.bool)
 
     record = solver._remove_failed_record_panels(
-        record, keep, solver._integral_loss, T_INIT, T_FINAL, solver.device
+        record, keep, chunks, solver._integral_loss, T_INIT, T_FINAL, solver.device
     )
     assert record["mesh_quadratures"].shape[0] == 0
-    assert record["nodes"].shape[0] == 0
+    assert torch.cat(chunks["nodes"]).shape[0] == 0
     assert torch.allclose(record["integral"], torch.zeros_like(record["integral"]))
 
     # Fresh single-panel batch spanning [0, 1].
@@ -515,13 +524,10 @@ def test_remove_all_then_record_does_not_crash(result_device):
         gradient_taken=False,
         y0=torch.zeros(1, dtype=torch.float64),
     )
-    mi_fresh = solver._get_mesh_indices(
-        torch.tensor([[0.0], [1.0]], dtype=torch.float64)
-    )
     record = solver._record_results(
-        record, False, fresh, fresh_nodes[:, 0, :], mi_fresh, result_device
+        record, chunks, False, fresh, torch.tensor([0]), result_device
     )
-    assert record["nodes"].shape[0] == 1
+    assert torch.cat(chunks["nodes"]).shape[0] == 1
     assert torch.allclose(record["mesh_quadratures"], fresh.mesh_quadratures)
 
 

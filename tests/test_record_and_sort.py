@@ -6,72 +6,48 @@ import math
 
 import pytest
 import torch
-from _helpers import make_solver_for_unit_test
+from _helpers import make_solver_for_unit_test, needs_cuda
 
+from padaquad import adaptive_quadrature
 from padaquad.methods import UniformMethodClass, _Tableau
 from padaquad.results import IntegrationResult
 
 
-def _make_integral_output(t_start, t_end, N=2, C=4, D=1):
-    """Create an IntegrationResult with N steps spanning [t_start, t_end]."""
-    boundaries = torch.linspace(t_start, t_end, N + 1, dtype=torch.float64)
-    t_left = boundaries[:-1]
-    t_right = boundaries[1:]
-    # Build [N, C, 1] time tensor
-    c = torch.linspace(0, 1, C, dtype=torch.float64)
-    t = t_left[:, None, None] + c[None, :, None] * (t_right - t_left)[:, None, None]
-    h = (t_right - t_left).unsqueeze(-1)
-
+def _batch(mesh_index, C=4, D=1, T=1):
+    """An IntegrationResult of one batch whose subinterval with left mesh index
+    i holds the value i in every per-subinterval field (nodes, h, y,
+    contributions, errors, ratios), so an order can be read off any field."""
+    tag = torch.as_tensor(mesh_index, dtype=torch.float64)
+    N = len(tag)
     return IntegrationResult(
         integral=torch.tensor([0.5], dtype=torch.float64),
         integral_error=torch.tensor([0.01], dtype=torch.float64),
-        nodes=t,
-        h=h,
-        y=torch.ones(N, C, D, dtype=torch.float64),
-        mesh_quadratures=torch.ones(N, D, dtype=torch.float64) * 0.1,
-        mesh_quadrature_errors=torch.ones(N, D, dtype=torch.float64) * 0.001,
-        error_ratios=torch.ones(N, dtype=torch.float64) * 0.5,
+        nodes=tag.view(N, 1, 1).expand(N, C, T).clone(),
+        h=tag.view(N, 1).expand(N, T).clone(),
+        y=tag.view(N, 1, 1).expand(N, C, D).clone(),
+        mesh_quadratures=tag.view(N, 1).expand(N, D).clone(),
+        mesh_quadrature_errors=tag.view(N, 1).expand(N, D).clone(),
+        error_ratios=tag.clone(),
         loss=torch.tensor([1.0], dtype=torch.float64),
-        mesh_init=torch.tensor([t_start], dtype=torch.float64),
-        mesh_final=torch.tensor([t_end], dtype=torch.float64),
+        mesh_init=torch.zeros(T, dtype=torch.float64),
+        mesh_final=torch.ones(T, dtype=torch.float64),
         gradient_taken=False,
         y0=torch.zeros(D, dtype=torch.float64),
     )
 
 
-def _mesh_indices_for(solver, *node_tensors):
-    """Build a tuple-keyed mesh_indices covering the left barriers of all
-    given node tensors (each [N, C, T]). The mesh is the sorted unique set of
-    left barriers (nodes[:, 0, :]), so the order matches the desired record
-    order for these 1-D tests."""
-    lefts = torch.cat([n[:, 0, :] for n in node_tensors], dim=0)
-    mesh = torch.unique(lefts, dim=0)  # sorted ascending for 1-D rows
-    return solver._get_mesh_indices(mesh)
-
-
-def _make_multidim_output(left_barriers):
-    """IntegrationResult for panels whose left barriers are the given [N, T]
-    rows (T may be > 1). Only nodes[:, 0, :] matters for ordering."""
-    N, T = left_barriers.shape
-    C, D = 2, 1
-    nodes = torch.zeros(N, C, T, dtype=torch.float64)
-    nodes[:, 0, :] = left_barriers
-    nodes[:, 1, :] = left_barriers + 0.05
-    return IntegrationResult(
-        integral=torch.tensor([0.5], dtype=torch.float64),
-        integral_error=torch.tensor([0.01], dtype=torch.float64),
-        nodes=nodes,
-        h=torch.ones(N, T, dtype=torch.float64) * 0.05,
-        y=torch.ones(N, C, D, dtype=torch.float64),
-        mesh_quadratures=torch.ones(N, D, dtype=torch.float64) * 0.1,
-        mesh_quadrature_errors=torch.ones(N, D, dtype=torch.float64) * 0.001,
-        error_ratios=torch.ones(N, dtype=torch.float64) * 0.5,
-        loss=torch.tensor([1.0], dtype=torch.float64),
-        mesh_init=left_barriers[0],
-        mesh_final=left_barriers[-1] + 0.05,
-        gradient_taken=False,
-        y0=torch.zeros(D, dtype=torch.float64),
-    )
+def _record(solver, *mesh_indices, take_gradient=False, **kwargs):
+    """Record one batch per list of left mesh indices, in the given order."""
+    record, chunks = {}, {}
+    for mesh_index in mesh_indices:
+        record = solver._record_results(
+            record,
+            chunks,
+            take_gradient,
+            _batch(mesh_index, **kwargs),
+            torch.tensor(mesh_index),
+        )
+    return record, chunks
 
 
 # ---------------------------------------------------------------------------
@@ -80,176 +56,95 @@ def _make_multidim_output(left_barriers):
 
 
 class TestRecordResults:
-    """Tests for _record_results: accumulate batches into a sorted record."""
+    """Tests for _record_results: append batches in the order they are accepted."""
 
     def setup_method(self):
         self.solver = make_solver_for_unit_test()
 
     def test_first_batch_initializes(self):
-        """Empty record is populated with all keys from first batch, and the
-        left mesh points (the key that places each subinterval in the mesh)."""
-        record = {}
-        results = _make_integral_output(0.0, 0.5)
-        mi = _mesh_indices_for(self.solver, results.nodes)
-        record = self.solver._record_results(
-            record, False, results, results.nodes[:, 0, :], mi
-        )
-        assert "integral" in record
-        assert "nodes" in record
-        assert "h" in record
-        assert "y" in record
-        assert "mesh_quadratures" in record
-        assert torch.equal(record["integral"], results.integral)
-        assert torch.equal(record["mesh_left"], results.nodes[:, 0, :])
+        """The first batch creates the sums, the loop's fields with the mesh
+        indices, and one chunk per other field."""
+        record, chunks = _record(self.solver, [0, 1])
+        assert set(record) == {
+            "integral",
+            "integral_error",
+            "loss",
+            "mesh_index",
+            "mesh_quadratures",
+            "mesh_quadrature_errors",
+        }
+        assert set(chunks) == {"nodes", "h", "y", "error_ratios"}
+        assert all(len(parts) == 1 for parts in chunks.values())
+        assert record["mesh_index"].tolist() == [0, 1]
+        assert torch.equal(record["integral"], torch.tensor([0.5], dtype=torch.float64))
 
-    def test_first_batch_detaches(self):
-        """With take_gradient=True, first batch values are detached."""
-        record = {}
-        results = _make_integral_output(0.0, 0.5)
-        # Make integral require grad
+    def test_take_gradient_detaches(self):
+        """With take_gradient=True every recorded tensor is detached."""
+        results = _batch([0])
         results.integral = results.integral.clone().requires_grad_(True)
         results.loss = results.loss.clone().requires_grad_(True)
-        mi = _mesh_indices_for(self.solver, results.nodes)
+        results.y = results.y.clone().requires_grad_(True)
+        record, chunks = {}, {}
         record = self.solver._record_results(
-            record, True, results, results.nodes[:, 0, :], mi
+            record, chunks, True, results, torch.tensor([0])
         )
         assert not record["integral"].requires_grad
         assert not record["loss"].requires_grad
+        assert not chunks["y"][0].requires_grad
 
-    def test_second_batch_merges(self):
-        """Two non-overlapping batches merge correctly in time order."""
-        record = {}
-        batch1 = _make_integral_output(0.5, 1.0, N=2)
-        batch2 = _make_integral_output(0.0, 0.5, N=2)
-        mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
+    def test_later_batches_are_appended(self):
+        """Rows stay in the order they were accepted: the loop's fields are
+        one tensor, the other fields one chunk per batch, nothing merged."""
+        record, chunks = _record(self.solver, [2, 0], [3, 1])
+        assert record["mesh_index"].tolist() == [2, 0, 3, 1]
+        assert record["mesh_quadratures"][:, 0].tolist() == [2.0, 0.0, 3.0, 1.0]
+        assert [part[:, 0, 0].tolist() for part in chunks["y"]] == [[2, 0], [3, 1]]
 
-        record = self.solver._record_results(
-            record, False, batch1, batch1.nodes[:, 0, :], mi
-        )
-        record = self.solver._record_results(
-            record, False, batch2, batch2.nodes[:, 0, :], mi
-        )
+    def test_sums_accumulated(self):
+        """The integral, its error and the loss are summed across batches."""
+        record, _ = _record(self.solver, [0], [1], [2])
+        assert torch.equal(record["integral"], torch.tensor([1.5], dtype=torch.float64))
+        assert torch.equal(record["loss"], torch.tensor([3.0], dtype=torch.float64))
 
-        assert record["nodes"].shape[0] == 4  # 2 + 2 steps
-        # Times should be sorted ascending
-        assert torch.all(record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] > 0)
-
-    def test_integral_accumulated(self):
-        """Integral values are summed across batches."""
-        record = {}
-        batch1 = _make_integral_output(0.0, 0.5, N=1)
-        batch1.integral = torch.tensor([0.3], dtype=torch.float64)
-        batch2 = _make_integral_output(0.5, 1.0, N=1)
-        batch2.integral = torch.tensor([0.7], dtype=torch.float64)
-        mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
-
-        record = self.solver._record_results(
-            record, False, batch1, batch1.nodes[:, 0, :], mi
-        )
-        record = self.solver._record_results(
-            record, False, batch2, batch2.nodes[:, 0, :], mi
-        )
-
-        assert torch.allclose(
-            record["integral"], torch.tensor([1.0], dtype=torch.float64)
-        )
-
-    def test_loss_accumulated(self):
-        """Loss values are summed across batches."""
-        record = {}
-        batch1 = _make_integral_output(0.0, 0.5, N=1)
-        batch1.loss = torch.tensor([1.0], dtype=torch.float64)
-        batch2 = _make_integral_output(0.5, 1.0, N=1)
-        batch2.loss = torch.tensor([2.0], dtype=torch.float64)
-        mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
-
-        record = self.solver._record_results(
-            record, False, batch1, batch1.nodes[:, 0, :], mi
-        )
-        record = self.solver._record_results(
-            record, False, batch2, batch2.nodes[:, 0, :], mi
-        )
-
-        assert torch.allclose(record["loss"], torch.tensor([3.0], dtype=torch.float64))
-
-    def test_time_ordering_after_merge(self):
-        """Batch 2 has earlier times but record remains sorted."""
-        record = {}
-        batch1 = _make_integral_output(0.6, 1.0, N=1)
-        batch2 = _make_integral_output(0.0, 0.3, N=1)
-        mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
-
-        record = self.solver._record_results(
-            record, False, batch1, batch1.nodes[:, 0, :], mi
-        )
-        record = self.solver._record_results(
-            record, False, batch2, batch2.nodes[:, 0, :], mi
-        )
-
-        assert torch.all(record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] > 0)
-
-    def test_merge_orders_by_mesh_not_coordinate(self):
-        """Multi-D: ordering follows mesh_indices, not left-node coordinate 0.
-
-        The path's coordinate 0 is non-monotonic (0.0, 1.0, 0.5, 0.2) while the
-        mesh order is 0, 1, 2, 3. Two batches contribute the even/odd mesh
-        positions; the merged record must be in mesh order, which the old
-        coordinate-0 sort could not produce.
-        """
-        mesh = torch.tensor(
-            [[0.0, 0.0], [1.0, 1.0], [0.5, 2.0], [0.2, 3.0]], dtype=torch.float64
-        )
-        mi = self.solver._get_mesh_indices(mesh)
-        batchA = _make_multidim_output(mesh[[0, 2]])  # mesh positions 0, 2
-        batchB = _make_multidim_output(mesh[[1, 3]])  # mesh positions 1, 3
-
-        record = {}
-        record = self.solver._record_results(
-            record, False, batchA, batchA.nodes[:, 0, :], mi
-        )
-        record = self.solver._record_results(
-            record, False, batchB, batchB.nodes[:, 0, :], mi
-        )
-
-        order = self.solver._mesh_order(record["nodes"][:, 0, :], mi)
-        assert order.tolist() == [0, 1, 2, 3]
-        # Coordinate 0 is non-monotonic -> proves order is by mesh, not coord 0.
-        coord0 = record["nodes"][:, 0, 0]
-        assert not torch.all(coord0[1:] - coord0[:-1] > 0)
-
-    def test_tracked_variables_are_record_keys(self):
-        """Each tracked variable is merged under its own key, in mesh order."""
-        batch1 = _make_integral_output(0.5, 1.0, N=2)
-        batch2 = _make_integral_output(0.0, 0.5, N=2)
-        for batch in (batch1, batch2):
-            # Tag each value with its node time so the merge order is visible.
+    def test_tracked_variables_are_chunk_keys(self):
+        """Each tracked variable is recorded under its own key, as a chunk."""
+        record, chunks = {}, {}
+        for mesh_index in ([1], [0]):
+            batch = _batch(mesh_index)
             batch.tracked_variables = (batch.nodes.clone(), 2 * batch.nodes)
-        mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
-
-        record = self.solver._record_results(
-            {}, False, batch1, batch1.nodes[:, 0, :], mi
+            record = self.solver._record_results(
+                record, chunks, False, batch, torch.tensor(mesh_index)
+            )
+        assert torch.equal(
+            torch.cat(chunks["tracked_variables_0"]), torch.cat(chunks["nodes"])
         )
-        record = self.solver._record_results(
-            record, False, batch2, batch2.nodes[:, 0, :], mi
+        assert torch.equal(
+            torch.cat(chunks["tracked_variables_1"]), 2 * torch.cat(chunks["nodes"])
         )
-
-        assert torch.equal(record["tracked_variables_0"], record["nodes"])
-        assert torch.equal(record["tracked_variables_1"], 2 * record["nodes"])
 
     def test_changed_tracked_variables_raise(self):
         """A batch whose tracked variables differ from the record's raises."""
-        batch1 = _make_integral_output(0.0, 0.5, N=1)
-        batch2 = _make_integral_output(0.5, 1.0, N=1)
-        batch2.tracked_variables = (batch2.nodes.clone(),)
-        mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
-
-        record = self.solver._record_results(
-            {}, False, batch1, batch1.nodes[:, 0, :], mi
-        )
+        record, chunks = _record(self.solver, [0])
+        batch = _batch([1])
+        batch.tracked_variables = (batch.nodes.clone(),)
         with pytest.raises(ValueError, match="different set of tracked variables"):
-            self.solver._record_results(
-                record, False, batch2, batch2.nodes[:, 0, :], mi
-            )
+            self.solver._record_results(record, chunks, False, batch, torch.tensor([1]))
+
+    def test_a_view_of_a_larger_array_is_copied(self):
+        """A chunk that is a view of a larger array (the accepted rows moved to
+        the front of a pass's values) is copied, so the array can be freed; a
+        tensor that owns exactly its memory is kept without a copy."""
+        record, chunks = _record(self.solver, [0])
+        batch = _batch([1, 2])
+        pass_values = torch.zeros(5, 4, 1, dtype=torch.float64)
+        batch.y = pass_values[:2]  # the kept rows of a pass of 5
+        whole = batch.nodes
+        self.solver._record_results(record, chunks, False, batch, torch.tensor([1, 2]))
+        y_chunk = chunks["y"][-1]
+        assert y_chunk.data_ptr() != pass_values.data_ptr()
+        assert y_chunk.untyped_storage().nbytes() == y_chunk.nbytes
+        assert torch.equal(y_chunk, pass_values[:2])
+        assert chunks["nodes"][-1] is whole
 
 
 # ---------------------------------------------------------------------------
@@ -258,133 +153,179 @@ class TestRecordResults:
 
 
 class TestSortRecord:
-    """Tests for _sort_record: sort per-step tensors by mesh order."""
+    """Tests for _sort_record: put the record of a finished integration in mesh order."""
 
     def setup_method(self):
         self.solver = make_solver_for_unit_test()
 
-    def _make_record(self, t_starts):
-        """Build a record dict with N steps at given start times."""
-        N = len(t_starts)
-        C, D = 4, 1
-        t = torch.zeros(N, C, 1, dtype=torch.float64)
-        for i, ts in enumerate(t_starts):
-            t[i, :, 0] = torch.linspace(ts, ts + 0.1, C)
-        return {
-            "integral": torch.tensor([1.0], dtype=torch.float64),
-            "loss": torch.tensor([2.0], dtype=torch.float64),
-            "nodes": t,
-            "h": torch.ones(N, 1, dtype=torch.float64) * 0.1,
-            "y": torch.arange(N, dtype=torch.float64)
-            .unsqueeze(-1)
-            .unsqueeze(-1)
-            .expand(N, C, D),
-            "mesh_quadratures": torch.arange(N, dtype=torch.float64).unsqueeze(-1),
-            "mesh_quadrature_errors": torch.ones(N, D, dtype=torch.float64) * 0.01,
-            "error_ratios": torch.ones(N, dtype=torch.float64) * 0.5,
-            "integral_error": torch.tensor([0.01], dtype=torch.float64),
-            "mesh_left": t[:, 0, :],
-        }
-
-    def _mesh_indices(self, record):
-        return _mesh_indices_for(self.solver, record["nodes"])
-
-    def test_already_sorted(self):
-        """Ascending times: unchanged."""
-        record = self._make_record([0.1, 0.3, 0.5])
-        mi = self._mesh_indices(record)
-        original_t = record["nodes"].clone()
-        record = self.solver._sort_record(record, mi)
-        assert torch.equal(record["nodes"], original_t)
-
-    def test_already_sorted_is_not_copied(self):
-        """A record in mesh order keeps its tensors: no field is copied."""
-        record = self._make_record([0.1, 0.3, 0.5])
-        before = {key: value for key, value in record.items()}
-        record = self.solver._sort_record(record, self._mesh_indices(record))
-        assert all(record[key] is value for key, value in before.items())
-
-    def test_reverse_order(self):
-        """Descending times: sorted to ascending."""
-        record = self._make_record([0.5, 0.3, 0.1])
-        mi = self._mesh_indices(record)
-        record = self.solver._sort_record(record, mi)
-        assert torch.all(record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] > 0)
-
-    def test_single_step(self):
-        """Single step: trivially sorted."""
-        record = self._make_record([0.5])
-        mi = self._mesh_indices(record)
-        record = self.solver._sort_record(record, mi)
-        assert record["nodes"].shape[0] == 1
-
-    def test_scalars_untouched(self):
-        """integral and loss are not reordered."""
-        record = self._make_record([0.5, 0.3, 0.1])
-        mi = self._mesh_indices(record)
-        record = self.solver._sort_record(record, mi)
+    @pytest.mark.parametrize("T", [1, 2])
+    def test_scrambled_to_mesh_order(self, T):
+        """Rows recorded out of mesh order (two batches) come out in mesh
+        order in every field, by their integer mesh index alone (any T); the
+        sums are untouched, the chunks emptied and mesh_index removed."""
+        record, chunks = _record(self.solver, [2, 0], [3, 1], T=T)
+        record = self.solver._sort_record(record, chunks, "cpu")
+        expected = torch.arange(4, dtype=torch.float64)
+        for key in ("nodes", "h", "y", "mesh_quadratures", "mesh_quadrature_errors"):
+            assert torch.equal(record[key].reshape(4, -1)[:, 0], expected), key
+        assert torch.equal(record["error_ratios"], expected)
         assert torch.equal(record["integral"], torch.tensor([1.0], dtype=torch.float64))
         assert torch.equal(record["loss"], torch.tensor([2.0], dtype=torch.float64))
+        assert "mesh_index" not in record
+        assert all(len(parts) == 0 for parts in chunks.values())
 
-    def test_all_keys_sorted_consistently(self):
-        """All per-step keys are reordered identically."""
-        record = self._make_record([0.5, 0.1, 0.3])
-        mi = self._mesh_indices(record)
-        record = self.solver._sort_record(record, mi)
-        # After sorting by t, mesh_quadratures should follow same order
-        # Original: [0.5→idx0, 0.1→idx1, 0.3→idx2]
-        # Sorted: [0.1→idx1, 0.3→idx2, 0.5→idx0]
-        assert torch.allclose(
-            record["mesh_quadratures"][:, 0],
-            torch.tensor([1.0, 2.0, 0.0], dtype=torch.float64),
+    def test_one_batch_in_order_is_not_copied(self):
+        """A record of one batch in mesh order keeps its tensors: no field is
+        copied, the values included (the common case of one pass)."""
+        record, chunks = _record(self.solver, [0, 1, 2])
+        before = {key: parts[0] for key, parts in chunks.items()}
+        before["mesh_quadratures"] = record["mesh_quadratures"]
+        record = self.solver._sort_record(record, chunks, "cpu")
+        assert all(record[key] is value for key, value in before.items())
+
+    def test_batches_in_order_are_joined(self):
+        """Batches recorded from left to right are joined in their order."""
+        record, chunks = _record(self.solver, [0, 1], [2], [3, 4])
+        record = self.solver._sort_record(record, chunks, "cpu")
+        assert record["y"][:, 0, 0].tolist() == [0, 1, 2, 3, 4]
+
+    @needs_cuda
+    def test_chunk_fields_end_on_the_given_device(self):
+        """The fields of chunks are moved to the given device; the loop's
+        fields stay on the solver's."""
+        solver = adaptive_quadrature("uniform", "bosh3", device="cuda")
+        record, chunks = {}, {}
+        for mesh_index in ([1], [0]):
+            batch = _batch(mesh_index)
+            for key in (
+                "nodes",
+                "h",
+                "y",
+                "mesh_quadratures",
+                "mesh_quadrature_errors",
+            ):
+                setattr(batch, key, getattr(batch, key).cuda())
+            batch.error_ratios = batch.error_ratios.cuda()
+            record = solver._record_results(
+                record, chunks, False, batch, torch.tensor(mesh_index, device="cuda")
+            )
+        record = solver._sort_record(record, chunks, "cpu")
+        assert record["y"].device.type == "cpu"
+        assert record["nodes"].device.type == "cpu"
+        assert record["mesh_quadratures"].device.type == "cuda"
+        assert record["y"][:, 0, 0].tolist() == [0, 1]
+
+    @pytest.mark.parametrize(
+        "mesh_index", [[[0, 1], [1]], [[0, 3], [1]]], ids=["twice", "gap"]
+    )
+    def test_record_that_does_not_cover_the_mesh_once_raises(self, mesh_index):
+        """With runtime_checks, a subinterval recorded twice or a missing one
+        (the record must cover the final mesh once) raises."""
+        record, chunks = _record(self.solver, *mesh_index)
+        with pytest.raises(AssertionError, match="cover the final mesh once"):
+            self.solver._sort_record(record, chunks, "cpu")
+
+    def test_gradient_passes_through_the_ordering(self):
+        """With take_gradient=False the record keeps the autograd graph: the
+        gradient of the ordered values reaches each recorded value."""
+        record, chunks = {}, {}
+        leaves = []
+        for mesh_index in ([2, 0], [1]):
+            batch = _batch(mesh_index)
+            batch.y = batch.y.clone().requires_grad_()
+            leaves.append(batch.y)
+            record = self.solver._record_results(
+                record, chunks, False, batch, torch.tensor(mesh_index)
+            )
+        record = self.solver._sort_record(record, chunks, "cpu")
+        weights = torch.arange(1.0, 4.0, dtype=torch.float64).view(3, 1, 1)
+        (record["y"] * weights).sum().backward()
+        assert leaves[0].grad[:, 0, 0].tolist() == [3.0, 1.0]
+        assert leaves[1].grad[:, 0, 0].tolist() == [2.0]
+
+
+def _cancelling_peak(t):
+    """A smooth part cancelled by a narrow peak: the re-check and a dropped
+    error_integral_reference remove accepted subintervals."""
+    return (
+        1.0
+        + 0.5 * torch.sin(4.0 * math.pi * t)
+        - 100.0 / math.sqrt(math.pi) * torch.exp(-1e4 * (t - 0.37) ** 2)
+    )
+
+
+def _tracked_peak(t):
+    """The cancelling peak with two tracked variables."""
+    return _cancelling_peak(t), (2 * t, torch.cos(t).repeat(1, 3))
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"take_gradient": True, "max_batch": 40},
+        {"error_integral_reference": 10.0},
+        {"use_absolute_error_ratio": False},
+        {"f": _tracked_peak},
+        {"f": _tracked_peak, "trade_speed_for_memory": True},
+        {"record_evaluations": False},
+        {"max_adaptive_splits": 3},
+        {"method": "gk21"},
+    ],
+    ids=[
+        "default",
+        "take_gradient",
+        "step7",
+        "cumulative",
+        "tracked",
+        "trade",
+        "no_record",
+        "split_cap",
+        "gk21",
+    ],
+)
+def test_every_record_path_returns_mesh_order(options):
+    """Through every path of the record (removals by the re-check and by a
+    dropped reference, cumulative mode, tracked variables, values moved early or
+    not recorded, the split cap, batches of take_gradient=True, a method
+    without end nodes), the returned subintervals are in mesh order and tile
+    the interval, and runtime_checks=False returns the same numbers bit for
+    bit."""
+    options = dict(options)
+    f = options.pop("f", _cancelling_peak)
+    ctor = {
+        key: options.pop(key)
+        for key in ("use_absolute_error_ratio", "method")
+        if key in options
+    }
+    out = {}
+    for checks in (True, False):
+        solver = adaptive_quadrature(
+            "uniform",
+            **({"method": "bosh3"} | ctor),
+            atol=1e-9,
+            rtol=1e-6,
+            device="cpu",
+            runtime_checks=checks,
         )
-
-    def test_sort_multidim_by_mesh_order(self):
-        """T>1: a scrambled record sorts to mesh order, not coordinate 0.
-
-        The mesh's coordinate 0 is non-monotonic ([0, 1, 0.5, 0.2]) so a
-        coordinate-0 sort could not recover the mesh order. The record rows are
-        supplied scrambled (mesh positions [2, 0, 3, 1]); after _sort_record the
-        rows must be in increasing mesh order, and mesh_quadratures (tagged with
-        each row's mesh position) must come out as [0, 1, 2, 3].
-        """
-        mesh = torch.tensor(
-            [[0.0, 0.0], [1.0, 1.0], [0.5, 2.0], [0.2, 3.0]], dtype=torch.float64
+        torch.manual_seed(0)
+        out[checks] = solver.integrate(
+            f,
+            mesh_init=torch.tensor([0.0], dtype=torch.float64),
+            mesh_final=torch.tensor([1.0], dtype=torch.float64),
+            **({"max_batch": 64, "take_gradient": False} | options),
         )
-        mi = self.solver._get_mesh_indices(mesh)
-        # Record rows in scrambled mesh-position order.
-        positions = [2, 0, 3, 1]
-        N, C, T, D = 4, 2, 2, 1
-        nodes = torch.zeros(N, C, T, dtype=torch.float64)
-        nodes[:, 0, :] = mesh[positions]
-        nodes[:, 1, :] = mesh[positions] + 0.01
-        record = {
-            "integral": torch.tensor([1.0], dtype=torch.float64),
-            "loss": torch.tensor([2.0], dtype=torch.float64),
-            "integral_error": torch.tensor([0.01], dtype=torch.float64),
-            "nodes": nodes,
-            "h": torch.ones(N, T, dtype=torch.float64) * 0.05,
-            "y": torch.ones(N, C, D, dtype=torch.float64),
-            # Tag each row with its mesh position so the reordering is visible.
-            "mesh_quadratures": torch.tensor(positions, dtype=torch.float64).unsqueeze(
-                -1
-            ),
-            "mesh_quadrature_errors": torch.ones(N, D, dtype=torch.float64) * 0.01,
-            "error_ratios": torch.ones(N, dtype=torch.float64) * 0.5,
-            "mesh_left": mesh[positions],
-        }
-
-        record = self.solver._sort_record(record, mi)
-
-        order = self.solver._mesh_order(record["nodes"][:, 0, :], mi)
-        assert torch.all(order[1:] - order[:-1] > 0)
-        assert torch.allclose(
-            record["mesh_quadratures"][:, 0],
-            torch.tensor([0.0, 1.0, 2.0, 3.0], dtype=torch.float64),
-        )
-        # Coordinate 0 alone is not monotonic -> sort followed mesh, not coord 0.
-        coord0 = record["nodes"][:, 0, 0]
-        assert not torch.all(coord0[1:] - coord0[:-1] > 0)
+    result, state = out[True]
+    nodes = result.nodes[:, 0]
+    assert torch.all(nodes[1:] > nodes[:-1])
+    assert len(state.mesh) > 2
+    assert abs(float(result.h.sum()) - 1.0) < 1e-12
+    other, other_state = out[False]
+    for key in ("integral", "integral_error", "nodes", "h", "mesh_quadratures", "loss"):
+        assert torch.equal(getattr(result, key), getattr(other, key)), key
+    if result.y is not None:
+        assert torch.equal(result.y, other.y)
+    assert torch.equal(state.mesh, other_state.mesh)
 
 
 class TestFlattenOutput:

@@ -647,7 +647,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         -------
         MethodOutput
             The integral, its error estimate, and the contribution, error
-            estimate, width and left mesh point of each subinterval.
+            estimate and width of each subinterval.
         """
         if y0 is None:
             y0 = torch.zeros(1, device=self.device, dtype=self.dtype)
@@ -661,7 +661,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh_quadratures=mesh_quadratures,
             mesh_quadrature_errors=mesh_quadrature_errors.detach(),
             h=h,
-            mesh_left=mesh_left,
         )
 
     # -------------------------------------------------------------------------------- #
@@ -1077,7 +1076,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         loss_fxn = loss_fxn if loss_fxn is not None else self._integral_loss
 
         # Starting mesh: the caller's mesh cut to the bounds, or a fresh one.
-        mesh, mesh_trackers, mesh_indices = self._setup_initial_mesh(
+        mesh, mesh_trackers = self._setup_initial_mesh(
             mesh,
             mesh_init,
             mesh_final,
@@ -1111,7 +1110,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         unsafe: str | None = None
         failed_batch: int | None = None
 
+        # The record of the accepted subintervals, in the order they were
+        # accepted (_record_results): the sums, and the fields the loop reads,
+        # one tensor each, among them each subinterval's left mesh index in
+        # the current mesh (mesh_index); the other fields, one chunk per
+        # accepted batch, in chunks. Put in mesh order after the loop
+        # (_sort_record).
         record: dict[str, torch.Tensor] = {}
+        chunks: dict[str, list[torch.Tensor]] = {}
         # Per-panel split counter, parallel to mesh/mesh_trackers: how many
         # times each step was halved (0 = a step of the starting mesh). It
         # enforces max_adaptive_splits and gives the split statistics returned
@@ -1172,12 +1178,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             else:
                 # Subsequent batches: add to previously recorded integral
                 current_integral = record["integral"] + method_output.integral.detach()
-                # Merge new steps into the sorted record to compute cumulative
-                # sums. Placement is by mesh order (each subinterval's left mesh
-                # point looked up in mesh_indices), robust for any time dimension.
+                # Merge the batch with the record in mesh order to compute
+                # cumulative sums, from the left mesh index of every recorded
+                # and evaluated subinterval (integers, for any time dimension).
                 idxs_keep, idxs_input = self._merge_positions(
-                    self._mesh_order(record["mesh_left"], mesh_indices),
-                    self._mesh_order(method_output.mesh_left, mesh_indices),
+                    record["mesh_index"], step_idxs
                 )
                 all_mesh_quadratures = self._insert_sorted_results(
                     record["mesh_quadratures"],
@@ -1254,7 +1259,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             record_keep_mask: torch.Tensor | None = None
             if recheck_active:
                 # All inputs are integration-device-resident (mesh_quadratures
-                # and mesh_quadrature_errors are in _DEVICE_RESIDENT_KEYS;
+                # and mesh_quadrature_errors are in _RECORD_LOOP_KEYS;
                 # reference_integral is on self.device) -- no host<->device copy.
                 # The record is non-empty here, so Step 3 took its merge branch
                 # and set idxs_keep. Cumulative mode judges each recorded step
@@ -1267,7 +1272,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     torch.cumsum(all_mesh_quadratures.detach(), 0)[idxs_keep],
                     reference_integral,
                     mesh,
-                    mesh_indices,
                     split_counts,
                     max_adaptive_splits,
                 )
@@ -1284,7 +1288,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 kept_nodes,
                 mesh,
                 mesh_trackers,
-                mesh_indices,
+                idxs_transfer,
                 keep_idx,
                 split_counts,
             ) = self._adaptively_increase_mesh(
@@ -1312,17 +1316,21 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             assert split_counts is not None  # returned non-None for non-None input
             method_output, y_step_eval, nodes = kept_output, kept_y, kept_nodes
             error_ratios = error_ratios[keep_idx]
+            # The recorded subintervals' left mesh points in the new mesh.
+            if record:
+                record["mesh_index"] = idxs_transfer[record["mesh_index"]]
 
             # --- Step 5b: Drop re-split recorded panels from the record ---
             # The recorded panels flagged above were just bisected in the mesh
             # update; remove their now-stale entries (their children will be
-            # re-evaluated as fresh panels). Done before _record_results so the
-            # remaining record stays strictly mesh-ordered for the merge.
+            # re-evaluated as fresh panels). Done before _record_results, whose
+            # rows record_keep_mask does not cover.
             # record_keep_mask is set exactly when recheck_active.
             if record_keep_mask is not None and not bool(torch.all(record_keep_mask)):
                 record = self._remove_failed_record_panels(
                     record,
                     record_keep_mask,
+                    chunks,
                     loss_fxn,
                     mesh_init,
                     mesh_final,
@@ -1378,10 +1386,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 )
                 record = self._record_results(
                     record=record,
+                    chunks=chunks,
                     take_gradient=take_gradient,
                     results=intermediate_results,
-                    mesh_left=method_output.mesh_left,
-                    mesh_indices=mesh_indices,
+                    mesh_index=idxs_transfer[step_idxs[keep_idx]],
                     # Without record_evaluations nothing large is recorded,
                     # and the nodes stay on the solver's device until the end.
                     result_device=result_device if record_evaluations else self.device,
@@ -1397,10 +1405,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 grads = [g for g in (mesh_grad, mesh_eval.grad) if g is not None]
                 if grads:
                     # Carry the gradient to the split mesh, whose points include
-                    # every point of the batch's mesh, with the same values.
-                    order = self._mesh_order(mesh_eval.detach(), mesh_indices)
+                    # every point of the batch's mesh, with the same values
+                    # (Step 7, the other mesh update, never runs with
+                    # take_gradient=True).
                     mesh_grad = torch.zeros_like(mesh.detach())
-                    mesh_grad[order] = sum(grads)
+                    mesh_grad[idxs_transfer] = sum(grads)
 
             # --- Step 7: drop a fixed reference once every panel is accepted ---
             # With a fixed error_integral_reference the loop judged every panel
@@ -1413,8 +1422,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # the whole record are judged against it together (Step 4b), so the
             # check of every panel happens in the same pass as the split
             # decision until the integral converges. A reference is fixed only
-            # in absolute mode, the record is non-empty and in mesh order
-            # (_record_results asserts it).
+            # in absolute mode, so no running sum is needed, and the record is
+            # non-empty.
             if (
                 enforce_convergence
                 and reference_pinned
@@ -1424,10 +1433,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 split_positions, record_keep_mask, fails = (
                     self._failed_record_positions(
                         record,
-                        torch.cumsum(record["mesh_quadratures"].detach(), 0),
+                        None,
                         record["integral"].detach(),
                         mesh,
-                        mesh_indices,
                         split_counts,
                         max_adaptive_splits,
                     )
@@ -1445,27 +1453,33 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     )
                 if split_positions.numel() > 0:
                     # No batch: only the extra positions are split.
-                    (_, _, _, _, mesh, mesh_trackers, mesh_indices, _, split_counts) = (
-                        self._adaptively_increase_mesh(
-                            method_output=None,
-                            keep_mask=torch.empty(
-                                0, dtype=torch.bool, device=self.device
-                            ),
-                            y_step_eval=None,
-                            nodes=None,
-                            mesh=mesh,
-                            mesh_idxs=torch.empty(
-                                0, dtype=torch.long, device=self.device
-                            ),
-                            mesh_trackers=mesh_trackers,
-                            split_counts=split_counts,
-                            max_adaptive_splits=max_adaptive_splits,
-                            extra_split_idxs=split_positions,
-                        )
+                    (
+                        _,
+                        _,
+                        _,
+                        _,
+                        mesh,
+                        mesh_trackers,
+                        idxs_transfer,
+                        _,
+                        split_counts,
+                    ) = self._adaptively_increase_mesh(
+                        method_output=None,
+                        keep_mask=torch.empty(0, dtype=torch.bool, device=self.device),
+                        y_step_eval=None,
+                        nodes=None,
+                        mesh=mesh,
+                        mesh_idxs=torch.empty(0, dtype=torch.long, device=self.device),
+                        mesh_trackers=mesh_trackers,
+                        split_counts=split_counts,
+                        max_adaptive_splits=max_adaptive_splits,
+                        extra_split_idxs=split_positions,
                     )
+                    record["mesh_index"] = idxs_transfer[record["mesh_index"]]
                     record = self._remove_failed_record_panels(
                         record,
                         record_keep_mask,
+                        chunks,
                         loss_fxn,
                         mesh_init,
                         mesh_final,
@@ -1502,7 +1516,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             )
 
         # === Post-convergence: sort results and optimize the mesh ===
-        record = self._sort_record(record, mesh_indices)
+        # The fields of chunks go where _get_optimal_mesh reads nodes with y.
+        record = self._sort_record(
+            record, chunks, result_device if record_evaluations else self.device
+        )
 
         # Split statistics. A step of the starting mesh has split count 0 and
         # every half of a split step has count >= 1, so the steps still at 0
@@ -1561,7 +1578,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # integration device with record_evaluations=False), moving the small
         # tableau there for the duration rather than copying them back. The
         # device-resident fields (mesh_quadratures, mesh_quadrature_errors,
-        # integral; see _DEVICE_RESIDENT_KEYS) are moved to join them. Without
+        # integral; see _RECORD_LOOP_KEYS) are moved to join them. Without
         # recorded values (record_evaluations=False) y is None, and
         # _merge_inputs uses merge_rule="power_law".
         optimal_device = record["nodes"].device
@@ -1636,7 +1653,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     def _record_error_check(
         self,
         record: dict[str, torch.Tensor],
-        cum_mesh_quadratures: torch.Tensor,
+        cum_mesh_quadratures: torch.Tensor | None,
         integral: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
@@ -1651,11 +1668,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Parameters
         ----------
         record : dict[str, torch.Tensor]
-            The running record, in mesh order, with ``mesh_quadratures`` and
-            ``mesh_quadrature_errors`` [N, D] on the integration device.
-        cum_mesh_quadratures : torch.Tensor
-            Running integral through each recorded subinterval [N, D] (used in
-            cumulative mode only).
+            The record, with ``mesh_quadratures`` and ``mesh_quadrature_errors``
+            [N, D] on the integration device, in the order the subintervals
+            were accepted (in the loop) or in mesh order (after it). Each
+            subinterval's ratio depends only on its own row and on
+            ``cum_mesh_quadratures``.
+        cum_mesh_quadratures : torch.Tensor or None
+            Running integral through each recorded subinterval [N, D], in the
+            record's row order (used in cumulative mode only; None there sums
+            ``mesh_quadratures``, which must then be in mesh order).
         integral : torch.Tensor
             Reference integral [D] for the absolute-mode tolerance.
 
@@ -1681,10 +1702,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     def _failed_record_positions(
         self,
         record: dict[str, torch.Tensor],
-        cum_mesh_quadratures: torch.Tensor,
+        cum_mesh_quadratures: torch.Tensor | None,
         integral: torch.Tensor,
         mesh: torch.Tensor,
-        mesh_indices: dict[tuple[float, ...], int],
         split_counts: torch.Tensor | None,
         max_adaptive_splits: int | None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -1700,16 +1720,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Parameters
         ----------
         record : dict[str, torch.Tensor]
-            The running record, in mesh order.
-        cum_mesh_quadratures : torch.Tensor
-            Running integral through each recorded subinterval [N, D] (used in
-            cumulative mode only).
+            The running record, in the order the subintervals were accepted,
+            with the left mesh index of each in ``mesh_index``.
+        cum_mesh_quadratures : torch.Tensor or None
+            Running integral through each recorded subinterval [N, D], in the
+            record's row order (cumulative mode only; None in absolute mode).
         integral : torch.Tensor
             Reference integral [D] for the absolute-mode tolerance.
         mesh : torch.Tensor
             The current mesh [M, T].
-        mesh_indices : dict[tuple[float, ...], int]
-            ``{tuple(mesh point): index}`` for the current mesh.
         split_counts : torch.Tensor or None
             Split count of each mesh position [M]; required when
             ``max_adaptive_splits`` is given.
@@ -1720,15 +1739,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         -------
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
             Tuple ``(split_positions, record_keep_mask, fails)``: the mesh
-            positions of the failing recorded subintervals that can be split,
-            a mask [N] that keeps every other recorded subinterval, and the
+            positions of the failing recorded subintervals that can be split
+            (in the record's row order), a mask [N] that keeps every other
+            recorded subinterval, and the
             mask [N] of every failing one (including those that cannot be
             split).
         """
         _, rec_remove, _ = self._record_error_check(
             record, cum_mesh_quadratures, integral
         )
-        rec_positions = self._mesh_order(record["mesh_left"], mesh_indices)
+        rec_positions = record["mesh_index"]
         # A failing subinterval that cannot be split (at the split cap, or too
         # narrow to halve) is not split, so it must stay recorded: the record
         # stays consistent with the mesh.
@@ -1930,7 +1950,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         torch.Tensor | None,
         torch.Tensor,
         torch.Tensor,
-        dict[tuple[float, ...], int],
+        torch.Tensor,
         torch.Tensor,
         torch.Tensor | None,
     ]:
@@ -1989,8 +2009,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         extra_split_idxs : torch.Tensor | None
             Further mesh indices to split in the same update, besides the
             batch's rejected subintervals: recorded subintervals that failed
-            the re-check after the running integral changed. Must be
-            ascending and disjoint from the batch's ``mesh_idxs``. Their
+            the re-check after the running integral changed. In any order;
+            disjoint from the batch's ``mesh_idxs``. Their
             trackers are set True so both halves are evaluated. None splits
             only the batch's rejected subintervals.
         in_place : bool
@@ -2001,9 +2021,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         Returns
         -------
-        tuple[MethodOutput | None, torch.Tensor | None, tuple[torch.Tensor, ...] | None, torch.Tensor | None, torch.Tensor, torch.Tensor, dict[tuple[float, ...], int], torch.Tensor, torch.Tensor | None]
+        tuple[MethodOutput | None, torch.Tensor | None, tuple[torch.Tensor, ...] | None, torch.Tensor | None, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor | None]
             Tuple ``(method_output, y_step_eval, tracked_step_eval, nodes,
-            mesh_new, mesh_trackers_new, mesh_indices_new, keep_idx,
+            mesh_new, mesh_trackers_new, idxs_transfer, keep_idx,
             split_counts_new)``:
 
             - method_output: with the split subintervals removed.
@@ -2012,8 +2032,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             - nodes: their nodes.
             - mesh_new: the mesh with the midpoints inserted.
             - mesh_trackers_new: the trackers, True for the new halves.
-            - mesh_indices_new: ``{tuple(mesh point): index}`` for mesh_new
-              (``_get_mesh_indices``).
+            - idxs_transfer: the position in mesh_new of each point of
+              ``mesh`` [M], increasing (``mesh_new[idxs_transfer]`` equals
+              ``mesh``).
             - keep_idx: positions in the batch of the accepted subintervals,
               ascending (after the split cap), on the mesh's device.
             - split_counts_new: split counts for mesh_new, with both halves
@@ -2095,7 +2116,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 keep_idx
             ]
             method_output.h = method_output.h[keep_idx]
-            method_output.mesh_left = method_output.mesh_left[keep_idx]
             method_output.integral = torch.sum(method_output.mesh_quadratures, 0)
             method_output.integral_error = torch.sum(
                 method_output.mesh_quadrature_errors, 0
@@ -2122,7 +2142,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             nodes,
             mesh_new,
             mesh_trackers_new,
-            self._get_mesh_indices(mesh_new),
+            idxs_transfer,
             keep_idx,
             split_counts_new,
         )
@@ -2785,7 +2805,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh_quadratures=mesh_quadratures,
             mesh_quadrature_errors=mesh_quadrature_errors,
             h=mesh_right - mesh_left,
-            mesh_left=mesh_left,
         )
         if values_device is None:
             f_evals, tracked_out = None, None  # the in_place arrays are dropped
@@ -3528,7 +3547,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_final: torch.Tensor,
         random_initial_mesh: bool,
         N_init_steps: int,
-    ) -> tuple[torch.Tensor, torch.Tensor, dict[tuple[float, ...], int]]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Build the starting mesh of an integration.
 
@@ -3553,10 +3572,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor, dict[tuple[float, ...], int]]
-            The mesh [M, T]; ``mesh_trackers`` [M], True at every mesh point
-            but the last (every subinterval needs evaluation); and the
-            ``{tuple(mesh point): index}`` map of ``_get_mesh_indices``.
+        tuple[torch.Tensor, torch.Tensor]
+            The mesh [M, T], and ``mesh_trackers`` [M], True at every mesh
+            point but the last (every subinterval needs evaluation).
         """
         if mesh is None:
             # Generate a fresh initial mesh of barriers across [mesh_init, mesh_final].
@@ -3627,33 +3645,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # True at every mesh point but the last, which starts no subinterval;
         # compared on the device, with no copy from the host.
         mesh_trackers = torch.arange(len(mesh), device=self.device) < len(mesh) - 1
-        mesh_indices = self._get_mesh_indices(mesh)
-
-        return mesh, mesh_trackers, mesh_indices
-
-    def _get_mesh_indices(self, mesh: torch.Tensor) -> dict[tuple[float, ...], int]:
-        """
-        Map each mesh point to its position in the mesh.
-
-        Parameters
-        ----------
-        mesh : torch.Tensor
-            The ordered mesh. Shape: [M, T].
-
-        Returns
-        -------
-        dict[tuple[float, ...], int]
-            ``{tuple(mesh point): index}``, keyed by coordinates so a
-            subinterval's position can be found from its left mesh point.
-        """
-        # Map each barrier to its position in the ordered mesh. Keyed on the
-        # full barrier coordinate as a hashable tuple (not the tensor object,
-        # which hashes by identity and so cannot be looked up by value) so the
-        # recording code can recover a panel's order from its left barrier for
-        # any time dimensionality T.
-        # Single device->host transfer of the whole [M, T] mesh, then build the
-        # tuple keys in pure Python (one host sync instead of one per barrier).
-        return {tuple(row): idx for idx, row in enumerate(mesh.tolist())}
+        return mesh, mesh_trackers
 
     # -------------------------------------------------------------------------------- #
     #                           ADAPTIVE ERROR CALCULATIONS                            #
@@ -4085,14 +4077,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     # not per-step arrays that need re-sorting.
     _RECORD_SCALAR_KEYS = ("integral", "integral_error", "loss")
 
-    # Record dict keys that must stay on the integration device because they are
-    # read back during the loop (running integral and the per-step quadratures
-    # merged + cumsum'd for the error ratios; the per-step errors are re-checked
-    # against the drifting tolerance every iteration -- see the accepted-panel
-    # re-check in ``integrate``). Everything else is detached and moved to
-    # ``result_device`` as it is recorded, to keep the large per-step tensors
-    # (nodes, y, tracked_variables, ...) off the GPU.
-    _DEVICE_RESIDENT_KEYS = ("integral", "mesh_quadratures", "mesh_quadrature_errors")
+    # Per-subinterval record keys the loop reads, each kept as one tensor on
+    # the integration device and appended to every turn: the left mesh index
+    # of each recorded subinterval in the current mesh (the order of the
+    # cumulative sums, the re-check's mesh positions), and the contributions
+    # and error estimates (cumulative sums and the re-check of accepted
+    # subintervals in ``integrate``). Every other per-subinterval field is
+    # kept as one chunk per batch (``_record_results``).
+    _RECORD_LOOP_KEYS = ("mesh_index", "mesh_quadratures", "mesh_quadrature_errors")
 
     # Cumulative scalar keys whose final output stays on the integration device.
     # The integral and its error estimate are the primary answer, so they remain
@@ -4140,64 +4132,30 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             fields[f"{self._TRACKED_KEY_PREFIX}{i}"] = tracked
         return fields
 
-    def _mesh_order(
-        self, barriers: torch.Tensor, mesh_indices: dict[tuple[float, ...], int]
-    ) -> torch.Tensor:
-        """
-        Look up the mesh index of each subinterval from its left mesh point.
-
-        The left mesh points are the record's ``mesh_left`` (or a batch's
-        ``MethodOutput.mesh_left``), the mesh points the subintervals' nodes
-        were placed from, bit for bit. ``mesh_indices`` maps each mesh point
-        (keyed on its full coordinate tuple) to its index in the ordered mesh,
-        so this gives an order for any number of coordinates T without
-        comparing coordinates.
-
-        Parameters
-        ----------
-        barriers : torch.Tensor
-            Left mesh point of each subinterval. Shape: [N, T].
-        mesh_indices : dict[tuple[float, ...], int]
-            ``{tuple(mesh point): index}`` from ``_get_mesh_indices`` for the
-            current mesh.
-
-        Returns
-        -------
-        torch.Tensor
-            Mesh index of each subinterval. Shape: [N], dtype long.
-        """
-        # Build keys from a SINGLE device->host transfer of the whole [N, T]
-        # block (barriers.tolist()), then look each up in pure Python. Avoids
-        # one host sync per panel, which matters on GPU for fine meshes.
-        return torch.tensor(
-            [mesh_indices[tuple(row)] for row in barriers.tolist()],
-            dtype=torch.long,
-            device=self.device,
-        )
-
     def _merge_positions(
         self, rec_order: torch.Tensor, new_order: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """
-        Compute merged-array positions from two mesh-order arrays.
+        Compute merged-array positions from the mesh indices of two row sets.
 
-        Given the mesh-order indices of the existing record entries and of the
-        new entries, return where each goes in the combined array in mesh
+        Given the mesh index of each existing record row (in any order) and of
+        each new row, return where each goes in the combined array in mesh
         order. The mesh indices are distinct integers, so the merge is a rank
         computation, with no comparison of coordinates.
 
         Parameters
         ----------
         rec_order : torch.Tensor
-            Mesh positions of existing record entries. Shape: [N_record].
+            Mesh indices of the existing record rows, in the record's row
+            order. Shape: [N_record].
         new_order : torch.Tensor
-            Mesh positions of new entries. Shape: [N_result].
+            Mesh indices of the new rows. Shape: [N_result].
 
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor]
             Tuple of (idxs_keep, idxs_input): positions in the merged array for
-            the existing and the new entries respectively (consumed by
+            the existing and the new rows respectively (consumed by
             ``_insert_sorted_results``).
         """
         orders = torch.cat([rec_order, new_order])
@@ -4240,17 +4198,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # move them to the record's device so a record living on result_device
         # (CPU) merges with CPU indices while a GPU-resident record uses GPU
         # indices. ``result`` is already placed on record.device by the caller.
-        # Allocate with the input tensor's own dtype/device so this works for
-        # non-float records (e.g. integer/bool tracked variables), not just
-        # self.dtype. Every position is overwritten below, so zeros is safe.
-        # The record is read, not copied first: the merged array is new, so
-        # the peak is the old record plus the merged one (a clone of the old
-        # record made it 3 times the record on the host, measured 2026-11-26).
-        merged = torch.zeros(
-            (len(record) + len(result), *record.shape[1:]),
-            device=record.device,
-            dtype=record.dtype,
-        )
+        # The positions of _merge_positions are a permutation of the merged
+        # rows, so every row is written below and need not be zeroed first.
+        merged = record.new_empty((len(record) + len(result), *record.shape[1:]))
         merged[record_idxs.to(record.device)] = record
         merged[result_idxs.to(record.device)] = result
         return merged
@@ -4258,25 +4208,27 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     def _record_results(
         self,
         record: dict[str, torch.Tensor],
+        chunks: dict[str, list[torch.Tensor]],
         take_gradient: bool,
         results: IntegrationResult,
-        mesh_left: torch.Tensor,
-        mesh_indices: dict[tuple[float, ...], int],
+        mesh_index: torch.Tensor,
         result_device: str | torch.device | None = None,
     ) -> dict[str, torch.Tensor]:
         """
-        Add the accepted subintervals of a batch to the running record.
+        Append the accepted subintervals of a batch to the record.
 
-        On the first batch this creates the record. On later batches it
-        inserts the new results in mesh order and adds to the integral, its
-        error and the loss.
-
-        Each field is placed on its device: the keys in
-        ``_DEVICE_RESIDENT_KEYS`` and ``_RESULT_INTEGRATION_KEYS`` stay on the
-        integration device (the first are read back during the loop), and all
-        other fields, including the large ``nodes``, ``y`` and tracked
-        variables, are moved to ``result_device`` so they do not accumulate on
-        the GPU. When ``take_gradient`` is True the per-batch
+        The record keeps the subintervals in the order they were accepted;
+        ``_sort_record`` puts them in mesh order after the loop. The sums
+        (``_RECORD_SCALAR_KEYS``) are added to; the fields the loop reads
+        (``_RECORD_LOOP_KEYS``) are appended to one tensor each, on the
+        integration device; every other field (``nodes``, ``h``, ``y``,
+        ``error_ratios`` and the tracked variables) is appended to its list in
+        ``chunks``, one tensor per batch, so the record's values are never
+        copied during the loop. The chunks and the loss are moved to
+        ``result_device`` so they do not accumulate on the GPU. A chunk that is
+        a view of a larger array, such as the accepted rows moved to the front
+        of a pass's values (``_keep_rows``), is copied, so the rest of that
+        array is freed. When ``take_gradient`` is True the per-batch
         ``loss.backward()`` has already run, so tensors are detached first;
         when False the autograd graph is kept so the returned integral stays
         differentiable (the device move is itself differentiable).
@@ -4284,178 +4236,132 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Parameters
         ----------
         record : dict[str, torch.Tensor]
-            Running record. An empty dict on the first call.
+            The sums and the loop's fields. An empty dict on the first call.
+        chunks : dict[str, list[torch.Tensor]]
+            The other per-subinterval fields, one tensor per batch, in the
+            record's row order. An empty dict on the first call.
         take_gradient : bool
             If True, the per-batch backward already ran and tensors are
             detached before recording; if False the graph is kept.
         results : IntegrationResult
             Results of the accepted subintervals of the current batch.
-        mesh_left : torch.Tensor
-            Left mesh point of each of them [N, T] (``MethodOutput.mesh_left``),
-            recorded detached under the key ``mesh_left``: it places a
-            subinterval in the mesh, which its first node does not when the
-            method has no node at the subinterval's start.
-        mesh_indices : dict[tuple[float, ...], int]
-            ``{tuple(mesh point): index}`` for the current mesh, used to place
-            the new subintervals in mesh order (for any T).
+        mesh_index : torch.Tensor
+            Left mesh index of each of them in the current mesh [N], on the
+            integration device; recorded under the key ``mesh_index``.
         result_device : str | torch.device | None
-            Device for the large output tensors. None keeps everything on the
+            Device for the chunks and the loss. None keeps everything on the
             integration device.
 
         Returns
         -------
         dict[str, torch.Tensor]
-            Updated record dict with the new results merged in. Keys are the
-            IntegrationResult field names, plus one key per tracked variable
-            (see ``_record_fields``) and ``mesh_left``.
+            The record with the batch added. Its keys are the sums, the
+            loop's fields and ``mesh_index``; the keys of ``chunks`` are the
+            other IntegrationResult field names and one key per tracked
+            variable (see ``_record_fields``).
+
+        Raises
+        ------
+        ValueError
+            If the batch's tracked variables are not those of earlier batches.
         """
         if result_device is None:
             result_device = self.device
-
-        def target(key: str) -> str | torch.device:
-            """
-            Return the device a record field is kept on.
-
-            Parameters
-            ----------
-            key : str
-                The record field's name.
-
-            Returns
-            -------
-            str or torch.device
-                The integration device or ``result_device``.
-            """
-            # Resident keys (read back in the loop) and the integration-output
-            # scalars stay on the integration device; everything else goes to
-            # result_device.
-            if (
-                key in self._DEVICE_RESIDENT_KEYS
-                or key in self._RESULT_INTEGRATION_KEYS
-            ):
-                return self.device
-            return result_device
-
-        def place(value: torch.Tensor, key: str) -> torch.Tensor:
-            """
-            Move a record field to its device, detached if take_gradient is True.
-
-            Parameters
-            ----------
-            value : torch.Tensor
-                The field's new values.
-            key : str
-                The record field's name.
-
-            Returns
-            -------
-            torch.Tensor
-                The value on the device ``target(key)`` gives.
-            """
-            # take_gradient=True does per-batch backward *before* recording, so
-            # the graph is no longer needed and is detached. take_gradient=False
-            # retains the full graph for a single backward through the returned
-            # integral, so the grad-tracked tensor is kept (``.to`` is itself an
-            # autograd op, so the device move stays differentiable).
-            if take_gradient:
-                value = value.detach()
-            return value.to(target(key))
-
         fields = self._record_fields(results)
-        fields["mesh_left"] = mesh_left.detach()
-        if len(record) == 0:
-            # Tracked variables are already detached at evaluation time, so
-            # place() leaves them unchanged apart from the device move.
-            for key, value in fields.items():
-                record[key] = place(value, key)
-            return record
-
-        idxs_keep, idxs_input = self._merge_positions(
-            self._mesh_order(record["mesh_left"], mesh_indices),
-            self._mesh_order(fields["mesh_left"], mesh_indices),
-        )
-        if fields.keys() != record.keys():
+        fields["mesh_index"] = mesh_index
+        if record and fields.keys() != record.keys() | chunks.keys():
             raise ValueError(
                 "The integrand returned a different set of tracked variables "
-                f"than in earlier batches: {sorted(fields)} vs {sorted(record)}."
+                f"than in earlier batches: {sorted(fields)} vs "
+                f"{sorted(record.keys() | chunks.keys())}."
             )
-        for key, value in record.items():
+        for key, field in fields.items():
+            # take_gradient=True does per-batch backward *before* recording,
+            # so the graph is no longer needed and is detached.
+            # take_gradient=False retains the full graph for a single backward
+            # through the returned integral.
+            value = field.detach() if take_gradient else field
             if key in self._RECORD_SCALAR_KEYS:
-                record[key] = value + place(fields[key], key)
-            else:
-                record[key] = self._insert_sorted_results(
-                    value,
-                    idxs_keep,
-                    place(fields[key], key),
-                    idxs_input,
+                if key not in self._RESULT_INTEGRATION_KEYS:
+                    value = value.to(result_device)
+                record[key] = record[key] + value if key in record else value
+            elif key in self._RECORD_LOOP_KEYS:
+                record[key] = (
+                    torch.cat([record[key], value]) if key in record else value
                 )
-        # General (any-T) invariant: the record is in strictly increasing mesh
-        # order after the merge.
-        if self.runtime_checks:
-            merged_order = self._mesh_order(record["mesh_left"], mesh_indices)
-            assert torch.all(merged_order[1:] - merged_order[:-1] > 0)
-            # For 1-D time the left mesh points must also be strictly ascending.
-            if record["mesh_left"].shape[-1] == 1:
-                left = record["mesh_left"][:, 0]
-                assert torch.all(left[1:] - left[:-1] > 0)
-
+            else:
+                value = value.to(result_device)
+                if value.untyped_storage().nbytes() > value.nbytes:
+                    value = value.clone()
+                chunks.setdefault(key, []).append(value)
         return record
 
     def _sort_record(
         self,
         record: dict[str, torch.Tensor],
-        mesh_indices: dict[tuple[float, ...], int],
+        chunks: dict[str, list[torch.Tensor]],
+        device: str | torch.device,
     ) -> dict[str, torch.Tensor]:
         """
-        Sort the per-subinterval entries of the record by mesh order and check it.
+        Put the record of a finished integration in mesh order, in one dict.
 
-        ``_record_results`` already inserts every batch in mesh order, so on
-        the record ``integrate`` builds the sort leaves the order unchanged;
-        this is a safeguard before the final output. The order is each
-        subinterval's index in the mesh (its left mesh point looked up in
-        ``mesh_indices``), which works for any number of coordinates T. The
-        accumulated scalars (integral, its error, loss) are not reordered.
+        The record covers its final mesh once, so the left mesh indices of
+        its N rows (``mesh_index``, removed here) are 0 to N - 1 in some order,
+        and row i belongs at row ``mesh_index[i]``: each field is written into
+        one array at those rows, chunk by chunk, each chunk dropped once
+        written. A field held in one tensor whose rows are already in mesh
+        order (always, when every subinterval was recorded in one batch) is
+        kept as it is, since writing it would copy it, the values included.
+        The sums are not reordered. The loop's fields stay on the integration
+        device; the fields of ``chunks`` end on ``device``.
 
         Parameters
         ----------
         record : dict[str, torch.Tensor]
-            Record with per-subinterval tensors.
-        mesh_indices : dict[tuple[float, ...], int]
-            ``{tuple(mesh point): index}`` for the final mesh.
+            The sums and the loop's fields, in the order the subintervals were
+            accepted (``_record_results``).
+        chunks : dict[str, list[torch.Tensor]]
+            The other per-subinterval fields, in the same row order; emptied.
+        device : str | torch.device
+            Device of the fields of ``chunks`` in the returned record.
 
         Returns
         -------
         dict[str, torch.Tensor]
-            The record with its per-subinterval tensors in mesh order.
+            The record with every per-subinterval field in mesh order.
         """
-        order = self._mesh_order(record["mesh_left"], mesh_indices)
-        # A record already in order (always, for the one integrate builds) is
-        # kept as it is: indexing would copy every field, including the values.
-        if not bool(torch.all(order[1:] > order[:-1])):
-            sorted_idxs = torch.argsort(order, dim=0)
-            # Per-step fields may live on different devices (result_device vs
-            # the integration device), so move the index to each field's device.
-            for key, value in record.items():
-                if key not in self._RECORD_SCALAR_KEYS:
-                    record[key] = value[sorted_idxs.to(value.device)]
+        rows = record.pop("mesh_index")
         if self.runtime_checks:
-            # General (any-T) invariant: strictly increasing mesh order.
-            sorted_order = self._mesh_order(record["mesh_left"], mesh_indices)
-            assert torch.all(sorted_order[1:] - sorted_order[:-1] > 0)
-            # For 1-D time the left mesh points must be strictly monotonic.
-            if record["mesh_left"].shape[-1] == 1:
-                left = record["mesh_left"][:, 0]
-                all_ascending = torch.all(left[1:] - left[:-1] > 0)
-                all_descending = torch.all(left[1:] - left[:-1] < 0)
-                assert all_ascending or all_descending, (
-                    "Nodes are required to be either in ascending or descending order"
-                )
+            # Every subinterval of the final mesh is recorded exactly once.
+            assert torch.equal(
+                torch.sort(rows).values, torch.arange(len(rows), device=rows.device)
+            ), "The record does not cover the final mesh once."
+        # One read of the device. Rows in increasing mesh order are 0 to N - 1.
+        in_order = bool(torch.all(rows[1:] > rows[:-1]))
+        loop_fields = {
+            key: [value]
+            for key, value in record.items()
+            if key not in self._RECORD_SCALAR_KEYS
+        }
+        for key, parts in (loop_fields | chunks).items():
+            if in_order and len(parts) == 1:
+                out = parts.pop()
+            else:
+                out = parts[0].new_empty((len(rows), *parts[0].shape[1:]))
+                at = rows.to(out.device)
+                start = 0
+                while parts:
+                    part = parts.pop(0)
+                    out[at[start : start + len(part)]] = part
+                    start += len(part)
+            record[key] = out.to(device) if key in chunks else out
         return record
 
     def _remove_failed_record_panels(
         self,
         record: dict[str, torch.Tensor],
         record_keep_mask: torch.Tensor,
+        chunks: dict[str, list[torch.Tensor]],
         loss_fxn: Callable[[IntegrationResult], torch.Tensor],
         mesh_init: torch.Tensor,
         mesh_final: torch.Tensor,
@@ -4466,15 +4372,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         They were just split in the mesh (their halves will be evaluated as
         new subintervals), so their entries must leave the record. The
-        per-subinterval fields are filtered by ``record_keep_mask``, and each
-        accumulated scalar loses what the removed subintervals added to it:
+        per-subinterval fields are filtered by ``record_keep_mask`` (each
+        field of ``chunks`` becomes one chunk), and each accumulated scalar
+        loses what the removed subintervals added to it:
 
         - ``integral`` and ``integral_error``: the sums of the removed
           ``mesh_quadratures`` and signed ``mesh_quadrature_errors``.
         - ``loss``: ``loss_fxn`` of a result made of the removed subintervals,
-          laid out like a per-batch result. For a loss that is a sum over
-          subintervals (any loss linear in the integral, including the
-          default) the loss and its gradient are then those of the kept
+          laid out like a per-batch result (in mesh order). For a loss that is
+          a sum over subintervals (any loss linear in the integral, including
+          the default) the loss and its gradient are then those of the kept
           subintervals; for another loss the per-batch sum is an
           approximation either way. The re-check never runs with
           ``take_gradient=True``, so no backward pass has used the loss yet.
@@ -4482,9 +4389,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Parameters
         ----------
         record : dict[str, torch.Tensor]
-            Running record (per-subinterval fields in mesh order).
+            The sums and the loop's fields (rows in the order the
+            subintervals were accepted).
         record_keep_mask : torch.Tensor
             Boolean mask over the recorded subintervals; True keeps one.
+        chunks : dict[str, list[torch.Tensor]]
+            The other per-subinterval fields, in the record's row order.
         loss_fxn : Callable[[IntegrationResult], torch.Tensor]
             The active loss function.
         mesh_init : torch.Tensor
@@ -4503,39 +4413,41 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         dict[str, torch.Tensor]
             The record without the failed subintervals.
         """
-        removed = ~record_keep_mask
-        # The removed subintervals' fields, laid out like the per-batch result
-        # loss_fxn receives: the values (y, tracked variables) on values_device,
-        # the rest on the integration device (in the record, all but
-        # mesh_quadratures and mesh_quadrature_errors live on result_device
-        # unless record_evaluations=False).
+        # The removed rows in mesh order, as a batch's rows are, so their sums
+        # and loss_fxn's input are those the record held in mesh order.
+        removed = torch.nonzero(~record_keep_mask).flatten()
+        removed = removed[torch.argsort(record["mesh_index"][removed])]
         gone = {
-            key: value[removed.to(value.device)].to(
-                values_device
-                if values_device is not None
-                and (key == "y" or key.startswith(self._TRACKED_KEY_PREFIX))
-                else self.device
-            )
+            key: value[removed]
             for key, value in record.items()
             if key not in self._RECORD_SCALAR_KEYS
         }
+        for key, parts in chunks.items():
+            # Joined, so the removed and the kept rows are indexed once; the
+            # kept rows become the field's one chunk.
+            whole = torch.cat(parts)
+            parts.clear()
+            gone[key] = whole[removed.to(whole.device)]
+            parts.append(whole[record_keep_mask.to(whole.device)])
         removed_quad_sum = gone["mesh_quadratures"].sum(0)
         removed_err_sum = gone["mesh_quadrature_errors"].sum(0)
+        # The result loss_fxn receives has the values (y, tracked variables)
+        # on values_device and the rest on the integration device.
         removed_result = IntegrationResult(
             integral=removed_quad_sum,
             integral_error=removed_err_sum,
-            nodes=gone["nodes"],
-            h=gone["h"],
-            y=gone.get("y"),
+            nodes=gone["nodes"].to(self.device),
+            h=gone["h"].to(self.device),
+            y=gone["y"].to(values_device) if "y" in gone else None,
             tracked_variables=tuple(
-                value
+                value.to(values_device)
                 for key, value in gone.items()
                 if key.startswith(self._TRACKED_KEY_PREFIX)
             )
             or None,
             mesh_quadratures=gone["mesh_quadratures"],
             mesh_quadrature_errors=torch.abs(gone["mesh_quadrature_errors"]),
-            error_ratios=gone["error_ratios"],
+            error_ratios=gone["error_ratios"].to(self.device),
             gradient_taken=False,
             mesh_init=mesh_init,
             mesh_final=mesh_final,
@@ -4552,7 +4464,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         )
         for key, value in record.items():
             if key not in self._RECORD_SCALAR_KEYS:
-                record[key] = value[record_keep_mask.to(value.device)]
+                record[key] = value[record_keep_mask]
         return record
 
     def _flatten_output(self, panel_array: torch.Tensor) -> torch.Tensor:

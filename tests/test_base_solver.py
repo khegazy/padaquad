@@ -387,19 +387,18 @@ class TestHostWaits:
     @pytest.mark.parametrize("runtime_checks", [True, False])
     def test_starting_mesh_reads_once_per_check(self, runtime_checks):
         """A fresh starting mesh reads the device for its order check (with
-        runtime_checks) and for the dictionary of its points, nothing else."""
+        runtime_checks), nothing else."""
         solver = adaptive_quadrature(
             "uniform", "gk21", device="cuda", runtime_checks=runtime_checks
         )
         a, b = (torch.tensor([x], dtype=torch.float64, device="cuda") for x in (0, 1))
         waits = _host_waits(lambda: solver._setup_initial_mesh(None, a, b, True, 13))
-        assert waits == 1 + runtime_checks
+        assert waits == runtime_checks
 
     @pytest.mark.parametrize("values_on", ["cuda", "cpu"])
     def test_mesh_update_reads_once(self, values_on):
         """The mesh update reads the device once, for the number of accepted
-        subintervals (plus once for _get_mesh_indices, the dictionary of the
-        new mesh's points), whatever it keeps: method output, values moved
+        subintervals, whatever it keeps: method output, values moved
         within their array, tracked variables, nodes, split counts, the split
         cap. Values on result_device ("cpu", trade_speed_for_memory) cost one
         more copy of the kept positions per array."""
@@ -429,7 +428,7 @@ class TestHostWaits:
                 in_place=True,
             )
 
-        assert _host_waits(update) == 2 + 2 * (values_on == "cpu")
+        assert _host_waits(update) == 1 + 2 * (values_on == "cpu")
 
     @pytest.mark.parametrize("runtime_checks", [True, False])
     def test_evaluation_reads_only_for_the_finite_check(self, runtime_checks):

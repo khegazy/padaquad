@@ -116,7 +116,6 @@ def _assert_integrated(solver, mesh, idxs, nodes, f_evals, method_output):
         "mesh_quadratures",
         "mesh_quadrature_errors",
         "h",
-        "mesh_left",
     ):
         assert torch.equal(getattr(method_output, field), getattr(expected, field)), (
             f"{field} differs from one _calculate_integral call"

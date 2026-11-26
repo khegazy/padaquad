@@ -17,7 +17,6 @@ def _make_method_output(N, D=1):
         mesh_quadratures=torch.ones(N, D, dtype=torch.float64),
         mesh_quadrature_errors=torch.ones(N, D, dtype=torch.float64) * 0.01,
         h=torch.ones(N, 1, dtype=torch.float64) * 0.5,
-        mesh_left=torch.arange(N, dtype=torch.float64).unsqueeze(-1) * 0.5,
     )
 
 
@@ -48,17 +47,19 @@ def _keep_mask(error_ratios):
     return make_solver_for_unit_test()._accept_reject_masks(error_ratios, None)[0]
 
 
-def _rebuilt_mesh_indices(barriers):
-    """The mesh_indices dict the method should return for ``barriers``: each
-    full barrier coordinate mapped to its position in the ordered mesh."""
-    return {tuple(b.tolist()): i for i, b in enumerate(barriers)}
+def _assert_transfer(idxs_transfer, barriers, barriers_new):
+    """``idxs_transfer`` gives the position in the new mesh of every old mesh
+    point (the map the record's mesh indices follow): increasing, and the new
+    mesh holds each old point there, bit for bit."""
+    assert torch.all(idxs_transfer[1:] > idxs_transfer[:-1])
+    assert torch.equal(barriers_new[idxs_transfer], barriers)
 
 
 class TestAdaptivelyAddSteps:
     """Tests for AdaptiveQuadrature._adaptively_increase_mesh.
 
     The method returns a 9-tuple:
-    (method_output, y, tracked, nodes, mesh_new, trackers_new, mesh_indices,
+    (method_output, y, tracked, nodes, mesh_new, trackers_new, idxs_transfer,
      keep_idx, split_counts_new); keep_idx holds the batch positions of the
     accepted subintervals.
     """
@@ -83,8 +84,7 @@ class TestAdaptivelyAddSteps:
         assert not torch.any(trackers_new[:2])
         assert len(er_kept) == 2
         assert mo_out.mesh_quadratures.shape[0] == 2
-        # mesh_indices maps every barrier coordinate to its mesh position.
-        assert mesh_idx == {tuple(b.tolist()): i for i, b in enumerate(barriers_new)}
+        assert mesh_idx.tolist() == [0, 1, 2]
 
     def test_all_fail(self):
         """All error_ratios >= 1: midpoints inserted, no subinterval kept."""
@@ -103,8 +103,9 @@ class TestAdaptivelyAddSteps:
         assert len(barriers_new) == 5
         assert len(er_kept) == 0
         assert mo_out.mesh_quadratures.shape[0] == 0
-        # mesh_indices reflects the inserted midpoints and the bumped positions.
-        assert mesh_idx == {tuple(b.tolist()): i for i, b in enumerate(barriers_new)}
+        # The old points move past the inserted midpoints.
+        assert mesh_idx.tolist() == [0, 2, 4]
+        _assert_transfer(mesh_idx, barriers, barriers_new)
 
     def test_mixed_pass_fail(self):
         """First passes, second fails: 1 midpoint added."""
@@ -196,10 +197,9 @@ class TestAdaptivelyAddSteps:
         )
         assert mo_out.mesh_quadratures.shape[0] == 2
         assert mo_out.h.shape[0] == 2
-        # The left mesh points of the accepted rows (0 and 2), which place
-        # them in the record.
-        assert mo_out.mesh_left[:, 0].tolist() == [0.0, 1.0]
-        assert len(er_kept) == 2
+        # The positions in the batch of the accepted rows, which place them
+        # in the record.
+        assert er_kept.tolist() == [0, 2]
 
     def test_single_step_passes(self):
         """Single step that passes: barriers unchanged."""
@@ -236,7 +236,7 @@ class TestAdaptivelyAddSteps:
 
 
 class TestVectorMeshOrdering:
-    """Vector mesh (T > 1): midpoints, per-component ordering, mesh_indices.
+    """Vector mesh (T > 1): midpoints, per-component ordering, idxs_transfer.
 
     The mesh barrier array has shape [M, T]; every transfer/insert operation
     must act per component and keep each column ordered. These meshes are
@@ -299,13 +299,9 @@ class TestVectorMeshOrdering:
         assert torch.allclose(barriers_new, expected)
         _assert_columns_increasing(barriers_new)
 
-    def test_mesh_indices_returned_T2(self):
-        """The returned mesh_indices keys every multi-element barrier vector.
-
-        Extends the T=1 mesh_indices check in TestAdaptivelyAddSteps to vector
-        meshes; ``len == len(barriers_new)`` guards against coordinate
-        collisions among the multi-element keys.
-        """
+    def test_idxs_transfer_returned_T2(self):
+        """The returned idxs_transfer places every old mesh point of a vector
+        mesh in the new mesh: integer positions, no coordinates compared."""
         barriers = torch.tensor(
             [[0.0, 0.0], [0.5, 1.0], [1.0, 2.0]], dtype=torch.float64
         )
@@ -318,8 +314,8 @@ class TestVectorMeshOrdering:
                 None, _keep_mask(error_ratios), None, None, barriers, idxs, trackers
             )
         )
-        assert mesh_idx == _rebuilt_mesh_indices(barriers_new)
-        assert len(mesh_idx) == len(barriers_new)
+        _assert_transfer(mesh_idx, barriers, barriers_new)
+        assert mesh_idx.tolist() == [0, 2, 4]
 
     def test_consecutive_fails_T2_ordering(self):
         """Three adjacent T=2 fails (stresses the cumsum offset): columns stay
@@ -661,7 +657,31 @@ class TestPartialAndBoundary:
         # Panel 1 accepted -> barrier 1 cleared; skipped panels 0 and 2 keep
         # their True tracker at shifted positions; new midpoint (idx 4) is True.
         assert trackers_new.tolist() == [True, False, True, True, True, False]
-        assert mesh_idx == _rebuilt_mesh_indices(barriers_new)
+        _assert_transfer(mesh_idx, barriers, barriers_new)
+
+    def test_extra_split_positions_in_any_order(self):
+        """The recorded subintervals to split again come in the record's row
+        order, not ascending; the update sorts them with the batch's, so the
+        mesh, trackers and idxs_transfer are those of ascending positions."""
+        barriers = torch.linspace(0, 1, 6, dtype=torch.float64)[:, None]
+        trackers = torch.tensor([False, True, False, False, False, False])
+        outputs = [
+            self.solver._adaptively_increase_mesh(
+                None,
+                torch.tensor([False]),
+                None,
+                None,
+                barriers,
+                torch.tensor([1]),
+                trackers.clone(),
+                extra_split_idxs=torch.tensor(extras),
+            )
+            for extras in ([4, 0, 2], [0, 2, 4])
+        ]
+        for slot in (4, 5, 6):
+            assert torch.equal(outputs[0][slot], outputs[1][slot])
+        assert len(outputs[0][4]) == 10
+        _assert_transfer(outputs[0][6], barriers, outputs[0][4])
 
     def test_split_first_panel(self):
         barriers = torch.tensor([[0.0], [0.5], [1.0]], dtype=torch.float64)

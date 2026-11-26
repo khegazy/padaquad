@@ -44,7 +44,7 @@ different, and what changed in this file:
    decide.
 3. **D2 (copy the values without waiting) does not help the default integrand
    and helps large D a lot.** With D = 1 a turn with the record on the GPU (no
-   copy at all) is not faster than with `result_device="cpu"` (2.30 against
+   copy at all) is not faster than with `result_device="cpu"` (2.31 against
    2.17 ms per turn on `chirp`), so the plan's argument "it lets a turn have
    one wait" buys nothing measurable there. With many outputs the copy is the
    largest cost of a turn: the prototype (pinned memory, `non_blocking=True`)
@@ -61,9 +61,10 @@ different, and what changed in this file:
    subintervals and the `"2"` and `"rms"` norms over outputs, which differ.
 5. **Route (d) was measured, not estimated.** A proxy (the whole solver on the
    CPU, `f` on the GPU) runs a `chirp` turn in 0.95 ms against 2.1 ms on the
-   GPU, and stops paying at about 5,000 mesh points (5.4). And the plan
-   missed that on the CPU alone a turn already costs 0.7-0.9 ms: the
-   few-subinterval targets of 3.6 are met today by `device="cpu"` (2.1).
+   GPU, and stops paying between about 5,000 and 8,000 mesh points (5.4).
+   And the plan missed that on the CPU alone a turn already costs 0.7-0.9 ms:
+   the few-subinterval targets of its 3.6 are met today by `device="cpu"`
+   (section 6).
 6. **`take_gradient=True` turns spend about 0.4 ms in memory statistics.** The
    plan did not look at them. Each call of `torch.cuda.memory_allocated`,
    `max_memory_allocated` or `memory_reserved` builds PyTorch's whole
@@ -132,7 +133,7 @@ GPU, `take_gradient=False`, default `result_device="cpu"`:
 | chirp | 14 | 77 | 35.3 | 1.02 | 2.17 | 3.80 | 5 | 149 | 2,331 |
 | damped_sine | 1 | 11 | 5.0 | 0.99 | 1.74 | 2.24 | (4 in the one turn) | 115 | 191 |
 | many_outputs (D = 1,000) | 2 | 13 | 11.2 | 1.25 | 2.72, 3.03 | 4.17 | 5 | 133 | 362 |
-| oscillatory | 13 | 13,737 | 39.8 | 1.28 | 1.85-2.82 | 8.90 | 4-5 | 125 | 1,797 |
+| oscillatory | 13 | 13,737 | 39.8 | 1.28 | 1.85-2.82 | 8.90 | 3 while every subinterval is split, then 5 | 125 | 1,797 |
 | bench_damped_sine | 1 | 11 | 5.0 | 1.00 | 1.77 | 2.24 | (4) | 117 | 193 |
 | bench_sharp_peak | 7 | 17 | 20.4 | 1.00 | 2.42 | 2.99 | 5 | 149 | 1,207 |
 
@@ -141,9 +142,9 @@ the first):
 
 | Integrand | GPU, record on the GPU | GPU, `take_gradient=True` | GPU, `take_gradient=True`, record on the GPU | CPU (8 threads) | CPU, `take_gradient=True` |
 |---|---|---|---|---|---|
-| chirp | 2.30 | 3.46 | 3.23 | 0.89 | 0.97 |
+| chirp | 2.31 | 3.46 | 3.23 | 0.89 | 0.97 |
 | many_outputs | 2.43 | 3.78 | 3.26 | 1.33 | 1.56 |
-| bench_sharp_peak | 2.37 | 3.28 | 3.23 | 0.83 | 0.90 |
+| bench_sharp_peak | 2.37 | 3.38 | 3.23 | 0.83 | 0.90 |
 
 (`take_gradient=True` used `f` times a scalar parameter equal to 1 and
 `loss_fxn=lambda r: r.integral.sum()`.) With the record on the GPU the
@@ -338,9 +339,9 @@ checked.
   implemented.
 - **(d) The bookkeeping of small meshes on the CPU, `f` and the reductions
   on the GPU.** Measured by a proxy (5.4): a turn of 0.8-1.0 ms on the few-
-  and middle-sized meshes, against 2.0-2.2 ms on the GPU; it stops paying at
-  about 5,000 mesh points. Not implemented (a device choice by mesh size is a
-  new code path; task decision).
+  and middle-sized meshes, against 2.0-2.2 ms on the GPU; it stops paying
+  between about 5,000 and 8,000 mesh points. Not implemented (a device
+  choice by mesh size is a new code path; task decision).
 - **(a) CUDA graph of the bookkeeping, (b) `torch.compile`.** Not attempted
   (stage 3; see "Not done").
 
@@ -374,7 +375,7 @@ convergence) and one subinterval per iteration. Rejected.
 
 ## 5. Stage 1 against the measurements
 
-### 5.1 To implement
+### 5.1 Implemented
 
 1. **The mesh update inserts its midpoints with three operations fewer per
    halving** (`_adaptively_increase_mesh`, the halving loop). Each split
@@ -387,12 +388,14 @@ convergence) and one subinterval per iteration. Rejected.
    offsets set at `split_idxs + 1`), which for `i = split_idxs[j]` counts the
    `j` smaller split positions because `split_idxs` is strictly ascending.
    Integers only, so every returned number is unchanged; measured: 149 to 146
-   operations per `chirp` turn, the same on the post-loop mesh update.
+   operations per `chirp` turn (CPU count: 1,633 to 1,600 over 11 turns;
+   `oscillatory` 1,617 to 1,578 over 13; `bench_sharp_peak` 1,027 to 1,006
+   over 7), and 2 fewer in the post-loop mesh update.
 2. **Test** `tests/test_base_solver.py::TestHostWaits::test_loop_reads_only_where_pinned`:
    the host waits that grow with the number of passes are exactly those the
    other tests of the class pin (per pass the loop's condition and the mesh
    update, per call of `f` the finite check, per re-check its one read), found
-   by comparing two integrals of 30 and 300 Hz-scale frequencies whose numbers
+   by comparing the integrals of `sin(30 t)` and `sin(300 t)`, whose numbers
    of passes differ, without hard-coding what is read before and after the
    loop. Checked to fail when one read per pass is added to the loop body. No
    launch count is pinned.
@@ -465,9 +468,9 @@ measures time, not bits.
 
 On `oscillatory`, whose turns sweep the mesh from 12 to 13,738 points, (b)
 is faster while the mesh has up to about 1,400 points (1.14 against 1.67 ms),
-about equal at 2,700-4,900 (1.75-2.01 against 2.18-2.19 ms), and slower from
-about 8,000 (2.48 against 2.19 ms): route (d) stops paying at about 5,000
-mesh points, later if its weighted sums stay on the GPU.
+still faster at 2,700-4,900 (1.75-2.01 against 2.18-2.19 ms), and slower
+from about 8,000 (2.48 against 2.19 ms): route (d) stops paying between
+about 5,000 and 8,000 mesh points, later if its weighted sums stay on the GPU.
 
 Bits (2.5): the nodes, midpoints, tolerances, ratios, `amax` and `cumsum` give
 the same bits on the CPU and the A100, so route (d) can keep them on either;
@@ -551,10 +554,73 @@ capture and compilation are blocked as in 3.1, and that quadax costs about
   5.2, built from 2.4's costs; that route (d) proper would be faster than the
   proxy for many outputs.
 - **Unsure:** where route (d)'s crossover lies when its sums stay on the GPU
-  (only the proxy's, about 5,000 mesh points, was measured); the pinned-memory
-  behaviour of D2 over many calls (PyTorch's pinned cache keeps freed blocks);
+  (only the proxy's, between about 5,000 and 8,000 mesh points, was
+  measured); the pinned-memory behaviour of D2 over many calls (PyTorch's pinned cache keeps freed blocks);
   run-to-run variation on other nodes.
 - **Not checked:** quadax 0.3.1 itself; Inductor's GPU code; the Performance
   page (not re-run).
 - **Mine, not from a source:** every candidate of 5.2, the D2 and route (d)
   prototypes, and the reading of quadax's cost per iteration.
+
+## Implemented (branch `compiled_turn`, 2026-11-26)
+
+| Step | Commit | What |
+|---|---|---|
+| Review | `454a1af` | This plan corrected against `bc5b4a1` with measurements (section 2), stage 1 rewritten as measured candidates (5.2), D2 and route (d) measured by prototypes (5.3, 5.4), the targets compared (6). |
+| 5.1, item 1 | `df96ba0` | `_adaptively_increase_mesh`: one tensor `split_left = step_transfer[split_idxs]` for the split counts' left child and the midpoint's left neighbour; `idxs_new = split_left + 1`. Removes `torch.arange(N_t_add)`, one addition, one subtraction and one gather per halving. |
+| 5.1, item 2 | `e71775e` | `tests/test_base_solver.py::TestHostWaits::test_loop_reads_only_where_pinned`. |
+
+Results unchanged, bit for bit: `impl/bitgrid_ct.py` (2,396 integrations,
+every returned tensor, the state's mesh, the re-checks' decisions and the
+points of `f`) on the CPU and on the A100, 0 differences of 66,922 and
+68,132 fields; `record-order/impl/bitgrid.py` (856 integrations on the CPU,
+864 on the A100), 0 differences.
+
+Gain, A100 (`nid200441`), `impl/time_ab.py`, base `bc5b4a1` and the branch
+alternated three times, median of 41 calls each (default settings of 2.1):
+
+| Integrand | Call, base (ms) | Call, branch (ms) | Mean turn, base (ms) | Mean turn, branch (ms) |
+|---|---|---|---|---|
+| chirp (14 turns) | 34.24, 35.05, 34.16 | 33.31, 34.11, 33.60 | 2.13, 2.16, 2.12 | 2.06, 2.11, 2.08 |
+| bench_sharp_peak (7) | 17.10, 17.08, 17.21 | 16.79, 17.36, 17.06 | 1.92, 1.92, 1.93 | 1.88, 1.95, 1.91 |
+| oscillatory (13) | 32.14, 34.81, 34.36 | 31.43, 31.96, 32.06 | 1.85, 1.91, 1.90 | 1.79, 1.83, 1.83 |
+| damped_sine (1) | 4.89, 4.90, 4.91 | 4.87, 4.91, 4.93 | 1.61, 1.61, 1.61 | 1.59, 1.61, 1.62 |
+
+About 1-2 % on the multi-turn integrands, at the edge of the run-to-run
+variation; nothing on a one-turn integral. (`sharp_peak` here is the solver
+called directly, as in 5.4, not through `padaquad.integrate`.)
+
+### Not done
+
+- **5.2, items 1-8**: measured or estimated, not implemented (reasons in the
+  table). The largest without a new code path is item 3 (judge the batch and
+  the record together, 4-6 % of a turn, estimate), which should wait for the
+  `split_waste` follow-up; item 8 (memory statistics with `take_gradient=True`,
+  up to 12 % of such a turn) is the largest of all but outside this plan.
+- **D2** (5.3): prototype only. Worth it for many outputs (25-35 % of a call at
+  10,000-100,000 outputs); needs pinned host memory as large as the recorded
+  values and a synchronization before every host read of the record during
+  the loop.
+- **D2b**: not implemented (task decision); it would save about 15 µs per
+  call of `f`.
+- **Route (d)** (5.4): proxy only. A turn of 0.8-1.0 ms instead of 2.0-2.2 ms
+  on meshes of up to about 1,400 points, break-even between about 5,000 and
+  8,000; bit identity
+  end to end not shown (it was not built). It would add a device choice by
+  mesh size.
+- **Stage 3, CUDA graphs and `torch.compile`**: not attempted. Capture needs
+  fixed shapes and no host reads (3.1), but a turn's sizes come from its one
+  read (D1) and change every turn, so only the bookkeeping between reads could
+  be captured, on capacity buffers re-captured as the mesh grows; that is
+  route (a) of the original plan, several hundred lines. What it could win is
+  bounded by what the bookkeeping costs: the measured turn is about 2.2 ms on
+  the GPU, while the same Python and operations run on the CPU in 0.9 ms
+  (2.1), so most of the GPU turn is launch and dispatch overhead that capture
+  would remove, but the CPU route (d) removes most of it with no capture
+  (5.4). `torch.compile` changed the bits of every sum and made a weighted sum
+  depend on the batch size on the CPU (2.9), which breaks the guarantee of
+  identical results for any batch size; only the elementwise chains could be
+  compiled, and they are about 35 of a turn's 146 operations (the error
+  ratios and masks of the batch and of the re-check, 2.3).
+- **The Performance page** was not re-run (section 6 uses copies of its
+  integrands).

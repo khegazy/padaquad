@@ -1479,7 +1479,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # result.integral is differentiated, wherever the values went. Known
         # only once f has run, so given after the loop (no state: the first
         # call of a series).
-        if state is None and trade_speed_for_memory and record["integral"].requires_grad:
+        if (
+            state is None
+            and trade_speed_for_memory
+            and record["integral"].requires_grad
+        ):
             logger.warning(
                 "trade_speed_for_memory=True with an integrand output that "
                 "requires grad: the autograd graph keeps what f saved for the "

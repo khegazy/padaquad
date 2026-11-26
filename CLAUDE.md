@@ -151,8 +151,9 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_examples_run.py` | Runs `examples/*.py` (with output markers, or self-checking with asserts: `SELF_CHECKING_EXAMPLES`, `MPLBACKEND=Agg`), every script in `examples/verification/`, and every ```python block of the files in its `DOCUMENTS` (the README, `docs/development/adding_a_method.md`; except blocks preceded by `<!-- not-tested -->`) |
 | `test_max_adaptive_splits.py` | The `max_adaptive_splits` depth cap |
 | `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks`; `get_max_batch(f=..., t=...)` (measurement, argument checks, `evaluation_buffer` kept free twice) and the measured `result.max_batch` |
+| `test_memory_state.py` | The batch size of `integrate` and the state: the first call is the first pass (at most 10,000 points), every point `f` is called at belongs to the integration (C per evaluated subinterval; every start, both `take_gradient`, with simulated out-of-memory errors), growth by 10, the retry chain of a first call that runs out of memory, a given `max_batch`, the state's mesh and batch size; backward out-of-memory restarts |
 | `test_methods_registry.py` | Registry consistency: table shapes and dtypes, `degree` / `error_exponent` types |
-| `test_interior_nodes.py` | Gauss-Kronrod (nodes all interior): C points of `f` per subinterval, none at a mesh point (start-up calls included), `1/sqrt(t)` and `log(t)` at a bound converge, result rows = evaluated points, bound gradients against the closed form |
+| `test_interior_nodes.py` | Gauss-Kronrod (nodes all interior): C points of `f` per subinterval, none at a mesh point, no call of `f` before the first pass, `1/sqrt(t)` and `log(t)` at a bound converge, result rows = evaluated points, bound gradients against the closed form |
 | `test_multi_d_integrand.py` | Integrands with D > 1 outputs |
 | `test_oom_recovery.py` | The out-of-memory catch-and-retry path (direct calls of `_evaluate_f_on_split_nodes`, including retries that end inside a subinterval; `integrate` with and without `trade_speed_for_memory`) |
 | `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance (with `take_gradient=False` the drift is between passes: `_cancelling_peak` hides its cancelling part in a narrow peak the first passes miss); `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN) |
@@ -450,10 +451,13 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   two reviews of the code in `d0bcbdc` and `59b7f11`). Per call, `_batch` (largest batch known
   to fit) and `_batch_converged` (will not grow again), set at the start of
   `integrate`: from `max_batch` (call, or constructor when no state) →
-  converged; from `state=` (`IntegrationState`, `results.py`); else from
-  `_initialize_max_batch` (forward calls on 10, 100 and 1,000 = `_LARGEST_TEST_CALL`
-  copies of `mesh_init`, stopping at the order of the first pass, through `_measure_call` with no-op readers;
-  an OOM shrinks by `_shrink_batch` = 0.75 until one runs → converged).
+  converged; from `state=` (`IntegrationState`, `results.py`); else
+  `ceil(min(n_first, _LARGEST_FIRST_CALL = 10,000) / _GROWTH)`, not converged,
+  so the first call of `f` is the first pass, at most 10,000 points (no test
+  calls and no output-check call: every point `f` is called at belongs to the
+  integration; the output's shape is checked in `_call_f`, the
+  `error_integral_reference` shape in Step 4, the `trade_speed_for_memory`
+  warning after the loop).
   `_batch_for(n_waiting)` sizes every call of `f`: `min(n_waiting, B)` if
   converged, else `min(n_waiting, 10 B)` (`_GROWTH`); `_evaluate_f_in_batches`
   raises `_batch` after each call that ran and, on OOM, sets it to

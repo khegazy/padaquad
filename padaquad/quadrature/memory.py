@@ -66,10 +66,10 @@ _OOM_BACKOFF = 0.75
 # that needs more points than it tries this many times as many.
 _GROWTH = 10
 
-# The largest test call of integrate() given no max_batch and no state (the
-# test calls are 10, 100 and 1,000 points; larger sizes are reached by growth,
-# whose calls of f do useful work).
-_LARGEST_TEST_CALL = 1000
+# The largest first call of f of an integrate() call given no max_batch and no
+# state: its first pass, up to this many points. Larger calls are reached by
+# growth (_GROWTH per call), so no call is more than 10 times one that ran.
+_LARGEST_FIRST_CALL = 10_000
 
 
 def _shrink_batch(n: int) -> int:
@@ -1607,58 +1607,6 @@ class _MemoryManagement:
         """
         growth = 1 if self._batch_converged else _GROWTH
         return min(n_waiting, growth * self._batch)
-
-    def _initialize_max_batch(
-        self,
-        f: Callable[..., Any],
-        f_args: tuple[Any, ...],
-        node: torch.Tensor,
-        n_first: int,
-        total_mem_usage: float,
-    ) -> tuple[int, bool]:
-        """
-        Find the starting batch size of a call given no max_batch and no state.
-
-        Calls f, forward only, on 10, 100 and 1,000 (``_LARGEST_TEST_CALL``)
-        copies of ``node``, stopping at the order of the first pass (the
-        largest power of 10 not above n_first), only to see whether f runs at
-        these sizes; no memory is read. A call
-        that runs out of memory is repeated at ``_shrink_batch`` of its size
-        until one runs, and no larger call follows.
-
-        Parameters
-        ----------
-        f, f_args : Callable[..., Any], tuple[Any, ...]
-            The integrand and its extra arguments.
-        node : torch.Tensor
-            One point as a [1, T] row on ``self.device``.
-        n_first : int
-            Number of points of the first pass.
-        total_mem_usage : float
-            Only quoted in the error for a single point that does not fit.
-
-        Returns
-        -------
-        tuple[int, bool]
-            The largest test call that ran (1 when n_first < 10), and whether
-            a test call ran out of memory (the batch size is then converged).
-
-        Raises
-        ------
-        torch.OutOfMemoryError
-            If f does not fit on a single point.
-        """
-        batch, converged, n = 1, False, _GROWTH
-        while n <= min(n_first, _LARGEST_TEST_CALL) and not converged:
-            while (
-                self._measure_call(
-                    f, f_args, node, n, lambda: None, lambda: 0, total_mem_usage
-                )
-                is None
-            ):
-                n, converged = _shrink_batch(n), True
-            batch, n = n, n * _GROWTH
-        return batch, converged
 
     def _save_grads(
         self, loss: torch.Tensor, saved: _SavedGrads, listed: bool

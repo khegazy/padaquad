@@ -58,6 +58,8 @@ from padaquad.distributed import DistributedEnvironment, _resolve_device
 from padaquad.methods import _get_method
 from padaquad.quadrature.memory import (
     _GB,
+    _GROWTH,
+    _LARGEST_FIRST_CALL,
     _check_evaluation_buffer,
     _is_out_of_memory,
     _MemoryManagement,
@@ -741,10 +743,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         max_batch : int or None
             Largest number of integrand evaluations per call of f, used as it is
             (it does not grow), also with a ``state``. If this, the ``state``
-            and the constructor's value are all None, f is called on 10, 100
-            and 1,000 points (stopping at the size of the first pass), and the
-            batch size starts at the largest that ran and grows by factors of
-            10 until f runs out of memory (see :ref:`the user guide <ug-memory>`).
+            and the constructor's value are all None, the first call of f is
+            the first pass (at most 10,000 points), and the batch size grows
+            from there by factors of 10 until f runs out of memory (see
+            :ref:`the user guide <ug-memory>`).
         state : IntegrationState or None
             Where an earlier call ended (the second value it returned): its mesh (as
             ``mesh=``) and its batch size. Cannot be given with ``mesh``; bounds
@@ -1048,17 +1050,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         self._total_mem_usage = total_mem_usage
         self._backward_ratio = 1.0
 
-        # The point of the test calls of _initialize_max_batch: the first node
-        # of the whole interval, which is mesh_init (bit for bit) for a method
-        # with a node at the start of a subinterval and an interior point
-        # otherwise, so f is not called at a bound the method never evaluates
-        # (where f may be singular, as 1/sqrt(t) at 0 with Gauss-Kronrod).
-        # The bounds are already on the solver's dtype and device
-        # (_setup_integral_bounds).
-        probe = self._compute_nodes(
-            mesh_init.reshape(1, -1), mesh_final.reshape(1, -1)
-        )[:, 0]
-
         loss_fxn = loss_fxn if loss_fxn is not None else self._integral_loss
 
         # Starting mesh: the caller's mesh cut to the bounds, or a fresh one.
@@ -1072,21 +1063,20 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         n_start_steps = len(mesh) - 1
         start_mesh = given_mesh if given_mesh is not None else mesh.detach().clone()
         # The batch size of this call (_batch_for): a given max_batch is fixed;
-        # a state's may grow unless it has converged; with neither, the test
-        # calls find where to start.
+        # a state's may grow unless it has converged. With neither, the first
+        # call of f is the first pass, at most _LARGEST_FIRST_CALL points
+        # (_batch_for allows _GROWTH times the batch size, and _GROWTH times
+        # the ceiling of m / _GROWTH is m to m + 9), and the batch size grows
+        # from what it ran; every point f is called at belongs to the
+        # integration.
         if given is not None:
             self._batch, self._batch_converged = operator.index(given), True
         elif state is not None:
             self._batch = state.max_batch
             self._batch_converged = state.max_batch_converged
         else:
-            self._batch, self._batch_converged = self._initialize_max_batch(
-                f,
-                f_args,
-                probe,
-                n_start_steps * self.C,
-                total_mem_usage,
-            )
+            n_first = min(n_start_steps * self.C, _LARGEST_FIRST_CALL)
+            self._batch, self._batch_converged = -(-n_first // _GROWTH), False
         # Gradients to put back after an out-of-memory error in a backward
         # pass: the given parameters now, the rest as the graph walk finds them.
         saved: _SavedGrads = {}

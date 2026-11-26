@@ -74,10 +74,10 @@ def test_no_warm_start_path_correctness(take_gradient):
 
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
-def test_reuse_mesh_and_max_batch(device, monkeypatch):
-    """The first call finds a batch size (test calls, then growth) and returns
-    it with its optimal mesh in result.state; passing the state to the next
-    call makes no test call and starts from every point of that mesh."""
+def test_reuse_mesh_and_max_batch(device):
+    """The first call finds a batch size (its first pass, then growth) and
+    returns it with its optimal mesh in the state; passing the state to the
+    next call starts from every point of that mesh."""
     solver = adaptive_quadrature("uniform", "gk21", device=device)
     first, first_state = solver.integrate(
         f=torch.exp, mesh_init=_bound(2.0), mesh_final=_bound(3.0), take_gradient=False
@@ -85,7 +85,6 @@ def test_reuse_mesh_and_max_batch(device, monkeypatch):
     assert first_state.max_batch >= solver.C
     assert not first_state.max_batch_converged
 
-    monkeypatch.setattr(solver, "_measure_call", lambda *a: pytest.fail("test call"))
     second, _ = solver.integrate(f=torch.exp, state=first_state, take_gradient=False)
     assert second.n_start_steps == len(first_state.mesh) - 1
     exact = math.exp(3.0) - math.exp(2.0)

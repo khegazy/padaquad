@@ -155,9 +155,10 @@ print(round(float(result.integral), 4), round(float(half.integral), 4))  # 0.776
 
 A call needs a `mesh`, a `state` with a mesh, or both bounds. Bounds inside the
 mesh cut it; a bound outside it extends it, and the integration refines the new
-subinterval. Without `max_batch` or a state, the first call tries a few small
-batches and then lets the batch size grow by factors of 10 until the integrand
-runs out of memory; a state carries what it found to the next call.
+subinterval. Without `max_batch` or a state, the first call evaluates its
+first pass in one call of the integrand (at most 10,000 points) and then lets
+the batch size grow by factors of 10 until the integrand runs out of memory; a
+state carries what it found to the next call.
 
 <!-- include-end: reuse -->
 More, including several integrals per step, checkpoints and when not to reuse
@@ -306,9 +307,11 @@ the same text. In short:
 
 2. **Batched evaluation.** The nodes of a batch of subintervals are stacked
    into one tensor and the integrand is called once on all of them. Unless
-   `max_batch` is given, the batch size starts small and grows by factors of
-   10 whenever more points are waiting, until the integrand runs out of memory;
-   then it shrinks and stops growing.
+   `max_batch` is given, the first call is the first pass (at most 10,000
+   points), and the batch size grows by factors of 10 whenever more points
+   are waiting, until the integrand runs out of memory; then it shrinks and
+   stops growing. Every point the integrand is called at belongs to the
+   integral.
 
 3. **Error estimate per subinterval.** Each method computes the integral of a
    subinterval twice: with its own weights and with a lower-degree method on

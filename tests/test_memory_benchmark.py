@@ -1509,8 +1509,9 @@ def test_gpu_oom_after_n_100_keeps_measured_cost(monkeypatch):
         return torch.ones((t.shape[0], 1), dtype=t.dtype, device=t.device)
 
     node = torch.zeros(1, dtype=torch.float64, device="cuda:0")
-    # Warm-up, as integrate() does: a cold first call (kernel loading) can
-    # take more than 0.1 s, after which the CUDA reader steps 2x, not 10x.
+    # Warm-up, as get_max_batch(f=...) does: a cold first call (kernel
+    # loading) can take more than 0.1 s, after which the CUDA reader steps 2x,
+    # not 10x.
     f(node.reshape(1, 1))
     calls.clear()
     solver._setup_memory_checks(f, node, take_gradient=False, total_mem_usage=0.9)
@@ -1569,7 +1570,7 @@ def test_gpu_benchmark_leaves_no_state(monkeypatch):
 
     warm = node.reshape(1, 1)
     (warm @ warm.T).sum()  # matmul: allocates cuBLAS's persistent workspace
-    f(warm)  # warm-up, as integrate() does
+    f(warm)  # warm-up, as get_max_batch(f=...) does
     # The benchmark runs gc.collect(); collect first so garbage left by earlier
     # tests is not counted as memory the benchmark freed.
     gc.collect()
@@ -1897,7 +1898,7 @@ def test_cost_convergence_waits_for_fit_ready(fake, monkeypatch, caplog):
     """A GPU-like reader (10 KB floor, counts reused memory) and calls of
     0.2 s, so N doubles. The call at N = 2 reads 1 MiB (a workspace f
     allocates only in that call, as for a kernel first used at two points;
-    integrate()'s one-point call absorbs only what N = 1 allocates); every
+    get_max_batch's one-point call absorbs only what N = 1 allocates); every
     other call reads 1 KiB per point. From N = 16 on the readings are
     reliable and the cost per point is constant, so the convergence stop
     alone would end the search at N = 64. The fit uses every reliable
@@ -1921,14 +1922,12 @@ def test_cost_convergence_waits_for_fit_ready(fake, monkeypatch, caplog):
     assert "did not allow a fit" not in caplog.text
 
 
-def test_out_of_memory_retry_shrinks_the_failed_batch(fake, monkeypatch):
-    """integrate() without max_batch: the test call of 10 points (stubbed, so
-    f is not called) gives a batch size of 10, not converged, so the first
-    pass of 44 points (11 subintervals of bosh3's 4 nodes) runs whole. f runs
-    out of memory above 29 points; each retry shrinks the batch that failed,
-    44 -> 33 -> 25 (then the 19 points left), and 25 is the converged batch
-    size. Catches: a retry that does not shrink the failed batch itself."""
-    stub_calls(fake.solver, monkeypatch, lambda n: 2**20 * n)
+def test_out_of_memory_retry_shrinks_the_failed_batch(fake):
+    """integrate() without max_batch: the first call of f is the first pass
+    of 44 points (11 subintervals of bosh3's 4 nodes). f runs out of memory
+    above 29 points; each retry shrinks the batch that failed, 44 -> 33 -> 25
+    (then the 19 points left), and 25 is the converged batch size. Catches: a
+    retry that does not shrink the failed batch itself."""
     f = CostIntegrand(fake.memory, fake.clock, oom_from=30)
     result, result_state = fake.solver.integrate(
         f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False

@@ -24,11 +24,11 @@ integrand. The number of points per call is the batch size, `max_batch`.
 **How `integrate` chooses it.** A `max_batch` given to the call (or to the
 constructor, when no `state` is given) is used as it is and never grows. A
 `state` (the state an earlier call returned, {ref}`ug-reuse`) gives the batch
-size to start from. With neither, the integrand is called, forward only, on 10,
-100 and 1,000 copies of the lower bound, stopping at the order of the first
-pass (for the default starting mesh of gk21, 253 points: calls of 10 and 100),
-and the batch size starts at the largest that ran. These calls read no memory; they only
-check that the integrand runs.
+size to start from. With neither, the first call of the integrand is the
+first pass, at most 10,000 points (for the default starting mesh of gk21, 231
+points), and the batch size grows from there. No call of the integrand is
+made for anything but the integral: every point it is called at belongs to
+it.
 
 **How it grows.** While the batch size has not converged, a call of the
 integrand that has more points waiting than the batch size tries 10 times as
@@ -86,7 +86,9 @@ error from the integrand is raised unchanged.
   an out-of-memory error. On a CPU an allocation that does not fit can get the
   process killed instead (Linux accepts most allocations and kills the process
   when memory runs out), and a GPU driver that falls back to system memory
-  (NVIDIA's on Windows) slows down instead of failing. PadaQuad is meant for
+  (NVIDIA's on Windows) slows down instead of failing. The first call (the
+  first pass, up to 10,000 points) is not preceded by a smaller one, and
+  every later call is at most 10 times one that ran. PadaQuad is meant for
   GPUs; on a CPU, pass `max_batch` when memory matters.
 - *Memory is not kept free.* The forward calls fill the memory until they
   fail; other processes on the same GPU can run out of memory meanwhile.

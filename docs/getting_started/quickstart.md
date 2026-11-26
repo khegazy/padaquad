@@ -5,10 +5,10 @@
 :end-before: "<!-- include-end: quickstart -->"
 ```
 
-The integral above uses the default method and tolerances, and a batch size
-chosen from the free memory: the first call measures how much memory one
-evaluation of `f` uses, which takes a few seconds; pass `max_batch` to skip
-it. See
+The integral above uses the default method and tolerances. Without
+`max_batch`, the first call of `f` evaluates the whole first pass, and later
+calls grow by factors of 10 until `f` runs out of memory ({ref}`ug-memory`).
+See
 {doc}`../user_guide/index` for what each option does, and
 {func}`padaquad.integrate` for the full list.
 

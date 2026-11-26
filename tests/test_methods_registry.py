@@ -266,10 +266,9 @@ def _gauss2() -> UniformMethodClass:
 @pytest.mark.parametrize("take_gradient", [False, True])
 def test_a_method_without_end_nodes_integrates(monkeypatch, take_gradient):
     """A uniform method whose nodes include neither end runs end to end: the
-    integral of a cubic is exact, f is never called at a mesh point (start-up
-    calls included, which use the first node of the interval), and the result
-    lists every evaluated point once, N * C rows, with the values f returned
-    there."""
+    integral of a cubic is exact, f is never called at a mesh point, and the
+    result lists every evaluated point once, N * C rows, with the values f
+    returned there."""
     method = _gauss2()
     measured = method.measure_degree()
     assert (measured.degree, measured.lower_degree) == (3, 0)

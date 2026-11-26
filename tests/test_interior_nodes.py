@@ -1,7 +1,8 @@
 """Methods whose nodes are all inside the subinterval (the Gauss-Kronrod methods).
 
 The integrand is evaluated only at the points that carry a weight: never at a
-mesh point, also not in the start-up calls. So an integrable singularity at a
+mesh point, and no call of it comes before the first pass. So an integrable
+singularity at a
 bound needs no special treatment, the result lists exactly the evaluated
 points, and the width and the gradient with respect to a bound come from the
 mesh points.
@@ -40,9 +41,8 @@ def test_nodes_are_interior_and_counted(method):
 @pytest.mark.parametrize("max_batch", [None, 50])
 def test_f_gets_c_points_per_subinterval_and_no_mesh_point(method, max_batch):
     """Every pass calls f at C points per waiting subinterval (in one or more
-    calls), and none of them is a point of the pass's mesh; nor is any point of
-    the start-up calls (made without max_batch) a point of the starting mesh.
-    (The centre node of a subinterval that is then split becomes a mesh point
+    calls), and none of them is a point of the pass's mesh; no call of f comes
+    before the first pass, with or without max_batch. (The centre node of a subinterval that is then split becomes a mesh point
     of the halves, which do not evaluate it.)"""
     received = []
 
@@ -70,35 +70,40 @@ def test_f_gets_c_points_per_subinterval_and_no_mesh_point(method, max_batch):
     )
     assert result.converged
     assert len(passes) > 1  # several passes
-    first_pass, starting_mesh = passes[0]
-    # The test calls of 10, 100, ... points
-    assert (first_pass > 0) == (max_batch is None)
-    for t in received[:first_pass]:
-        assert not torch.isin(t, starting_mesh).any()
+    assert passes[0][0] == 0  # the first pass starts with the first call of f
     exact = 100 * (math.atan(63) + math.atan(37))
     assert abs(float(result.integral) - exact) < 1e-8
 
 
 @pytest.mark.parametrize("method", GAUSS_KRONROD)
 @pytest.mark.parametrize("max_batch", [None, 10_000])
+@pytest.mark.parametrize("take_gradient", [False, True])
 @pytest.mark.parametrize(
     ("f", "exact"),
     [(lambda t: 1 / torch.sqrt(t), 2.0), (torch.log, -1.0)],
     ids=["inverse_sqrt", "log"],
 )
-def test_integrable_singularity_at_a_bound(method, max_batch, f, exact):
+def test_integrable_singularity_at_a_bound(method, max_batch, take_gradient, f, exact):
     """1/sqrt(t) and log(t) are infinite at t = 0, a bound. With every node
-    inside its subinterval f is never called there, so runtime_checks finds
-    no NaN or Inf and the integral converges to the exact value."""
+    inside its subinterval f is never called there, also not without
+    max_batch (no call of f comes before the first pass), so runtime_checks
+    finds no NaN or Inf and the integral converges to the exact value."""
+    smallest = []
+
+    def recorded(t):
+        smallest.append(float(t.min()))
+        return f(t)
+
     torch.manual_seed(0)
     result, _ = _solver(method, atol=1e-6, rtol=0).integrate(
-        f,
+        recorded,
         mesh_init=A,
         mesh_final=B,
-        take_gradient=False,
+        take_gradient=take_gradient,
         max_batch=max_batch,
         runtime_checks=True,
     )
+    assert min(smallest) > 0.0
     assert result.converged
     assert abs(float(result.integral) - exact) < 1e-6
 

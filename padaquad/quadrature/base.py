@@ -200,14 +200,6 @@ def _midpoint(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
     return 0.5 * (left + right)
 
 
-# With split_rule="accelerate", the smallest error ratio at which a failing
-# piece of a split subinterval is split in four instead of halved
-# (_adaptively_increase_mesh). Chosen on a sweep of 9 integrands, 5 methods,
-# 3 tolerances and 3 seeds (docs/issues/2026-11-25-speedup-split-waste-plan.md):
-# above about this ratio both halves of such a piece were usually split again.
-_FOUR_PIECES_RATIO = 1e4
-
-
 # Multi-GPU keyword options the solver forwards to ``DistributedEnvironment``,
 # read from its signature so the names and defaults live only there.
 _DISTRIBUTED_OPTIONS = frozenset(
@@ -360,10 +352,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Default for how a failing subinterval is split (see :ref:`the user
             guide <ug-four-pieces>`): ``"halve"`` (default) splits it in two;
             ``"accelerate"`` splits it in four when it is itself a piece of a
-            split subinterval and its error ratio is at least 1e4, which saves
-            evaluations of f and passes on integrands that need many levels of
-            refinement, at the cost of extra evaluations when both halves would
-            have passed. With ``error_norm="failure_fraction"`` it halves.
+            split subinterval and its error ratio is at least 2**k, k the
+            method's ``error_exponent`` (where its error estimate shrinks as
+            h**k, both halves would fail again), which saves evaluations of f
+            and passes on integrands that need many levels of refinement. With
+            ``error_norm="failure_fraction"`` it halves.
         use_absolute_error_ratio : bool
             If True (default), the relative tolerance uses the whole integral;
             if False, the running integral from ``mesh_init`` through each
@@ -839,7 +832,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         split_rule : str or None
             How a failing subinterval is split: ``"halve"`` or
             ``"accelerate"`` (into four pieces when it is a piece of a split
-            subinterval with an error ratio of at least 1e4; see :ref:`the
+            subinterval with an error ratio of at least 2**error_exponent; see :ref:`the
             user guide <ug-four-pieces>`). With
             ``error_norm="failure_fraction"`` it halves.
         error_norm : str, Callable or None
@@ -2059,9 +2052,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         With ``error_ratios`` (``split_rule="accelerate"``), a failing
         subinterval that is itself a piece of a split one (split count at
-        least 1) and whose error ratio is at least ``_FOUR_PIECES_RATIO`` is
-        split in four instead: both halves are halved again in the same
-        update, so the pieces are those of two successive halvings.
+        least 1) and whose error ratio is at least 2**k, k the method's
+        ``error_exponent``, is split in four instead: both halves are halved
+        again in the same update, so the pieces are those of two successive
+        halvings. Where the error estimate shrinks as h**k, a half's ratio is
+        the parent's divided by 2**k (by 2**(k - 1) when the tolerance is the
+        rounding floor, which shrinks with h), so both halves of such a
+        subinterval would fail and be split again: no evaluation is spent on a
+        four-way split whose halves would have passed.
 
         A subinterval that cannot be split (``_splittable``: its split count
         has reached ``max_adaptive_splits``, when both are given, or its
@@ -2154,7 +2152,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         )
         # How many times each subinterval of the batch is halved: 0 (accepted),
         # 1, or, with error_ratios, 2 (four pieces) for a failing piece of a
-        # failed subinterval whose error ratio is at least _FOUR_PIECES_RATIO
+        # failed subinterval whose error ratio is at least 2**error_exponent
         # and that can be halved twice. The update's one read of the device:
         # how many are accepted and how many are split in four. Integer
         # positions index every field below without another read (a boolean
@@ -2166,7 +2164,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             assert split_counts is not None  # given with error_ratios
             halvings += (
                 ~keep_mask
-                & (error_ratios >= _FOUR_PIECES_RATIO)
+                & (error_ratios >= 2.0**self.method.error_exponent)
                 & (split_counts[mesh_idxs] > 0)
                 & self._splittable(
                     mesh, mesh_idxs, split_counts, max_adaptive_splits, halvings=2

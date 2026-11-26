@@ -97,7 +97,7 @@ def test_panel_count_equals_K_times_2_pow_n(sampling, method, n, take_gradient):
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 def test_four_way_splits_respect_the_cap(sampling, method, n, take_gradient):
     """With ``split_rule="accelerate"`` the halves of a starting step are split
-    in four (their error ratios are far above 1e4) while two halvings remain
+    in four (their error ratios are far above 2**error_exponent) while two halvings remain
     below the cap, and halved one halving below it: the same K * 2**n panels
     and statistics as halving, in fewer passes (calls of f) from n = 3 on.
     (gk21's capped steps pass by the round-off floor from n = 3 on, so the

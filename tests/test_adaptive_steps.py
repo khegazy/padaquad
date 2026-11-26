@@ -751,8 +751,8 @@ class TestPartialAndBoundary:
 
 class TestFourPieces:
     """With ``error_ratios`` (``split_rule="accelerate"``), a failing piece of a
-    split subinterval (split count >= 1) whose error ratio is at least 1e4 is
-    split in four: two halvings in one update, with one read of the device."""
+    split subinterval (split count >= 1) whose error ratio is at least
+    2**error_exponent (8 for the unit-test solver's bosh3) is split in four: two halvings in one update, with one read of the device."""
 
     def setup_method(self):
         self.solver = make_solver_for_unit_test()
@@ -776,12 +776,15 @@ class TestFourPieces:
         )
 
     def test_equals_two_successive_halvings(self):
-        """Subintervals 1 and 4 (split count >= 1, ratio >= 1e4) are split in
-        four, 2 (ratio below 1e4) and 3 (split count 0) are halved, 0 is
+        """Subintervals 1 and 4 (split count >= 1, ratio >= 2**k) are split in
+        four, 2 (ratio below 2**k) and 3 (split count 0) are halved, 0 is
         accepted: the mesh, trackers and split counts are bit for bit those of
         halving every failing subinterval and then both halves of 1 and 4, and
         idxs_transfer is the composition of the two transfers."""
-        ratios = torch.tensor([0.5, 1e5, 9e3, 1e5, 1e4], dtype=torch.float64)
+        four = 2.0**self.solver.method.error_exponent
+        ratios = torch.tensor(
+            [0.5, 10 * four, 0.9 * four, 10 * four, four], dtype=torch.float64
+        )
         counts = torch.tensor([0, 1, 1, 0, 2, 0])
         _, _, _, _, mesh, trackers, transfer, keep_idx, new_counts = self._update(
             ratios, counts, error_ratios=ratios

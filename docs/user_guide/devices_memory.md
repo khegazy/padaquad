@@ -90,6 +90,12 @@ error from the integrand is raised unchanged.
   first pass, up to 10,000 points) is not preceded by a smaller one, and
   every later call is at most 10 times one that ran. PadaQuad is meant for
   GPUs; on a CPU, pass `max_batch` when memory matters.
+- *A first call far above the limit.* Each failed call shrinks by a quarter,
+  so reaching the limit takes about 8 failed calls per factor of 10 between
+  the first call and the limit: for an integrand that holds 60 points, 5
+  failed calls from the default first pass of `gk21` (231 points) and 18 from
+  a first pass of 10,000 points (a mesh of 500 subintervals). This happens
+  once per state; pass `max_batch` or the state to avoid it.
 - *Memory is not kept free.* The forward calls fill the memory until they
   fail; other processes on the same GPU can run out of memory meanwhile.
   `total_mem_usage` limits only the check before a backward pass.

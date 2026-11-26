@@ -811,6 +811,36 @@ def test_accelerate_tests_no_piece_before_the_first_split(take_gradient):
     assert 2 in tests
 
 
+def test_accelerate_worst_case_of_the_user_guide():
+    """The cost documented in the user guide (ug-four-pieces): f = T_20(2t - 1)
+    on one starting subinterval has gk21 error estimates c h^21 exactly, so one
+    halving divides every ratio by 2^21. At atol 3.2e-11 the halves' ratios lie
+    between 1e4 and 2^21: the rule splits both in four (11 subintervals) where
+    halving them once suffices (7), for the same error."""
+    points, errors = {}, {}
+    for split_rule in ("halve", "accelerate"):
+        calls = []
+
+        def f(t, calls=calls):
+            calls.append(t.shape[0])
+            return torch.special.chebyshev_polynomial_t(2 * t - 1, 20)
+
+        out, _ = integrate(
+            f,
+            "gk21",
+            atol=3.2e-11,
+            rtol=0.0,
+            device="cpu",
+            split_rule=split_rule,
+            mesh=torch.tensor([[0.0], [1.0]], dtype=torch.float64),
+            take_gradient=False,
+        )
+        points[split_rule] = sum(calls)
+        errors[split_rule] = abs(float(out.integral) + 1 / 399)  # exact: -1/399
+    assert points == {"halve": 7 * 21, "accelerate": 11 * 21}
+    assert max(errors.values()) < 1e-15
+
+
 def test_failure_fraction_always_halves():
     """With error_norm="failure_fraction" the accept quantity is a fraction,
     not a ratio, so the rule halves: the same call as split_rule="halve", bit

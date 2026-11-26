@@ -9,7 +9,8 @@ one batch.
 
 The mesh divides ``[mesh_init, mesh_final]`` into subintervals, and the
 method places C nodes in each one. A subinterval whose error estimate exceeds
-the tolerance is split in half and both halves are evaluated again. After the
+the tolerance is split in half (or in four, with ``split_rule="accelerate"``)
+and the pieces are evaluated again. After the
 integral has converged, neighboring subintervals with very small errors are
 merged to build the optimal mesh, which a later call can start from.
 
@@ -839,7 +840,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             How a failing subinterval is split: ``"halve"`` or
             ``"accelerate"`` (into four pieces when it is a piece of a split
             subinterval with an error ratio of at least 1e4; see :ref:`the
-            user guide <ug-four-pieces>`).
+            user guide <ug-four-pieces>`). With
+            ``error_norm="failure_fraction"`` it halves.
         error_norm : str, Callable or None
             How the error of a vector-valued integrand becomes one
             accept-or-split decision (see :ref:`the user guide <ug-error-norm>`).

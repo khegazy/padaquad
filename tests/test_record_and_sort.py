@@ -366,6 +366,52 @@ def test_fields_are_copied_one_at_a_time(stage):
     assert torch.cuda.max_memory_allocated() - before < 1.3 * field
 
 
+def _weighted(f, d):
+    """f's one output repeated d times, each with its own weight."""
+    w = torch.linspace(1.0, 1.001, d, dtype=torch.float64)
+    return lambda t: f(t) * w
+
+
+@needs_cuda
+@pytest.mark.parametrize(
+    ("method", "f", "options", "bound"),
+    [
+        ("gk21", _weighted(torch.sin, 4096), {"N_init_steps": 400}, 1.3),
+        ("gk21", _weighted(lambda t: torch.sin(2e3 * t), 256), {}, 2.05),
+        ("bosh3", _weighted(_cancelling_peak, 256), {}, 2.05),
+        ("bosh3", _weighted(torch.sin, 4096), {"N_init_steps": 400}, 2.1),
+    ],
+    ids=["gk21_one_pass", "gk21_passes", "bosh3_removals", "bosh3_one_pass"],
+)
+def test_record_device_peak_at_the_end(method, f, options, bound):
+    """The record's device holds at most about twice the recorded values R over
+    a whole call: the final ordering's chunks and array in mesh order (2 R),
+    or for one pass of a method without end nodes the values once (the join is
+    a view). A CPU solver keeps its record on the GPU (result_device="cuda"),
+    the code path of the host with exact allocator numbers. The join copied
+    the values (2.15 R for gk21) and the reuse mesh held up to six arrays of
+    one number per subinterval and output beside the values (2.5 R for
+    bosh3, whose four nodes make such an array a quarter of R)."""
+    solver = adaptive_quadrature(
+        "uniform", method, atol=1e-9, rtol=1e-6, device="cpu", dtype=torch.float64
+    )
+    torch.cuda.synchronize()
+    before = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    result, _ = solver.integrate(
+        f,
+        mesh_init=torch.tensor([0.0], dtype=torch.float64),
+        mesh_final=torch.tensor([1.0], dtype=torch.float64),
+        take_gradient=False,
+        random_initial_mesh=False,
+        result_device="cuda",
+        **options,
+    )
+    torch.cuda.synchronize()
+    values = len(result.h) * solver.C * result.y.shape[-1] * 8
+    assert torch.cuda.max_memory_allocated() - before < bound * values
+
+
 class TestFlattenOutput:
     """_flatten_output writes the joined values into one array."""
 

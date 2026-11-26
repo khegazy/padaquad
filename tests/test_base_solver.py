@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import logging
 import sys
 import tracemalloc
 import warnings
@@ -690,7 +691,7 @@ class TestPythonWork:
         [("uniform", "gk21", 1e-10), ("variable", "interpolatory3_variable", 1e-2)],
     )
     def test_same_for_256_times_the_subintervals(
-        self, sampling, method, atol, take_gradient
+        self, sampling, method, atol, take_gradient, caplog
     ):
         """cos(8 pi t) + exp(cos(2 pi t)) on n unit subintervals of [0, n]:
         each holds the same periods, so the calls with n = 16 and n = 4096
@@ -699,6 +700,10 @@ class TestPythonWork:
         the subintervals added, and its peak of Python memory exceeds the
         first's by less than one byte per subinterval added (a list holding
         one pointer per subinterval takes 8)."""
+        # The debug log prints each pass's error ratios, a tensor whose
+        # formatting grows with the subintervals: run at most at INFO, also
+        # under pytest --log-level=DEBUG.
+        caplog.set_level(logging.INFO, logger="padaquad")
         solver = adaptive_quadrature(
             sampling, method, atol=atol, rtol=0.0, device="cpu"
         )

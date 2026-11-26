@@ -1,5 +1,5 @@
 """Unit tests for the adaptive_quadrature factory, MethodClass.weights through a
-solver, and the per-step node count C."""
+solver, the per-step node count C, and the size of a fresh starting mesh."""
 
 from __future__ import annotations
 
@@ -332,3 +332,26 @@ class TestDefaultMethod:
     def test_integrate_variable_without_method(self):
         result, _ = integrate(torch.cos, sampling="variable", **_BASE)
         assert float(result.integral) == pytest.approx(0.8414709848, abs=1e-6)
+
+
+# ---------------------------------------------------------------------------
+# Size of a fresh starting mesh
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("n_init_steps", "root"),
+    [(1, 1), (13, 3), (16, 4), (100, 10), (1e4, 100), (3073**2 - 1, 3072)],
+    ids=["1", "default-13", "square-16", "100", "float-1e4", "3073sq-1"],
+)
+def test_starting_mesh_has_isqrt_segments(n_init_steps, root):
+    """A fresh starting mesh has k = isqrt(N_init_steps) segments of k + 1
+    points: k (k + 1) mesh points. At 3073**2 - 1 the float32 square root used
+    before rounded up to 3073 (on an AVX2 CPU with torch 2.8); a float N_init_steps
+    is accepted as before."""
+    solver = make_solver_for_unit_test()
+    a, b = (torch.tensor([x], dtype=torch.float64) for x in (0.0, 1.0))
+    mesh, trackers, _ = solver._setup_initial_mesh(None, a, b, False, n_init_steps)
+    assert len(mesh) == root * (root + 1)
+    assert trackers.sum() == len(mesh) - 1
+    assert not trackers[-1]

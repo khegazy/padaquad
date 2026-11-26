@@ -3559,11 +3559,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # subdivided into sqrt(N_init_steps)+1 sub-barriers. The total
             # barrier count is ~N_init_steps. Sub-barriers are placed
             # randomly (default) or uniformly within each segment.
-            # A Python int (computed on the CPU, as before) so it can size
-            # torch.arange / torch.rand.
-            N_even_t = int(
-                torch.sqrt(torch.tensor(N_init_steps, dtype=torch.float)).to(torch.int)
-            )
+            # The exact integer square root; int() because math.isqrt refuses
+            # a float such as N_init_steps=1e4.
+            N_even_t = math.isqrt(int(N_init_steps))
             dt = (mesh_final - mesh_init) / N_even_t
             # Top-level segment starts: mesh_init + k*dt, points along the
             # mesh_init -> mesh_final line (dt is the [T] segment vector, so

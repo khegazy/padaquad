@@ -497,7 +497,8 @@ def test_result_shares_no_storage_with_f(device, method):
     pass and its output is recorded as it is) returns values, nodes and
     tracked variables that share storage with nothing f returned or was given,
     and not with each other: f = t (its output is its input) and an f that
-    keeps its outputs and inputs."""
+    keeps its outputs and inputs. ``max_batch`` is given so that no test call
+    of f comes before the pass."""
     kept = []
 
     def f(t):
@@ -510,6 +511,7 @@ def test_result_shares_no_storage_with_f(device, method):
         mesh_init=torch.tensor([0.0], dtype=torch.float64, device=device),
         mesh_final=torch.tensor([1.0], dtype=torch.float64, device=device),
         result_device=device,
+        max_batch=10_000,
     )
     assert len(kept) == 2  # one call of f
     returned = [result.y, result.nodes, *result.tracked_variables]

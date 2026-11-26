@@ -27,7 +27,9 @@ import math
 
 import pytest
 import torch
-from _helpers import make_solver_for_unit_test
+from _helpers import make_solver_for_unit_test, needs_cuda
+
+from padaquad import adaptive_quadrature
 
 DTYPES = [torch.float32, torch.float64]
 DTYPE_IDS = ["f32", "f64"]
@@ -437,3 +439,74 @@ def test_merge_prediction_adds_to_the_pair_numerator(dtype, error_norm, absolute
     if per_dim is not None:
         assert torch.equal(per_dim3, per_dim)
     assert torch.allclose(pair3, 3 * pair, rtol=_close(dtype), atol=0)
+
+
+# ---------------------------------------------------------------------------
+# atol and rtol: Python floats rounded to the dtype of the values they meet
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "device", ["cpu", pytest.param("cuda", marks=needs_cuda)], ids=["cpu", "cuda"]
+)
+@pytest.mark.parametrize(
+    ("solver_dtype", "dtype"),
+    [
+        (torch.float32, torch.float32),
+        (torch.float64, torch.float64),
+        (torch.float32, torch.float64),
+    ],
+    ids=["f32", "f64", "f32-solver-f64-values"],
+)
+@pytest.mark.parametrize("error_norm", ["2", "max", "failure_fraction"])
+@pytest.mark.parametrize("absolute", [True, False], ids=["absolute", "cumulative"])
+def test_tolerances_act_as_tensors_of_the_values_dtype(
+    device, solver_dtype, dtype, error_norm, absolute
+):
+    """``solver.atol`` and ``solver.rtol`` are Python floats; in the error
+    ratios they act as 0-d tensors of the dtype of the values they meet (an
+    integrand that returns float64 to a float32 solver makes float64 values).
+    The ratios equal, bit for bit, the formulas evaluated with such tensors
+    and torch.maximum, for tolerances that are 0, subnormal in float32 (1e-40)
+    or 0 in float32 (1e-300), and values with NaN, +-Inf, 0 and subnormals."""
+    g = torch.Generator().manual_seed(0)
+    scale = 10.0 ** torch.randint(-30, 5, (8, 3), generator=g)
+    q = (torch.randn(8, 3, generator=g, dtype=torch.float64) * scale).to(dtype)
+    q[0, 0], q[1, 1], q[2, 2] = float("nan"), float("inf"), 0.0
+    q[3, 0] = torch.finfo(dtype).tiny / 4
+    e = (torch.rand(8, 3, generator=g, dtype=torch.float64) * scale * 1e-6).to(dtype)
+    e[4, 2], e[5, 1] = float("inf"), 0.0
+    q, e = q.to(device), e.to(device)
+    for atol, rtol in [(0.0, 1e-6), (1e-12, 0.0), (1e-40, 1e-5), (1e-300, 3.3e-7)]:
+        s = adaptive_quadrature(
+            "uniform",
+            "bosh3",
+            atol=atol,
+            rtol=rtol,
+            dtype=solver_dtype,
+            device=device,
+            error_norm=error_norm,
+            use_absolute_error_ratio=absolute,
+        )
+        assert (type(s.atol), type(s.rtol)) == (float, float)
+        ratio, _, per_dim = s._compute_error_ratios(
+            mesh_quadrature_errors=e,
+            mesh_quadratures=q,
+            integral=q.sum(0) if absolute else None,
+        )
+        a, r = (torch.tensor(x, dtype=dtype, device=device) for x in (atol, rtol))
+        # The whole integral (absolute mode) or the running one (cumulative).
+        reference = q.sum(0) if absolute else torch.cumsum(q, dim=0).abs()
+        floor = s._round_floor(q)
+        if error_norm == "failure_fraction":
+            tol = a + r * torch.abs(reference)
+            expected = e / torch.maximum(tol * torch.ones_like(floor), floor)
+            got = per_dim
+        else:
+            norm = s._reduce_norm
+            tol = torch.maximum(a, r * norm(reference))
+            expected = norm(e) / torch.maximum(tol, norm(floor))
+            got = ratio
+        assert got.dtype == expected.dtype == dtype
+        assert torch.equal(got.isnan(), expected.isnan())
+        assert torch.equal(got.nan_to_num(7.0), expected.nan_to_num(7.0))

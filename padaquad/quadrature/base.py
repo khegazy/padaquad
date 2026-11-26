@@ -284,11 +284,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             matter. None (default) means ``"gk21"`` (uniform) or
             ``"interpolatory3_variable"`` (variable).
         atol : float
-            Absolute tolerance. A subinterval is accepted when its error
-            estimate is below ``max(atol, rtol * |I|)``, with ``I`` the integral
-            (see :ref:`the user guide <ug-error-control>`). Default 1e-5.
+            Absolute tolerance, finite and >= 0. A subinterval is accepted when
+            its error estimate is below ``max(atol, rtol * |I|)``, with ``I`` the
+            integral (see :ref:`the user guide <ug-error-control>`). Default 1e-5.
         rtol : float
-            Relative tolerance; see ``atol``. Default 1e-5.
+            Relative tolerance, finite and >= 0; see ``atol``. Default 1e-5.
         y0 : torch.Tensor or None
             Default value added to the returned integral, shape [D]. None means 0.
         remove_cut : float
@@ -3876,10 +3876,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             ``(error_ratio, error_ratio_2steps, None)``, shapes [N], [N-1].
         """
         err = self._reduce_norm(abs_err)
-        # Tolerances follow the inputs' device so this runs on the integration
-        # device in the loop and on result_device in the post-convergence pass.
-        atol = self.atol.to(abs_err.device)
-        rtol = self.rtol.to(abs_err.device)
         floor = (
             self._reduce_norm(self._round_floor(mesh_quadratures))
             if mesh_quadratures is not None
@@ -3888,7 +3884,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         if self.use_absolute_error_ratio:
             assert integral is not None  # checked in _compute_error_ratios
-            error_tol = torch.maximum(atol, rtol * self._reduce_norm(integral))
+            error_tol = torch.clamp(
+                self.rtol * self._reduce_norm(integral), min=self.atol
+            )
             error_tol_2steps = error_tol
         else:
             if cum_mesh_quadratures is not None:
@@ -3897,8 +3895,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 cum_steps = torch.cumsum(mesh_quadratures, dim=0)
             else:
                 raise ValueError("Must give mesh_quadratures or cum_mesh_quadratures")
-            error_tol = torch.maximum(
-                atol, rtol * self._reduce_norm(torch.abs(cum_steps))
+            error_tol = torch.clamp(
+                self.rtol * self._reduce_norm(torch.abs(cum_steps)), min=self.atol
             )
             # A merged pair (i, i+1) ends where step i+1 ends, so it is judged
             # against step i+1's cumulative tolerance (not the larger of the
@@ -3968,12 +3966,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             ``(failure_fraction, error_ratio_2steps, ratio)``, shapes [N],
             [N-1], [N, D].
         """
-        # Tolerances follow the inputs' device (see _error_ratios_norm).
-        atol = self.atol.to(abs_err.device)
-        rtol = self.rtol.to(abs_err.device)
         if self.use_absolute_error_ratio:
             assert integral is not None  # checked in _compute_error_ratios
-            error_tol = atol + rtol * torch.abs(integral)  # [D]
+            error_tol = self.atol + self.rtol * torch.abs(integral)  # [D]
             error_tol_2steps = error_tol
         else:
             if cum_mesh_quadratures is not None:
@@ -3982,7 +3977,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 cum_steps = torch.cumsum(mesh_quadratures, dim=0)
             else:
                 raise ValueError("Must give mesh_quadratures or cum_mesh_quadratures")
-            error_tol = atol + rtol * torch.abs(cum_steps)  # [N, D]
+            error_tol = self.atol + self.rtol * torch.abs(cum_steps)  # [N, D]
             # Merged pair's tolerance: step i+1's (see _error_ratios_norm).
             error_tol_2steps = error_tol[1:]
 

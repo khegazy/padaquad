@@ -17,6 +17,7 @@ The result dataclasses ``IntegrationResult`` and ``MethodOutput`` live in
 from __future__ import annotations
 
 import logging
+import math
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -154,9 +155,9 @@ class SolverBase(ABC, DistributedEnvironment):
             Name of the quadrature method, for example 'gk21' or 'dopri5', in
             any letter case.
         atol : float
-            Absolute tolerance. See :ref:`ug-error-control`.
+            Absolute tolerance, finite and >= 0. See :ref:`ug-error-control`.
         rtol : float
-            Relative tolerance. See :ref:`ug-error-control`.
+            Relative tolerance, finite and >= 0. See :ref:`ug-error-control`.
         y0 : torch.Tensor or None
             Value added to the integral, shape ``[D]``. None uses 0.
         f : callable or None
@@ -175,6 +176,11 @@ class SolverBase(ABC, DistributedEnvironment):
         **distributed_options : Any
             Options for multi-process runs: backend, master_addr, master_port
             and is_slurm.
+
+        Raises
+        ------
+        ValueError
+            If ``atol`` or ``rtol`` is negative or not finite.
         """
         super().__init__(device=device, **distributed_options)
 
@@ -191,8 +197,12 @@ class SolverBase(ABC, DistributedEnvironment):
             self.speed_logger = None
 
         self.method_name = method.lower()
-        self.atol = torch.tensor(atol, dtype=dtype, device=self.device)
-        self.rtol = torch.tensor(rtol, dtype=dtype, device=self.device)
+        # Python floats: an operation rounds them to the dtype of the tensor
+        # they meet, and they need no copy to the device.
+        self.atol, self.rtol = float(atol), float(rtol)
+        for name, tol in (("atol", self.atol), ("rtol", self.rtol)):
+            if not (math.isfinite(tol) and tol >= 0.0):
+                raise ValueError(f"{name} must be finite and >= 0, got {tol!r}")
         # Construction-time defaults; each integrate() call falls back to these
         # when its corresponding argument is None (resolved in _check_variables).
         # The bounds have no default: each call gives its interval.
@@ -312,7 +322,7 @@ class SolverBase(ABC, DistributedEnvironment):
         """
         Set the floating-point precision for all solver tensors.
 
-        Converts atol, rtol and y0 to the new dtype,
+        Converts y0 to the new dtype,
         then calls ``_set_solver_dtype``. Also sets dtype-appropriate assertion
         tolerances
         used for internal sanity checks (e.g. verifying that the nodes are in
@@ -355,10 +365,6 @@ class SolverBase(ABC, DistributedEnvironment):
 
         self.dtype = dtype
         self.init_y0 = self.init_y0.to(self.dtype)
-
-        # Update integration control error tolerances
-        self.atol = self.atol.to(self.dtype)
-        self.rtol = self.rtol.to(self.dtype)
 
         # Set assertion tolerances appropriate for this precision level.
         # These are used in internal sanity checks (e.g., time ordering),

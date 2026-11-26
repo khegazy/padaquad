@@ -76,6 +76,23 @@ class TestSetDtype:
 # ---------------------------------------------------------------------------
 
 
+class TestTolerances:
+    """``atol`` and ``rtol`` are stored as Python floats, finite and >= 0."""
+
+    def test_stored_as_floats(self):
+        """Floats, also when given as a 0-d tensor; 0 is allowed."""
+        solver = make_solver_for_unit_test(atol=torch.tensor(1e-7), rtol=0)
+        assert (type(solver.atol), type(solver.rtol)) == (float, float)
+        assert (solver.atol, solver.rtol) == (float(torch.tensor(1e-7)), 0.0)
+
+    @pytest.mark.parametrize("bad", [-1e-6, float("nan"), float("inf")])
+    @pytest.mark.parametrize("name", ["atol", "rtol"])
+    def test_negative_or_not_finite_raises(self, name, bad):
+        """A negative or non-finite tolerance raises ValueError naming it."""
+        with pytest.raises(ValueError, match=rf"{name} must be finite and >= 0"):
+            make_solver_for_unit_test(**{name: bad})
+
+
 class TestSetDtypeByInput:
     """Tests for SolverBase.set_dtype_by_input: infer dtype from tensors."""
 

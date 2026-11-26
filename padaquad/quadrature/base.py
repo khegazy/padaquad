@@ -2130,8 +2130,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # 1, or, with error_ratios, 2 (four pieces) for a failing piece of a
         # failed subinterval whose error ratio is at least _FOUR_PIECES_RATIO
         # and that can be halved twice.
+        # The update's one read of the device: how many are accepted and how
+        # many are split in four. Integer positions index every field below
+        # without another read (a boolean mask reads the device for the size
+        # of its result).
         halvings = (~keep_mask).to(torch.uint8)
-        if error_ratios is not None:
+        if error_ratios is None:
+            n_keep, n_four = int(keep_mask.sum()), 0
+        else:
             assert split_counts is not None  # given with error_ratios
             halvings += (
                 ~keep_mask
@@ -2141,14 +2147,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     mesh, mesh_idxs, split_counts, max_adaptive_splits, halvings=2
                 )
             )
+            n_keep, n_four = torch.stack(
+                [keep_mask.sum(), (halvings == 2).sum()]
+            ).tolist()
         # The batch's positions, accepted ones first, then those halved once,
-        # then those split in four, each group ascending (a stable sort), and
-        # the update's one read of the device: how many are accepted and how
-        # many are split in four. Integer positions index every field below
-        # without another read (a boolean mask reads the device for the size
-        # of its result).
+        # then those split in four, each group ascending (a stable sort).
         order = torch.sort(halvings, stable=True).indices
-        n_keep, n_four = torch.stack([keep_mask.sum(), (halvings == 2).sum()]).tolist()
         keep_idx = order[:n_keep]
         mesh_trackers.index_fill_(0, mesh_idxs[keep_idx], False)
 
@@ -2174,9 +2178,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # subinterval, the second both halves of each four-piece one, so its
         # mesh points are those two successive halvings would insert.
         # idxs_transfer composes the transfers of the halvings.
-        idxs_transfer = torch.arange(len(mesh), device=mesh.device)
-        for halving in range(1 + (n_four > 0)):
-            if halving == 1:
+        idxs_transfer: torch.Tensor | None = None
+        for _ in range(1 + (n_four > 0)):
+            if idxs_transfer is not None:
                 # The halves start at the four-piece subinterval's own mesh
                 # point and at the midpoint inserted right after it.
                 left = idxs_transfer[four_idxs]
@@ -2221,12 +2225,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 split_counts_new[idxs_new] = child_counts
             else:
                 split_counts_new = None
-            idxs_transfer = step_transfer[idxs_transfer]
+            idxs_transfer = (
+                step_transfer if idxs_transfer is None else step_transfer[idxs_transfer]
+            )
             mesh, mesh_trackers, split_counts = (
                 mesh_new,
                 mesh_trackers_new,
                 split_counts_new,
             )
+        assert idxs_transfer is not None  # the loop runs at least once
 
         if method_output is not None:
             method_output.mesh_quadratures = method_output.mesh_quadratures[keep_idx]

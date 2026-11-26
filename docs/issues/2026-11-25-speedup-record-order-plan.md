@@ -650,3 +650,97 @@ review's harness is in `$SCRATCH/padaquad_speedup_plans/record-order/impl/`):
   gain may be smaller than the profiled 172 ms on `oscillatory`.
 - **Not checked:** T > 1 end to end, which CLAUDE.md says is unreachable
   (the order check fails for T > 1); the unit tests with T > 1 are kept.
+
+## Implemented (branch `record_order`, 2026-11-26)
+
+Scripts and logs: `$SCRATCH/padaquad_speedup_plans/record-order/impl/`
+(`bitgrid.py`, the `turn_device_reads` grid extended with removals in
+cumulative mode and with the record on the solver's device, and tracked
+variables with `take_gradient=True`: 856 integrations on the CPU, 864 on
+CUDA; `bitcompare.py`; `count_turn.py` host waits by line and GPU launches;
+`timing.py` wall time and garbage collections; `memory_stages.py` GPU peaks
+per stage; `probe_warn.py`; `logs/`). Node `nid200288`, A100-SXM4 (GPU 0 for
+the timings, alone on the node), torch 2.8.0.
+
+| Step (5) | Commit | What |
+|---|---|---|
+| 1 | `95c66d3` | this file, reviewed |
+| 2 | `aa8ac48` | mesh index, appended record, `_sort_record` by scatter (one chunk in order kept), removal with chunks, dictionary and `mesh_left` removed, Step 7 without a running sum; tests rewritten |
+| 3 (D1) | `adb8478` | nodes, widths, error ratios, loss on the solver's device until `_sort_record`; user guide's `result_device` row |
+| 4 | `9a97db9` | host-wait pins by source line (`_lines`, `_host_waits(fn, where)`) |
+| memory test | `0c949a1` | recording a pass on the GPU never allocates the record's values again (fails on `cd3ff34`: 1.03 GB against a bound of 0.80 GB) |
+| simplification | `19052b5` | `_record_results(result_device=result_device)`; docstrings |
+| 7 | `6c66fb4` | CLAUDE.md, CHANGELOG, user guide (`runtime_checks`), `multi-coordinate-t.md` |
+
+**Numbers unchanged.** The grid against `cd3ff34`: 0 differences of 8,832
+tensors (CPU) and 8,928 (CUDA), with 246 and 228 removals of recorded
+subintervals in the base runs; after step 2 and after step 4 (the code of
+`19052b5` differs only by passing `result_device` where it is unused; the final
+run repeats the grid).
+
+**Host waits and GPU launches per call** (`count_turn.py`, gk21, `atol=1e-8`,
+`rtol=0`, `error_norm="max"`, float64, `max_batch=1e6`, `runtime_checks=True`;
+`cd3ff34` → branch):
+
+| Case | Turns | Waits | Launches |
+|---|---|---|---|
+| damped_sine | 1 | 30 → 25 | 213 → 214 |
+| chirp | 14 | 412 → 103 | 3,229 → 2,823 |
+| many_outputs | 2 | 61 → 32 | 443 → 416 |
+| oscillatory | 13 | 213 → 77 | 2,310 → 2,123 |
+| chirp, `take_gradient=True`, `max_batch=230` | 18 | 422 → 90 | 3,003 → 2,565 |
+
+On `chirp` what remains is the loop (37: its condition and the per-pass
+reads), the mesh update (14), the finite check (14), `_record_results` (13:
+the values to the host), `_failed_record_positions` (13, `error-ratio-work`),
+`_sort_record` (6, once).
+
+**Wall time** (`timing.py`, 21 calls after a warm-up, ms, min / median / max;
+two rounds alternating base and branch; round 1 shown, round 2 within 2 ms of
+it except `many_outputs`):
+
+| Case | A100 base | A100 branch | CPU (8 threads) base | CPU branch |
+|---|---|---|---|---|
+| damped_sine | 4.55 / 4.59 / 5.15 | 4.42 / 4.45 / 4.89 | 3.01 / 3.03 / 3.19 | 2.92 / 2.94 / 3.12 |
+| chirp | 46.2 / 48.4 / 54.1 | 35.4 / 37.4 / 42.2 | 15.3 / 16.1 / 16.9 | 13.2 / 13.7 / 16.7 |
+| many_outputs | 9.00 / 9.34 / 9.75 | 8.47 / 8.59 / 8.98 | 6.08 / 6.27 / 6.75 | 5.71 / 6.04 / 6.19 |
+| oscillatory | 89.0 / 123.2 / 143.6 | 36.2 / 38.2 / 40.3 | 72.9 / 105.4 / 114.7 | 28.9 / 29.7 / 31.1 |
+| oscillatory, `result_device` the solver's | 76.4 / 101.4 / 115.2 | 28.7 / 28.9 / 29.7 | 74.9 / 105.1 / 127.6 | 28.8 / 30.4 / 33.2 |
+| chirp, `take_gradient=True`, `max_batch=230` | 46.8 / 49.1 / 52.1 | 35.9 / 37.9 / 41.9 | 16.9 / 17.8 / 18.8 | 13.3 / 14.4 / 14.9 |
+
+**Garbage collections per call** (`gc.callbacks`): `oscillatory` ran 100.7
+collections of generation 0, 9.1 of generation 1 and 0.81 of generation 2 per
+call on the base (93, 8.5 and 0.76 on the CPU); none on the branch. Every other
+case: none on both, except `chirp` with `take_gradient=True` (0.8 of
+generation 0 on both). The base's two-speed timing on `oscillatory` (89 to
+145 ms) is gone (36 to 40 ms), consistent with the collections being its
+cause (not proven: the spread could have other sources).
+
+**GPU peak per stage** (`memory_stages.py`, multiples of R, the recorded
+values; the record stage is the largest peak inside `_record_results`):
+
+| Case, setting | `result_device` | total, base → branch | record stage | final ordering | `_flatten_output` |
+|---|---|---|---|---|---|
+| split (4096 outputs, 1,500 subintervals), default, trade, trade + buffer | None | 2.51 → 2.30 | 2.51 → 1.25 | 1.24 → 2.24 | 2.25 → 2.25 |
+| split, every setting | "cpu" | unchanged (0.97 default, 0.48 trade) | unchanged | 0.24 → 0.24 | unchanged |
+| split, `record_evaluations=False` | either | 0.96 → 0.96 | 0.25 → 0.25 | 0.24 → 0.24 | unchanged |
+| removal (512 outputs, a tracked variable, 7,831 subintervals), default, trade, trade + buffer | None | 3.68 → 3.68 | 2.98 → 2.34 | 2.17 → 3.19 | 3.02 → 3.02 |
+| removal, every setting | "cpu" | 2.29 → 2.29 | unchanged | 1.04 → 1.54 | unchanged |
+
+The record's per-pass peak falls; the final ordering, which the base skipped
+for its always-sorted record, now writes the values once when the record is
+not in mesh order, which reaches about the peak of `_flatten_output` right
+after it, so the call's peak does not rise in any case measured. The removal
+stage is small (0.01 R) in both. On the host the same code runs with the record
+there; it was not measured separately (the GPU numbers with
+`result_device=None` are the allocator's exact peaks of the same operations).
+
+**Tests at the final commit:** the full suite on CUDA and CPU, the grid, the
+docs build, ruff, mypy and numpydoc are in the implementing agent's final
+report (logs `logs/*_final*`).
+
+### Not done
+
+- The host's peak with `result_device="cpu"` was argued, not measured.
+- `compiled-turn`: the loop fields' `torch.cat` per turn changes shapes; a
+  capacity buffer would replace it (3.7).

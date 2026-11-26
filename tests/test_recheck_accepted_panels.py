@@ -268,11 +268,24 @@ def test_recorded_subintervals_keep_their_reduced_errors(error_norm, absolute):
     the final check) receives each subinterval's reduced error and rounding
     floor as its batch computed them, in the record's row order (equal here
     to a recomputation from the record's arrays: D = 2, whose reductions do
-    not depend on the other rows); "failure_fraction" records none, and the
-    returned result carries no such field."""
+    not depend on the other rows), and reduces only its tolerance, not the
+    record's errors again; "failure_fraction" records none and reduces
+    nothing. Only cumulative mode builds running sums (merges the batch into
+    the record's order). The returned result carries no such field."""
     solver = _solver(error_norm=error_norm, use_absolute_error_ratio=absolute)
-    check = solver._record_error_check
-    seen = []
+    check, reduce, merge = (
+        solver._record_error_check,
+        solver._reduce_norm,
+        solver._merge_positions,
+    )
+    seen, reductions, calls = [], [], {"reduce": 0, "merge": 0}
+
+    def count(name, method):
+        def counted(*args, **kwargs):
+            calls[name] += 1
+            return method(*args, **kwargs)
+
+        return counted
 
     def spy(record, *args, **kwargs):
         kept = record.get("reduced_errors")
@@ -286,12 +299,19 @@ def test_recorded_subintervals_keep_their_reduced_errors(error_norm, absolute):
             )
         )
         assert (kept is None) == (error_norm == "failure_fraction")
-        return check(record, *args, **kwargs)
+        before = calls["reduce"]
+        out = check(record, *args, **kwargs)
+        reductions.append(calls["reduce"] - before)
+        return out
 
     solver._record_error_check = spy
+    solver._reduce_norm = count("reduce", reduce)
+    solver._merge_positions = count("merge", merge)
     torch.manual_seed(0)
     result, _ = _run(solver, _vector_cancelling, take_gradient=False)
     assert len(seen) > 2 and all(seen)
+    assert set(reductions) == {0 if error_norm == "failure_fraction" else 1}
+    assert (calls["merge"] > 0) == (not absolute)
     assert not hasattr(result, "reduced_errors")
 
 

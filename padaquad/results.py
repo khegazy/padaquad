@@ -1,9 +1,10 @@
 """
 Result dataclasses of an integration.
 
-``IntegrationResult`` is what ``integrate()`` and a solver's ``integrate``
-method return: the integral, its error estimate, the mesh to warm-start the
-next call from, and per-subinterval diagnostics.
+``IntegrationResult`` is the first value that ``integrate()`` and a solver's
+``integrate`` method return: the integral, its error estimate and
+per-subinterval diagnostics. ``IntegrationState`` is the second: the mesh and
+the batch size to start the next call from.
 
 ``MethodOutput`` is internal. It holds the integral and the error estimate of
 one batch of subintervals, as computed by the solver's

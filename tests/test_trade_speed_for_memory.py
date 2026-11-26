@@ -378,15 +378,15 @@ def test_one_call_pass_keeps_f_output_intact(device, record):
 
 
 def test_keep_rows_in_place(monkeypatch):
-    """_keep_rows with in_place moves the kept rows to the front of x, in
-    blocks (here of 3 rows, so the last block is shorter), and returns a view
-    of x equal to indexing; without in_place, or for an x that requires grad
-    or is a view, it indexes and leaves x unchanged."""
+    """_keep_rows with in_place moves the kept rows (ascending positions) to
+    the front of x, in blocks (here of 3 rows, so the last block is shorter),
+    and returns a view of x equal to indexing; without in_place, or for an x
+    that requires grad or is a view, it indexes and leaves x unchanged."""
     import padaquad.quadrature.base as qbase
 
     g = torch.Generator().manual_seed(0)
     x = torch.randn(20, 4, 3, generator=g)
-    keep = torch.rand(20, generator=g) < 0.6
+    keep = torch.nonzero(torch.rand(20, generator=g) < 0.6).flatten()
     expected = x[keep].clone()
     monkeypatch.setattr(qbase, "_BLOCK_BYTES", 3 * 4 * 3 * x.element_size())
     copied = qbase._keep_rows(x, keep, in_place=False)
@@ -401,7 +401,7 @@ def test_keep_rows_in_place(monkeypatch):
     kept = qbase._keep_rows(x, keep, in_place=True)
     assert torch.equal(kept, expected)
     assert kept.data_ptr() == x.data_ptr()
-    assert len(qbase._keep_rows(x, torch.zeros(20, dtype=torch.bool), True)) == 0
+    assert len(qbase._keep_rows(x, torch.zeros(0, dtype=torch.long), True)) == 0
 
 
 def test_pass_array_out_of_memory_names_the_remedies(monkeypatch):

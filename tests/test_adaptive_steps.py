@@ -41,6 +41,12 @@ def _assert_columns_increasing(mesh):
     assert torch.all(diffs > 0), f"Columns not strictly increasing:\n{mesh}"
 
 
+def _keep_mask(solver, error_ratios):
+    """The accept mask the integration loop passes for these error ratios
+    (``_accept_reject_masks``: below 1, or non-finite)."""
+    return solver._accept_reject_masks(error_ratios, None)[0]
+
+
 def _rebuilt_mesh_indices(barriers):
     """The mesh_indices dict the method should return for ``barriers``: each
     full barrier coordinate mapped to its position in the ordered mesh."""
@@ -52,7 +58,8 @@ class TestAdaptivelyAddSteps:
 
     The method returns a 9-tuple:
     (method_output, y, tracked, nodes, mesh_new, trackers_new, mesh_indices,
-     error_ratios_kept, split_counts_new).
+     keep_idx, split_counts_new); keep_idx holds the batch positions of the
+    accepted subintervals.
     """
 
     def setup_method(self):
@@ -68,7 +75,7 @@ class TestAdaptivelyAddSteps:
 
         mo_out, _, _, _, barriers_new, trackers_new, mesh_idx, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
-                mo, error_ratios, None, None, barriers, idxs, trackers
+                mo, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
             )
         )
         assert len(barriers_new) == len(barriers)
@@ -79,7 +86,7 @@ class TestAdaptivelyAddSteps:
         assert mesh_idx == {tuple(b.tolist()): i for i, b in enumerate(barriers_new)}
 
     def test_all_fail(self):
-        """All error_ratios >= 1: midpoints inserted, error_ratios_kept empty."""
+        """All error_ratios >= 1: midpoints inserted, no subinterval kept."""
         barriers = torch.tensor([[0.0], [0.5], [1.0]], dtype=torch.float64)
         trackers = torch.tensor([True, True, False])
         idxs = torch.tensor([0, 1])
@@ -88,7 +95,7 @@ class TestAdaptivelyAddSteps:
 
         mo_out, _, _, _, barriers_new, _trackers_new, mesh_idx, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
-                mo, error_ratios, None, None, barriers, idxs, trackers
+                mo, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
             )
         )
         # 2 midpoints added: len goes from 3 to 5
@@ -108,7 +115,7 @@ class TestAdaptivelyAddSteps:
 
         mo_out, _, _, _, barriers_new, _trackers_new, _, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
-                mo, error_ratios, None, None, barriers, idxs, trackers
+                mo, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
             )
         )
         # 1 midpoint added: len goes from 3 to 4
@@ -125,7 +132,7 @@ class TestAdaptivelyAddSteps:
 
         mo_out, y_out, _tracked, t_out, barriers_new, _, _, _, _ = (
             self.solver._adaptively_increase_mesh(
-                None, error_ratios, None, None, barriers, idxs, trackers
+                None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
             )
         )
         assert mo_out is None
@@ -142,7 +149,7 @@ class TestAdaptivelyAddSteps:
         error_ratios = torch.tensor([3.0])
 
         _, _, _, _, barriers_new, _, _, _, _ = self.solver._adaptively_increase_mesh(
-            None, error_ratios, None, None, barriers, idxs, trackers
+            None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
         )
         assert torch.allclose(barriers_new[1], torch.tensor([0.5], dtype=torch.float64))
 
@@ -154,7 +161,7 @@ class TestAdaptivelyAddSteps:
         error_ratios = torch.tensor([2.0, 2.0, 2.0])
 
         _, _, _, _, barriers_new, _, _, _, _ = self.solver._adaptively_increase_mesh(
-            None, error_ratios, None, None, barriers, idxs, trackers
+            None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
         )
         diffs = barriers_new[1:, 0] - barriers_new[:-1, 0]
         assert torch.all(diffs > 0), f"Barriers not sorted: {barriers_new[:, 0]}"
@@ -168,7 +175,7 @@ class TestAdaptivelyAddSteps:
 
         _, _, _, _, _barriers_new, trackers_new, _, _, _ = (
             self.solver._adaptively_increase_mesh(
-                None, error_ratios, None, None, barriers, idxs, trackers
+                None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
             )
         )
         # After split: barriers = [0, 0.5, 1]. Both step 0 and step 1 need eval.
@@ -184,7 +191,7 @@ class TestAdaptivelyAddSteps:
         mo = _make_method_output(3)
 
         mo_out, _, _, _, _, _, _, er_kept, _ = self.solver._adaptively_increase_mesh(
-            mo, error_ratios, None, None, barriers, idxs, trackers
+            mo, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
         )
         assert mo_out.mesh_quadratures.shape[0] == 2
         assert mo_out.h.shape[0] == 2
@@ -202,41 +209,28 @@ class TestAdaptivelyAddSteps:
 
         _, _, _, _, barriers_new, trackers_new, _, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
-                None, error_ratios, None, None, barriers, idxs, trackers
+                None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
             )
         )
         assert len(barriers_new) == 2
         assert trackers_new[0] == False  # noqa: E712
         assert len(er_kept) == 1
 
-    def test_explicit_masks_override_scalar_rule(self):
-        """When keep_mask/remove_mask are given they drive accept/reject,
-        independent of the scalar error_ratios values."""
+    def test_keep_mask_drives_accept_split(self):
+        """keep_mask decides alone: False splits, True accepts."""
         barriers = torch.tensor([[0.0], [0.5], [1.0]], dtype=torch.float64)
         trackers = torch.tensor([True, True, False])
         idxs = torch.tensor([0, 1])
-        # Scalar rule would keep both (< 1), but the explicit masks reject step 0.
-        error_ratios = torch.tensor([0.5, 0.5])
-        keep_mask = torch.tensor([False, True])
-        remove_mask = torch.tensor([True, False])
         mo = _make_method_output(2)
 
         mo_out, _, _, _, barriers_new, _, _, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
-                mo,
-                error_ratios,
-                None,
-                None,
-                barriers,
-                idxs,
-                trackers,
-                keep_mask=keep_mask,
-                remove_mask=remove_mask,
+                mo, torch.tensor([False, True]), None, None, barriers, idxs, trackers
             )
         )
         # One step split -> one midpoint added (3 -> 4); one step kept.
         assert len(barriers_new) == 4
-        assert len(er_kept) == 1
+        assert er_kept.tolist() == [1]
         assert mo_out.mesh_quadratures.shape[0] == 1
 
 
@@ -260,7 +254,7 @@ class TestVectorMeshOrdering:
         error_ratios = torch.tensor([3.0])
 
         _, _, _, _, barriers_new, _, _, _, _ = self.solver._adaptively_increase_mesh(
-            None, error_ratios, None, None, barriers, idxs, trackers
+            None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
         )
         assert barriers_new.shape == (3, 2)
         assert torch.allclose(
@@ -278,7 +272,7 @@ class TestVectorMeshOrdering:
         error_ratios = torch.tensor([3.0])
 
         _, _, _, _, barriers_new, _, _, _, _ = self.solver._adaptively_increase_mesh(
-            None, error_ratios, None, None, barriers, idxs, trackers
+            None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
         )
         assert barriers_new.shape == (3, 3)
         assert torch.allclose(
@@ -295,7 +289,7 @@ class TestVectorMeshOrdering:
         error_ratios = torch.tensor([2.0, 2.0])
 
         _, _, _, _, barriers_new, _, _, _, _ = self.solver._adaptively_increase_mesh(
-            None, error_ratios, None, None, barriers, idxs, trackers
+            None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
         )
         expected = torch.tensor(
             [[0.0, 0.0], [0.25, 0.5], [0.5, 1.0], [0.75, 1.5], [1.0, 2.0]],
@@ -320,7 +314,7 @@ class TestVectorMeshOrdering:
 
         _, _, _, _, barriers_new, _, mesh_idx, _, _ = (
             self.solver._adaptively_increase_mesh(
-                None, error_ratios, None, None, barriers, idxs, trackers
+                None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
             )
         )
         assert mesh_idx == _rebuilt_mesh_indices(barriers_new)
@@ -337,7 +331,7 @@ class TestVectorMeshOrdering:
         error_ratios = torch.tensor([2.0, 2.0, 2.0])
 
         _, _, _, _, barriers_new, _, _, _, _ = self.solver._adaptively_increase_mesh(
-            None, error_ratios, None, None, barriers, idxs, trackers
+            None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
         )
         assert len(barriers_new) == 7  # 4 + 3 midpoints
         _assert_columns_increasing(barriers_new)
@@ -361,7 +355,7 @@ class TestNonFiniteErrorRatios:
 
         _, _, _, _, barriers_new, trackers_new, _, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
-                None, error_ratios, None, None, barriers, idxs, trackers
+                None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
             )
         )
         assert len(barriers_new) == 2  # no midpoint inserted
@@ -376,7 +370,7 @@ class TestNonFiniteErrorRatios:
 
         _, _, _, _, barriers_new, trackers_new, _, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
-                None, error_ratios, None, None, barriers, idxs, trackers
+                None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
             )
         )
         assert len(barriers_new) == 2
@@ -392,7 +386,7 @@ class TestNonFiniteErrorRatios:
 
         _, _, _, _, barriers_new, _, _, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
-                None, error_ratios, None, None, barriers, idxs, trackers
+                None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
             )
         )
         # Only the 2.0 panel splits -> exactly one midpoint added (4 -> 5).
@@ -414,7 +408,7 @@ class TestSplitCounts:
         error_ratios = torch.tensor([2.0, 0.5])
 
         *_, split_counts_new = self.solver._adaptively_increase_mesh(
-            None, error_ratios, None, None, barriers, idxs, trackers
+            None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
         )
         assert split_counts_new is None
 
@@ -428,7 +422,7 @@ class TestSplitCounts:
 
         *_, split_counts_new = self.solver._adaptively_increase_mesh(
             None,
-            error_ratios,
+            _keep_mask(self.solver, error_ratios),
             None,
             None,
             barriers,
@@ -451,7 +445,7 @@ class TestSplitCounts:
 
         *_, split_counts_new = self.solver._adaptively_increase_mesh(
             None,
-            error_ratios,
+            _keep_mask(self.solver, error_ratios),
             None,
             None,
             barriers,
@@ -477,7 +471,7 @@ class TestSplitCounts:
         _, _, _, _, barriers_new, _, _, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
                 None,
-                error_ratios,
+                _keep_mask(self.solver, error_ratios),
                 None,
                 None,
                 barriers,
@@ -488,10 +482,9 @@ class TestSplitCounts:
             )
         )
         # Only panel 1 splits -> one midpoint (4 -> 5). Panel 0 accepted despite
-        # ratio 2.0, so its ratio is in er_kept.
+        # ratio 2.0, so it is in er_kept.
         assert len(barriers_new) == 5
-        assert len(er_kept) == 2
-        assert 2.0 in er_kept.tolist()
+        assert er_kept.tolist() == [0, 2]
 
     def test_below_max_still_splits(self):
         """Below the cap, a high-error panel splits and bumps the count."""
@@ -504,7 +497,7 @@ class TestSplitCounts:
         _, _, _, _, barriers_new, _, _, _, split_counts_new = (
             self.solver._adaptively_increase_mesh(
                 None,
-                error_ratios,
+                _keep_mask(self.solver, error_ratios),
                 None,
                 None,
                 barriers,
@@ -538,7 +531,7 @@ class TestDataFiltering:
         y, _ = _make_y_and_nodes(N=3, C=2, D=3, T=1)
 
         _, y_out, _, _, _, _, _, _, _ = self.solver._adaptively_increase_mesh(
-            None, error_ratios, y, None, barriers, idxs, trackers
+            None, _keep_mask(self.solver, error_ratios), y, None, barriers, idxs, trackers
         )
         assert y_out.shape == (2, 2, 3)
         assert y_out[:, 0, 0].tolist() == [0.0, 2.0]
@@ -554,7 +547,7 @@ class TestDataFiltering:
         _, nodes = _make_y_and_nodes(N=3, C=2, D=1, T=2)
 
         _, _, _, nodes_out, _, _, _, _, _ = self.solver._adaptively_increase_mesh(
-            None, error_ratios, None, nodes, barriers, idxs, trackers
+            None, _keep_mask(self.solver, error_ratios), None, nodes, barriers, idxs, trackers
         )
         assert nodes_out.shape == (2, 2, 2)
         assert nodes_out[:, 0, 0].tolist() == [0.0, 2.0]
@@ -571,7 +564,7 @@ class TestDataFiltering:
 
         _, _, tracked_out, _, _, _, _, _, _ = self.solver._adaptively_increase_mesh(
             None,
-            error_ratios,
+            _keep_mask(self.solver, error_ratios),
             None,
             None,
             barriers,
@@ -593,7 +586,7 @@ class TestDataFiltering:
         mo = _make_method_output(3, D=3)
 
         mo_out, _, _, _, _, _, _, _, _ = self.solver._adaptively_increase_mesh(
-            mo, error_ratios, None, None, barriers, idxs, trackers
+            mo, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
         )
         assert mo_out.mesh_quadratures.shape == (2, 3)
         # Two kept rows of all-ones -> 2.0 per component.
@@ -623,7 +616,7 @@ class TestPartialAndBoundary:
 
         _, _, _, _, barriers_new, trackers_new, mesh_idx, _, _ = (
             self.solver._adaptively_increase_mesh(
-                None, error_ratios, None, None, barriers, idxs, trackers
+                None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
             )
         )
         expected = torch.tensor(
@@ -642,7 +635,7 @@ class TestPartialAndBoundary:
         error_ratios = torch.tensor([2.0, 0.5])  # only the first panel splits
 
         _, _, _, _, barriers_new, _, _, _, _ = self.solver._adaptively_increase_mesh(
-            None, error_ratios, None, None, barriers, idxs, trackers
+            None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
         )
         expected = torch.tensor([[0.0], [0.25], [0.5], [1.0]], dtype=torch.float64)
         assert torch.allclose(barriers_new, expected)
@@ -655,7 +648,7 @@ class TestPartialAndBoundary:
         error_ratios = torch.tensor([0.5, 2.0])  # only the last panel splits
 
         _, _, _, _, barriers_new, _, _, _, _ = self.solver._adaptively_increase_mesh(
-            None, error_ratios, None, None, barriers, idxs, trackers
+            None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
         )
         expected = torch.tensor([[0.0], [0.5], [0.75], [1.0]], dtype=torch.float64)
         assert torch.allclose(barriers_new, expected)
@@ -669,7 +662,7 @@ class TestPartialAndBoundary:
 
         _, _, _, _, barriers_new, _, _, er_kept, _ = (
             self.solver._adaptively_increase_mesh(
-                None, error_ratios, None, None, barriers, idxs, trackers
+                None, _keep_mask(self.solver, error_ratios), None, None, barriers, idxs, trackers
             )
         )
         assert len(barriers_new) == 3  # split
@@ -687,7 +680,7 @@ class TestPartialAndBoundary:
         _, _, _, _, barriers_new, _, _, _, split_counts_new = (
             self.solver._adaptively_increase_mesh(
                 None,
-                error_ratios,
+                _keep_mask(self.solver, error_ratios),
                 None,
                 None,
                 barriers,

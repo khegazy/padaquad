@@ -166,8 +166,9 @@ class TestPruneExcessT:
         assert torch.cuda.max_memory_allocated() - before < held + 0.05 * n * row
         keep = torch.ones(n + 1, dtype=torch.bool, device="cuda")
         keep[merged + 1] = False
-        expected = ss.index_put((merged,), ss[merged] + ss[merged + 1])[keep[:-1]]
-        assert torch.equal(ss_p, expected)
+        for x, x_p in ((ss, ss_p), (se, se_p)):
+            expected = x.index_put((merged,), x[merged] + x[merged + 1])[keep[:-1]]
+            assert torch.equal(x_p, expected)
         assert torch.equal(m_p, mesh[keep])
 
     @pytest.mark.parametrize("method", ["bosh3", "dopri5", "gk21", "cc17"])

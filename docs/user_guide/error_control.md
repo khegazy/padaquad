@@ -128,12 +128,13 @@ every piece is in that state (a Chebyshev polynomial of degree $k - 1$), the
 rule evaluates 57 % more points than halving with `gk15`, `gk21` and `cc33` and
 86 % more with `gk31`, for the same error.
 
-It does not save time when `f` is cheap: on an A100, each mesh update with the
-rule on costs about 30 more GPU launches for its test, and about 30 more when
-it splits in four. Over 270 runs (the 9 integrands above, `gk7` to `cc33`,
-`atol` $10^{-6}$ to $10^{-10}$, two random starting meshes, cheap integrands),
-the total time was the same as halving's: 6 % less where the rule acted, 10 %
-more where it did not. Use it when `f` is expensive and the integrand needs
+It saves little time when `f` is cheap: on an A100, a mesh update takes 53
+GPU launches when halving; with the rule on, every update after the call's
+first split takes 31 more for its test, and 35 more when it splits in four.
+Over 270 runs (the 9 integrands above, `gk7` to `cc33`, `atol` $10^{-6}$ to
+$10^{-10}$, two random starting meshes, cheap integrands), the total time was
+1 % less than halving's: 7 % less where the rule acted, 6 % more where it did
+not. Use it when `f` is expensive and the integrand needs
 many levels of refinement; with the default, no evaluation of `f` is spent on
 a four-way split whose halves would have passed.
 

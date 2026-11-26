@@ -411,8 +411,10 @@ read of the device: the positions of the failures that `_splittable` allows;
 the loop learns from their count, on the host, whether any is split), and
 those failures are split in the same mesh update (`extra_split_idxs`)
 and removed from the record (`_remove_failed_record_panels`). Step 7 and the
-final `converged` check use the same `_record_error_check`, so the three
-cannot disagree through rounding. A fixed
+final `converged` check use the same `_record_error_check`, so in absolute
+mode the three cannot disagree through rounding (in cumulative mode the
+tolerance, the norm of the running sums, is reduced as rows of different
+arrays and can still differ in its last bit for D > 1). A fixed
 `error_integral_reference` turns Step 4b off; with `enforce_convergence`, Step 7
 drops it once no tracker is True: the record is judged against its own
 integral, the failures are split directly (`_adaptively_increase_mesh` with an

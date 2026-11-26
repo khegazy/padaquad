@@ -593,3 +593,118 @@ split that deep is something I have not checked.
 - **Mine, not from a source:** the guard of D2(b), the tracker-list
   alternative, and the split of `runtime_checks` in D1(c) (the last one is
   also proposed in `per-turn-overhead.md`).
+
+## 11. Implemented (branch `turn_device_reads`, 2026-11-26)
+
+Scripts and logs: `$SCRATCH/padaquad_speedup_plans/turn-device-reads/impl/`
+(`count_turn.py` waits by line, launches and the returned tensors;
+`compare_counts.py`; `bitgrid.py`, the `endpoint-evaluations` grid extended
+with three error-norm cases over D = 3 and the record on the solver's device,
+704 integrations; `bitcompare.py`; `profile_turn.py` wall time;
+`diverge.py`, `diverge_tg.py`, `d2_jump.py` the divergent cases; `logs/`).
+Nodes: `nid200337`, `nid001060`, `nid200268` (A100-SXM4, torch 2.8.0).
+
+| Step (5) | Commit | What |
+|---|---|---|
+| 1 | `1879fed` | this file, reviewed |
+| 2 | `e966904` | mesh update with one read; `keep_mask` required, `error_ratios`, `remove_mask` and the legacy mask path removed; `keep_idx` in slot 8; `_keep_rows(x, idx, in_place)`; empty allocations, no clones, no NaN check |
+| 3 | `6f046a2` | the loop's one `torch.nonzero`; `_evaluate_f_on_mesh(..., step_idxs, ...)` |
+| 4 (D2) | `3190cac` | `_splittable` (cap and guard), used by the mesh update and `_failed_record_positions` (new parameter `mesh`); tests; troubleshooting page; CHANGELOG |
+| 5 (D1) | `c1eb51f` | the loop's mesh-order check and the `take_gradient=True` node-order check removed; `runtime_checks` docstrings, user guide, CHANGELOG |
+| 5b | `2b51079` | `atol_assert`, `rtol_assert` removed (no reader left; public attributes, own commit) |
+| test fix | `1380210` | the mesh-update tests' helper `_keep_mask(error_ratios)`, for `ruff format` |
+| 6 | `5da5416` | host-wait tests in `TestHostWaits` |
+| 7 | `cdda96f` | CLAUDE.md, CHANGELOG |
+
+**Numbers unchanged.** Grid of 704 integrations (7,184 tensors) against
+`73caae8`: 0 differences on the CPU and on CUDA, after step 3 and at
+`cdda96f`. `count_turn.py`: integral, error, contributions, errors, nodes,
+values and state mesh equal (`torch.equal`) for the five cases below.
+
+**Host waits and GPU launches per call** (gk21, `atol=1e-8`, `rtol=0`,
+`error_norm="max"`, float64, `max_batch=1e6`, [0, 1]; `73caae8` → branch):
+
+| Case | Turns | Waits | Launches | Waits, `runtime_checks=False` |
+|---|---|---|---|---|
+| damped_sine | 1 | 45 → 30 | 256 → 219 | 38 → 26 |
+| chirp | 14 | 648 → 412 | 3,739 → 3,234 | 565 → 371 |
+| many_outputs | 2 | 93 → 61 | 520 → 447 | 80 → 54 |
+| oscillatory | 13 | 432 → 213 | 2,883 → 2,313 | 367 → 187 |
+| chirp, `take_gradient=True`, `max_batch=230` | 18 | 738 → 422 | 3,924 → 3,008 | n/a → 375 |
+
+After step 3 (before the guard) `chirp` had 3,022 launches: the guard costs
+about 15 launches per mesh update (two gathers, the midpoint, two
+comparisons and their reductions), no wait. On `chirp` the mesh update now
+makes 14 waits (one per call) and `_evaluate_f_on_mesh` none; what remains
+is the record (`_insert_sorted_results` 120, `_mesh_order` 102, `place` 78:
+`record-order`), the loop (36), `_get_mesh_indices` 15, the finite check 14
+and `_failed_record_positions` 13.
+
+**Wall time** (`profile_turn.py`, median of 21 calls after a warm-up, ms;
+two rounds alternating base and branch on GPU 2 of `nid001060`, CPU of
+`nid200268` with 8 threads, nothing else of mine running):
+
+| Case | A100 base | A100 branch | CPU base | CPU branch |
+|---|---|---|---|---|
+| damped_sine | 5.15, 5.11 | 4.78, 4.77 | 3.08, 3.11 | 3.08, 3.09 |
+| chirp | 57.5, 57.3 | 51.6, 52.9 | 17.1, 16.8 | 16.2, 16.4 |
+| many_outputs | 11.2, 11.0 | 10.1, 12.0 | 6.6, 6.5 | 6.5, 6.4 |
+| oscillatory | 132, 128 | 126, 137 | 107, 106 | 110, 105 |
+| chirp, `take_gradient=True`, `max_batch=230` | 63.5, 63.3 | 53.0, 54.4 | 20.5, 19.8 | 18.2, 18.2 |
+
+`many_outputs` and `oscillatory` vary between rounds by as much as the change
+(the second branch round was slower on both); `chirp` gains 4.5-6 ms (8-10 %)
+on the GPU and `take_gradient=True` 9-10 ms (15 %). On the CPU the changes
+are within the spread except `take_gradient=True` (about 10 %).
+
+**Tests at `cdda96f`** (`nid200268`): CUDA 4,343 passed, 25 skipped, no
+failure (`73caae8`: 4,321 passed, 25 skipped); CPU 4,025 passed, 343 skipped,
+no failure (`73caae8`: 4,007 passed, 339 skipped). `ruff check padaquad/`,
+`ruff format --check padaquad/ tests/`, `mypy padaquad/` and `numpydoc lint`
+clean; docs build with `-W` passes.
+
+**The divergent cases** (CPU, `diverge.py`, `diverge_tg.py`; gk21,
+`atol=1e-6` float64 or `1e-4` float32, no `max_adaptive_splits`):
+
+| Case | `73caae8` | branch |
+|---|---|---|
+| `1/(t-0.5)**2`, `take_gradient=False` | `ValueError` at t = 0.5 after 46 turns (`runtime_checks=False`: integral inf, `converged=False`) | the same |
+| `1/(t-0.5)**2`, `take_gradient=True` (the solver's default), `runtime_checks=True` | empty `AssertionError` after 60 turns | still refining at 60 s: 224 turns, 458,783 mesh points |
+| the same, `runtime_checks=False` | still refining at 60 s: 248 turns, 515,045 mesh points | still refining at 60 s: 250 turns, 521,328 mesh points |
+| the same in float32 | `ValueError` at t = 0.5 after 17 turns | the same |
+| `1/t`, `t**-0.99` at 0; `1/(1-t)` at 1 | `ValueError` at a subnormal t or at 1.0 (1,011, 1,021, 43 turns; float32 115, 116, 14) | the same |
+| `sign(t - 0.3)`, `atol=rtol=0`, dopri5 | empty `AssertionError` (`runtime_checks=True`), no end (`False`) | `converged=False` in 0.1 s |
+
+So the guard ends early and cleanly only the case where a subinterval
+reaches one ULP alone (the jump). Near an interior non-integrable
+singularity with `take_gradient=True`, `f`'s own rounding error (a relative
+error of about ulp(0.5) / |t - 0.5| in `t - 0.5`) exceeds the rounding floor,
+which assumes `f` accurate to eps, on every subinterval within about 1e-9 of
+0.5; they all refine toward one ULP (about 4e7 subintervals), and the
+`take_gradient=True` queue, served in mesh order, never reaches the node that
+would round onto 0.5. Before, the first one-ULP split stopped the call with
+the empty `AssertionError` (with `runtime_checks=True`); now it continues, as
+it already did with `runtime_checks=False`.
+
+## 12. Not done, and open
+
+- **What D2 should do near an interior singularity** (decision for the user).
+  (a) As now: accept, the run is correct but can refine for very long.
+  (b) Raise a located error when a failing subinterval cannot be halved, read
+  together with the mesh update's `n_keep` (no new wait): it would end the
+  `take_gradient=True` case above after 60 turns with a message naming t,
+  for both `runtime_checks` values, but turns the jump case from
+  `converged=False` into an error. (c) Drop D2: then the D1 commit's removal
+  of the loop's mesh-order check must be reverted too, since it relies on the
+  guard. Not decided here, since (b) is not the plan's recommendation.
+- **A rounding floor that accounts for the integrand's own rounding error**
+  (the cause of the long refinement): out of scope.
+- **The sorted list of waiting indices** (review item 8): not done; would save
+  14 waits per call on `chirp`.
+- **`interpolatory3_variable` on a one-ULP subinterval** returns a NaN
+  contribution (its weights are not finite there), so the jump case ends with
+  a NaN integral and `converged=False`; unchanged from before, where the call
+  did not end.
+- **Mesh points above about 9e307** in magnitude: the midpoint overflows to
+  inf, which the guard does not refuse (it is not equal to either end); the
+  removed order check would have raised. Not handled.

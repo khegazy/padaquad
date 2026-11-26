@@ -143,11 +143,19 @@ integrand. The number of points per call is the batch size, `max_batch`.
 **How `integrate` chooses it.** A `max_batch` given to the call (or to the
 constructor, when no `state` is given) is used as it is and never grows. A
 `state` (the state an earlier call returned, {ref}`ug-reuse`) gives the batch
-size to start from. With neither, the first call of the integrand is the
-first pass, at most 10,000 points (for the default starting mesh of gk21, 231
-points), and the batch size grows from there. No call of the integrand is
-made for anything but the integral: every point it is called at belongs to
-it.
+size to start from. With neither, the integrand is called, forward only, on
+10, 100 and 1,000 copies of one point, stopping at the order of the first pass
+(for the default starting mesh of gk21, 231 points: calls of 10 and 100), and
+the batch size starts at the largest that ran. These test calls read no memory
+and their values are discarded; they only check that the integrand runs, at
+the cost of 10, 110 or 1,110 points per call (none when the first pass has
+fewer than 10 points). The point is the first node of the first subinterval,
+which the first pass evaluates too, so it is never a bound that a method
+without nodes at the ends of its subintervals leaves out (gk21 and the other
+Gauss-Kronrod methods), where the integrand may be singular. A test call that
+runs out of memory is repeated at half its size up to 10 points and at three
+quarters of it above, until one runs; the batch size has then converged (see
+below), and no larger test call follows.
 
 **How it grows.** While the batch size has not converged, a call of the
 integrand that has more points waiting than the batch size tries 10 times as
@@ -169,6 +177,9 @@ the call raises `ValueError` before the integrand is called. (With
 `take_gradient=False` a call may end inside a subinterval, so any batch size
 works, and the state of such a call can hold a converged batch size below
 it; pass `max_batch` to a `take_gradient=True` call started from that state.)
+The test calls then shrink no further than one subinterval: after a failed test
+call, the points of one subinterval are tried before giving up, and if they do
+not fit either, the call raises `torch.OutOfMemoryError`.
 On a GPU, before each backward pass it compares the memory
 still usable (keeping `1 - total_mem_usage` of the total free) with what the
 backward pass is predicted to need: the batch's forward peak memory, times the
@@ -212,16 +223,19 @@ error from the integrand is raised unchanged.
   an out-of-memory error. On a CPU an allocation that does not fit can get the
   process killed instead (Linux accepts most allocations and kills the process
   when memory runs out), and a GPU driver that falls back to system memory
-  (NVIDIA's on Windows) slows down instead of failing. The first call (the
-  first pass, up to 10,000 points) is not preceded by a smaller one, and
-  every later call is at most 10 times one that ran. PadaQuad is meant for
-  GPUs; on a CPU, pass `max_batch` when memory matters.
-- *A first call far above the limit.* Each failed call shrinks by a quarter,
-  so reaching the limit takes about 8 failed calls per factor of 10 between
-  the first call and the limit: for an integrand that holds 60 points, 5
-  failed calls from the default first pass of `gk21` (231 points) and 18 from
-  a first pass of 10,000 points (a mesh of 500 subintervals). This happens
-  once per state; pass `max_batch` or the state to avoid it.
+  (NVIDIA's on Windows) slows down instead of failing. The test calls start
+  at 10 points, and every later call is at most 10 times one that ran.
+  PadaQuad is meant for GPUs; on a CPU, pass `max_batch` when memory matters.
+- *Failed calls.* A call that runs out of memory shrinks by a quarter, about 8
+  failed calls per factor of 10 between its size and the limit; since no call
+  is more than 10 times one that ran, reaching the limit costs a few failed
+  calls once per state (for an integrand that holds 60 points, the test calls
+  of 100 and 75 points with the default starting mesh of gk21). Pass
+  `max_batch` or the state to avoid them.
+- *Small batch sizes.* Test calls of up to 10 points halve when they fail, so
+  an integrand that holds 9 points gets the batch size 5 (10 failed, 5 ran),
+  and one that holds 3 points gets 2; the batch size then never grows. Pass
+  `max_batch` when such an integrand matters.
 - *Memory is not kept free.* The forward calls fill the memory until they
   fail; other processes on the same GPU can run out of memory meanwhile.
   `total_mem_usage` limits only the check before a backward pass.

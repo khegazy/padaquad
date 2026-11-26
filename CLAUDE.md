@@ -150,9 +150,9 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_examples_run.py` | Runs `examples/*.py` (with output markers, or self-checking with asserts: `SELF_CHECKING_EXAMPLES`, `MPLBACKEND=Agg`), every script in `examples/verification/`, and every ```python block of the files in its `DOCUMENTS` (the README, `docs/development/adding_a_method.md`; except blocks preceded by `<!-- not-tested -->`) |
 | `test_max_adaptive_splits.py` | The `max_adaptive_splits` depth cap; with `split_rule="accelerate"`, the same K 2^n subintervals in fewer passes |
 | `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks`; `get_max_batch(f=..., t=...)` (measurement, argument checks, `evaluation_buffer` kept free twice) and the measured `result.max_batch` |
-| `test_memory_state.py` | The batch size of `integrate` and the state: the first call is the first pass (at most 10,000 points), every point `f` is called at belongs to the integration (C per evaluated subinterval; every start, both `take_gradient`, with simulated out-of-memory errors), growth by 10, the retry chain of a first call that runs out of memory, a given `max_batch`, the state's mesh and batch size (a converged one below C refused with `take_gradient=True`, before `f`; with `max_batch=21` or not converged it runs); backward out-of-memory restarts |
+| `test_memory_state.py` | The batch size of `integrate` and the state: the test calls (10, 100, 1,000, stopping at the order of the first pass; 0.75 above 10 points and 0.5 up to 10 after an out-of-memory error; with `take_gradient=True` not below C, and `torch.OutOfMemoryError` when C points do not fit), the calls of `f` are exactly the test calls plus C per evaluated subinterval (every start, both `take_gradient`, with simulated out-of-memory errors), growth by 10, a given `max_batch`, the state's mesh and batch size (a converged one below C refused with `take_gradient=True`, before `f`; with `max_batch=21` or not converged it runs); backward out-of-memory restarts |
 | `test_methods_registry.py` | Registry consistency: table shapes and dtypes, `degree` / `error_exponent` types |
-| `test_interior_nodes.py` | Gauss-Kronrod (nodes all interior): C points of `f` per subinterval, none at a mesh point, no call of `f` before the first pass, `1/sqrt(t)` and `log(t)` at a bound converge, result rows = evaluated points, bound gradients against the closed form |
+| `test_interior_nodes.py` | Gauss-Kronrod (nodes all interior): C points of `f` per subinterval, none at a mesh point, the test calls at the first node of the first subinterval, `1/sqrt(t)` and `log(t)` at a bound converge, result rows = evaluated points, bound gradients against the closed form |
 | `test_multi_d_integrand.py` | Integrands with D > 1 outputs |
 | `test_oom_recovery.py` | The out-of-memory catch-and-retry path (direct calls of `_evaluate_f_on_split_nodes`, including retries that end inside a subinterval; `integrate` with and without `trade_speed_for_memory`) |
 | `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance (with `take_gradient=False` the drift is between passes: `_cancelling_peak` hides its cancelling part in a narrow peak the first passes miss); `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN); the norm family's record carries each step's `reduced_errors` into every re-check and the final check; the re-check with `split_rule="accelerate"` (fewer passes, no step evaluated twice) |
@@ -516,13 +516,22 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   two reviews of the code in `d0bcbdc` and `59b7f11`). Per call, `_batch` (largest batch known
   to fit) and `_batch_converged` (will not grow again), set at the start of
   `integrate`: from `max_batch` (call, or constructor when no state) →
-  converged; from `state=` (`IntegrationState`, `results.py`); else
-  `ceil(min(n_first, _LARGEST_FIRST_CALL = 10,000) / _GROWTH)`, not converged,
-  so the first call of `f` is the first pass, at most 10,000 points (no test
-  calls and no output-check call: every point `f` is called at belongs to the
-  integration; the output's shape is checked in `_call_f`, the
-  `error_integral_reference` shape in Step 4, the `trade_speed_for_memory`
-  warning after the loop).
+  converged; from `state=` (`IntegrationState`, `results.py`); else the test
+  calls, inline in `integrate` after the starting mesh is drawn (restored on
+  2026-11-26 by the user's decision after `2d969f1` removed them; design note
+  `docs/issues/2026-11-26-restore-test-calls-plan.md`): `_call_f` on 10, 100
+  and 1,000 (`_LARGEST_TEST_CALL`) copies of the first node of the first
+  subinterval (detached; never a bound a Gauss-Kronrod method leaves out),
+  stopping at the order of the first pass (`n_start_steps * C`), values
+  discarded; the batch starts at the largest that ran (1 below 10 points),
+  not converged. A test call that runs out of memory is retried at
+  `_shrink_batch(n, 0.5)` up to 10 points and `_shrink_batch(n)` (0.75)
+  above, never below `smallest` (C with `take_gradient=True`, else 1), until
+  one runs → converged; the call at `smallest` has `can_shrink=False`, so
+  `_call_f` raises `torch.OutOfMemoryError` when it fails. No one-point
+  output-check call (removed in `1183318`): the output's shape is checked in
+  `_call_f`, the `error_integral_reference` shape in Step 4, the
+  `trade_speed_for_memory` warning after the loop.
   `_batch_for(n_waiting)` sizes every call of `f`: `min(n_waiting, B)` if
   converged, else `min(n_waiting, 10 B)` (`_GROWTH`); `_evaluate_f_in_batches`
   raises `_batch` after each call that ran and, on OOM, sets it to
@@ -614,12 +623,12 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 - PadaQuad sets no thread count and no garbage-collector setting (`torch.set_num_threads`, `gc.disable`/`freeze`/`set_threshold`: none; user guide `ug-cpu-threads`). The one `gc.collect()`, in `_release_memory`, runs only after an out-of-memory error of `f` (`_call_f`, `_measure_call`), at the end of the memory benchmark and before a restart after a backward out-of-memory error.
 - Out-of-memory errors are recognized by `_is_out_of_memory` (GPU OOM, CPU
   `DefaultCPUAllocator` refusal, CUDA "out of memory" and CUDA-library
-  `*ALLOC*_FAILED` statuses, `MemoryError`). Every call of `f` in the
-  integration loop goes through `_call_f` (memory.py), the one place that
+  `*ALLOC*_FAILED` statuses, `MemoryError`). Every call of `f` in
+  `integrate` (the test calls and the loop) goes through `_call_f` (memory.py), the one place that
   catches them: it returns None after `_release_memory` (CUDA cache only on
   a CUDA solver, and only for an error from outside PyTorch's allocator), or
   raises `torch.OutOfMemoryError` ("cannot be reduced") when the caller cannot
-  shrink. Its two callers retry smaller: `_evaluate_f_in_batches`
+  shrink. Its callers retry smaller: the test calls, `_evaluate_f_in_batches`
   (`take_gradient=False`) and the `while output is None` loop of
   `_evaluate_f_on_full_nodes` (`take_gradient=True`). It is also the one
   check of the output's shape (`ValueError` unless [N, D], one row per point).

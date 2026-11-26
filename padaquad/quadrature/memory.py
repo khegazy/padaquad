@@ -762,8 +762,8 @@ class _MemoryManagement:
         """
         Call f on points and check its output, or return None when it runs out of memory.
 
-        Every call of f in the integration loop goes through it, so it is the
-        one place that checks the shape of f's output and that catches an
+        Every call of f in ``integrate`` (the test calls and the integration
+        loop) goes through it, so it is the one place that checks the shape of f's output and that catches an
         out-of-memory error of f (``_is_out_of_memory``). After one, the
         memory f held is released, so the caller can try again with fewer
         points.

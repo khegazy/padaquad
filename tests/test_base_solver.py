@@ -407,11 +407,11 @@ class TestHostWaits:
     @pytest.mark.parametrize("runtime_checks", [True, False])
     def test_starting_mesh_reads_once(self, runtime_checks):
         """A fresh starting mesh reads the device once, with or without
-        runtime_checks: for the number of points kept once those that
-        rounding put on or below an earlier point are dropped. The mesh is
-        then strictly increasing by construction, so no order check reads
-        it (before, one read under runtime_checks and none without, which
-        let a repeated point through)."""
+        runtime_checks: whether it is strictly increasing, which decides
+        whether points that rounding put on or below an earlier point must be
+        dropped. The mesh is then strictly increasing by construction, so no
+        order check reads it (before, one read under runtime_checks and none
+        without, which let a repeated point through)."""
         solver = adaptive_quadrature(
             "uniform", "gk21", device="cuda", runtime_checks=runtime_checks
         )

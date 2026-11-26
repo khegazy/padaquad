@@ -3915,14 +3915,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # above every point before them and below mesh_final, so the mesh
             # is strictly increasing (for T > 1, which integrate does not
             # reach, consecutive points differ) and keeps its exact ends. One
-            # read of the device, whether any point is dropped: dropping (a
-            # boolean index and a copy, six more kernels on a GPU) runs only
-            # then, and a mesh with no such point is kept as it is.
-            inner = mesh[1:-1]
-            keep = (
-                (inner > torch.cummax(mesh[:-2], dim=0).values) & (inner < mesh_final)
-            ).any(-1)
-            if not bool(keep.all()):
+            # read of the device, whether the mesh is strictly increasing (then
+            # no point is dropped and it is kept as it is): the rest runs only
+            # when a point must be dropped.
+            if not bool(torch.all(mesh[1:] > mesh[:-1])):
+                inner = mesh[1:-1]
+                keep = (
+                    (inner > torch.cummax(mesh[:-2], dim=0).values)
+                    & (inner < mesh_final)
+                ).any(-1)
                 mesh = torch.cat([mesh[:1], inner[keep], mesh[-1:]])
         # True at every mesh point but the last, which starts no subinterval;
         # compared on the device, with no copy from the host.

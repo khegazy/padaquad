@@ -379,7 +379,10 @@ def test_pair_ratio_is_merged_step_ratio(use_absolute_error_ratio, error_norm):
     err = torch.tensor([[1e-11, 3e-11], [2e-11, 1e-11]], dtype=torch.float64)
     integral = quad.sum(0)
     _, pair, _ = solver._compute_error_ratios(
-        mesh_quadrature_errors=err, mesh_quadratures=quad, integral=integral
+        mesh_quadrature_errors=err,
+        mesh_quadratures=quad,
+        integral=integral,
+        pair_errors=err[:-1] + err[1:],
     )
     merged, _, merged_per_dim = solver._compute_error_ratios(
         mesh_quadrature_errors=err.sum(0, keepdim=True),

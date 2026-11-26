@@ -610,7 +610,7 @@ class Trainer(CurriculumClass):
                     [t_init, self.t_pred], dtype=self.dtype, device=self.device
                 ).unsqueeze(-1)
             else:
-                self.input_times = self.integral_output.mesh_optimal
+                self.input_times = self.integral_state.mesh
             # self.input_times = torch.tensor([t_init, self.t_pred], dtype=self.dtype, device=self.device).unsqueeze(-1)
             # print("TIMES", times.shape, loss, torch.std(self.loss_history), self.loss_history, times)
             """

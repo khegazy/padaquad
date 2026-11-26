@@ -1073,23 +1073,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         )
         if given is not None and (isinstance(given, bool) or operator.index(given) < 1):
             raise ValueError(f"max_batch must be an int >= 1; got {given!r}.")
-        # With take_gradient=True every call of f is whole subintervals, each
-        # followed by its backward pass, so a batch size that does not grow
-        # must hold one subinterval: a given one, or a state's converged one
-        # (the largest known to fit; raising it could run out of memory).
-        fixed = given
-        if fixed is None and state is not None and state.max_batch_converged:
-            fixed = state.max_batch
-        if take_gradient and fixed is not None and fixed < self.C:
-            raise ValueError(
-                f"{'max_batch' if given is not None else 'The state batch size'} "
-                f"{fixed} is below the {self.C} points of one subinterval of "
-                f"{self.method_name}: with take_gradient=True every call of f "
-                "evaluates whole subintervals, each followed by its backward "
-                f"pass. Pass max_batch={self.C} or more (it replaces a state's "
-                "batch size), or take_gradient=False, where a call of f may end "
-                "inside a subinterval."
-            )
 
         # Per-call max_adaptive_splits takes priority over the constructor value.
         max_adaptive_splits = (
@@ -1251,6 +1234,20 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         else:
             n_first = min(n_start_steps * self.C, _LARGEST_FIRST_CALL)
             self._batch, self._batch_converged = -(-n_first // _GROWTH), False
+        # With take_gradient=True every call of f is whole subintervals, each
+        # followed by its backward pass, so a batch size that does not grow
+        # must hold one subinterval: a given one, or a state's converged one
+        # (the largest known to fit; raising it could run out of memory).
+        if take_gradient and self._batch_converged and self._batch < self.C:
+            raise ValueError(
+                f"{'max_batch' if given is not None else 'The state batch size'} "
+                f"{self._batch} is below the {self.C} points of one subinterval of "
+                f"{self.method_name}: with take_gradient=True every call of f "
+                "evaluates whole subintervals, each followed by its backward "
+                f"pass. Pass max_batch={self.C} or more (it replaces a state's "
+                "batch size), or take_gradient=False, where a call of f may end "
+                "inside a subinterval."
+            )
         # Gradients to put back after an out-of-memory error in a backward
         # pass: the given parameters now, the rest as the graph walk finds them.
         saved: _SavedGrads = {}

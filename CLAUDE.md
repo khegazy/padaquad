@@ -531,8 +531,8 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 - **`take_gradient=True`** (`_evaluate_f_on_full_nodes`, one batch per loop
   turn, whole subintervals): a batch size that cannot grow (a given
   `max_batch`, or without it a state's converged one) below C raises
-  `ValueError` in `integrate`, beside the `max_batch` check, before `f` is
-  called (a state's is not raised to C: it is the largest known to fit), so
+  `ValueError` in `integrate` where the call's batch size is set (after the
+  true-or-false options are checked), before `f` is called (a state's is not raised to C: it is the largest known to fit), so
   every batch holds at least one subinterval; a forward OOM drops the outputs and retries with fewer
   subintervals; on a GPU, when `f`'s output requires grad, the check
   `usable >= _backward_ratio * F` (F = forward peak via

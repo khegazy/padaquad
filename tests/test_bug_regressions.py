@@ -626,7 +626,9 @@ _NOT_BOOLS = ["False", None, 0, [], torch.tensor(True), 1.0]
 def test_integrate_true_or_false_options_reject_other_values(option, value):
     """An integrate option that must be True or False raises TypeError naming
     it and the value, before f is called; None is valid for runtime_checks
-    and enforce_convergence."""
+    and enforce_convergence. It is named before the batch size is checked:
+    take_gradient="False" with max_batch=10 raised that 10 is below one
+    subinterval, a check of take_gradient=True."""
     if value is None and option in ("runtime_checks", "enforce_convergence"):
         pytest.skip("None means the default")
     calls = []
@@ -634,6 +636,7 @@ def test_integrate_true_or_false_options_reject_other_values(option, value):
         _solver().integrate(
             lambda t: calls.append(t) or torch.exp(t),
             mesh=_MESH,
+            max_batch=10,
             **({"take_gradient": False} | {option: value}),
         )
     assert calls == []

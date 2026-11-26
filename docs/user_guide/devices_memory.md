@@ -30,13 +30,14 @@ the host.
 `torch.get_num_threads()` returns the count. On the node measured below, with
 `OMP_NUM_THREADS` unset, it was 64 (the node's 64 cores, which have two
 hardware threads each, 128 logical CPUs) in a process allowed to run on every
-logical CPU, and 8 in a process allowed 8 logical CPUs (`taskset`, or a Slurm
-job step started with `srun -c 8`), even when those were the two hardware
-threads of 4 cores. Set the count before the first integral: with
-`torch.set_num_threads(n)` in Python, or with `OMP_NUM_THREADS=n` in the
-environment before Python starts. On a Slurm cluster, bind each task to its
-cores (`srun --cpu-bind=cores`) and use at most one thread per core it was
-given.
+logical CPU, and 8 in a process allowed 8 logical CPUs, even when those were
+the two hardware threads of 4 cores: `srun -c 8 --cpu-bind=cores` gave a job
+step exactly that, so PyTorch put two threads on each core. Set the count
+before the first integral: with `torch.set_num_threads(n)` in Python, or with
+`OMP_NUM_THREADS=n` in the environment before Python starts. On a Slurm
+cluster, bind each task to its cores and use at most one thread per core: on
+this node, `srun -c 16 --cpu-bind=cores` gave 8 cores (16 logical CPUs), and
+`OMP_NUM_THREADS=8` then runs one thread on each.
 
 PadaQuad itself never changes the thread count or the settings of Python's
 garbage collector, and outside a distributed job (several processes joined by

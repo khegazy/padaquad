@@ -68,7 +68,10 @@ is now different, and what changed in this file:
    logical CPUs, by `taskset -c 0-7`, `srun -c 8` or `srun -c 8
    --cpu-bind=cores`; 16 under `srun -c 16`; and **8 under `taskset -c
    0-3,64-67`, the two hardware threads of 4 cores**, so the default follows
-   the CPU set and can put two threads on one core. (That the default is the
+   the CPU set and can put two threads on one core. `srun -c 8
+   --cpu-bind=cores` gives exactly that set (CPUs 0-3 and 64-67), and `srun
+   -c 16 --cpu-bind=cores` 8 cores (0-7 and 64-71) (`impl/logs/srun_cpuset.log`,
+   second node `nid200273`). (That the default is the
    smaller of the CPU set and the number of physical cores is my inference
    from these five counts and the login node's, not from torch's source.)
 6. **Known doubts, checked.** `KMP_BLOCKTIME` does not apply: the plan's 2.5
@@ -606,7 +609,10 @@ the node of 2.6, after the protocol): CUDA 4,622 passed, 25 skipped; CPU
 (`CUDA_VISIBLE_DEVICES=""`) 4,288 passed, 359 skipped; no failure
 (`impl/logs/suite_base_*.log`). The suites, docs build and checks at the
 final commit are in the implementing agent's final report
-(`impl/logs/suite_final_*.log`, `impl/logs/docs_final.log`).
+(`impl/logs/suite_final_*.log`, `impl/logs/docs_final.log`). The base
+suites above ran with an uncommitted draft of `TestPythonWork` already in the
+worktree; the clean base comparison is from an archive of `3eb4507`
+(`impl/logs/suite_base2_*.log`).
 
 ### Not done
 

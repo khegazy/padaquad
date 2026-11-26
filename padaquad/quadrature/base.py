@@ -258,9 +258,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     # through ``_set_dtype``.
     method: MethodClass
     C: int
-    # Weight vectors of _merged_pair_weights by quantized width ratio (the key
-    # None holds the distinct-node indices); reset by ``_set_solver_dtype``.
-    _merge_weight_cache: dict[int | None, torch.Tensor]
+    # Weight vectors of _merged_pair_weights by quantized width ratio; reset by
+    # ``_set_solver_dtype``.
+    _merge_weight_cache: dict[int, torch.Tensor]
 
     def __init__(
         self,
@@ -2880,9 +2880,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             self.remove_cut,
         )
 
-    def _merged_pair_weights(
-        self, rho: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _merged_pair_weights(self, rho: torch.Tensor) -> torch.Tensor:
         """
         Weight vectors that give a merged subinterval's integral and error estimate.
 
@@ -2893,12 +2891,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         polynomials are evaluated at the merged subinterval's nodes and the
         method's weights b and error weights b_err are applied. Both results
         are linear in the stored values, so with ``y_L`` and ``y_R`` the
-        neighbors' values at their distinct nodes and H the merged width::
+        neighbors' values at their nodes and H the merged width::
 
             Q_hat = H * (alpha_L . y_L + alpha_R . y_R)
             E_hat = H * (gamma_L . y_L + gamma_R . y_R)
 
-        and the vectors depend on the pair only through ``rho``.
+        and the vectors depend on the pair only through ``rho``. A method may
+        repeat a node fraction; its stored values there are equal, and the
+        repeats get weight 0, so the vectors apply to the values as stored.
 
         Parameters
         ----------
@@ -2907,24 +2907,20 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor]
-            ``(weights, first)``. ``weights`` holds the four vectors in
-            float64, shape [R, 2, 2, U] with U the number of distinct node
-            fractions: ``weights[:, 0]`` is ``(alpha_L, gamma_L)`` and
-            ``weights[:, 1]`` is ``(alpha_R, gamma_R)``. ``first`` is the index
-            of each distinct fraction in ``node_fractions()``, shape [U]
-            (a method may repeat a fraction; its stored values there are
-            equal).
+        torch.Tensor
+            The four vectors in float64, shape [R, 2, 2, C]: ``[:, 0]`` is
+            ``(alpha_L, gamma_L)`` and ``[:, 1]`` is ``(alpha_R, gamma_R)``.
         """
         if len(rho) > self._RATIO_BLOCK:
-            blocks = [
-                self._merged_pair_weights(rho[i : i + self._RATIO_BLOCK])
-                for i in range(0, len(rho), self._RATIO_BLOCK)
-            ]
-            return torch.cat([weights for weights, _ in blocks]), blocks[0][1]
+            return torch.cat(
+                [
+                    self._merged_pair_weights(rho[i : i + self._RATIO_BLOCK])
+                    for i in range(0, len(rho), self._RATIO_BLOCK)
+                ]
+            )
         c = self.method.node_fractions().to(device=rho.device, dtype=torch.float64)
-        # The fractions are non-decreasing (MethodClass checks it), so repeats
-        # are neighbors.
+        # The polynomials go through the U distinct fractions. They are
+        # non-decreasing (MethodClass checks it), so repeats are neighbors.
         new = torch.ones_like(c, dtype=torch.bool)
         new[1:] = c[1:] != c[:-1]
         first = torch.nonzero(new)[:, 0]
@@ -2968,8 +2964,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # basis non-finite, so it is masked rather than multiplied by 0)
             shared = torch.where(share[..., None] > 0, basis * share[..., None], 0.0)
             sides.append((bb * shared[:, None]).sum(dim=2))
-        weights = torch.stack(sides, dim=1)
-        return weights, first.to(rho.device)
+        # Each distinct fraction's vectors at its first node, 0 at its repeats.
+        weights = torch.zeros(
+            len(rho), 2, 2, len(c), dtype=torch.float64, device=rho.device
+        )
+        weights[..., first] = torch.stack(sides, dim=1)
+        return weights
 
     def _predict_merged_errors(
         self,
@@ -3041,10 +3041,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # Vectors only for this chunk's ratios, so memory stays bounded
             # even when every pair has its own ratio.
             keys, inverse = torch.unique(key[lo:hi], return_inverse=True)
-            weights, first = self._cached_merged_pair_weights(keys)
-            pair_weights = weights[inverse]  # [P, 2, 2, U]
-            y_l = y[lo:hi][:, first, :].to(torch.float64)  # [P, U, D]
-            y_r = y[lo + 1 : hi + 1][:, first, :].to(torch.float64)
+            pair_weights = self._cached_merged_pair_weights(keys)[inverse]
+            # [P, C, D]: the stored values as they are (views when float64)
+            y_l = y[lo:hi].to(torch.float64)
+            y_r = y[lo + 1 : hi + 1].to(torch.float64)
             width = (widths[lo:hi] + widths[lo + 1 : hi + 1])[:, None, None]
             # [P, 2, D]: row 0 the merged integral Q_hat, row 1 its error E_hat
             q_e_hat = width * (
@@ -3059,9 +3059,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         out[~finite] = torch.inf
         return out
 
-    def _cached_merged_pair_weights(
-        self, keys: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
+    def _cached_merged_pair_weights(self, keys: torch.Tensor) -> torch.Tensor:
         """
         Return ``_merged_pair_weights`` for quantized width ratios, cached.
 
@@ -3081,9 +3079,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor]
-            ``(weights, first)`` as in ``_merged_pair_weights``, with
-            ``weights`` of shape [K, 2, 2, U] in the order of ``keys``.
+        torch.Tensor
+            The vectors of ``_merged_pair_weights`` for each ratio, in the
+            order of ``keys``. Shape: [K, 2, 2, C].
         """
         rho = torch.exp2(keys.to(torch.float64) / self._RATIO_QUANTUM)
         if len(keys) > self._MERGE_CACHE_SIZE:
@@ -3098,10 +3096,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             if len(cache) + len(missing) > self._MERGE_CACHE_SIZE:
                 cache.clear()
                 missing = list(range(len(key_list)))
-            weights, first = self._merged_pair_weights(rho[missing])
-            cache[None] = first
+            weights = self._merged_pair_weights(rho[missing])
             cache.update(zip([key_list[i] for i in missing], weights, strict=True))
-        return torch.stack([cache[k] for k in key_list]), cache[None]
+        return torch.stack([cache[k] for k in key_list])
 
     def _prune_excess_mesh(
         self,

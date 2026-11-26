@@ -18,7 +18,14 @@ from _helpers import (
     needs_cuda,
 )
 
-from padaquad import VARIABLE_METHODS, adaptive_quadrature, integrand_dict, integrate
+from padaquad import (
+    UNIFORM_METHODS,
+    VARIABLE_METHODS,
+    adaptive_quadrature,
+    integrand_dict,
+    integrate,
+)
+from padaquad.methods import UniformMethodClass, _Tableau
 
 #: The merge rules whose meshes are checked end to end: the default and the
 #: 1.3.0 and 1.4.0 one ("sum" merges pairs whose merged step fails, by design).
@@ -455,8 +462,8 @@ def _all_solvers():
 def test_merged_pair_weights_exact_for_polynomials(rho):
     """Interpolating each neighbor through its U distinct nodes is exact for a
     polynomial of degree U - 1, so the predicted merged integral and error
-    estimate equal the merged subinterval's own, to rounding, for every method
-    and width ratio."""
+    estimate, from the values at the neighbors' C nodes, equal the merged
+    subinterval's own, to rounding, for every method and width ratio."""
     generator = torch.Generator().manual_seed(1)
     a, b = 0.2, 1.3
     m = a + (b - a) / (1.0 + rho)
@@ -471,10 +478,8 @@ def test_merged_pair_weights_exact_for_polynomials(rho):
 
         edges = torch.tensor([[a], [m], [b]], dtype=torch.float64)
         halves = solver._compute_nodes(edges[:-1], edges[1:])  # [2, C, 1]
-        weights, first = solver._merged_pair_weights(
-            torch.tensor([rho], dtype=torch.float64)
-        )
-        y = poly(halves[..., 0])[:, first]  # [2, U]
+        weights = solver._merged_pair_weights(torch.tensor([rho], dtype=torch.float64))
+        y = poly(halves[..., 0])  # [2, C]
         predicted = (b - a) * (weights[0, 0] @ y[0] + weights[0, 1] @ y[1])  # [2]
 
         merged = solver._compute_nodes(edges[:1], edges[2:])
@@ -488,6 +493,43 @@ def test_merged_pair_weights_exact_for_polynomials(rho):
             solver.method_name,
             rho,
         )
+
+
+def test_predicted_with_a_repeated_node_fraction(monkeypatch):
+    """A method may repeat a node fraction (its values there are equal): the
+    vectors give the repeat weight 0 and apply to the values as stored.
+    Simpson's rule with its middle node written twice (weights 1/3 + 1/3)
+    predicts the same merged errors as Simpson's rule, to rounding."""
+    third, sixth = 1.0 / 3.0, 1.0 / 6.0
+    rules = {
+        "simpson": ([0.0, 0.5, 1.0], [sixth, 4 * sixth, sixth], [2 * third]),
+        "simpson_twice": (
+            [0.0, 0.5, 0.5, 1.0],
+            [sixth, third, third, sixth],
+            [third] * 2,
+        ),
+    }
+    edges = torch.tensor([[0.0], [0.2], [0.45], [0.5], [1.0]], dtype=torch.float64)
+    predicted = {}
+    for name, (c, b, middle) in rules.items():
+        c, b = (
+            torch.tensor(c, dtype=torch.float64),
+            torch.tensor(b, dtype=torch.float64),
+        )
+        # Simpson minus the trapezoidal rule
+        b_error = torch.tensor([-third, *middle, -third], dtype=torch.float64)
+        method = UniformMethodClass(
+            degree=3, error_exponent=3, tableau=_Tableau(c=c, b=b, b_error=b_error)
+        )
+        monkeypatch.setitem(UNIFORM_METHODS, name, method)
+        solver = make_solver_for_unit_test(name)
+        y, q = _record(solver, edges, lambda t: torch.exp(3 * t) * torch.sin(7 * t))
+        predicted[name] = solver._predict_merged_errors(y, q, edges)
+    weights = solver._merged_pair_weights(torch.tensor([1.0, 2.5], dtype=torch.float64))
+    assert torch.all(weights[..., 2] == 0)  # the repeat
+    assert torch.allclose(
+        predicted["simpson_twice"], predicted["simpson"], rtol=1e-13, atol=0
+    )
 
 
 def _lorentz_5(t):
@@ -651,7 +693,7 @@ def test_predicted_detaches_and_caches():
     y, q = _record(solver, edges, lambda t: torch.sin(theta * t))
     first = solver._predict_merged_errors(y, q, edges)
     assert not first.requires_grad
-    assert len(solver._merge_weight_cache) == 3  # ratios 1 and 2, and the indices
+    assert len(solver._merge_weight_cache) == 2  # ratios 1 and 2
     assert torch.equal(solver._predict_merged_errors(y, q, edges), first)
 
     solver._set_dtype(torch.float32)
@@ -736,7 +778,7 @@ def test_cache_eviction_gives_the_uncached_prediction():
     chunk's ratios several times (no other test reaches that branch). The
     prediction must equal that of a solver whose cache never fills, also on a
     second pass that starts from the evicted cache, and the cache must stay
-    within its bound (plus the entry that holds the distinct-node indices)."""
+    within its bound."""
     # Widths 1, 1, 2, 2, 1, 4, 4, 0.5, 8, ...: ratios 1, 2, 1/2, 4, 1/8, ...
     widths = torch.tensor(
         [1, 1, 2, 2, 1, 4, 4, 0.5, 8, 8, 3, 3, 1, 0.25, 0.25, 5], dtype=torch.float64
@@ -751,7 +793,7 @@ def test_cache_eviction_gives_the_uncached_prediction():
     for _ in range(2):
         got = small._predict_merged_errors(y, q, edges)
         assert torch.allclose(got, expected, rtol=0, atol=1e-14 * scale)
-        assert len(small._merge_weight_cache) <= small._MERGE_CACHE_SIZE + 1
+        assert len(small._merge_weight_cache) <= small._MERGE_CACHE_SIZE
 
 
 @pytest.mark.parametrize("error_norm", ["2", "failure_fraction"])
@@ -928,7 +970,7 @@ def test_predicted_on_gpu_with_either_result_device():
             max_batch=out_cpu_state.max_batch,
             take_gradient=False,
         )
-        cached = [v for k, v in gpu._merge_weight_cache.items() if k is not None]
+        cached = list(gpu._merge_weight_cache.values())
         assert cached
         assert all(v.device.type == result_device for v in cached)
         assert out_gpu_state.mesh.device.type == "cuda"

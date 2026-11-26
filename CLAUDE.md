@@ -429,7 +429,9 @@ None) and the cutoff for the constructor option `merge_rule`:
   and the halves-versus-whole difference. Both are linear in the stored
   values, so `_merged_pair_weights` builds four weight vectors per width ratio
   (log2 ratio quantized to 2^-48), one entry per node (0 at a repeated
-  fraction, so they apply to the stored values as they are, no copy), cached
+  fraction, so they apply to the stored values as they are: no copy of a
+  contiguous float64 record; a strided one, such as a transposed output of
+  `f`, is made contiguous per chunk, since `bmm` rounds differently on it), cached
   on the solver (`_merge_weight_cache`, reset in `_set_solver_dtype`; a
   one-shot call pays 0.5-1.2 ms to fill it). The widths come from the final
   mesh; the nodes are not read. With T > 1 it falls

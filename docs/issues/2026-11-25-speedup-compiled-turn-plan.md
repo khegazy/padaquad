@@ -555,8 +555,8 @@ capture and compilation are blocked as in 3.1, and that quadax costs about
   proxy for many outputs.
 - **Unsure:** where route (d)'s crossover lies when its sums stay on the GPU
   (only the proxy's, between about 5,000 and 8,000 mesh points, was
-  measured); the pinned-memory behaviour of D2 over many calls (PyTorch's pinned cache keeps freed blocks);
-  run-to-run variation on other nodes.
+  measured); the pinned-memory behaviour of D2 over many calls (PyTorch's
+  pinned cache keeps freed blocks); run-to-run variation on other nodes.
 - **Not checked:** quadax 0.3.1 itself; Inductor's GPU code; the Performance
   page (not re-run).
 - **Mine, not from a source:** every candidate of 5.2, the D2 and route (d)

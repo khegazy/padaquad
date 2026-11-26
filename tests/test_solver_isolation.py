@@ -26,7 +26,10 @@ These tests pin what sharing must keep:
 
 from __future__ import annotations
 
+import copy
 import dataclasses
+import gc
+import pickle
 
 import pytest
 import torch
@@ -35,6 +38,7 @@ from tests._helpers import DEVICE, make_uniform_solver, needs_cuda
 from padaquad import UNIFORM_METHODS, VARIABLE_METHODS, adaptive_quadrature
 from padaquad.base import steps
 from padaquad.methods import MethodClass, UniformMethodClass, _get_method, _Tableau
+from padaquad.methods._base import _CONVERTED
 
 
 def _b_values(solver):
@@ -258,3 +262,28 @@ def test_failed_conversion_for_result_device_keeps_the_solvers_device(monkeypatc
             solver.integrate(torch.sin, mesh_init=a, mesh_final=b, result_device="cpu")
     assert solver.device == device
     assert solver.method is method
+
+
+@needs_cuda
+def test_copied_solvers_leave_no_converted_methods():
+    """A deep copy or an unpickled copy of a solver holds its own method
+    object, which converts itself for result_device="cpu"; once the copy is
+    gone, so is that conversion (the cache holds its source methods weakly),
+    and the copies' results are the solver's."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cuda")
+    a, b = (torch.tensor([x], dtype=torch.float64) for x in (0.0, 1.0))
+
+    def integral(s):
+        torch.manual_seed(0)
+        result, _ = s.integrate(
+            torch.sin, mesh_init=a, mesh_final=b, result_device="cpu"
+        )
+        return result.integral
+
+    expected = integral(solver)
+    gc.collect()
+    entries = len(_CONVERTED)
+    for make_copy in [copy.deepcopy] * 5 + [lambda s: pickle.loads(pickle.dumps(s))]:
+        assert torch.equal(integral(make_copy(solver)), expected)
+    gc.collect()
+    assert len(_CONVERTED) == entries

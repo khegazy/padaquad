@@ -155,7 +155,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_multi_d_integrand.py` | Integrands with D > 1 outputs |
 | `test_oom_recovery.py` | The out-of-memory catch-and-retry path (direct calls of `_evaluate_f_on_split_nodes`, including retries that end inside a subinterval; `integrate` with and without `trade_speed_for_memory`) |
 | `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance (with `take_gradient=False` the drift is between passes: `_cancelling_peak` hides its cancelling part in a narrow peak the first passes miss); `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN) |
-| `test_solver_isolation.py` | Solvers of different dtypes keep their own tables; the registry is never changed; `MethodClass.to` returns one shared copy per (method, device, dtype), sharing no memory with its source; `_Tableau` frozen; no integration writes into a method's tensors (version counters); a replaced registry entry reaches new solvers only; `_integration_on_device` restores the solver's method object, and leaves the solver's device and method when the conversion raises (CUDA) |
+| `test_solver_isolation.py` | Solvers of different dtypes keep their own tables; the registry is never changed; `MethodClass.to` returns one shared copy per (method, device, dtype), sharing no memory with its source, dropped with its source (deep copies and pickles of a solver, CUDA); `_Tableau` frozen; no integration writes into a method's tensors (version counters); a replaced registry entry reaches new solvers only; `_integration_on_device` restores the solver's method object, and leaves the solver's device and method when the conversion raises (CUDA) |
 | `test_tracked_variables.py` | The `tracked_variables` feature |
 | `test_docs_performance_table.py` | The Performance page's rendering of `docs/performance/results_*.json`: no file, one, two (name order, hardware headings), unreadable files named in the error; the memory options tables from `docs/performance/memory_options.json` (every setting of every integrand, the field's `EXAMPLE_SETTINGS` in order of `max_batch`, defaults first, missing and unreadable files) |
 | `test_split_statistics.py` | `n_start_steps` / `n_start_steps_split` / `max_split_depth` on integrands with known answers; `converged` against a hand-computed tolerance check (absolute and cumulative, with `y0`), in `failure_fraction` mode (including a NaN component), against the final integral, and its warning (numbers, output component, remedies); `max_adaptive_splits` type check |
@@ -669,7 +669,9 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 - Methods are **converted once per process and shared**: `_get_method`
   returns `registry[name].to(device, dtype)`, a copy (never sharing memory
   with the registry entry) built on first use and kept in `_CONVERTED`
-  (`methods/_base.py`), keyed by the source object, the device and the dtype;
+  (`methods/_base.py`), a `WeakKeyDictionary` of the source object (so a
+  copied or unpickled solver's conversions go with it) to a dict by device and
+  dtype;
   every solver of that method, device and dtype uses the same object.
   Nothing converts in place (`clone`, `to_dtype` and `to_device` were
   removed; `_Tableau` is frozen), so the registries never change. A method's

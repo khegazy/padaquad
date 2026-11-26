@@ -22,6 +22,7 @@ positions).
 from __future__ import annotations
 
 import copy
+import weakref
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple, Self
@@ -89,8 +90,11 @@ class DegreeMeasurement(NamedTuple):
     lower_errors: torch.Tensor
 
 
-# Converted methods by (source method, device, dtype); see MethodClass.to.
-_CONVERTED: dict[tuple[MethodClass, torch.device, torch.dtype], MethodClass] = {}
+# Converted methods of each source method, by (device, dtype); see MethodClass.to.
+# The source is held weakly: its conversions go when it does (a copied solver's).
+_CONVERTED: weakref.WeakKeyDictionary[
+    MethodClass, dict[tuple[torch.device, torch.dtype], MethodClass]
+] = weakref.WeakKeyDictionary()
 
 
 class MethodClass(ABC):
@@ -223,11 +227,11 @@ class MethodClass(ABC):
 
         The converted method is a new object holding copies of the tensors, so it
         never shares memory with ``self`` and ``self`` is unchanged. It is built
-        on the first call for a ``(self, device, dtype)`` and kept for the life
-        of the process (in ``_CONVERTED``); every later call returns the same
-        object, which every solver of that method, device and dtype then
-        shares. Do not write into its tensors in place: the change would reach
-        all of those solvers.
+        on the first call for a ``(self, device, dtype)`` and kept as long as
+        ``self`` lives (in ``_CONVERTED``, the registry entries for the life of
+        the process); every later call returns the same object, which every
+        solver of that method, device and dtype then shares. Do not write into
+        its tensors in place: the change would reach all of those solvers.
 
         The key is the object ``self``, not its name in a registry, so a
         solver keeps its method when a registry entry is replaced. Solvers pass
@@ -248,14 +252,15 @@ class MethodClass(ABC):
             The converted method, of the same class as ``self``.
         """
         device = torch.device(device)
-        key = (self, device, dtype)
-        if key not in _CONVERTED:
+        converted = _CONVERTED.setdefault(self, {})
+        if (device, dtype) not in converted:
             # setdefault: when two threads build the same method, both return
             # the one stored.
-            _CONVERTED.setdefault(
-                key, self._map_tensors(lambda t: t.to(device).to(dtype, copy=True))
+            converted.setdefault(
+                (device, dtype),
+                self._map_tensors(lambda t: t.to(device).to(dtype, copy=True)),
             )
-        return _CONVERTED[key]
+        return converted[device, dtype]
 
     @abstractmethod
     def _map_tensors(self, fn: Callable[[torch.Tensor], torch.Tensor]) -> Self:

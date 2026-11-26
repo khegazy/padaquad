@@ -1933,7 +1933,7 @@ def test_out_of_memory_retry_shrinks_the_failed_batch(fake, monkeypatch):
     result, result_state = fake.solver.integrate(
         f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
     )
-    assert f.calls == [1, 44, 33, 25, 19]  # after the one-point check
+    assert f.calls == [44, 33, 25, 19]
     assert (result_state.max_batch, result_state.max_batch_converged) == (25, True)
     assert float(result.integral.sum()) == pytest.approx(1.0)
 

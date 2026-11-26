@@ -121,8 +121,7 @@ def test_saved_gradients_do_not_keep_every_batch_alive(leaf):
             x = t.detach().requires_grad_()
             refs.append(weakref.ref(x))
             return w * torch.sin(40 * x) + 0 * x
-        if len(t) > 1:  # the shape check's point depends on the bounds, the caller's
-            refs.extend(weakref.ref(v) for v in _leaves(t))
+        refs.extend(weakref.ref(v) for v in _leaves(t))
         return torch.sin(40 * t) + t
 
     kwargs = {}

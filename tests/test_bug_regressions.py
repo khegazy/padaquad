@@ -984,7 +984,7 @@ def test_check_f_output_finite_helper():
 
 
 # -----------------------------------------------------------------------------
-# The integrand test call receives one point of shape [1, T].
+# The first call of the integrand receives the first pass, shaped [N, T].
 # -----------------------------------------------------------------------------
 
 
@@ -993,15 +993,17 @@ class _StopAfterFirstCall(Exception):
 
 
 @pytest.mark.parametrize("T", [1, 2])
-def test_integrand_test_call_shape(T, monkeypatch):
-    """integrate()'s first call to f (the output check) passes t shaped [1, T].
+def test_first_call_of_f_has_shape_n_by_t(T, monkeypatch):
+    """integrate()'s first call to f passes t shaped [N, T]: the nodes of the
+    first pass (11 subintervals of the default starting mesh), not a separate
+    check of f's output.
 
-    The call used torch.tensor([[mesh_init]]), which only works when mesh_init
-    holds one number: T=1 gave [1, 1], T=2 raised "only one element tensors
-    can be converted to Python scalars". Through the public path T>1 is
-    stopped earlier by the scalar `mesh_init < mesh_final` check in
-    _setup_integral_bounds (T>1 is not supported end to end yet), so for T=2
-    that method is stubbed on this instance to reach the test call.
+    A former one-point output check used torch.tensor([[mesh_init]]), which
+    only works when mesh_init holds one number: T=1 gave [1, 1], T=2 raised
+    "only one element tensors can be converted to Python scalars". Through the
+    public path T>1 is stopped earlier by the scalar `mesh_init < mesh_final`
+    check in _setup_integral_bounds (T>1 is not supported end to end yet), so
+    for T=2 that method is stubbed on this instance to reach the first call.
     """
     solver = make_solver_for_unit_test()
     if T > 1:
@@ -1021,4 +1023,4 @@ def test_integrand_test_call_shape(T, monkeypatch):
             mesh_final=torch.ones(T, dtype=torch.float64),
             max_batch=10000,
         )
-    assert shapes == [(1, T)]
+    assert shapes == [(11 * solver.C, T)]

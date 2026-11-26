@@ -71,9 +71,10 @@ def test_f_gets_c_points_per_subinterval_and_no_mesh_point(method, max_batch):
     assert result.converged
     assert len(passes) > 1  # several passes
     first_pass, starting_mesh = passes[0]
-    # The shape check's one point, then the test calls of 10, 100, ... points
-    assert (first_pass > 1) == (max_batch is None)
-    assert not torch.isin(torch.cat(received[:first_pass]), starting_mesh).any()
+    # The test calls of 10, 100, ... points
+    assert (first_pass > 0) == (max_batch is None)
+    for t in received[:first_pass]:
+        assert not torch.isin(t, starting_mesh).any()
     exact = 100 * (math.atan(63) + math.atan(37))
     assert abs(float(result.integral) - exact) < 1e-8
 

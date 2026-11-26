@@ -1048,10 +1048,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         self._total_mem_usage = total_mem_usage
         self._backward_ratio = 1.0
 
-        # Make sure f exists and provides the correct output. Running this
-        # before the test calls also warms f up, so one-time costs (CUDA
-        # start-up, lazy model loading, cuBLAS workspace) stay out of them.
-        # One point, shaped [1, T] like every batch f receives: the first node
+        # The point of the test calls of _initialize_max_batch: the first node
         # of the whole interval, which is mesh_init (bit for bit) for a method
         # with a node at the start of a subinterval and an interior point
         # otherwise, so f is not called at a bound the method never evaluates
@@ -1061,37 +1058,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         probe = self._compute_nodes(
             mesh_init.reshape(1, -1), mesh_final.reshape(1, -1)
         )[:, 0]
-        test_output = self._call_f(f, f_args, probe, False)
-        assert test_output is not None  # can_shrink=False raises instead
-        test_integrand = test_output[0]
-        del test_output
-        # An output that requires grad (from f's parameters or from bounds that
-        # require grad) carries an autograd graph, which holds what f saved
-        # for its backward pass on the solver's device until result.integral
-        # is differentiated, wherever the values themselves go.
-        if state is None and trade_speed_for_memory and test_integrand.requires_grad:
-            logger.warning(
-                "trade_speed_for_memory=True with an integrand output that "
-                "requires grad: the autograd graph keeps what f saved for the "
-                "backward pass on the solver's device until result.integral is "
-                "differentiated, so moving the values may save little. To "
-                "integrate a gradient without an autograd graph, let f return it "
-                "as extra outputs, computed with torch.func.grad from detached "
-                "parameters (see examples/gradient_as_output.py and %s).",
-                guide,
-            )
-        # The reference must match the integrand's D output components (or be
-        # one value for all); another shape would broadcast silently.
-        if error_integral_reference is not None and (
-            error_integral_reference.dim() > 1
-            or error_integral_reference.numel() not in (1, test_integrand.shape[-1])
-        ):
-            raise ValueError(
-                "error_integral_reference must be a number or a tensor of shape "
-                f"[], [1] or [D] = [{test_integrand.shape[-1]}]; got shape "
-                f"{list(error_integral_reference.shape)}."
-            )
-        del test_integrand
 
         loss_fxn = loss_fxn if loss_fxn is not None else self._integral_loss
 
@@ -1218,6 +1184,19 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # first batch.
             reference_integral = current_integral
             if error_integral_reference is not None:
+                # The reference must match the integrand's D output components
+                # (or be one value for all); another shape would broadcast
+                # silently. Checked here, where D is first known: on the first
+                # pass, before any subinterval is judged or backpropagated.
+                D = current_integral.shape[-1]
+                if error_integral_reference.dim() > 1 or (
+                    error_integral_reference.numel() not in (1, D)
+                ):
+                    raise ValueError(
+                        "error_integral_reference must be a number or a tensor of "
+                        f"shape [], [1] or [D] = [{D}]; got shape "
+                        f"{list(error_integral_reference.shape)}."
+                    )
                 reference_integral = error_integral_reference
             error_ratios, error_ratios_2steps, error_ratios_per_dim = (
                 self._compute_error_ratios(
@@ -1493,6 +1472,24 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             self._raise_after_backward_oom(failed_batch, start_mesh, saved, unsafe)
         if mesh_grad is not None:
             mesh.backward(mesh_grad)
+
+        # An integral that requires grad (from f's parameters, or from bounds
+        # that require grad) carries an autograd graph, which holds what f
+        # saved for its backward pass on the solver's device until
+        # result.integral is differentiated, wherever the values went. Known
+        # only once f has run, so given after the loop (no state: the first
+        # call of a series).
+        if state is None and trade_speed_for_memory and record["integral"].requires_grad:
+            logger.warning(
+                "trade_speed_for_memory=True with an integrand output that "
+                "requires grad: the autograd graph keeps what f saved for the "
+                "backward pass on the solver's device until result.integral is "
+                "differentiated, so moving the values may save little. To "
+                "integrate a gradient without an autograd graph, let f return it "
+                "as extra outputs, computed with torch.func.grad from detached "
+                "parameters (see examples/gradient_as_output.py and %s).",
+                guide,
+            )
 
         # === Post-convergence: sort results and optimize the mesh ===
         record = self._sort_record(record, mesh_indices)

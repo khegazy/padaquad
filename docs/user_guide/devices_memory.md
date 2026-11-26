@@ -331,7 +331,8 @@ given; later calls that pass the state stay quiet) when:
 - `trade_speed_for_memory=True` and the integrand's output requires grad (from
   its parameters or from bounds that require grad): the autograd graph keeps
   what `f` saved for its backward pass on the GPU until the integral is
-  differentiated, so moving the values may save little;
+  differentiated, so moving the values may save little (logged at the end of
+  the call, once the integral is known to require grad);
 - `record_evaluations=False` with the solver's default `merge_rule="predicted"`.
 
 (ug-pass-array-oom)=

@@ -76,7 +76,7 @@ def even_mesh(n_subintervals: int) -> torch.Tensor:
 def test_test_calls_stop_at_1000_or_the_order_of_the_first_pass(
     n_subintervals, test_calls, caplog
 ):
-    """After the one-point output check, f is called on 10, 100 and 1,000
+    """f is first called on 10, 100 and 1,000
     points, stopping at the largest power of 10 not above the first pass (gk21:
     21 nodes per subinterval, so 231, 1,008 and 10,500 points). The first call
     of the pass is then the whole pass, or 10 times the last test call (10,000
@@ -89,8 +89,8 @@ def test_test_calls_stop_at_1000_or_the_order_of_the_first_pass(
         )
     first_pass = 21 * n_subintervals
     first_call = min(first_pass, 10 * test_calls[-1])
-    assert f.sizes[: len(test_calls) + 1] == [1, *test_calls]
-    passes = f.sizes[len(test_calls) + 1 :]
+    assert f.sizes[: len(test_calls)] == test_calls
+    passes = f.sizes[len(test_calls) :]
     assert passes[0] == first_call
     if first_call < first_pass:  # the rest of the first pass
         assert passes[1] == first_pass - first_call
@@ -108,8 +108,8 @@ def test_failed_test_call_shrinks_until_one_runs():
     result, result_state = solver().integrate(
         f, mesh_init=A, mesh_final=B, take_gradient=False
     )
-    assert f.sizes[:5] == [1, 10, 100, 75, 56]
-    assert max(f.sizes[5:]) <= 56
+    assert f.sizes[:4] == [10, 100, 75, 56]
+    assert max(f.sizes[4:]) <= 56
     assert (result_state.max_batch, result_state.max_batch_converged) == (56, True)
     assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
 
@@ -131,7 +131,7 @@ def test_batch_grows_tenfold_per_call_until_out_of_memory(trade_speed_for_memory
         trade_speed_for_memory=trade_speed_for_memory,
     )
     assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
-    assert f.sizes[1:4] == [1000, 10000, 508]
+    assert f.sizes[:3] == [1000, 10000, 508]
     assert (result_state.max_batch, result_state.max_batch_converged) == (
         10000,
         False,
@@ -158,21 +158,20 @@ def test_given_max_batch_is_fixed_and_converged():
     result, result_state = solver().integrate(
         f, mesh=even_mesh(46), max_batch=50, take_gradient=False
     )
-    assert f.sizes[0] == 1
-    assert max(f.sizes[1:]) <= 50
+    assert max(f.sizes) <= 50
     assert (result_state.max_batch, result_state.max_batch_converged) == (50, True)
     f = Recorder()
     result, result_state = solver(max_batch=40).integrate(
         f, mesh=even_mesh(46), take_gradient=False
     )
-    assert max(f.sizes[1:]) <= 40
+    assert max(f.sizes) <= 40
     assert result_state.max_batch_converged
     f = Recorder()
     state = IntegrationState(even_mesh(46), 5000, False)
     result, result_state = solver().integrate(
         f, state=state, max_batch=30, take_gradient=False
     )
-    assert max(f.sizes[1:]) <= 30
+    assert max(f.sizes) <= 30
     assert (result_state.max_batch, result_state.max_batch_converged) == (30, True)
 
 
@@ -186,7 +185,7 @@ def test_state_carries_mesh_and_batch_size_to_the_next_call():
     f = Recorder()
     second, _ = solver(max_batch=7).integrate(f, state=first_state, take_gradient=False)
     assert second.n_start_steps == len(first_state.mesh) - 1
-    assert f.sizes[1] == min(21 * second.n_start_steps, 10 * first_state.max_batch)
+    assert f.sizes[0] == min(21 * second.n_start_steps, 10 * first_state.max_batch)
     assert math.isclose(float(second.integral), EXACT, abs_tol=1e-9)
 
 
@@ -239,8 +238,8 @@ class GradIntegrand:
         self.v = torch.tensor([0.7], dtype=torch.float64, requires_grad=True)
         self.forward_limit, self.backward_limit = forward_limit, backward_limit
         self.function, self.sizes = function, []
-        # The backward passes of these batches (counted from 1, one-point
-        # calls excluded) run out of memory too, whatever their size.
+        # The backward passes of these batches (counted from 1) run out of
+        # memory too, whatever their size.
         self.fail, self.batches = set(fail), 0
 
     def __call__(self, t):
@@ -253,9 +252,9 @@ class GradIntegrand:
             y = self.w * torch.sin(40 * t)
         if bool((t > 0.9).any()):
             y = y + self.v * torch.clamp(t - 0.9, min=0)
-        self.batches += len(t) > 1
+        self.batches += 1
         if y.requires_grad and (
-            len(t) > self.backward_limit or (len(t) > 1 and self.batches in self.fail)
+            len(t) > self.backward_limit or self.batches in self.fail
         ):
             y.register_hook(self._fail)
         return y

@@ -639,8 +639,8 @@ def test_switch_never_evaluates_a_subinterval_twice(
     )
     assert len(seen) > 0
     assert max(seen.values()) == 1
-    # One point for the integrand's shape check, then C points per panel.
-    assert n_points[0] == 1 + solver.C * len(seen)
+    # C points per panel, and no other call of f.
+    assert n_points[0] == solver.C * len(seen)
 
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
@@ -904,13 +904,27 @@ def test_nonfinite_warning_names_runtime_checks(caplog):
     ],
     ids=["two-values-for-D=1", "2-d"],
 )
-def test_reference_shape_is_validated(reference):
+@pytest.mark.parametrize("take_gradient", [False, True])
+def test_reference_shape_is_validated(reference, take_gradient):
     """A reference must be a number, or a tensor of shape [] , [1] or [D];
-    another shape used to broadcast silently and change the mesh."""
-    with pytest.raises(ValueError, match="error_integral_reference"):
+    another shape used to broadcast silently and change the mesh. D is known
+    once f has run, so the error comes in the first batch, before any
+    subinterval is judged or a gradient is written, and f is called on no
+    other batch."""
+    w = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
+    sizes = []
+
+    def f(t, *args):
+        sizes.append(len(t))
+        return w * _cancelling(t)
+
+    solver = _solver()
+    with pytest.raises(ValueError, match=r"error_integral_reference.*\[D\] = \[1\]"):
         _run(
-            _solver(),
-            _cancelling,
-            take_gradient=False,
+            solver,
+            f,
+            take_gradient=take_gradient,
             error_integral_reference=reference,
         )
+    assert sum(sizes) <= 11 * solver.C  # at most the first pass, 11 subintervals
+    assert w.grad is None

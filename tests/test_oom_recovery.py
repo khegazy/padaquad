@@ -372,11 +372,7 @@ class TestIntegrateOOMRecovery:
         )
 
         def broken(t, *args):
-            # Only multi-point batches fail, so the one-point warm-up call in
-            # integrate() passes and the error comes from the batch loop.
-            if t.shape[0] > 1:
-                raise RuntimeError("shape mismatch in f")
-            return torch.ones((1, 1), dtype=t.dtype, device=t.device)
+            raise RuntimeError("shape mismatch in f")
 
         with pytest.raises(RuntimeError, match="shape mismatch in f"):
             solver.integrate(broken, mesh_init=T_INIT, mesh_final=T_FINAL)

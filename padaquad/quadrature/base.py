@@ -374,7 +374,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             If True (default), check while integrating: raise ``ValueError``
             naming the points where ``f`` returned NaN or Inf, and check
             PadaQuad's own bookkeeping (that the accepted subintervals cover
-            the final mesh once). If False, skip these checks to save time
+            the final mesh once, each with its own width). If False, skip these checks to save time
             and memory; subintervals where ``f`` returned NaN or Inf are then
             accepted and the non-finite value reaches the result. The mesh and
             the nodes are in order by construction either way.
@@ -1619,7 +1619,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # The fields of chunks go to the result's device, where
         # _get_optimal_mesh also reads y (when build_state_mesh).
         record = self._sort_record(
-            record, chunks, result_device if record_evaluations else self.device
+            record, chunks, mesh, result_device if record_evaluations else self.device
         )
 
         # Split statistics. A step of the starting mesh has split count 0 and
@@ -4520,6 +4520,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         self,
         record: dict[str, torch.Tensor],
         chunks: dict[str, list[torch.Tensor]],
+        mesh: torch.Tensor,
         device: str | torch.device,
     ) -> dict[str, torch.Tensor]:
         """
@@ -4535,6 +4536,18 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         The sums are not reordered. The loop's fields stay on the integration
         device; the fields of ``chunks`` end on ``device``.
 
+        With ``runtime_checks``, it checks in one read of the device that the
+        mesh indices are 0 to N - 1 (N the number of subintervals of
+        ``mesh``), each once, and that each recorded width ``h`` equals the
+        spacing of ``mesh`` at its index, bit for bit: both are the
+        difference of the same two mesh points (a batch evaluated on a
+        detached copy of the mesh, with ``take_gradient=True`` and a bound
+        that requires grad, has the same values), and the mesh points of an
+        accepted subinterval never move. The widths catch a wrong but valid
+        permutation, such as two rows swapped, which would otherwise put
+        every field and the state's mesh out of place silently; they cannot
+        catch two rows of exactly equal width swapped.
+
         Parameters
         ----------
         record : dict[str, torch.Tensor]
@@ -4542,6 +4555,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             accepted (``_record_results``).
         chunks : dict[str, list[torch.Tensor]]
             The other per-subinterval fields, in the same row order; emptied.
+        mesh : torch.Tensor
+            The final mesh [N + 1, T], on the integration device.
         device : str | torch.device
             Device of the fields of ``chunks`` in the returned record.
 
@@ -4549,13 +4564,30 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         -------
         dict[str, torch.Tensor]
             The record with every per-subinterval field in mesh order.
+
+        Raises
+        ------
+        AssertionError
+            With ``runtime_checks``, if the record does not cover ``mesh``
+            once or a recorded width is not its subinterval's.
         """
         rows = record.pop("mesh_index")
         if self.runtime_checks:
-            # Every subinterval of the final mesh is recorded exactly once.
-            assert torch.equal(
-                torch.sort(rows).values, torch.arange(len(rows), device=rows.device)
-            ), "The record does not cover the final mesh once."
+            # Every subinterval of the final mesh is recorded exactly once, and
+            # each recorded width is the mesh spacing at its index. One read.
+            sorted_rows, order = torch.sort(rows)
+            widths = mesh[1:] - mesh[:-1]
+            assert len(rows) == len(widths), (
+                f"The record has {len(rows)} subintervals, the final mesh "
+                f"{len(widths)}."
+            )
+            assert bool(
+                torch.all(sorted_rows == torch.arange(len(rows), device=rows.device))
+                & torch.all(torch.cat(chunks["h"])[order] == widths)
+            ), (
+                "The record does not cover the final mesh once, or a recorded "
+                "width is not the width of its subinterval in the mesh."
+            )
         # One read of the device. Rows in increasing mesh order are 0 to N - 1.
         in_order = bool(torch.all(rows[1:] > rows[:-1]))
         loop_fields = {

@@ -6,7 +6,12 @@ import math
 
 import pytest
 import torch
-from _helpers import make_solver_for_unit_test, needs_cuda
+from _helpers import (
+    TAKE_GRADIENT_IDS,
+    TAKE_GRADIENT_VALUES,
+    make_solver_for_unit_test,
+    needs_cuda,
+)
 
 from padaquad import adaptive_quadrature
 from padaquad.methods import UniformMethodClass, _Tableau
@@ -34,6 +39,13 @@ def _batch(mesh_index, C=4, D=1, T=1):
         gradient_taken=False,
         y0=torch.zeros(D, dtype=torch.float64),
     )
+
+
+def _mesh(n, T=1, device="cpu"):
+    """A mesh of n subintervals whose width at index i is i, the h of _batch."""
+    widths = torch.arange(n, dtype=torch.float64, device=device)
+    mesh = torch.cat([widths.new_zeros(1), torch.cumsum(widths, 0)])
+    return mesh[:, None].expand(n + 1, T)
 
 
 def _record(solver, *mesh_indices, take_gradient=False, **kwargs):
@@ -164,7 +176,7 @@ class TestSortRecord:
         order in every field, by their integer mesh index alone (any T); the
         sums are untouched, the chunks emptied and mesh_index removed."""
         record, chunks = _record(self.solver, [2, 0], [3, 1], T=T)
-        record = self.solver._sort_record(record, chunks, "cpu")
+        record = self.solver._sort_record(record, chunks, _mesh(4, T), "cpu")
         expected = torch.arange(4, dtype=torch.float64)
         for key in ("nodes", "h", "y", "mesh_quadratures", "mesh_quadrature_errors"):
             assert torch.equal(record[key].reshape(4, -1)[:, 0], expected), key
@@ -180,13 +192,13 @@ class TestSortRecord:
         record, chunks = _record(self.solver, [0, 1, 2])
         before = {key: parts[0] for key, parts in chunks.items()}
         before["mesh_quadratures"] = record["mesh_quadratures"]
-        record = self.solver._sort_record(record, chunks, "cpu")
+        record = self.solver._sort_record(record, chunks, _mesh(3), "cpu")
         assert all(record[key] is value for key, value in before.items())
 
     def test_batches_in_order_are_joined(self):
         """Batches recorded from left to right are joined in their order."""
         record, chunks = _record(self.solver, [0, 1], [2], [3, 4])
-        record = self.solver._sort_record(record, chunks, "cpu")
+        record = self.solver._sort_record(record, chunks, _mesh(5), "cpu")
         assert record["y"][:, 0, 0].tolist() == [0, 1, 2, 3, 4]
 
     @needs_cuda
@@ -209,7 +221,7 @@ class TestSortRecord:
             record = solver._record_results(
                 record, chunks, False, batch, torch.tensor(mesh_index, device="cuda")
             )
-        record = solver._sort_record(record, chunks, "cpu")
+        record = solver._sort_record(record, chunks, _mesh(2, device="cuda"), "cpu")
         assert record["y"].device.type == "cpu"
         assert record["nodes"].device.type == "cpu"
         assert record["mesh_quadratures"].device.type == "cuda"
@@ -223,7 +235,28 @@ class TestSortRecord:
         (the record must cover the final mesh once) raises."""
         record, chunks = _record(self.solver, *mesh_index)
         with pytest.raises(AssertionError, match="cover the final mesh once"):
-            self.solver._sort_record(record, chunks, "cpu")
+            self.solver._sort_record(record, chunks, _mesh(3), "cpu")
+
+    @pytest.mark.parametrize("runtime_checks", [True, False])
+    def test_swapped_rows_raise(self, runtime_checks):
+        """Two rows of different widths swapped (the indices still cover the
+        mesh once) raise with runtime_checks, as the recorded widths are not
+        the mesh's; without it the record is put out of place silently."""
+        self.solver.runtime_checks = runtime_checks
+        record, chunks = _record(self.solver, [2, 0], [3, 1])
+        record["mesh_index"] = torch.tensor([2, 3, 0, 1])  # 0 and 3 swapped
+        if runtime_checks:
+            with pytest.raises(AssertionError, match="recorded width"):
+                self.solver._sort_record(record, chunks, _mesh(4), "cpu")
+        else:
+            record = self.solver._sort_record(record, chunks, _mesh(4), "cpu")
+            assert record["h"][:, 0].tolist() == [3.0, 1.0, 2.0, 0.0]
+
+    def test_record_of_another_mesh_raises(self):
+        """A record that covers fewer subintervals than the mesh has raises."""
+        record, chunks = _record(self.solver, [1, 0])
+        with pytest.raises(AssertionError, match="2 subintervals, the final mesh 3"):
+            self.solver._sort_record(record, chunks, _mesh(3), "cpu")
 
     def test_gradient_passes_through_the_ordering(self):
         """With take_gradient=False the record keeps the autograd graph: the
@@ -237,7 +270,7 @@ class TestSortRecord:
             record = self.solver._record_results(
                 record, chunks, False, batch, torch.tensor(mesh_index)
             )
-        record = self.solver._sort_record(record, chunks, "cpu")
+        record = self.solver._sort_record(record, chunks, _mesh(3), "cpu")
         weights = torch.arange(1.0, 4.0, dtype=torch.float64).view(3, 1, 1)
         (record["y"] * weights).sum().backward()
         assert leaves[0].grad[:, 0, 0].tolist() == [3.0, 1.0]
@@ -328,6 +361,50 @@ def test_every_record_path_returns_mesh_order(options):
     assert torch.equal(state.mesh, other_state.mesh)
 
 
+@pytest.mark.parametrize("swap", [False, True], ids=["record", "swapped"])
+@pytest.mark.parametrize("bounds_grad", [False, True], ids=["bounds", "bounds_grad"])
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_width_check_end_to_end(take_gradient, bounds_grad, swap):
+    """The recorded widths equal the final mesh's spacings bit for bit in an
+    integration of several batches, also with a bound that requires grad
+    (with take_gradient=True each batch is evaluated on a detached copy of
+    the mesh), so runtime_checks passes; the record's mesh indices of the
+    subintervals at 2 and 5 swapped before the final ordering (a wrong but
+    valid permutation) raise."""
+    solver = adaptive_quadrature(
+        "uniform", "gk21", atol=1e-10, rtol=1e-10, device="cpu"
+    )
+    sort_record = solver._sort_record
+
+    def corrupted(record, *args):
+        rows = record["mesh_index"]
+        if swap:
+            at_2, at_5 = (
+                int((rows == 2).nonzero()[0, 0]),
+                int((rows == 5).nonzero()[0, 0]),
+            )
+            rows[at_2], rows[at_5] = 5, 2
+        return sort_record(record, *args)
+
+    solver._sort_record = corrupted
+    a, b = (torch.tensor([x], dtype=torch.float64) for x in (0.0, 1.0))
+    a.requires_grad_(bounds_grad), b.requires_grad_(bounds_grad)
+    torch.manual_seed(0)
+    run = lambda: solver.integrate(  # noqa: E731
+        lambda t: torch.exp(-3 * t) * torch.sin(30 * t),
+        mesh_init=a,
+        mesh_final=b,
+        take_gradient=take_gradient,
+        max_batch=105,
+    )
+    if swap:
+        with pytest.raises(AssertionError, match="recorded width"):
+            run()
+    else:
+        result, _ = run()
+        assert result.converged
+
+
 @needs_cuda
 @pytest.mark.parametrize("stage", ["removal", "final_ordering"])
 def test_fields_are_copied_one_at_a_time(stage):
@@ -361,7 +438,7 @@ def test_fields_are_copied_one_at_a_time(stage):
             record, keep, chunks, lambda r: r.integral, zero, zero + 1, "cuda"
         )
     else:
-        solver._sort_record(record, chunks, "cuda")
+        solver._sort_record(record, chunks, _mesh(4, device="cuda"), "cuda")
     torch.cuda.synchronize()
     assert torch.cuda.max_memory_allocated() - before < 1.3 * field
 

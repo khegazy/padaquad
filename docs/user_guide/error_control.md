@@ -74,7 +74,7 @@ the offending points (`runtime_checks=True`, the default). With
 accepted instead of split, the non-finite value reaches the returned integral,
 and `converged` is `False`. Either way the run ends. `runtime_checks=False`
 also skips the check, made once at the end of the call, that the accepted
-subintervals cover the final mesh once; the finite check costs time and, for
+subintervals cover the final mesh once, each with its own width; the finite check costs time and, for
 integrands with many outputs, memory as large as a call's output. The mesh
 itself stays in order by construction, so it is not checked.
 

@@ -114,3 +114,73 @@ test call follows. Out-of-memory retries inside the integration loop keep 0.75.
   mesh point; a singularity at a bound converges without `max_batch`.
 - Others that pinned "no call before the first pass" are found by running
   the suite.
+
+## Implemented (branch `restore_test_calls`, base `a2b805c`)
+
+- `21e0291`: this note.
+- `7c7dd86`: the test calls, inline in the `else` branch of the batch-size
+  block of `integrate` (`base.py`); `_shrink_batch(n, factor=_OOM_BACKOFF)`;
+  `_LARGEST_TEST_CALL = 1000` replaces `_LARGEST_FIRST_CALL`; `_call_f`'s
+  "cannot be reduced" message names the one-point and one-subinterval floors;
+  tests (`test_memory_state.py`, `test_interior_nodes.py`, and docstrings or
+  counts in `test_memory_benchmark.py`, `test_bug_regressions.py`,
+  `test_memory_state_adversarial.py`, `test_methods_registry.py`).
+- `5c5b8bd`: user guide (`devices_memory.md`, `troubleshooting.md`), README,
+  quick start, CLAUDE.md, CHANGELOG 2.0.0 entries, docstrings of `integrate`,
+  the constructor and `IntegrationState`.
+- `ab383c7`: rewrap of `_call_f`'s docstring.
+
+Measured (scripts and logs in the scratch directory above):
+
+- **Evaluations** (`count_startup.py`, CPU; elementwise and tanh-network `f`,
+  both `take_gradient`): extra points against the base 0 / 10 / 110 / 1,110 /
+  1,110 / 1,110 for first passes of 8, 63, 231, 1,050, 10,500 and 42,000
+  points (0 / 1 / 2 / 3 / 3 / 3 extra calls); 0 with `max_batch` or a
+  `state`. `main` had 1 / 11 / 111 / 1,111 and 1 with `max_batch` or a state.
+  Integral, error, contributions, state mesh and state batch size equal the
+  base's in every case.
+- **Bit-for-bit grid** (`startgrid.py`, 248 cases, 3,294 tensors: first
+  passes in every range, gk21, cc17, bosh3, `interpolatory3_variable`,
+  elementwise and network `f`, both `take_gradient`, warm starts, a given
+  `max_batch`, `trade_speed_for_memory`, `record_evaluations=False`,
+  float32): 0 differences against the base on CPU and on CUDA (A100), the
+  calls of `f` identical after the test calls (160 cases without, 26 with
+  10 points, 26 with 110, 36 with 1,110). No snapshot changed.
+- **Out-of-memory chains** (`count_oom.py`, simulated limit): the branch
+  reproduces `main`'s test-call chain without its one-point call above 10
+  points (limit 60, gk21: 10, 100, 75, 56; batch 56 converged, also with
+  `take_gradient=True`, where the base gave 42). It differs from `main` where
+  the user's 0.5 rule applies (limit 9: batch 5, `main` 8; limit 4: 2,
+  `main` 4) and where `main` crashed below C (limit 21, gk21,
+  `take_gradient=True`: 21, `main` `AssertionError` at 18; cc65 limit 70: 65).
+  The returned integral and error equal the base's in all these cases
+  (`sin(40 t) + t`; the batching of `take_gradient=True` differed only in the
+  limit-60 case, where both form batches of 42 points).
+- **Random generator** (`rng_check.py`): a deterministic `f` gets the same
+  starting mesh as `main` and the base; an `f` that draws from the global
+  generator gets the base's starting mesh, and its later draws follow the
+  test calls' draws, so its integral differs from the base's in the last bits.
+- **Time** (A100, GPU 0 of nid001821, alone; medians of 21 calls, two rounds,
+  base / branch / `main`): a cold default gk21 call without `max_batch`,
+  `exp(-t) sin(40 t)`: 4.38, 4.22 / 4.57, 4.36 / 5.53, 5.52 ms; a 3×512 tanh
+  network: 4.36, 4.33 / 5.04, 4.81 / 6.08, 5.91 ms (with
+  `take_gradient=True` 6.05, 6.07 / 6.53, 6.45 / 8.11, 8.22 ms); a 6×2048
+  network: 5.09, 5.13 / 6.15, 6.08 / 7.52, 7.43 ms, and from a mesh of 500
+  subintervals 37.4 (one slow run; min 30.6), 30.9 / 34.1, 35.1 / 39.1,
+  38.8 ms. With `max_batch` or a state the branch equals the base within
+  0.1 ms (6×2048: 5.11, 5.07 against 5.12, 5.12 ms). So the test calls cost
+  0.15 to 1 ms per cold call on the default mesh and 3 to 4 ms from a large
+  mesh, against the base; the branch is faster than `main` everywhere (other
+  changes since `main`, and no one-point call).
+- **Suite** (nid001821, at `5c5b8bd`): base 4,744 passed / 27 skipped on
+  CUDA and 4,388 / 383 on CPU; branch 4,748 / 27 and 4,393 / 382; no
+  failures on either. Docs build (`-W`) passes.
+
+## Not done
+
+- No option to turn the test calls off (none was asked for).
+- The halving below 10 points can leave a batch size well below what fits
+  (an `f` that holds 9 points gets 5); this is the user's rule, documented
+  under the user guide's limitations.
+- The starting mesh of an `f` that draws random numbers cannot match `main`'s
+  without the one-point call before the mesh, which stays removed.

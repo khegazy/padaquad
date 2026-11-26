@@ -30,8 +30,15 @@ point, as QUADPACK's `dqk21` does {cite:p}`quadpack_netlib`. This makes them the
 methods to choose for an integrand that is infinite at a bound but whose
 integral is finite, such as $1/\sqrt{t}$ or $\log t$ on $[0, 1]$: no special
 treatment is needed (the subintervals next to the bound are refined until the
-tolerance is met). The other methods evaluate both ends of every subinterval and
-raise `ValueError` there (`runtime_checks=True`). With a Gauss-Kronrod method,
+tolerance is met). This holds for a singularity at $t = 0$, where floating-point
+numbers come as close to the bound as the refinement needs. At a bound $b \ne 0$
+they do not: once a subinterval next to $b$ is narrower than about 230 times the
+spacing of the floating-point numbers at $b$ (`gk21`; 25 times for `gk7`), its
+outermost node rounds onto $b$, `f` is evaluated there, and `ValueError` names
+the point. For $1/\sqrt{1 - t}$ on $[0, 1]$ this happens at the default
+tolerances in float32 and at `atol=1e-10` in float64. Substitute $s = b - t$ to
+move the singularity to 0. The other methods evaluate both ends of every
+subinterval and raise `ValueError` there (`runtime_checks=True`). With a Gauss-Kronrod method,
 `result.nodes` and `result.y` therefore contain no mesh point, not even
 `mesh_init` or `mesh_final`: they list exactly the evaluated points (see
 `IntegrationResult`). An integral that diverges at a bound, such as that of $1/t$

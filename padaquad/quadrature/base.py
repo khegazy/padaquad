@@ -3416,6 +3416,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             shape [T] (the mesh's T, or the other bound's shape without a
             mesh), or if the bounds do not satisfy ``mesh_init < mesh_final``.
         """
+        # A mesh given without bounds is returned as it is: there is nothing to
+        # cut (the loop never writes into it).
+        bounds_given = mesh_init is not None or mesh_final is not None
         if mesh is not None:
             # Increasing for T = 1; distinct consecutive points for any T (the
             # order of a path in T > 1 dimensions is its own). T > 1 is not
@@ -3491,7 +3494,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 "from b to a, integrate from a to b and negate the result."
             )
 
-        if mesh is not None:
+        if mesh is not None and bounds_given:
             # Cut to the bounds: keep the points in [mesh_init, mesh_final] other
             # than the bounds, then add the bounds, so every given bound is a
             # mesh end and gets its gradient. A bound that is not its end also

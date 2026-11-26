@@ -636,6 +636,36 @@ def test_bounds_equal_to_mesh_ends_leave_it_unchanged():
     assert torch.equal(with_bounds_state.mesh, alone_state.mesh)
 
 
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_a_mesh_alone_is_used_as_given(take_gradient):
+    """Without bounds a given mesh is not cut: the call starts from the mesh
+    tensor itself (no copy) and its ends are the bounds, and a mesh that
+    requires grad gets the gradient of the integral of w e^t with respect to
+    its points: -w e^a at the first, w e^b at the last, about 0 inside (both
+    neighbors' contributions depend on an inner point)."""
+    solver = _solver()
+    starts = []
+    setup_initial_mesh = solver._setup_initial_mesh
+
+    def spy(mesh, *args):
+        starts.append(mesh)
+        return setup_initial_mesh(mesh, *args)
+
+    solver._setup_initial_mesh = spy
+    mesh = _MESH.clone().requires_grad_()
+    out, _ = solver.integrate(
+        f=lambda t: 2 * torch.exp(t), mesh=mesh, take_gradient=take_gradient
+    )
+    assert starts[0] is mesh
+    assert torch.equal(out.mesh_init, _MESH[0])
+    assert torch.equal(out.mesh_final, _MESH[-1])
+    if not take_gradient:
+        out.integral.sum().backward()
+    expected = torch.zeros_like(_MESH)
+    expected[0], expected[-1] = -2 * math.exp(0.0), 2 * math.exp(4.0)
+    assert torch.allclose(mesh.grad, expected, rtol=1e-9, atol=1e-8)
+
+
 @pytest.mark.parametrize(
     "bounds",
     [

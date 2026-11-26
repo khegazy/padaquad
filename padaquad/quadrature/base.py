@@ -1339,8 +1339,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # update; remove their now-stale entries (their children will be
             # re-evaluated as fresh panels). Done before _record_results, whose
             # rows record_keep_mask does not cover.
-            # record_keep_mask is set exactly when recheck_active.
-            if record_keep_mask is not None and not bool(torch.all(record_keep_mask)):
+            # Both are set exactly when recheck_active, and record_keep_mask
+            # drops exactly the subintervals of extra_split_idxs, whose size is
+            # known on the host (no read of the device).
+            if extra_split_idxs is not None and len(extra_split_idxs) > 0:
+                assert record_keep_mask is not None
                 record = self._remove_failed_record_panels(
                     record,
                     record_keep_mask,

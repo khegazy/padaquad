@@ -512,3 +512,61 @@ class TestHostWaits:
         assert record == (0 if result_device is None else 2 * calls["records"])
         if result_device is None:
             assert _host_waits(run, _lines(AdaptiveQuadrature._sort_record)) == 2
+
+    @pytest.mark.parametrize("error_norm", ["2", "failure_fraction"])
+    @pytest.mark.parametrize("absolute", [True, False], ids=["absolute", "cumulative"])
+    def test_error_control_reads_once_per_recheck(self, error_norm, absolute):
+        """Judging a pass reads the device only in the re-check of accepted
+        subintervals, once per pass (which of them fail and can be split): the
+        batch's error ratios and masks, the running sums of cumulative mode
+        and the final check read nothing, and whether any recorded subinterval
+        is split comes from the size of the re-check's result, on the host."""
+        calls = {"rechecks": 0}
+
+        def run():
+            solver = adaptive_quadrature(
+                "uniform",
+                "gk21",
+                device="cuda",
+                atol=1e-10,
+                rtol=1e-8,
+                error_norm=error_norm,
+                use_absolute_error_ratio=absolute,
+            )
+            method = solver._failed_record_positions
+
+            def counted(*args, **kwargs):
+                calls["rechecks"] += 1
+                return method(*args, **kwargs)
+
+            solver._failed_record_positions = counted
+            calls["rechecks"] = 0
+            torch.manual_seed(0)
+            solver.integrate(
+                lambda t: torch.sin(1.0 / (t + 1e-3)).repeat(1, 3),
+                mesh_init=torch.tensor([0.0], dtype=torch.float64),
+                mesh_final=torch.tensor([1.0], dtype=torch.float64),
+                take_gradient=False,
+                max_batch=10**6,
+            )
+
+        where = set().union(
+            *(
+                _lines(getattr(AdaptiveQuadrature, name))
+                for name in (
+                    "_compute_error_ratios",
+                    "_error_ratios_norm",
+                    "_error_ratios_failure_fraction",
+                    "_accept_reject_masks",
+                    "_record_error_check",
+                    "_failed_record_positions",
+                    "_merge_positions",
+                    "_insert_sorted_results",
+                )
+            ),
+            _lines(AdaptiveQuadrature.integrate, "cum"),
+            _lines(AdaptiveQuadrature.integrate, "extra_split_idxs"),
+            _lines(AdaptiveQuadrature.integrate, "record_keep_mask"),
+        )
+        assert _host_waits(run, where) == calls["rechecks"]
+        assert calls["rechecks"] > 2

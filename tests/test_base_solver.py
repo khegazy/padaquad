@@ -521,6 +521,57 @@ class TestHostWaits:
         if result_device is None:
             assert _host_waits(run, _lines(AdaptiveQuadrature._sort_record)) == 2
 
+    def test_loop_reads_only_where_pinned(self):
+        """The reads of the device that grow with the number of passes are the
+        ones the tests of this class pin, and no others: per pass, the loop's
+        condition and the mesh update; per call of f, its finite check; per
+        re-check, the failing subintervals (the record on the GPU). Two
+        integrals that take different numbers of passes therefore differ in
+        their reads by exactly these; what is read before and after the loop
+        is the same for both."""
+
+        def reads(frequency):
+            calls = {"update": 0, "recheck": 0, "f": 0}
+            solver = adaptive_quadrature(
+                "uniform", "gk21", device="cuda", atol=1e-10, rtol=0.0
+            )
+            for name, key in (
+                ("_adaptively_increase_mesh", "update"),
+                ("_failed_record_positions", "recheck"),
+            ):
+                method = getattr(solver, name)
+
+                def counted(*args, _method=method, _key=key, **kwargs):
+                    calls[_key] += 1
+                    return _method(*args, **kwargs)
+
+                setattr(solver, name, counted)
+
+            def f(t):
+                calls["f"] += 1
+                return torch.sin(frequency * t)
+
+            torch.manual_seed(0)
+            waits = _host_waits(
+                lambda: solver.integrate(
+                    f,
+                    mesh_init=torch.tensor([0.0], dtype=torch.float64),
+                    mesh_final=torch.tensor([1.0], dtype=torch.float64),
+                    take_gradient=False,
+                    max_batch=10**6,
+                    result_device=None,
+                    build_state_mesh=False,
+                )
+            )
+            # Every pass updates the mesh once (no update after the loop
+            # without the state's mesh).
+            pinned = 2 * calls["update"] + calls["f"] + calls["recheck"]
+            return waits - pinned, calls["update"]
+
+        (rest_few, passes_few), (rest_many, passes_many) = reads(30.0), reads(300.0)
+        assert passes_many > passes_few + 2
+        assert rest_many == rest_few
+
     @pytest.mark.parametrize("error_norm", ["2", "failure_fraction"])
     @pytest.mark.parametrize("absolute", [True, False], ids=["absolute", "cumulative"])
     def test_error_control_reads_once_per_recheck(self, error_norm, absolute):

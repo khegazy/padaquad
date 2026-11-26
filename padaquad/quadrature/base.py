@@ -61,7 +61,8 @@ from padaquad.methods import _get_method
 from padaquad.quadrature.memory import (
     _GB,
     _GROWTH,
-    _LARGEST_FIRST_CALL,
+    _LARGEST_TEST_CALL,
+    _OOM_BACKOFF,
     _check_evaluation_buffer,
     _is_out_of_memory,
     _MemoryManagement,
@@ -336,9 +337,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Default for the largest number of integrand evaluations per call of
             ``f``, used by calls given no ``max_batch`` and no ``state``; with
             ``take_gradient=True`` at least the C points of one subinterval.
-            None (default) lets the batch size grow from the first pass until
-            ``f`` runs out of memory (see ``integrate`` and :ref:`the user
-            guide <ug-memory>`).
+            None (default): test calls of ``f`` find a batch size to start
+            from, which then grows until ``f`` runs out of memory (see
+            ``integrate`` and :ref:`the user guide <ug-memory>`).
         total_mem_usage : float
             Default fraction of the device's total memory, in (0, 1], that may
             be in use; see ``integrate``. Default 0.9.
@@ -866,11 +867,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             ``take_gradient=True`` it must be at least the C points of one
             subinterval (a call of f then evaluates whole subintervals), and so
             must a ``state``'s batch size that has converged, unless this is
-            given; otherwise ``ValueError``. If this, the ``state``
-            and the constructor's value are all None, the first call of f is
-            the first pass (at most 10,000 points), and the batch size grows
-            from there by factors of 10 until f runs out of memory (see
-            :ref:`the user guide <ug-memory>`).
+            given; otherwise ``ValueError``. If this, the ``state`` and the
+            constructor's value are all None, f is called on 10, 100 and 1,000
+            copies of the first node of the first subinterval (stopping at the
+            size of the first pass; the values are discarded), and the batch
+            size starts at the largest that ran and grows by factors of 10
+            until f runs out of memory. A test call that runs out of memory is
+            repeated at 0.5 times its size up to 10 points and 0.75 above
+            (with ``take_gradient=True`` not below one subinterval) until one
+            runs, and the batch size then stops growing (see :ref:`the user
+            guide <ug-memory>`).
         state : IntegrationState or None
             Where an earlier call ended (the second value it returned): its mesh (as
             ``mesh=``) and its batch size. Cannot be given with ``mesh``; bounds
@@ -1220,20 +1226,41 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         n_start_steps = len(mesh) - 1
         start_mesh = given_mesh if given_mesh is not None else mesh.detach().clone()
         # The batch size of this call (_batch_for): a given max_batch is fixed;
-        # a state's may grow unless it has converged. With neither, the first
-        # call of f is the first pass, at most _LARGEST_FIRST_CALL points
-        # (_batch_for allows _GROWTH times the batch size, and _GROWTH times
-        # the ceiling of m / _GROWTH is m to m + 9), and the batch size grows
-        # from what it ran; every point f is called at belongs to the
-        # integration.
+        # a state's may grow unless it has converged; with neither, the test
+        # calls find where to start.
         if given is not None:
             self._batch, self._batch_converged = operator.index(given), True
         elif state is not None:
             self._batch = state.max_batch
             self._batch_converged = state.max_batch_converged
         else:
-            n_first = min(n_start_steps * self.C, _LARGEST_FIRST_CALL)
-            self._batch, self._batch_converged = -(-n_first // _GROWTH), False
+            # The test calls: f, forward only, on 10, 100 and 1,000 copies of
+            # one point, stopping at the order of the first pass, only to see
+            # that f runs at these sizes; the values are discarded. The batch
+            # size starts at the largest that ran (1 below 10 points), so the
+            # first pass's first call is at most 10 times it. A call that runs
+            # out of memory is repeated smaller, at 0.5 times its size up to
+            # 10 points and 0.75 above, until one runs; the batch size has then
+            # converged. With take_gradient=True, where every batch holds whole
+            # subintervals, no retry is smaller than one subinterval: C points
+            # are tried before giving up, and _call_f raises if they do not
+            # fit. The point is the first node of the first subinterval, which
+            # the first pass evaluates: never a bound that a method without
+            # end nodes leaves out (f may be singular there). Detached, so the
+            # test calls build no graph of bounds that require grad.
+            point = self._compute_nodes(mesh[:1], mesh[1:2])[0, :1].detach()
+            smallest = self.C if take_gradient else 1
+            self._batch, self._batch_converged, n = 1, False, _GROWTH
+            while n <= min(n_start_steps * self.C, _LARGEST_TEST_CALL) and not (
+                self._batch_converged
+            ):
+                while (
+                    self._call_f(f, f_args, point.repeat(n, 1), n != smallest) is None
+                ):
+                    factor = 0.5 if n <= _GROWTH else _OOM_BACKOFF
+                    n = max(smallest, _shrink_batch(n, factor))
+                    self._batch_converged = True
+                self._batch, n = n, n * _GROWTH
         # With take_gradient=True every call of f is whole subintervals, each
         # followed by its backward pass, so a batch size that does not grow
         # must hold one subinterval: a given one, or a state's converged one

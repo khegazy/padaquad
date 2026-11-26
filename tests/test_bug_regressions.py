@@ -76,7 +76,7 @@ def test_no_warm_start_path_correctness(take_gradient):
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
 def test_reuse_mesh_and_max_batch(device):
-    """The first call finds a batch size (its first pass, then growth) and
+    """The first call finds a batch size (test calls, then growth) and
     returns it with its optimal mesh in the state; passing the state to the
     next call starts from every point of that mesh."""
     solver = adaptive_quadrature("uniform", "gk21", device=device)

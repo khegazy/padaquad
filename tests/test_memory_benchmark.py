@@ -1923,8 +1923,9 @@ def test_cost_convergence_waits_for_fit_ready(fake, monkeypatch, caplog):
 
 
 def test_out_of_memory_retry_shrinks_the_failed_batch(fake):
-    """integrate() without max_batch: the first call of f is the first pass
-    of 44 points (11 subintervals of bosh3's 4 nodes). f runs out of memory
+    """integrate() without max_batch: the test call of 10 points runs and
+    gives a batch size of 10, not converged, so the first pass of 44 points
+    (11 subintervals of bosh3's 4 nodes) runs whole. f runs out of memory
     above 29 points; each retry shrinks the batch that failed, 44 -> 33 -> 25
     (then the 19 points left), and 25 is the converged batch size. Catches: a
     retry that does not shrink the failed batch itself."""
@@ -1932,7 +1933,7 @@ def test_out_of_memory_retry_shrinks_the_failed_batch(fake):
     result, result_state = fake.solver.integrate(
         f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
     )
-    assert f.calls == [44, 33, 25, 19]
+    assert f.calls == [10, 44, 33, 25, 19]
     assert (result_state.max_batch, result_state.max_batch_converged) == (25, True)
     assert float(result.integral.sum()) == pytest.approx(1.0)
 

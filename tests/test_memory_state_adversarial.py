@@ -364,10 +364,9 @@ def test_restart_keeps_every_other_argument():
     ("kind", "method"), [("uniform", "gk21"), ("variable", "interpolatory3_variable")]
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
-def test_first_call_with_both_solvers_and_dtypes(kind, method, dtype):
-    """Without max_batch or a state, the first call of f (the first pass)
-    runs with the variable-sampling solver and in float32, with an f that
-    returns tracked variables and takes f_args."""
+def test_test_calls_with_both_solvers_and_dtypes(kind, method, dtype):
+    """The test calls run with the variable-sampling solver and in float32,
+    and an f that returns tracked variables and takes f_args."""
     a = torch.tensor([0.0], dtype=dtype)
 
     def f(t, scale):

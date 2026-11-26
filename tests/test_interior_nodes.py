@@ -1,10 +1,11 @@
 """Methods whose nodes are all inside the subinterval (the Gauss-Kronrod methods).
 
 The integrand is evaluated only at the points that carry a weight: never at a
-mesh point, and no call of it comes before the first pass. So an integrable
-singularity at a bound needs no special treatment, the result lists exactly the
-evaluated points, and the width and the gradient with respect to a bound come
-from the mesh points.
+mesh point, also not in the test calls made without ``max_batch`` (on copies
+of the first node of the first subinterval). So an integrable singularity at a
+bound needs no special treatment, the result lists exactly the evaluated
+points, and the width and the gradient with respect to a bound come from the
+mesh points.
 """
 
 from __future__ import annotations
@@ -40,8 +41,10 @@ def test_nodes_are_interior_and_counted(method):
 @pytest.mark.parametrize("max_batch", [None, 50])
 def test_f_gets_c_points_per_subinterval_and_no_mesh_point(method, max_batch):
     """Every pass calls f at C points per waiting subinterval (in one or more
-    calls), and none of them is a point of the pass's mesh; no call of f comes
-    before the first pass, with or without max_batch. (The centre node of a
+    calls), and none of them is a point of the pass's mesh. Only without
+    max_batch do calls of f come before the first pass: the test calls (10
+    points, and 100 when the first pass has at least 100), every point of them
+    the first node of the first subinterval, inside it. (The centre node of a
     subinterval that is then split becomes a mesh point of the halves, which do
     not evaluate it.)"""
     received = []
@@ -70,7 +73,15 @@ def test_f_gets_c_points_per_subinterval_and_no_mesh_point(method, max_batch):
     )
     assert result.converged
     assert len(passes) > 1  # several passes
-    assert passes[0][0] == 0  # the first pass starts with the first call of f
+    first_pass, starting_mesh = passes[0]
+    test_calls = received[:first_pass]
+    n_first = solver.C * (len(starting_mesh) - 1)
+    sizes = [] if max_batch else [n for n in (10, 100) if n <= n_first]
+    assert [len(t) for t in test_calls] == sizes
+    first_node = solver._compute_nodes(starting_mesh[:1], starting_mesh[1:2])[0, 0]
+    for t in test_calls:
+        assert (t == first_node).all()
+        assert not torch.isin(t, starting_mesh).any()
     exact = 100 * (math.atan(63) + math.atan(37))
     assert abs(float(result.integral) - exact) < 1e-8
 
@@ -85,9 +96,10 @@ def test_f_gets_c_points_per_subinterval_and_no_mesh_point(method, max_batch):
 )
 def test_integrable_singularity_at_a_bound(method, max_batch, take_gradient, f, exact):
     """1/sqrt(t) and log(t) are infinite at t = 0, a bound. With every node
-    inside its subinterval f is never called there, also not without
-    max_batch (no call of f comes before the first pass), so runtime_checks
-    finds no NaN or Inf and the integral converges to the exact value."""
+    inside its subinterval f is never called there, also not by the test
+    calls made without max_batch (at the first node of the first
+    subinterval), so runtime_checks finds no NaN or Inf and the integral
+    converges to the exact value."""
     smallest = []
 
     def recorded(t):

@@ -66,30 +66,34 @@ _OOM_BACKOFF = 0.75
 # that needs more points than it tries this many times as many.
 _GROWTH = 10
 
-# The largest first call of f of an integrate() call given no max_batch and no
-# state: its first pass, up to this many points. Larger calls are reached by
-# growth (_GROWTH per call), so no call is more than 10 times one that ran.
-_LARGEST_FIRST_CALL = 10_000
+# The largest test call of integrate() given no max_batch and no state (the
+# test calls are 10, 100 and 1,000 points; larger sizes are reached by growth,
+# whose calls of f do useful work, so no call is more than 10 times one that
+# ran).
+_LARGEST_TEST_CALL = 1000
 
 
-def _shrink_batch(n: int) -> int:
+def _shrink_batch(n: int, factor: float = _OOM_BACKOFF) -> int:
     """
     Return the batch size to retry with after a batch of n points ran out of memory.
 
-    ``_OOM_BACKOFF * n``, rounded, but always below n (``round(0.75 * 2)`` is 2)
-    and at least 1.
+    ``factor * n``, rounded (half to even), but always below n
+    (``round(0.75 * 2)`` is 2) and at least 1.
 
     Parameters
     ----------
     n : int
         The batch size that ran out of memory, at least 1.
+    factor : float
+        The fraction of n to retry with, in (0, 1). Default ``_OOM_BACKOFF``;
+        the test calls of ``integrate`` use 0.5 up to 10 points.
 
     Returns
     -------
     int
         The smaller batch size.
     """
-    return max(1, int(min(round(_OOM_BACKOFF * n), n - 1)))
+    return max(1, int(min(round(factor * n), n - 1)))
 
 
 def _check_evaluation_buffer(evaluation_buffer: Any) -> None:
@@ -798,7 +802,9 @@ class _MemoryManagement:
             if not can_shrink:
                 raise torch.OutOfMemoryError(
                     f"{e}\n\nA call of the integrand f on {len(points)} points ran "
-                    "out of memory, and the batch size cannot be reduced."
+                    "out of memory, and the batch size cannot be reduced: a call "
+                    "holds at least one point, and with take_gradient=True at "
+                    f"least one subinterval ({self.C} points)."
                 ) from e
             # An error from outside PyTorch's allocator (a CUDA library's, or
             # the CPU's) is helped by emptying PyTorch's GPU cache too.

@@ -889,7 +889,7 @@ def test_predicted_far_from_the_origin(dtype, offset):
 
 
 def test_nan_integrand_does_not_break_the_prediction():
-    """With error_on_nonfinite=False a NaN integrand value makes the prediction
+    """With runtime_checks=False a NaN integrand value makes the prediction
     NaN only in its own output component, for the pairs that touch it; the
     call returns a valid increasing mesh (a NaN pair ratio is never below the
     cutoff, so such a pair is not merged)."""
@@ -899,7 +899,7 @@ def test_nan_integrand_does_not_break_the_prediction():
         rtol=1e-9,
         device="cpu",
         max_batch=SMALL_BATCH,
-        error_on_nonfinite=False,
+        runtime_checks=False,
     )
 
     def f(t):

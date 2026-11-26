@@ -1,4 +1,4 @@
-"""Sphinx configuration for the padaquad documentation.
+"""Sphinx configuration for the PadaQuad documentation.
 
 Build locally (from the repository root)::
 
@@ -20,7 +20,7 @@ DOCS = Path(__file__).resolve().parent
 ROOT = DOCS.parent
 sys.path.insert(0, str(DOCS / "_ext"))
 
-project = "padaquad"
+project = "PadaQuad"
 author = "Kareem Hegazy"
 copyright = "2024-2026, Kareem Hegazy"  # noqa: A001 (Sphinx setting name)
 release = importlib.metadata.version("padaquad")
@@ -81,18 +81,21 @@ sphinx_gallery_conf = {
     "gallery_dirs": "auto_examples",
     # Only the tutorial scripts and the verification scripts; examples/pode and
     # examples/speed_test are not part of the gallery.
-    "filename_pattern": r"/(quadrature_basics|gradient_of_integral|polynomial_degree|integral_accuracy|merge_prediction)\.py$",
+    "filename_pattern": (
+        r"/(quadrature_basics|gradient_of_integral|gradient_as_output"
+        r"|polynomial_degree|integral_accuracy|merge_prediction)\.py$"
+    ),
     "ignore_pattern": r"(pode|speed_test)",
     "download_all_examples": False,
     "remove_config_comments": True,
-    # The examples print text and draw no figures, so no image scraper (and no
-    # matplotlib) is needed.
-    "image_scrapers": (),
+    # Figures drawn with matplotlib appear on the example's page; the first one
+    # is its thumbnail on the Examples page.
+    "image_scrapers": ("matplotlib",),
     "reset_modules": (),
 }
 
 html_theme = "pydata_sphinx_theme"
-html_title = f"padaquad {release}"
+html_title = f"PadaQuad {release}"
 html_theme_options = {
     "github_url": "https://github.com/khegazy/padaquad",
     "use_edit_page_button": True,
@@ -110,3 +113,8 @@ html_static_path: list[str] = []
 # ACM and SIAM answer automated requests with 403 Forbidden. These DOIs
 # (Gonnet 2012, Trefethen 2008) were confirmed through the Crossref API.
 linkcheck_ignore = [r"https://doi\.org/10\.1145/", r"https://doi\.org/10\.1137/"]
+# docs.pytorch.org answers automated requests with a JavaScript page that has
+# no anchors, so its pages are checked without their anchors. The anchors come
+# from PyTorch's intersphinx inventory (e.g. cuda-memory-envvars, the label in
+# PyTorch's docs/source/notes/cuda.rst).
+linkcheck_anchors_ignore_for_url = [r"https://docs\.pytorch\.org/"]

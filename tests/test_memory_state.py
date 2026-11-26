@@ -114,29 +114,35 @@ def test_failed_test_call_shrinks_until_one_runs():
     assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
 
 
-@pytest.mark.parametrize("conserve_memory", [False, True])
-def test_batch_grows_tenfold_per_call_until_out_of_memory(conserve_memory):
+@pytest.mark.parametrize("trade_speed_for_memory", [False, True])
+def test_batch_grows_tenfold_per_call_until_out_of_memory(trade_speed_for_memory):
     """A state with batch size 100, not converged, and a pass of 11,500 points
-    (500 gk21 subintervals). Default path: calls of 1,000, 10,000, then the
-    500 left; with a limit of 3,000 points the call of 10,000 fails and shrinks
-    by 0.75 per retry until it fits, and the state converges. Both paths give
-    the right integral."""
+    (500 gk21 subintervals). Calls of 1,000, 10,000, then the 500 left,
+    whether the values stay on the device or not (``trade_speed_for_memory``); with a
+    limit of 3,000 points the call of 10,000 fails and shrinks by 0.75 per
+    retry until it fits, and the state converges. Both give the right
+    integral."""
     state = IntegrationState(even_mesh(500), 100, False)
     f = Recorder()
     result, result_state = solver().integrate(
-        f, state=state, take_gradient=False, conserve_memory=conserve_memory
+        f,
+        state=state,
+        take_gradient=False,
+        trade_speed_for_memory=trade_speed_for_memory,
     )
     assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
-    if not conserve_memory:
-        assert f.sizes[1:4] == [1000, 10000, 500]
-        assert (result_state.max_batch, result_state.max_batch_converged) == (
-            10000,
-            False,
-        )
+    assert f.sizes[1:4] == [1000, 10000, 500]
+    assert (result_state.max_batch, result_state.max_batch_converged) == (
+        10000,
+        False,
+    )
 
     f = Recorder(limit=3000)
     result, result_state = solver().integrate(
-        f, state=state, take_gradient=False, conserve_memory=conserve_memory
+        f,
+        state=state,
+        take_gradient=False,
+        trade_speed_for_memory=trade_speed_for_memory,
     )
     assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
     assert result_state.max_batch_converged

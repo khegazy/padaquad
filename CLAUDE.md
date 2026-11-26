@@ -5,7 +5,7 @@ with code in this repository.
 
 ## Project overview
 
-**padaquad** is a PyTorch library for **adaptive numerical
+**PadaQuad** is a PyTorch library for **adaptive numerical
 quadrature**: it computes definite integrals
 $\int_a^b f(t)\,dt$ for a known integrand $f$ by evaluating many
 quadrature panels in parallel batches on GPU, with full autograd through
@@ -59,7 +59,7 @@ sphinx-build -b linkcheck docs docs/_build/linkcheck
 
 `pytest` also runs the docstring Examples (`--doctest-modules`, testpaths
 include `padaquad/`); the repository-root `conftest.py` seeds torch and quiets
-the padaquad log for them.
+the PadaQuad log for them.
 
 ## Documentation
 
@@ -81,13 +81,18 @@ the padaquad log for them.
   `tests/test_docs_methods_table.py`) and the Performance table
   (`docs/_ext/performance_table.py`, from `docs/performance/results_<device>.json`,
   written by `examples/speed_test/torchdiffeq_comparison.py`; one section per
-  file, tested by `tests/test_docs_performance_table.py`).
+  file, tested by `tests/test_docs_performance_table.py`), and, by the same
+  extension, the memory options tables of the user guide (from
+  `docs/performance/memory_options.json`, written by
+  `examples/speed_test/trade_speed_for_memory.py`).
 - README sections reused on the site are marked
   `<!-- include-start: NAME -->` / `<!-- include-end: NAME -->`; the Python
   blocks of the README and of `docs/development/adding_a_method.md`
   (`DOCUMENTS` in `tests/test_examples_run.py`) run in that test unless
   preceded by `<!-- not-tested -->`.
-- The gallery runs `examples/*.py` and `examples/verification/*.py`.
+- The gallery runs the scripts listed in `filename_pattern` (`docs/conf.py`):
+  the `examples/*.py` tutorials and `examples/verification/*.py`; matplotlib
+  figures become the cards' thumbnails.
 
 mypy runs with every function annotated and every body checked
 (`disallow_untyped_defs`, `check_untyped_defs`, `disallow_any_generics`,
@@ -122,10 +127,10 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_convergence_rate.py` | Empirical convergence-rate slope matches each method's theoretical rate |
 | `test_autodiff_consistency.py` | $\nabla_\theta\int f_\theta dt$ via backprop equals $\int \nabla_\theta f_\theta dt$ |
 | `test_error_indicator.py` | Behavior of absolute vs cumulative error indicators (Bug B8 investigation) |
-| `test_bug_regressions.py` | Regression tests for bugs B4, B6 fixed in Phase 1; reuse by passing the returned state (no state on the solver, `same_f` and constructor bounds gone); the interval rules (bounds required, cut, outside extends, rounding snap, one-ULP cut, mesh validation, keyword-only options) |
+| `test_bug_regressions.py` | Regression tests for bugs B4, B6 fixed in Phase 1; `runtime_checks` (old name `error_on_nonfinite` raises; False skips the order and finite checks with the same result); reuse by passing the returned state (no state on the solver, `same_f` and constructor bounds gone); the interval rules (bounds required, cut, outside extends, rounding snap, one-ULP cut, mesh validation, keyword-only options) |
 | `test_snapshots.py` | Golden-value regression net for the file-split refactor; CPU-only float64 |
 | `test_public_api.py` | Smoke test of every public symbol and `IntegrationResult` fields |
-| `test_rk_integral.py` | `_RK_integral`: constant / linear / multi-step / multi-dim / zero-width / variable-b inputs |
+| `test_rk_integral.py` | `_RK_integral`: constant / linear / multi-step / multi-dim / zero-width / variable-b inputs; the weighted sum in blocks of rows (`_BLOCK_BYTES`) equals one sum bit for bit, N = 0 included |
 | `test_base_and_methods.py` | `get_sampling_type`, `_Tableau` dtype conversion, `_get_method` factory (unknown name raises `ValueError`), `error_exponent`, weight formulas |
 | `test_error_computation.py` | `_error_norm`, `_rec_remove`, `_compute_error_ratios_absolute`/`_cumulative` |
 | `test_interpolation.py` | `_compute_nodes`: endpoints, shapes, monotonicity, tableau-c matching |
@@ -139,19 +144,20 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: the state's mesh re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
 | `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
-| `test_error_integral_reference.py` | The `error_integral_reference` argument of `integrate()` |
+| `test_error_integral_reference.py` | The `error_integral_reference` argument of `integrate()`, with `take_gradient=True` (the one path where a batch is judged before the rest of its pass is evaluated) |
 | `test_error_masks.py` | Vector-error machinery (norms, `failure_fraction`, rounding floor) in float32 and float64 |
-| `test_evaluate_f_on_mesh.py` | `_evaluate_f_on_mesh` and its evaluation paths |
-| `test_examples_run.py` | Runs `examples/*.py`, every script in `examples/verification/`, and every ```python block of the files in its `DOCUMENTS` (the README, `docs/development/adding_a_method.md`; except blocks preceded by `<!-- not-tested -->`) |
+| `test_evaluate_f_on_mesh.py` | `_evaluate_f_on_mesh` and its two evaluation paths; the returned `MethodOutput` equals one `_calculate_integral` call bit for bit however the calls of `f` were cut |
+| `test_trade_speed_for_memory.py` | `trade_speed_for_memory`, `evaluation_buffer`, `record_evaluations`: the same calls of `f`, mesh and integral (bit for bit) with every setting, for every `max_batch`, uniform and variable, CPU and CUDA; when the values are integrated (once per pass, per call, per buffer); the values' device in every result `loss_fxn` receives; lower GPU peak; the `ValueError`s; the three warnings, on the first call only (no state), none for `result_device` on the solver's device; without values, `state.mesh` is the `power_law` one; every feature unchanged; the default holds a pass once (GPU peak < 1.8 × the pass's values); an out-of-memory error at the pass's array names the remedies; `_keep_rows` in place equals indexing |
+| `test_examples_run.py` | Runs `examples/*.py` (with output markers, or self-checking with asserts: `SELF_CHECKING_EXAMPLES`, `MPLBACKEND=Agg`), every script in `examples/verification/`, and every ```python block of the files in its `DOCUMENTS` (the README, `docs/development/adding_a_method.md`; except blocks preceded by `<!-- not-tested -->`) |
 | `test_max_adaptive_splits.py` | The `max_adaptive_splits` depth cap |
-| `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks`; `get_max_batch(f=..., t=...)` (measurement, argument checks) and the measured `result.max_batch` |
+| `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks`; `get_max_batch(f=..., t=...)` (measurement, argument checks, `evaluation_buffer` kept free twice) and the measured `result.max_batch` |
 | `test_methods_registry.py` | Registry consistency: table shapes and dtypes, `degree` / `error_exponent` types |
 | `test_multi_d_integrand.py` | Integrands with D > 1 outputs |
-| `test_oom_recovery.py` | The out-of-memory catch-and-retry path |
-| `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance; `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN) |
+| `test_oom_recovery.py` | The out-of-memory catch-and-retry path (direct calls of `_evaluate_f_on_split_nodes`, including retries that end inside a subinterval; `integrate` with and without `trade_speed_for_memory`) |
+| `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance (with `take_gradient=False` the drift is between passes: `_cancelling_peak` hides its cancelling part in a narrow peak the first passes miss); `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN) |
 | `test_solver_isolation.py` | Solvers do not share method objects or state |
 | `test_tracked_variables.py` | The `tracked_variables` feature |
-| `test_docs_performance_table.py` | The Performance page's rendering of `docs/performance/results_*.json`: no file, one, two (name order, hardware headings), unreadable files named in the error |
+| `test_docs_performance_table.py` | The Performance page's rendering of `docs/performance/results_*.json`: no file, one, two (name order, hardware headings), unreadable files named in the error; the memory options tables from `docs/performance/memory_options.json` (every setting of every integrand, the field's `EXAMPLE_SETTINGS` in order of `max_batch`, defaults first, missing and unreadable files) |
 | `test_split_statistics.py` | `n_start_steps` / `n_start_steps_split` / `max_split_depth` on integrands with known answers; `converged` against a hand-computed tolerance check (absolute and cumulative, with `y0`), in `failure_fraction` mode (including a NaN component), against the final integral, and its warning (numbers, output component, remedies); `max_adaptive_splits` type check |
 
 **Snapshot tests** are the regression net for internal refactors: the
@@ -290,12 +296,29 @@ is a boolean array where `True` means the panel still needs evaluation.
 2. **Main loop.** While any `mesh_trackers` are `True`:
    - Size the next call of `f` with `_batch_for` (the call's batch size, or
      10 times it while not converged; see Memory management).
-   - Select up to `max_steps` unevaluated panels.
-   - Place C nodes per panel via `_compute_nodes`.
-   - Evaluate `f` on all flattened nodes; reshape to `[N, C, D]`.
-   - Compute integral + error via `_calculate_integral` (weighted sum
-     with the rule's `b` and `b_error` weights from `method.weights`; the
-     error estimates are detached).
+   - `_evaluate_f_on_mesh` evaluates and integrates: with `take_gradient=True`
+     (`_evaluate_f_on_full_nodes`) the whole panels that fit in one call;
+     with `take_gradient=False` (`_evaluate_f_on_split_nodes`) every waiting
+     panel, its flattened nodes in calls of at most the batch size (from the
+     generator `_evaluate_f_in_batches`; a call may end inside a panel and
+     the next finishes it). Nodes via `_compute_nodes`; integral + error via
+     `_calculate_integral` (weighted sum with the rule's `b` and `b_error`
+     weights from `method.weights`; the error estimates are detached), which
+     the split path runs on the completed panels once per pass (`buffer_bytes`
+     = inf, the default) or, with `trade_speed_for_memory=True`, whenever
+     `evaluation_buffer` bytes of them wait (0, after every call, when None);
+     bit-identical either way (every row depends only on its panel). It then
+     sends their values and tracked variables to `values_device`: the
+     solver's device by default (the record moves the accepted ones to
+     `result_device` after the decision), `result_device` with
+     `trade_speed_for_memory`, None (dropped) with `record_evaluations=False`
+     (then `state.mesh` uses `merge_rule="power_law"`: `_merge_inputs` with
+     `y=None`). Nodes stay on the solver's device. Both return `(nodes, y,
+     tracked, step_idxs, MethodOutput)`; the pass's integral is
+     `sum(mesh_quadratures)`. `integrate` raises `ValueError` for
+     `trade_speed_for_memory` with `take_gradient=True` and for a misused
+     `evaluation_buffer`, and logs three warnings only when no `state` is given
+     (the first call of a series).
    - Compute error ratios (absolute or cumulative mode).
    - `_adaptively_increase_mesh`: panels with ratio `< 1` are accepted;
      panels with ratio `>= 1` are split at midpoint into two
@@ -330,7 +353,7 @@ reducing to `|error| / max(atol, rtol*|I|) < 1` (norm family) or
   vector to a scalar with the norm, compare to `max(atol, rtol * norm(integral))`
   (scipy `quad_vec` uses `max(epsabs, epsrel*norm(I))`).
   Accept when `< 1`. Options: `"2"` (default, L2 = `sqrt(sum(e²))`), `"max"`
-  (L∞), `"rms"` (`sqrt(mean(e²))`, padaquad's historical reduction), or a
+  (L∞), `"rms"` (`sqrt(mean(e²))`, PadaQuad's historical reduction), or a
   callable reducing the last (`D`) axis.
 - **`"failure_fraction"`** — *per-component*: each output element is compared
   against its own `atol + rtol*|I_d|`; a panel is accepted when the fraction of
@@ -378,7 +401,7 @@ None) and the cutoff for the constructor option `merge_rule`:
   (log2 ratio quantized to 2^-48), cached on the solver
   (`_merge_weight_cache`, reset in `_set_solver_dtype`). With T > 1 it falls
   back to `"power_law"` with a warning.
-- `"power_law"` (padaquad 1.3.0 and 1.4.0): summed errors, cutoff `remove_cut / 2^(k-1)`
+- `"power_law"` (PadaQuad 1.3.0 and 1.4.0): summed errors, cutoff `remove_cut / 2^(k-1)`
   (assumes the estimate scales as h^k, k = `error_exponent`; on wide steps it
   grows far less, so safe merges are refused).
 - `"sum"` (1.2.2): summed errors, cutoff `remove_cut`.
@@ -506,6 +529,12 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   `_get_max_f_evals` = `_largest_n(f_mem_coeffs, _MEMORY_BUDGET·usable)` from
   the last `get_max_batch(f=...)`, both through `_cap_max_batch`
   (`min(value, _oom_max_batch)`); no `default_max_batch` (removed).
+  `get_max_batch(evaluation_buffer=X)` subtracts 2X bytes from `usable`
+  (`reserved`, GB, in `_get_max_f_evals` and the benchmark's result; not in
+  its test calls); `integrate` does not.
+- `_RK_integral` forms `b * y` in blocks of at most `_BLOCK_BYTES`
+  (128 MiB) of rows, bit-identical to one sum, so the quadrature calculation
+  needs no temporary as large as the values.
 - Out-of-memory errors are recognized by `_is_out_of_memory` (GPU OOM, CPU
   `DefaultCPUAllocator` refusal, CUDA "out of memory" and CUDA-library
   `*ALLOC*_FAILED` statuses, `MemoryError`). Every call of `f` in the
@@ -516,6 +545,32 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   shrink. Its two callers retry smaller: `_evaluate_f_in_batches`
   (`take_gradient=False`) and the `while output is None` loop of
   `_evaluate_f_on_full_nodes` (`take_gradient=True`).
+- **A pass's values are held once** (`take_gradient=False`):
+  when the values stay on the solver's device for the pass (`values_device`
+  is it, or None with no buffer) and f's output does not require grad, `_evaluate_f_on_split_nodes` writes each call's whole subintervals
+  into one [K, C, D] array for the pass (`in_place`; K is known before the
+  first call, since nothing is split during a pass) and integrates from its
+  rows, with no list of calls to join (when one call covers the pass, its
+  output is the array, no copy; `_keep_rows` copies from a view such as it); `_adaptively_increase_mesh` keeps the
+  accepted rows by moving them to the front of that array
+  (`_keep_rows(in_place=not take_gradient)`, blocks of `_BLOCK_BYTES`; a
+  view, so no copy), or keeps the array as it is when all are accepted; the
+  loop deletes the batch's values (`kept_y`, `intermediate_results`) after
+  recording. An out-of-memory error allocating the pass's array is raised
+  as `torch.OutOfMemoryError` naming `trade_speed_for_memory` and
+  `expandable_segments` (user guide `ug-pass-array-oom`). The settings'
+  memory and time are measured by
+  `examples/speed_test/trade_speed_for_memory.py` (every setting, from speed to
+  memory, on a light integrand, two Fourier-feature networks of ~10,000 and
+  ~1,000,000 parameters, with every setting and no `max_batch` (the batch grows until f
+  runs out of memory), and a `SteppedField` of 512² outputs with
+  `FIELD_SETTINGS` (`max_batch` 3,000, 4,000, 5,550 × `trade_speed_for_memory`,
+  `record_evaluations=False`; on a 40 GB A100 the default runs out of memory in
+  f at 4,000 and 5,550 and retries smaller, rendered in bold); out-of-memory
+  rows are recorded; asserts the same integral to 10×
+  the tolerance and records whether it is the same bit for bit; writes `docs/performance/memory_options.json`, rendered by its
+  `render_markdown` into `docs/user_guide/devices_memory.md`, section
+  `ug-trade-speed-for-memory`).
 - `_get_usable_memory = free - buffer`, where
   `buffer = (1 - total_mem_usage) * total_memory`.
 - Supports both CUDA (`torch.cuda.mem_get_info`) and CPU
@@ -540,13 +595,21 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 - Results from each batch after backward are `.detach()`-ed before
   being added to the running record (so the graph for that batch can
   be released).
+- **The gradient as extra outputs** (`examples/gradient_as_output.py`): `f`
+  returns its gradient with respect to the parameters as extra output
+  components (`torch.func.grad` on detached parameters), integrated with
+  `take_gradient=False` and no autograd graph; a callable `error_norm`
+  chooses which components decide a split. It leaves out the terms of bounds
+  that depend on the parameters. `trade_speed_for_memory=True` with an
+  output that requires grad logs a warning pointing to it (the graph keeps
+  what `f` saved on the device, so moving the values saves little).
 
 ### `y0` additive offset
 
 - `y0` is an optional initial value of the integral accumulator. The
   returned `result.integral` is `y0 + ∫f(t)dt`. Default is zeros.
-- Per-batch `_calculate_integral` calls inside the loop use `y0=zeros`
-  so each batch returns only its step contributions. The user-supplied
+- `_calculate_integral`'s `y0` defaults to zero (None), as the evaluation
+  functions call it, so each batch returns only its step contributions. The user-supplied
   `y0` is added once at the final `IntegrationResult`.
 - `result.y0` echoes the value that was used (after dtype/device
   coercion) so callers can recover what offset was applied.

@@ -20,7 +20,7 @@ from padaquad import (
 # Default test device
 # ---------------------------------------------------------------------------
 #
-# padaquad is normally run on GPU, so the suite runs on CUDA when one is present
+# PadaQuad is normally run on GPU, so the suite runs on CUDA when one is present
 # and falls back to CPU otherwise (e.g. GitHub CI, where ``torch.cuda`` is
 # unavailable). Set ``PADAQUAD_TEST_DEVICE`` to force a specific device -- e.g.
 # ``PADAQUAD_TEST_DEVICE=cpu`` to reproduce the CI / CPU path on a GPU box, or

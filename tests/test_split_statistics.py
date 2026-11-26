@@ -301,7 +301,9 @@ def test_converged_matches_a_hand_computed_tolerance_check(
         mesh_final=T_FINAL,
         y0=torch.tensor([5.0], dtype=torch.float64),
         take_gradient=take_gradient,
-        conserve_memory=True,
+        # The values leave the device with take_gradient=False (it raises with
+        # take_gradient=True); converged must not depend on where they are.
+        trade_speed_for_memory=not take_gradient,
         max_batch=8 * solver.C,
         max_adaptive_splits=cap,
     )
@@ -336,7 +338,7 @@ def test_y0_does_not_loosen_the_converged_tolerance():
 
 def test_cumulative_mode_recheck_uses_the_running_integral():
     """In cumulative mode the re-check of accepted steps judges each one against
-    the running integral through it, including the current batch. Judging
+    the running integral through it, including the current pass. Judging
     against the record alone (the previous behaviour) left this run with a
     failing step (converged=False)."""
     solver = adaptive_quadrature(
@@ -353,7 +355,7 @@ def test_cumulative_mode_recheck_uses_the_running_integral():
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
         take_gradient=False,
-        conserve_memory=True,
+        trade_speed_for_memory=True,
         max_batch=16 * solver.C,
     )
     assert out.converged is True
@@ -411,7 +413,7 @@ def test_failure_fraction_nan_component_is_not_converged(absolute):
         ),
         mesh=torch.linspace(0.0, 1.0, 5, dtype=torch.float64).unsqueeze(-1),
         take_gradient=False,
-        error_on_nonfinite=False,
+        runtime_checks=False,
     )
     assert torch.isnan(out.integral[1])
     assert out.converged is False

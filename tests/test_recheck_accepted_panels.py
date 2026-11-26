@@ -15,11 +15,15 @@ serves as the "re-check disabled" baseline. With a fixed
 ``error_integral_reference`` the re-check is off until every panel is accepted;
 the reference is then dropped (section E).
 
-A strongly *cancelling* integrand drives the effect: its partial integral peaks
-mid-domain and the total is ~0, so the absolute denominator is large mid-run and
-collapses toward ``atol`` at the end. ``conserve_memory=True`` + a small
-``max_batch`` make the running integral accumulate batch by batch (the regime
-where the denominator genuinely drifts within a single solve).
+A strongly *cancelling* integrand drives the effect: the total is ~0, so the
+absolute denominator collapses toward ``atol`` once the cancellation is
+resolved. With ``take_gradient=False`` every pass judges all its subintervals
+against the running integral of the whole interval, so the drift must come
+from one pass to the next: ``_cancelling_peak`` hides its cancelling part in a
+narrow peak that the first, coarse passes miss, so their running integral (about
+1) sets a loose tolerance that the final integral (0) no longer allows.
+``take_gradient=True`` judges one small batch at a time (``max_batch``), so
+there the running integral also drifts within a pass.
 """
 
 from __future__ import annotations
@@ -70,12 +74,29 @@ def _cancelling(t, *args):
     return torch.sin(2.0 * math.pi * t)
 
 
+def _cancelling_peak(t, *args):
+    """f(t) = 1 + 0.5 sin(4 pi t) minus a Gaussian of unit area at t = 0.37.
+
+    The Gaussian, sqrt(a/pi) exp(-a (t - 0.37)^2) with a = 1e4 (width about
+    0.007), cancels the smooth part: the integral over [0, 1] is 0 (to rounding).
+    The coarse first passes do not resolve the peak, so their running integral
+    is about 1 and their tolerance rtol * 1; once the peak is resolved the
+    tolerance falls to atol, and subintervals accepted early fail it.
+    """
+    a = 1e4
+    return (
+        1.0
+        + 0.5 * torch.sin(4.0 * math.pi * t)
+        - math.sqrt(a / math.pi) * torch.exp(-a * (t - 0.37) ** 2)
+    )
+
+
 def _run(
     solver,
     f,
     take_gradient,
     mesh_final=T_FINAL,
-    conserve_memory=True,
+    trade_speed_for_memory=False,
     max_batch=MAX_BATCH,
     **kwargs,
 ):
@@ -85,7 +106,7 @@ def _run(
         mesh_final=mesh_final,
         take_gradient=take_gradient,
         max_batch=max_batch,
-        conserve_memory=conserve_memory,
+        trade_speed_for_memory=trade_speed_for_memory,
         **kwargs,
     )
 
@@ -367,7 +388,7 @@ def test_recheck_actually_resplits_accepted_panels():
 
     solver._remove_failed_record_panels = counting_remove
     torch.manual_seed(0)
-    result, _ = _run(solver, _cancelling, take_gradient=False)
+    result, _ = _run(solver, _cancelling_peak, take_gradient=False)
 
     assert removed_total > 0, (
         "the re-check never removed/re-split an accepted panel; the feature did "
@@ -438,7 +459,7 @@ def test_remove_failed_record_panels_subset():
     keep = torch.tensor([True, False, True, False])
 
     record = solver._remove_failed_record_panels(
-        record, keep, solver._integral_loss, T_INIT, T_FINAL
+        record, keep, solver._integral_loss, T_INIT, T_FINAL, solver.device
     )
 
     assert record["mesh_quadratures"].shape[0] == 2
@@ -467,7 +488,7 @@ def test_remove_all_then_record_does_not_crash(result_device):
     keep = torch.zeros(4, dtype=torch.bool)
 
     record = solver._remove_failed_record_panels(
-        record, keep, solver._integral_loss, T_INIT, T_FINAL
+        record, keep, solver._integral_loss, T_INIT, T_FINAL, solver.device
     )
     assert record["mesh_quadratures"].shape[0] == 0
     assert record["nodes"].shape[0] == 0
@@ -509,7 +530,7 @@ def test_enforce_convergence_false_turns_the_recheck_off():
     """enforce_convergence=False turns the re-check off with take_gradient=False."""
     torch.manual_seed(0)
     result, _ = _run(
-        _solver(), _cancelling, take_gradient=False, enforce_convergence=False
+        _solver(), _cancelling_peak, take_gradient=False, enforce_convergence=False
     )
     assert result.converged is False
 
@@ -548,7 +569,12 @@ def test_warning_suggests_enforce_convergence(caplog):
     """With the re-check turned off, the warning names the argument."""
     torch.manual_seed(0)
     with caplog.at_level(logging.WARNING, logger="padaquad"):
-        _run(_solver(), _cancelling, take_gradient=False, enforce_convergence=False)
+        _run(
+            _solver(),
+            _cancelling_peak,
+            take_gradient=False,
+            enforce_convergence=False,
+        )
     assert "enforce_convergence=True" in caplog.text
 
 
@@ -576,18 +602,18 @@ def _spy_evaluated(solver):
 
 
 @pytest.mark.parametrize("max_batch", [MAX_BATCH, 7, 3])
-@pytest.mark.parametrize("conserve_memory", [True, False])
+@pytest.mark.parametrize("trade_speed_for_memory", [True, False])
 @pytest.mark.parametrize("max_adaptive_splits", [None, 4])
 def test_switch_never_evaluates_a_subinterval_twice(
-    conserve_memory, max_adaptive_splits, max_batch
+    trade_speed_for_memory, max_adaptive_splits, max_batch
 ):
     """The panels that fail when the reference is dropped are split from their
     stored errors, never evaluated again (f can be expensive).
 
-    Batch sizes that are not multiples of C (7) or below it (3) make the
-    conserve_memory path evaluate part of a panel in one call of f and the rest
-    in the next; counting the points passed to f checks that no partly
-    evaluated panel is evaluated again either.
+    Batch sizes that are not multiples of C (7) or below it (3) make a call of
+    f end inside a panel and the next call finish it; counting the points
+    passed to f checks that no partly evaluated panel is evaluated again
+    either, with the values on or off the solver's device.
     """
     solver = _solver()
     seen = _spy_evaluated(solver)
@@ -602,7 +628,7 @@ def test_switch_never_evaluates_a_subinterval_twice(
         solver,
         f,
         take_gradient=False,
-        conserve_memory=conserve_memory,
+        trade_speed_for_memory=trade_speed_for_memory,
         max_batch=max_batch,
         error_integral_reference=1.0,
         max_adaptive_splits=max_adaptive_splits,
@@ -614,8 +640,8 @@ def test_switch_never_evaluates_a_subinterval_twice(
 
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
-@pytest.mark.parametrize("conserve_memory", [True, False])
-def test_too_large_fixed_reference_converges(device, conserve_memory):
+@pytest.mark.parametrize("trade_speed_for_memory", [True, False])
+def test_too_large_fixed_reference_converges(device, trade_speed_for_memory):
     """Once the reference is dropped, the failing panels are refined until
     every panel meets the final integral's tolerance. On CUDA the record's
     nodes stay on the CPU (result_device) while the masks and the mesh are on
@@ -628,7 +654,7 @@ def test_too_large_fixed_reference_converges(device, conserve_memory):
             _solver(device),
             _cancelling,
             take_gradient=False,
-            conserve_memory=conserve_memory,
+            trade_speed_for_memory=trade_speed_for_memory,
             error_integral_reference=1.0,
             enforce_convergence=enforce,
         )
@@ -695,7 +721,7 @@ def test_switch_with_nonfinite_terminates():
     def f(t, *args):
         return torch.where(t > 0.9, torch.nan, _cancelling(t))
 
-    solver = _solver(error_on_nonfinite=False)
+    solver = _solver(runtime_checks=False)
     n_split = []  # one entry per call: how many recorded panels it splits
     find = solver._failed_record_positions
 
@@ -812,10 +838,13 @@ def test_integral_error_exact_after_removals(reference):
     solver._remove_failed_record_panels = spy
     torch.manual_seed(0)
     result, _ = _run(
-        solver, _cancelling, take_gradient=False, error_integral_reference=reference
+        solver,
+        _cancelling_peak,
+        take_gradient=False,
+        error_integral_reference=reference,
     )
     assert sum(n_removed) > 0
-    expected = _signed_error_sum(solver, result, _cancelling)
+    expected = _signed_error_sum(solver, result, _cancelling_peak)
     scale = float(result.mesh_quadrature_errors.abs().sum())
     assert abs(float(result.integral_error[0]) - float(expected[0])) < 1e-9 * scale
 
@@ -849,17 +878,17 @@ def test_custom_loss_exact_after_removals(reference):
     assert abs(float(theta.grad[0]) - 0.6) < 1e-6
 
 
-def test_nonfinite_warning_names_error_on_nonfinite(caplog):
+def test_nonfinite_warning_names_runtime_checks(caplog):
     """When NaN/Inf values make the run fail, calling again cannot help: the
-    warning points at the integrand (error_on_nonfinite=True) instead."""
+    warning points at the integrand (runtime_checks=True) instead."""
 
     def f(t, *args):
         return torch.where(t > 0.9, torch.nan, _cancelling(t))
 
     torch.manual_seed(0)
     with caplog.at_level(logging.WARNING, logger="padaquad"):
-        _run(_solver(error_on_nonfinite=False), f, take_gradient=False)
-    assert "error_on_nonfinite=True" in caplog.text
+        _run(_solver(runtime_checks=False), f, take_gradient=False)
+    assert "runtime_checks=True" in caplog.text
     assert "call again" not in caplog.text
 
 

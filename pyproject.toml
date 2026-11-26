@@ -48,8 +48,12 @@ dev = [
   # torchdiffeq is needed for the speed-test benchmark in
   # examples/speed_test/torchdiffeq_comparison.py. Not used by the library.
   "torchdiffeq",
+  # The example scripts that tests/test_examples_run.py runs draw figures.
+  "matplotlib>=3.8",
 ]
 docs = [
+  # The gallery draws the examples' figures (sphinx-gallery's matplotlib scraper).
+  "matplotlib>=3.8",
   # The combination the documentation is built and tested with.
   "sphinx>=9.1",
   "numpydoc>=1.11",

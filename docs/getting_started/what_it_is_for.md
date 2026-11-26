@@ -1,4 +1,4 @@
-# What padaquad is for
+# What PadaQuad is for
 
 ```{include} ../../README.md
 :start-after: "<!-- include-start: what-for -->"

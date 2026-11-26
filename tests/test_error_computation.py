@@ -197,7 +197,7 @@ class TestRecRemove:
 
     @staticmethod
     def _loop_reference(mask: torch.Tensor) -> torch.Tensor:
-        """The loop _rec_remove used up to padaquad 1.4.0, kept as the reference.
+        """The loop _rec_remove used up to PadaQuad 1.4.0, kept as the reference.
 
         Each pass un-flags about two entries, so a mostly-True mask needs about
         N/2 passes; the one-pass version must give the same output.

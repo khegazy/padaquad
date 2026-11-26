@@ -7,7 +7,7 @@ and adds n + 1 more. The (2n + 1)-point method gives the integral, and the
 error estimate is the difference between the (2n + 1)-point and the n-point
 results (Gonnet 2012, Eq. (24), Sec. 2.4 :cite:p:`gonnet2012`). QUADPACK
 starts from the same difference and then rescales it (dqk21.f, lines 176-180
-:cite:p:`quadpack_netlib`); padaquad does not rescale. ``gkN`` is the pair with
+:cite:p:`quadpack_netlib`); PadaQuad does not rescale. ``gkN`` is the pair with
 2n + 1 = N points.
 
 Degrees: the (2n + 1)-point method has degree 3n + 1 (Gonnet 2012, Sec. 2.4,
@@ -19,7 +19,7 @@ gk31: 11, 23, 31, 47, and the n-point Gauss methods have degree 2n - 1 (5, 13,
 tables. Gonnet 2012, Sec. 2.4, p. 10, lists degree 11 for the 7-point
 extension of the 3-point Gauss method (gk7's method).
 
-Gauss-Kronrod nodes lie inside the subinterval. padaquad adds two nodes of
+Gauss-Kronrod nodes lie inside the subinterval. PadaQuad adds two nodes of
 weight zero at its ends (so gk21 evaluates 23 nodes per subinterval), because
 the solver measures a subinterval's width from its first and last node.
 
@@ -137,7 +137,7 @@ def _build_gauss_kronrod_tableau(
     # ``h = t[:, -1] - t[:, 0]`` and node fractions must start at 0 and end
     # at 1. Gauss-Kronrod nodes are interior, so without padding gk21's ``h``
     # would be 0.99566... of the width and the integral off by that factor.
-    # padaquad pads with two zero-weight nodes at 0 and 1: they are evaluated
+    # PadaQuad pads with two zero-weight nodes at 0 and 1: they are evaluated
     # but contribute nothing to the integral or the error estimate, at the cost
     # of 2 extra integrand evaluations per subinterval (23 instead of 21).
     c_padded = torch.cat([zero, c_unit, one])

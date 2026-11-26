@@ -26,12 +26,13 @@ integral at once and the "incomplete early reference" effect never appears).
 ``atol`` is kept far below ``rtol * |I|`` so the behavior is rtol-dominated; if
 ``atol`` floored the denominator the reference would have no effect.
 
-These tests run with ``conserve_memory=True``. The default
-(``conserve_memory=False``) path evaluates *every* pending panel in one pass
-before any accept/reject decision, so the running integral is already complete
-the first time a panel is judged and a reference has nothing to correct. The
-incremental, batch-by-batch accumulation that ``error_integral_reference``
-targets only happens on the memory-conserving (``conserve_memory=True``) path.
+These tests run with ``take_gradient=True``, which evaluates and judges one
+batch of whole subintervals at a time (each batch's gradient is
+backpropagated before the next), so the running integral accumulates batch by
+batch. With ``take_gradient=False`` every pass evaluates *every* waiting
+subinterval before any accept/reject decision (with or without
+``trade_speed_for_memory``), so the running integral already covers the whole interval
+the first time a subinterval is judged and a reference has little to correct.
 """
 
 from __future__ import annotations
@@ -124,20 +125,20 @@ def _panel_left_edges(result):
 
 
 def _run(solver, f, **kwargs):
-    """Integrate over [0, 1] with a forced small batch and no gradient.
+    """Integrate over [0, 1] with a forced small batch.
 
-    Uses ``conserve_memory=True`` so the running integral accumulates batch by
-    batch (the regime ``error_integral_reference`` targets). The default
-    evaluate-everything path computes the full integral before any panel is
-    judged, leaving a reference nothing to correct.
+    Uses ``take_gradient=True`` so the running integral accumulates batch by
+    batch (the regime ``error_integral_reference`` targets); ``f`` has no
+    parameters, so no backward pass runs. With ``take_gradient=False`` every
+    waiting subinterval is evaluated before any is judged, leaving a reference
+    little to correct.
     """
     return solver.integrate(
         f=f,
         mesh_init=T_INIT,
         mesh_final=T_FINAL,
-        take_gradient=False,
+        take_gradient=True,
         max_batch=MAX_BATCH,
-        conserve_memory=True,
         **kwargs,
     )[0]
 

@@ -1,9 +1,9 @@
 cff-version: 1.2.0
-message: "If you use padaquad in your work, please cite the software as below."
+message: "If you use PadaQuad in your work, please cite the software as below."
 type: software
 title: "padaquad: parallel adaptive numerical quadrature in PyTorch"
 abstract: >-
-  padaquad computes definite integrals of functions that can be evaluated, in
+  PadaQuad computes definite integrals of functions that can be evaluated, in
   PyTorch. It splits the integration domain into subintervals, refines those
   whose error estimate is too large, and evaluates the integrand at many points
   of many subintervals in one call, on a CPU or a GPU, with gradients through

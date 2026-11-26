@@ -19,7 +19,7 @@ expected value is exact and independent of the machine:
   adds a known number of bytes per call, so M is known exactly (a reading is
   never below the bytes of the call's input and output, 16 bytes per point
   for the fakes here).
-- ``FakeClock`` stands in for the ``time`` module of padaquad's memory module,
+- ``FakeClock`` stands in for the ``time`` module of PadaQuad's memory module,
   so slow calls take the time the test says, without sleeping.
 
 GPU tests use the real CUDA peak counters with buffers of known size.
@@ -1392,6 +1392,29 @@ def test_get_max_batch_uses_solver_total_mem_usage(monkeypatch):
     assert seen == [0.5]
 
 
+def test_get_max_batch_keeps_evaluation_buffer_free(fake, monkeypatch):
+    """get_max_batch(evaluation_buffer=X) sizes the batch for the usable memory
+    less 2 X bytes (the values waiting to be integrated and their joined copy):
+    with f, from the benchmark's exact linear fit (a = 0.25 GB, b = 0.4 GB);
+    without f, from the stored fit. The test calls are not limited by it, and
+    a value that is not an int >= 1 raises."""
+    set_reader(fake.solver, monkeypatch, counts_reuse=True)
+    a, b = GB // 4, 2 * GB // 5
+    buffer = 10 * GB
+    budget = qmem._MEMORY_BUDGET * (USABLE_GB * GB - 2 * buffer)
+    f = CostIntegrand(fake.memory, fake.clock, fixed=a, per_point=b)
+    measured = fake.solver.get_max_batch(
+        f=f, t=T_INIT, take_gradient=False, evaluation_buffer=buffer
+    )
+    assert max(f.calls) > measured  # the test calls used the whole budget
+    assert measured == pytest.approx((budget - a) / b, abs=1)
+    assert fake.solver.get_max_batch(evaluation_buffer=buffer) == measured
+    assert fake.solver.get_max_batch() == pytest.approx((BUDGET - a) / b, abs=1)
+    for bad in (0, -1, True):
+        with pytest.raises(ValueError, match="evaluation_buffer"):
+            fake.solver.get_max_batch(evaluation_buffer=bad)
+
+
 def test_release_memory_never_touches_gpu_on_cpu_solver(monkeypatch):
     """A CPU solver must not empty the CUDA cache, even when a GPU is visible."""
 
@@ -1951,8 +1974,10 @@ def _fake_benchmark(solver, monkeypatch, measured=1234):
     ``measured``; it also sets a memory fit so integrate() can size batches."""
     calls = []
 
-    def fake(f, node_test, take_gradient, total_mem_usage, f_args=()):
-        calls.append({"take_gradient": take_gradient, "f_args": f_args})
+    def fake(f, node_test, take_gradient, total_mem_usage, f_args=(), reserved=0.0):
+        calls.append(
+            {"take_gradient": take_gradient, "f_args": f_args, "reserved": reserved}
+        )
         solver.f_mem_coeffs = (0.0, 1e-6, 0.0)
         return measured
 
@@ -1975,7 +2000,7 @@ def test_get_max_batch_measures_when_given_f(monkeypatch):
 
     measured = solver.get_max_batch(f=f, t=_T, take_gradient=False, f_args=(2.0,))
     assert measured == 1234
-    assert calls == [{"take_gradient": False, "f_args": (2.0,)}]
+    assert calls == [{"take_gradient": False, "f_args": (2.0,), "reserved": 0.0}]
     assert seen == [1]  # the one-point output check (warm-up)
     assert solver._oom_max_batch is None
 
@@ -2053,7 +2078,7 @@ def test_get_max_batch_measures_in_the_dtype_of_t(monkeypatch):
     assert solver.dtype == torch.float32
     seen = []
 
-    def fake(f, node_test, take_gradient, total_mem_usage, f_args=()):
+    def fake(f, node_test, take_gradient, total_mem_usage, f_args=(), reserved=0.0):
         seen.append(node_test.dtype)
         return 1234
 

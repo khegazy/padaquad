@@ -18,8 +18,8 @@ of the error is logged. Common causes:
   final integral ({ref}`ug-error-reference`). Use `take_gradient=False`, with
   which `enforce_convergence` is on by default, or pass an
   `error_integral_reference` no larger than |integral|.
-- **A non-finite value** with `error_on_nonfinite=False`. Refining cannot
-  remove it; pass `error_on_nonfinite=True` to raise where it first appears.
+- **A non-finite value** with `runtime_checks=False`. Refining cannot
+  remove it; pass `runtime_checks=True` to raise where it first appears.
 
 `result.error_ratios` holds each subinterval's ratio when it was accepted, so
 every entry can be below 1 while `converged` is `False`. With
@@ -52,15 +52,17 @@ returned to the next call, which starts from the size that fit.
 
 ## Out of memory
 
-padaquad shrinks the batch and retries when an evaluation runs out of memory,
+PadaQuad shrinks the batch and retries when an evaluation runs out of memory,
 and with `take_gradient=True` restarts the integral when a backward pass does
 ({ref}`ug-memory`). If a single evaluation of the integrand does not fit, it
 raises `torch.OutOfMemoryError`. It raises `BackwardOutOfMemoryError` when a
 backward pass ran out of memory and the integrand uses a custom autograd
-function: pass `parameters=` (the tensors, or their optimizer) so padaquad can
+function: pass `parameters=` (the tensors, or their optimizer) so PadaQuad can
 restart, or reset the gradients and call again with `state=error.state`. Else
 pass a smaller `max_batch`, use `take_gradient=True` (which does not keep the
-whole graph), or set `conserve_memory=True`.
+whole graph), or, with `take_gradient=False` and an integrand with many outputs,
+set `trade_speed_for_memory=True` or `record_evaluations=False`
+({ref}`ug-trade-speed-for-memory`).
 
 ## The error estimate seems unreliable
 
@@ -78,6 +80,10 @@ removes an accepted subinterval, its signed estimate is subtracted, so
   ({ref}`ug-reuse`).
 - The constructor's `mesh_init` and `mesh_final` were removed (2.0.0):
   pass the bounds, or a mesh, to every `integrate` call.
+- `conserve_memory` was removed (2.0.0); `trade_speed_for_memory=True` takes
+  its place. It does not change the mesh: every pass is judged whole, and the
+  option only changes when the integrand values are integrated and moved off
+  the solver's device ({ref}`ug-trade-speed-for-memory`).
 - `max_path_change` was removed; use `max_adaptive_splits` to limit refinement
   and read the split statistics above.
 - Solver options are keyword-only, and `integrate()` accepts every option of

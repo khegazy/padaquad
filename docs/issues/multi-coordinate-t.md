@@ -2,7 +2,7 @@
 
 ## Summary
 
-padaquad is built so that the integration variable `t` can have more than one
+PadaQuad is built so that the integration variable `t` can have more than one
 coordinate (`T > 1`, for example a point $(x, y)$ moving along a path). However, no
 test runs `integrate()` with `T > 1`, and today every such call fails at the first
 step. With that failure bypassed, the integration runs, but what it computes for
@@ -56,7 +56,7 @@ s.integrate(f, mesh=mesh, max_batch=10000)
 # RuntimeError: Boolean value of Tensor with more than one value is ambiguous   (base.py:1834)
 ```
 
-(torch 2.8.0, padaquad 1.3.0.)
+(torch 2.8.0, PadaQuad 1.3.0.)
 
 A second blocker sat behind this one: the integrand check call built its point with
 `torch.tensor([[mesh_init]])`, which fails for `T > 1`. That is fixed in 1.3.0

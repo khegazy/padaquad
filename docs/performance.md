@@ -1,6 +1,6 @@
 # Performance
 
-This page compares padaquad with torchdiffeq {cite:p}`torchdiffeq`, the
+This page compares PadaQuad with torchdiffeq {cite:p}`torchdiffeq`, the
 differentiable ODE solver of {cite:t}`chen2018`, on integrals with known
 answers. Every number below comes from the files
 `docs/performance/results_<device>.json`, written by
@@ -11,15 +11,15 @@ when this page is built.
 
 To compute $\int_0^1 f(t)\,dt$, torchdiffeq solves the ODE $dy/dt = f(t)$ with
 $y(0) = 0$. An ODE solver must take its steps one after another, because in
-general each step needs the state the previous one produced. padaquad uses the
+general each step needs the state the previous one produced. PadaQuad uses the
 fact that the integrand does not depend on $y$: it evaluates the nodes of many
 subintervals in one call of $f$. The comparison measures what that buys on one
 machine:
 
 - **torchdiffeq `dopri5`**, solving $dy/dt = f(t)$;
-- **padaquad `dopri5`**, the same Runge-Kutta weights used as a quadrature
+- **PadaQuad `dopri5`**, the same Runge-Kutta weights used as a quadrature
   method, so the difference is mostly the batching;
-- **padaquad `gk21`**, padaquad's default method.
+- **PadaQuad `gk21`**, PadaQuad's default method.
 
 The integrands are the five entries of `integrand_dict` (all on $[0, 1]$) and a
 small neural network with fixed weights (two hidden layers of 64 tanh units;
@@ -29,14 +29,14 @@ solver runs at `atol = rtol` of $10^{-6}$ and $10^{-9}$.
 For each case the script records the median wall time of 7 runs after one
 warm-up run (with `torch.cuda.synchronize` around each run on a GPU), the
 smallest and largest time, the number of points at which $f$ was evaluated,
-and the absolute error against the exact answer. padaquad runs with a fixed
+and the absolute error against the exact answer. PadaQuad runs with a fixed
 `max_batch`, so its one-time memory benchmark is not timed, and with
 `take_gradient=False`, because no gradient is computed (torchdiffeq's forward
 solve is timed without one too).
 
 **Read the errors as well as the times.** The two libraries apply the
 tolerance differently: torchdiffeq tests each step's error against
-$\text{atol} + \text{rtol}\,|y|$, padaquad each subinterval's against
+$\text{atol} + \text{rtol}\,|y|$, PadaQuad each subinterval's against
 $\max(\text{atol}, \text{rtol}\,|I|)$ ({doc}`user_guide/error_control`). Equal
 tolerances therefore do not give equal accuracy.
 

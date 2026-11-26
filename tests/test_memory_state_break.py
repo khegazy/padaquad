@@ -262,7 +262,7 @@ def capped_cuda():
 @pytest.mark.usefixtures("capped_cuda")
 def test_real_backward_out_of_memory_restarts_to_the_reference_gradient():
     """A real CUDA out-of-memory error inside ``loss.backward()`` (a hook that
-    needs 200 kB per point): padaquad puts back the gradients, restarts with a
+    needs 200 kB per point): PadaQuad puts back the gradients, restarts with a
     smaller batch, and the integral and gradient are bit for bit those of an
     uninterrupted run with the final batch size. The process can go on using
     the GPU afterwards."""

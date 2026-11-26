@@ -1,8 +1,8 @@
 """Tests for the out-of-memory (OOM) catch-and-retry path.
 
 When an integrand ``f`` raises ``torch.OutOfMemoryError`` mid-evaluation, the
-split evaluation handlers
-(``_evaluate_f_on_split_nodes`` / ``_evaluate_f_on_split_residual_nodes``) are
+evaluation of ``take_gradient=False`` (``_evaluate_f_on_split_nodes``, through
+its batch loop ``_evaluate_f_in_batches``) is
 supposed to shrink ``max_batch`` and retry the failed batch, storing the new
 size as the call's batch size ``self._batch``, converged, so every later batch
 stays clamped. A later call keeps it only when it is passed
@@ -19,11 +19,10 @@ it was asked to evaluate — so we can watch ``max_batch`` shrink and confirm it
 driven by ``_batch``.
 
 Two layers:
-  * ``TestSplitHandlersOOM`` — direct calls to both split handlers, parametrized
-    over the handler, mirroring the direct-call unit tests in
-    ``test_evaluate_f_on_mesh.py``.
+  * ``TestSplitNodesOOM`` — direct calls to ``_evaluate_f_on_split_nodes``,
+    mirroring the direct-call unit tests in ``test_evaluate_f_on_mesh.py``.
   * ``TestIntegrateOOMRecovery`` — full ``.integrate()`` runs (the real user
-    path), across ``conserve_memory`` (split vs. split-residual).
+    path), with and without ``trade_speed_for_memory``.
 
 The ``take_gradient=True`` path (``_evaluate_f_on_full_nodes``, its backward
 pass and restart) is tested in ``test_memory_state.py``.
@@ -128,20 +127,16 @@ def _make_mesh(n_panels: int) -> torch.Tensor:
     return torch.linspace(0.0, 1.0, n_panels + 1, dtype=torch.float64).unsqueeze(-1)
 
 
-def _call_handler(solver, handler: str, f, mesh, step_idxs, max_batch):
-    """Invoke the requested split handler with correct args for its signature."""
-    if handler == "split":
-        return solver._evaluate_f_on_split_nodes(
-            f, (), mesh, step_idxs, max_batch=max_batch
-        )
-    return solver._evaluate_f_on_split_residual_nodes(
+def _evaluate(solver, f, mesh, step_idxs, max_batch):
+    """Evaluate and integrate every given subinterval, values on the CPU."""
+    return solver._evaluate_f_on_split_nodes(
         f,
         (),
         mesh,
         step_idxs,
         max_batch=max_batch,
-        max_mesh_steps=len(step_idxs),
-        split_node_state=(None, None, None, None),
+        values_device=torch.device("cpu"),
+        buffer_bytes=0,
     )
 
 
@@ -162,9 +157,6 @@ def _expected_reduction_sequence(start: int, limit: int) -> list[int]:
     return seq
 
 
-HANDLERS = ["split", "residual"]
-
-
 def _wave(t):
     """sin(40 t) + t: its integral over [0, 1] is (1 - cos 40) / 40 + 1 / 2."""
     return torch.sin(40 * t) + t
@@ -179,15 +171,14 @@ WAVE_INTEGRAL = (1 - math.cos(40.0)) / 40 + 0.5
 
 
 @pytest.mark.tier1
-@pytest.mark.parametrize("handler", HANDLERS)
-class TestSplitHandlersOOM:
+class TestSplitNodesOOM:
     def _solver(self):
         solver = make_solver_for_unit_test(UNIT_METHOD)
         # Mimic a fresh call whose batch size is fixed (no growth).
         solver._batch, solver._batch_converged = 1, True
         return solver
 
-    def test_first_oom_seeds_from_max_batch(self, handler):
+    def test_first_oom_seeds_from_max_batch(self):
         """Regression for the reported crash: the *first* OOM must shrink the
         live ``max_batch`` (once a ``0.75 * None`` raised ``TypeError``); the
         result is the call's batch size ``_batch``, converged."""
@@ -199,14 +190,14 @@ class TestSplitHandlersOOM:
 
         oom = OOMIntegrand(limit=5)
         # No TypeError here is the whole point.
-        _call_handler(solver, handler, oom, mesh, step_idxs, max_batch=total_nodes)
+        _evaluate(solver, oom, mesh, step_idxs, max_batch=total_nodes)
 
         assert oom.n_oom >= 1, "the integrand never OOM'd; test setup is wrong"
         assert isinstance(solver._batch, int)
         assert solver._batch_converged
         assert 1 <= solver._batch <= oom.limit
 
-    def test_reduction_is_strictly_decreasing(self, handler):
+    def test_reduction_is_strictly_decreasing(self):
         """The retried batch sizes strictly decrease (each ``<= ceil(0.75*prev)``
         and ``<= prev-1``) until one fits, matching the intended rule exactly.
 
@@ -219,7 +210,7 @@ class TestSplitHandlersOOM:
         step_idxs = torch.arange(n_panels)
 
         oom = OOMIntegrand(limit=1)
-        _call_handler(solver, handler, oom, mesh, step_idxs, max_batch=3)
+        _evaluate(solver, oom, mesh, step_idxs, max_batch=3)
 
         expected = _expected_reduction_sequence(3, oom.limit)  # [3, 2, 1]
         # The first len(expected) calls are the reduction of the first chunk.
@@ -230,7 +221,7 @@ class TestSplitHandlersOOM:
         assert len(set(oom_attempts)) == len(oom_attempts)
         assert solver._batch <= oom.limit
 
-    def test_oom_max_batch_clamps_rest_of_batch(self, handler):
+    def test_oom_max_batch_clamps_rest_of_batch(self):
         """Once shrunk, the call's batch size ``_batch`` clamps every later
         batch: no evaluation after the first successful reduction exceeds it,
         and it does not grow again (converged)."""
@@ -241,7 +232,7 @@ class TestSplitHandlersOOM:
         total_nodes = n_panels * solver.C
 
         oom = OOMIntegrand(limit=6)
-        _call_handler(solver, handler, oom, mesh, step_idxs, max_batch=total_nodes)
+        _evaluate(solver, oom, mesh, step_idxs, max_batch=total_nodes)
 
         cap = solver._batch
         assert solver._batch_converged
@@ -249,7 +240,7 @@ class TestSplitHandlersOOM:
         assert all(b <= cap for b in oom.batch_sizes if b <= oom.limit)
         assert solver._batch_for(10**9) == cap
 
-    def test_unfittable_single_eval_raises(self, handler):
+    def test_unfittable_single_eval_raises(self):
         """If even ``max_batch == 1`` OOMs (``limit=0``), the handler raises an
         informative ``OutOfMemoryError`` rather than shrinking below 1."""
         solver = self._solver()
@@ -258,64 +249,49 @@ class TestSplitHandlersOOM:
 
         oom = OOMIntegrand(limit=0)
         with pytest.raises(torch.OutOfMemoryError, match="cannot be reduced"):
-            _call_handler(solver, handler, oom, mesh, step_idxs, max_batch=2)
+            _evaluate(solver, oom, mesh, step_idxs, max_batch=2)
 
 
 @pytest.mark.tier1
 @pytest.mark.parametrize("limit_share", [0.3, 0.5, 0.8])
-@pytest.mark.parametrize("max_batch", [30, 60, 100, 150, 200])
+@pytest.mark.parametrize("max_batch", [3, 30, 60, 100, 150, 200])
 @pytest.mark.parametrize("method", ["bosh3", "gk15", "gk21"])
-def test_residual_handler_pairs_nodes_with_values_after_oom(
-    method, max_batch, limit_share
-):
-    """The ``conserve_memory`` handler lays a pass out for ``max_batch``; an
-    out-of-memory retry then changes the batch size inside the pass, so the
-    batches end at other nodes than planned. Whatever they evaluated, every
-    returned subinterval must hold its own C nodes with the integrand's values
-    at them, and the carried part must be the first nodes of the next
-    subinterval with their values.
+def test_split_pairs_nodes_with_values_after_oom(method, max_batch, limit_share):
+    """An out-of-memory retry changes the batch size inside a pass, so the
+    calls of f end at other nodes than ``max_batch`` alone would give, often
+    inside a subinterval (always, with ``max_batch=3`` < C). Every
+    subinterval must still hold its own C nodes with the integrand's values at
+    them, and its contribution must be computed from those values.
 
-    Regression: for gk21 with ``max_batch=100`` and a retry at 75, the batches
-    evaluated 75 + 40 = 115 nodes, one whole subinterval more than the 92
-    planned. That subinterval was treated as a partly evaluated one: its nodes
-    were dropped (an empty slice) while its 23 values were carried, and the
-    next pass paired them with other nodes. ``integrate`` returned 0.38 for an
-    integral of 0.54, with ``converged=True``. ``f = 1`` hid this."""
+    Regression (the former ``conserve_memory`` path, which carried a partly
+    evaluated subinterval to the next pass): for gk21 with ``max_batch=100``
+    and a retry at 75, nodes were paired with the values of other nodes, and
+    ``integrate`` returned 0.38 for an integral of 0.54, with
+    ``converged=True``. ``f = 1`` hid this."""
     solver = make_solver_for_unit_test(method)
     solver._oom_max_batch = None
     C = solver.C
-    # More nodes than max_batch, as the caller guarantees (_evaluate_f_on_mesh
-    # lowers max_batch to the nodes left).
     n_subintervals = 80
     mesh = _make_mesh(n_subintervals)
-    oom = OOMIntegrand(limit=int(limit_share * max_batch), value=_wave)
-    nodes, f_evals, _, step_idxs, carried = solver._evaluate_f_on_split_residual_nodes(
-        oom,
-        (),
-        mesh,
-        torch.arange(n_subintervals),
-        max_batch=max_batch,
-        max_mesh_steps=max_batch // C,
-        split_node_state=(None, None, None, None),
+    oom = OOMIntegrand(
+        limit=max(1, int(limit_share * max_batch)), value=_wave, max_calls=50_000
     )
-    assert oom.n_oom >= 1, "the integrand never ran out of memory; wrong setup"
-    assert len(step_idxs) >= 1
-    assert nodes.shape[:2] == f_evals.shape[:2] == (len(step_idxs), C)
+    nodes, f_evals, _, step_idxs, method_output = _evaluate(
+        solver, oom, mesh, torch.arange(n_subintervals), max_batch
+    )
+    if max_batch > oom.limit:
+        assert oom.n_oom >= 1, "the integrand never ran out of memory; wrong setup"
+    assert torch.equal(step_idxs, torch.arange(n_subintervals))
+    assert nodes.shape[:2] == f_evals.shape[:2] == (n_subintervals, C)
     expected_nodes = solver._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
-    assert torch.allclose(nodes, expected_nodes, rtol=0, atol=1e-14)
+    assert torch.equal(nodes, expected_nodes)
     assert torch.allclose(f_evals, _wave(nodes), rtol=0, atol=1e-12)
-
-    carried_nodes, carried_f_evals, _, carried_point = carried
-    n_evaluated = sum(b for b in oom.batch_sizes if b <= oom.limit)
-    n_carried = 0 if carried_nodes is None else len(carried_nodes)
-    assert n_evaluated == len(step_idxs) * C + n_carried
-    if carried_point is not None:
-        assert 0 < n_carried < C
-        k = int(step_idxs.max()) + 1
-        assert torch.equal(carried_point, mesh[k])
-        first_nodes = solver._compute_nodes(mesh[k : k + 1], mesh[k + 1 : k + 2])
-        assert torch.allclose(carried_nodes, first_nodes[0, :n_carried], atol=1e-14)
-        assert torch.allclose(carried_f_evals, _wave(carried_nodes), atol=1e-12)
+    # Every node evaluated once, and each subinterval integrated from its own
+    # values, as one _calculate_integral call would.
+    assert sum(b for b in oom.batch_sizes if b <= oom.limit) == n_subintervals * C
+    expected = solver._calculate_integral(nodes, f_evals)
+    assert torch.equal(method_output.mesh_quadratures, expected.mesh_quadratures)
+    assert torch.equal(method_output.integral, expected.integral)
 
 
 # ---------------------------------------------------------------------------
@@ -329,13 +305,13 @@ class TestIntegrateOOMRecovery:
     BIG_BATCH = 100_000  # >> any panel count, so the first batch OOMs
 
     @pytest.mark.parametrize("fail", list(FAILURE_MODES))
-    @pytest.mark.parametrize("conserve_memory", [False, True])
-    def test_integrate_recovers_from_oom(self, conserve_memory, fail):
+    @pytest.mark.parametrize("trade_speed_for_memory", [False, True])
+    def test_integrate_recovers_from_oom(self, trade_speed_for_memory, fail):
         """A full ``integrate()`` of ``f=1`` completes despite repeated OOMs,
         returns the correct integral (∫₀¹ 1 dt = 1), and returns a converged
-        batch size ``<= limit``. ``conserve_memory`` selects the split vs. split-residual
-        handler; ``take_gradient=False`` keeps us off the (unhandled)
-        full-nodes path. ``fail`` covers every recognized out-of-memory form;
+        batch size ``<= limit``, with the values kept on the solver's device or
+        moved off it (``trade_speed_for_memory``); ``take_gradient=False`` keeps us off
+        the full-nodes path. ``fail`` covers every recognized out-of-memory form;
         before 1.2.3 the CPU refusal and ``MemoryError`` crashed ``integrate``."""
         solver = make_uniform_solver(
             "gk21", atol=1e-6, rtol=1e-6, device="cpu", max_batch=self.BIG_BATCH
@@ -346,7 +322,7 @@ class TestIntegrateOOMRecovery:
             mesh_init=T_INIT,
             mesh_final=T_FINAL,
             take_gradient=False,
-            conserve_memory=conserve_memory,
+            trade_speed_for_memory=trade_speed_for_memory,
         )
 
         assert oom.n_oom >= 1, "the integrand never OOM'd; test setup is wrong"
@@ -357,18 +333,18 @@ class TestIntegrateOOMRecovery:
     @pytest.mark.parametrize("limit_share", [0.3, 0.5, 0.8])
     @pytest.mark.parametrize("max_batch", [30, 60, 100, 150, 200])
     @pytest.mark.parametrize("method", ["bosh3", "gk15", "gk21"])
-    @pytest.mark.parametrize("conserve_memory", [False, True])
+    @pytest.mark.parametrize("trade_speed_for_memory", [False, True])
     def test_integral_of_non_constant_f_survives_oom(
-        self, conserve_memory, method, max_batch, limit_share
+        self, trade_speed_for_memory, method, max_batch, limit_share
     ):
         """``integrate`` of sin(40 t) + t with batches above ``limit_share`` of
         ``max_batch`` running out of memory: the first batch is retried
         smaller inside its pass, and the integral is still right.
 
-        Regression: with ``conserve_memory=True`` the result was off by 0.05
-        to 0.29 (gk21 and gk15, ``max_batch`` 60 to 200) and reported
-        ``converged=True``; see
-        ``test_residual_handler_pairs_nodes_with_values_after_oom``."""
+        Regression: with the former ``conserve_memory=True`` the result was
+        off by 0.05 to 0.29 (gk21 and gk15, ``max_batch`` 60 to 200) and
+        reported ``converged=True``; see
+        ``test_split_pairs_nodes_with_values_after_oom``."""
         solver = make_uniform_solver(
             method, atol=1e-6, rtol=1e-6, device="cpu", max_batch=max_batch
         )
@@ -380,7 +356,7 @@ class TestIntegrateOOMRecovery:
             mesh_init=T_INIT,
             mesh_final=T_FINAL,
             take_gradient=False,
-            conserve_memory=conserve_memory,
+            trade_speed_for_memory=trade_speed_for_memory,
         )
         assert oom.n_oom >= 1, "the integrand never ran out of memory; wrong setup"
         assert result.converged

@@ -1,8 +1,10 @@
-"""The Performance page's tables are rendered from the committed results files.
+"""The measured tables of the documentation are rendered from the committed results files.
 
-``docs/_ext/performance_table.py`` renders one section per
-``docs/performance/results_*.json`` file. These tests run it without Sphinx on
-copies of the committed file: none, one, two, and malformed files.
+``docs/_ext/performance_table.py`` renders one Performance section per
+``docs/performance/results_*.json`` file, and the user guide's memory options
+tables from ``docs/performance/memory_options.json``. These tests run it
+without Sphinx on copies of the committed files: none, one, two, and malformed
+files.
 """
 
 from __future__ import annotations
@@ -18,13 +20,20 @@ DOCS = Path(__file__).resolve().parents[1] / "docs"
 COMMITTED = DOCS / "performance" / "results_cpu.json"
 
 
-def _render(results_dir: Path) -> str:
+MEMORY_COMMITTED = DOCS / "performance" / "memory_options.json"
+
+
+def _extension():
     spec = importlib.util.spec_from_file_location(
         "performance_table", DOCS / "_ext" / "performance_table.py"
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.render(results_dir)
+    return module
+
+
+def _render(results_dir: Path) -> str:
+    return _extension().render(results_dir)
 
 
 def test_no_results_file_raises(tmp_path: Path) -> None:
@@ -55,3 +64,46 @@ def test_unreadable_file_is_named(tmp_path: Path, content: str) -> None:
     (tmp_path / "results_bad.json").write_text(content)
     with pytest.raises(ValueError, match=r"results_bad\.json"):
         _render(tmp_path)
+
+
+def test_memory_options_render_every_setting_of_every_integrand() -> None:
+    """Every integrand's table has a row per setting: the 12 of ``SETTINGS``,
+    defaults first and every later row with a bold value; or, for the
+    examples of ``EXAMPLE_SETTINGS``, those settings in order of max_batch."""
+    extension = _extension()
+    script = extension._load(extension.MEMORY_SCRIPT)
+    results = json.loads(MEMORY_COMMITTED.read_text())
+    text = extension.render_memory_options(MEMORY_COMMITTED)
+    sections = text.split("\n#### ")[1:]
+    assert len(sections) == len(results["examples"])
+    assert set(script.EXAMPLE_SETTINGS) <= set(results["examples"])
+    for section, (name, example) in zip(
+        sections, results["examples"].items(), strict=True
+    ):
+        settings = script.EXAMPLE_SETTINGS.get(name, script.SETTINGS)
+        short = name in script.EXAMPLE_SETTINGS
+        lines = section.splitlines()
+        columns = 7 if short else 10
+        rows = [
+            line for line in lines[lines.index("|" + "---|" * columns) + 1 :] if line
+        ]
+        assert len(example["rows"]) == len(rows) == len(settings)
+        assert "**" not in rows[0]  # the default setting, or the smallest batch
+        if short:
+            batches = [int(r.split("|")[1].strip(" `").replace(",", "")) for r in rows]
+            assert batches == sorted(batches)
+        else:
+            assert all("**" in row for row in rows[1:])
+
+
+def test_memory_options_missing_file_raises(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="memory_options"):
+        _extension().render_memory_options(tmp_path / "memory_options.json")
+
+
+@pytest.mark.parametrize("content", ["{not json", json.dumps({"meta": {}})])
+def test_memory_options_unreadable_file_is_named(tmp_path: Path, content: str) -> None:
+    path = tmp_path / "memory_options.json"
+    path.write_text(content)
+    with pytest.raises(ValueError, match=r"memory_options\.json"):
+        _extension().render_memory_options(path)

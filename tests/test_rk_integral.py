@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from padaquad import UNIFORM_METHODS
+import padaquad.quadrature.base as qbase
 from padaquad.quadrature.base import _RK_integral
 
 
@@ -145,3 +146,34 @@ class TestRKIntegralShapes:
         assert integral.shape == (D,)
         assert rk_steps.shape == (N, D)
         assert h.shape == (N, T)
+
+
+@pytest.mark.parametrize("N", [0, 1, 7, 50])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
+def test_blocks_give_the_same_bits(monkeypatch, N, dtype):
+    """The weighted sum formed in blocks of rows (here 3 subintervals of
+    C = 5 nodes and D = 4 outputs, by lowering _BLOCK_BYTES) equals one
+    sum over all rows bit for bit, with per-subinterval and expanded weights;
+    N = 0 gives empty contributions and the integral y0."""
+    g = torch.Generator().manual_seed(N)
+    C, D = 5, 4
+    t = torch.sort(torch.rand(N, C, 1, generator=g, dtype=dtype), dim=1).values
+    y = torch.randn(N, C, D, generator=g, dtype=dtype)
+    y0 = torch.randn(D, generator=g, dtype=dtype)
+    for b in (
+        torch.rand(N, C, 1, generator=g, dtype=dtype),
+        torch.rand(C, 1, generator=g, dtype=dtype).expand(N, -1, -1),
+    ):
+        one = _RK_integral(t, y, b, y0)
+        monkeypatch.setattr(qbase, "_BLOCK_BYTES", 3 * C * D * y.element_size())
+        blocks = _RK_integral(t, y, b, y0)
+        monkeypatch.undo()
+        for x, z in zip(one, blocks, strict=True):
+            assert torch.equal(x, z)
+        assert blocks[1].shape == (N, D)
+        assert torch.equal(one[1], h_times_sum(t, y, b))
+
+
+def h_times_sum(t, y, b):
+    """The unblocked formula, h * sum_j(b_j * y_j)."""
+    return (t[:, -1] - t[:, 0]) * torch.sum(b * y, dim=1)

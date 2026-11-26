@@ -5,8 +5,10 @@
 `device` selects where the integrand is evaluated: `"cpu"`, `"cuda"`,
 `"cuda:N"` or a `torch.device`; `None` picks the GPU if one is available. The
 solver never changes PyTorch's global default device. `result_device` is where the per-subinterval arrays of the result go (nodes,
-integrand values, contributions, errors), to keep them off the GPU; `None`
-keeps them on the solver's device. The integral, its error estimate and the
+integrand values, contributions, errors), to keep them off the GPU, and, with
+`trade_speed_for_memory=True`, where the integrand values go during the
+integration ({ref}`ug-trade-speed-for-memory`); `None` keeps them on the
+solver's device. The integral, its error estimate and the
 state's mesh stay on the solver's device.
 
 The solver computes in the dtype of the bounds or mesh given to `integrate`,
@@ -16,7 +18,7 @@ makes the integration run in float32.
 (ug-memory)=
 ## Batch size and the memory benchmark
 
-padaquad evaluates the nodes of many subintervals in one call of the
+PadaQuad evaluates the nodes of many subintervals in one call of the
 integrand. The number of points per call is the batch size, `max_batch`.
 
 **How `integrate` chooses it.** A `max_batch` given to the call (or to the
@@ -40,21 +42,21 @@ the integrand once per state (measured on an A100, for a network filling the
 GPU: 0.6 s more than a run with the right batch size from the start, 1.4 s
 from a cold call).
 
-**With `take_gradient=True`.** padaquad backpropagates every batch right after
+**With `take_gradient=True`.** PadaQuad backpropagates every batch right after
 evaluating it. On a GPU, before each backward pass it compares the memory
 still usable (keeping `1 - total_mem_usage` of the total free) with what the
 backward pass is predicted to need: the batch's forward peak memory, times the
 ratio of backward to forward peak memory the previous batch measured (1 for
 the first batch). If it does not fit, the batch is dropped before any gradient
 is written and evaluated again, smaller. If a backward pass still runs out of
-memory, padaquad puts back the gradients the call added, lowers the batch
+memory, PadaQuad puts back the gradients the call added, lowers the batch
 size, and restarts the integral from its starting mesh, with a warning. It
 finds those gradients by walking each batch's autograd graph. A custom
 autograd function (for example activation checkpointing with
 `use_reentrant=True`, or a function compiled with `torch.compile`) can hide
 parameters from that walk; pass
 `parameters=model.parameters()` (or the optimizer) in that case, else
-padaquad raises `BackwardOutOfMemoryError`, whose `state` is the state to call
+PadaQuad raises `BackwardOutOfMemoryError`, whose `state` is the state to call
 again with after resetting the gradients. It raises it also when a parameter
 has a post-accumulate-grad hook, or when `torch.distributed` runs more than one
 process. An out-of-memory error in `loss_fxn` is handled the same way as one in
@@ -84,7 +86,7 @@ error from the integrand is raised unchanged.
   an out-of-memory error. On a CPU an allocation that does not fit can get the
   process killed instead (Linux accepts most allocations and kills the process
   when memory runs out), and a GPU driver that falls back to system memory
-  (NVIDIA's on Windows) slows down instead of failing. padaquad is meant for
+  (NVIDIA's on Windows) slows down instead of failing. PadaQuad is meant for
   GPUs; on a CPU, pass `max_batch` when memory matters.
 - *Memory is not kept free.* The forward calls fill the memory until they
   fail; other processes on the same GPU can run out of memory meanwhile.
@@ -214,12 +216,230 @@ was measured on Linux or on a GPU.
 15. *Silent messages.* The benchmark's messages are logged at WARNING level, so
     they do not appear when the application sets logging above WARNING.
 
-## `conserve_memory`
+(ug-trade-speed-for-memory)=
+## Memory efficiency and speed options for `integrate()`
 
-`conserve_memory` matters only with `take_gradient=False`. By default each pass
-of the loop evaluates every subinterval still waiting, in calls of at most
-`max_batch` points, and holds all of their values at once. With
-`conserve_memory=True` each pass evaluates one batch of `max_batch` points; a
-subinterval whose nodes do not all fit is finished in the next pass. This
-holds fewer values at once but needs more passes. With `take_gradient=True`
-each pass already evaluates only the whole subintervals that fit in one batch.
+PadaQuad's memory management can integrate any integrand as long as a single
+integrand evaluation fits on your device. However, memory management can come
+at the cost of speed when it is not needed. Specifically, improved memory
+management speeds up integration with expensive integrand evaluations while
+slowing down integration with cheap integrand evaluations. This section
+describes the four arguments that control memory management and tests various
+combinations of them on three integrands of increasing cost.
+
+None of these options change which points are evaluated, the subintervals, or
+the integral. Every combination measured below gave the same integral and
+subintervals, bit for bit.
+
+This section uses the words of the {doc}`../glossary` (subinterval, node) and
+these:
+
+Integrand values
+: The outputs of the integrand `f` at the nodes.
+
+Pass
+: One iteration of the integration loop. In a pass, subintervals are
+  evaluated, in calls of `f` of at most `max_batch` points; then each
+  subinterval is accepted or split.
+
+Solver device
+: The device on which the solver evaluates `f` and computes the integral. The
+  options matter when it is a GPU, so the text below says GPU.
+
+The options apply only with `take_gradient=False`. With `take_gradient=True`
+each call of `f` holds whole subintervals and its quadrature is calculated at
+once.
+
+### `trade_speed_for_memory`
+
+When False, the quadrature is calculated once per pass, after all subintervals
+are evaluated, which is fastest for cheap integrands. When True, it is
+calculated early, so integrand values can be deleted or moved to
+`result_device` to free GPU memory; `evaluation_buffer` sets how early (after
+every call of `f` by default). For expensive integrands, True can be faster,
+because it frees up memory that can be used for evaluation while paying a
+small cost of calculating the quadrature from the integrand evaluations more
+often. It applies only with `take_gradient=False`, and saves GPU memory only
+when `result_device` is another device or `record_evaluations` is False.
+
+| Value | Speed | GPU memory | Host memory |
+|---|---|---|---|
+| `False` (default) | Fastest for cheap integrands: one quadrature calculation per pass. | Holds all integrand values of the pass, once: each call of `f` writes its values into one array for the pass. | Receives the values of accepted subintervals after each pass. |
+| `True` | Can be faster for expensive integrands, because the freed memory can be used for evaluating `f`. Slower for cheap integrands, because each extra quadrature calculation costs time: about 0.2 ms per call of `f` on an A100 without a buffer. | Holds the values of about one call of `f`, or up to `evaluation_buffer` bytes. | Receives the values of every evaluated subinterval right away; values of subintervals that are later split are deleted. The peak is the same as with False. |
+
+The cost per call was measured with the script below at commit cc77e8b, on 75
+calls of 46 points (gk21): 52 ms against 34 ms by default on an A100, and
+23 ms against 16 ms on a CPU. With a 256 MB buffer it took the default's time.
+
+### `evaluation_buffer`
+
+Sets how many bytes of integrand values can wait on the GPU before the
+quadrature is calculated and the values are moved. It balances speed and
+memory between the two values of `trade_speed_for_memory` and is meant for
+advanced users. Use it only with `trade_speed_for_memory=True`; otherwise it
+raises `ValueError`. When measuring `max_batch` with `get_max_batch(f=...)`,
+pass the same `evaluation_buffer`: it keeps twice that many bytes free, for
+the waiting values and their copy when they are joined for the quadrature
+calculation.
+
+| Value | Speed | GPU memory | Host memory |
+|---|---|---|---|
+| `None` (default) | The quadrature is calculated after every call of `f`, so its cost is paid on every call. | Holds the values of about one call of `f`. | No effect. |
+| a number of bytes | The quadrature is calculated once that many bytes of values are waiting, so its cost is paid less often. | Holds up to the buffer plus one call's values. If a pass never fills the buffer, the quadrature is calculated once per pass, as with `trade_speed_for_memory=False`. | No effect. |
+
+### `result_device`
+
+Where the integrand values of accepted subintervals and the per-subinterval
+results are stored. The integral and its error estimate stay on the solver
+device. It works independently of the other options.
+
+| Value | Speed | GPU memory | Host memory |
+|---|---|---|---|
+| `"cpu"` (default) | Copying values to the host takes time that grows with their size; for integrands with many outputs it is most of the run time. | Holds only the values waiting for their quadrature calculation. | Holds the values of every accepted subinterval. |
+| `None` | Fastest, since nothing is copied. `None` means the solver device. | Holds the values of every accepted subinterval until the end, which gives the highest peak. | Nothing. |
+
+The result `loss_fxn` receives for each batch has its `y` and
+`tracked_variables` on `result_device` with `trade_speed_for_memory=True`, and
+on the solver device without it; its other tensors stay on the solver device.
+
+### `record_evaluations`
+
+Whether integrand values are kept after their quadrature is calculated. The
+quadrature alone decides which subintervals are accepted or split, so the
+values are needed only if you use them (`result.y`) or to build the best mesh
+for a later call.
+
+| Value | Speed | GPU memory | Host memory |
+|---|---|---|---|
+| `True` (default) | Values are copied to `result_device`, which takes time when it is the host. | Set by the other options. | Holds the values of every accepted subinterval when `result_device="cpu"`. |
+| `False` | Fastest with `result_device="cpu"`, since nothing is copied. `result.y` and `result.tracked_variables` are `None`. | Values are deleted right after their quadrature is calculated. With `trade_speed_for_memory=True` this lowers the peak even when `result_device=None`. | Holds no values. |
+
+With False, the mesh returned for a later call is built with
+`merge_rule="power_law"`, because the default `"predicted"` merge rule needs
+the stored values. `"power_law"` merges fewer wide subintervals, so the later
+call may start with more subintervals ({ref}`ug-reuse`).
+
+### Errors and warnings
+
+`integrate` raises `ValueError`, before any call of `f`, when
+`trade_speed_for_memory=True` is given with `take_gradient=True`, and when
+`evaluation_buffer` is given with `trade_speed_for_memory=False` or is not an
+int of at least 1. It logs a warning on the first call of a series (no `state`
+given; later calls that pass the state stay quiet) when:
+
+- `trade_speed_for_memory=True` has no `evaluation_buffer`;
+- `trade_speed_for_memory=True` and the integrand's output requires grad (from
+  its parameters or from bounds that require grad): the autograd graph keeps
+  what `f` saved for its backward pass on the GPU until the integral is
+  differentiated, so moving the values may save little;
+- `record_evaluations=False` with the solver's default `merge_rule="predicted"`.
+
+(ug-pass-array-oom)=
+### Out of memory with many outputs
+
+With `trade_speed_for_memory=False`, the integrand values of a pass are held in
+one array. For an integrand with many outputs this array can take many
+gigabytes, all in one piece of GPU memory. PyTorch keeps the GPU memory it
+frees in a cache of pieces of the sizes it used before. Near the GPU's limit,
+the cache can hold enough free memory in total but no piece large enough, and
+the allocation fails. PadaQuad then raises `torch.OutOfMemoryError` naming the
+pass's size and two remedies:
+
+- Pass `trade_speed_for_memory=True` with `record_evaluations=False` or
+  `result_device="cpu"`, so the GPU holds about one call's values at a time.
+- When PyTorch's message reports much memory "reserved by PyTorch but
+  unallocated", set the environment variable
+  `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` before CUDA is first used
+  (for example, before the script starts). PyTorch then grows one piece of
+  memory as needed, instead of reserving pieces of fixed sizes that later
+  requests may not fit ({external+torch:std:ref}`PyTorch's CUDA memory notes
+  <cuda-memory-envvars>`). PadaQuad cannot set it for you: it applies to the
+  whole process and must be set before CUDA starts.
+
+On a 40 GB A100 (2026-11-25), an integrand with 262,144 outputs
+(`SteppedField` in `examples/speed_test/trade_speed_for_memory.py`, side 512)
+with `max_batch=500` and `record_evaluations=False` failed with the default
+setting: it asked for 16.85 GiB while 18.82 GiB were reserved but unallocated.
+With `expandable_segments:True` it completed in 8.3 to 9.1 s, against 8.0 to
+8.2 s with `trade_speed_for_memory=True`. Near the limit, the default can
+also be slower: at `max_batch=2000` it took 5.3 to 5.8 s against 3.7 to 4.1 s,
+mostly in reserving GPU memory for arrays of changing size, and
+`expandable_segments:True` did not close that gap.
+
+### The gradient as extra outputs
+
+To get the gradient of an integral without an autograd graph, let the
+integrand return its gradient with respect to the parameters as extra outputs,
+computed with `torch.func.grad` from detached parameters (or under
+`torch.no_grad()`), and integrate with `take_gradient=False`. The integral of
+those outputs is the gradient of the integral when the bounds do not depend on
+the parameters; a bound b that does adds f(b) times the derivative of b (minus
+the same at the lower bound), one call of `f`. `error_norm` chooses which
+outputs decide a split ({ref}`ug-error-norm`), so the mesh can be refined for
+the gradient's accuracy. {doc}`../auto_examples/gradient_as_output` shows both;
+{ref}`ug-autodiff` describes the other ways to differentiate an integral.
+
+### Measurements
+
+`examples/speed_test/trade_speed_for_memory.py` integrates four integrands
+over [0, 1]:
+
+- a light integrand with 2 outputs;
+- two networks, multilayer perceptrons with two tanh hidden layers, fixed
+  random weights and gradients turned off, whose inputs are sin(ωt) and
+  cos(ωt) for 64 frequencies ω from 1 to 20,000;
+- an expensive field: a state of 64 numbers advanced by 2,000 sequential
+  steps, then expanded into a field of 512 × 512 outputs, 1 MB per point, so
+  a pass's integrand values take tens of GB.
+
+The light integrand and the networks are integrated with every combination of
+the four options and no `max_batch`: PadaQuad grows each call of `f` until `f`
+runs out of memory. The field is integrated with `max_batch` 3,000, 4,000 and
+5,550, each with `trade_speed_for_memory` False and True, and
+`record_evaluations=False`. The script records the actual batch (below) and
+the number of calls; for the field, the number of points evaluated; the GPU's peak
+memory above what was allocated before the call, during the integration loop
+and over the whole call (which also includes the final error check, the
+state's mesh and the result); for the light integrand and the networks, the
+host's peak resident memory, sampled every 5 ms; and the wall time. The tables
+below are rendered from `docs/performance/memory_options.json`, which the
+script writes.
+
+In the tables of the light integrand and the networks, rows are ordered by
+`trade_speed_for_memory`, then `evaluation_buffer`, `result_device` and
+`record_evaluations`, with the default value first. Values that differ from
+the default are in bold, so the first row is the default setting. In the
+field's table, rows are ordered by `max_batch`.
+
+The column "Actual Batch" is the number of points per call of `f` that
+PadaQuad ended with. `max_batch` is where it starts; when a call of `f` runs
+out of memory, PadaQuad discards that call's values, evaluates the same
+points again at three quarters of the batch size, repeating until a call
+fits, and keeps that smaller batch size for the rest of the integration.
+Without `max_batch` it also lets each call grow to up to 10 times the
+largest call so far, limited by the points waiting, until a call runs out of
+memory, so for the light integrand and the networks the Actual Batch is the
+largest call that ran. In the field's table, an Actual Batch below
+`max_batch` is in bold: those calls ran out of memory, and the points include
+the points of the calls that were evaluated again.
+
+What the tables show:
+
+- **Light integrand and networks.** Their integrand values take at most a few
+  hundred MB, so every setting makes the same calls of `f` and uses about the
+  same GPU memory, and the defaults are appropriate. For the large network,
+  copying the values to the host is most of the time with
+  `result_device="cpu"`, which `record_evaluations=False` avoids.
+- **Expensive field.** With `trade_speed_for_memory=False`, the pass's values
+  stay on the GPU while `f` is called, so a call of 4,000 or 5,550 points runs
+  out of memory. PadaQuad evaluates it again at three quarters of its size
+  until it fits, which costs 4,000 and 9,712 extra points and leaves the calls at about
+  3,000 points. With `True` every batch size fits, with a GPU peak of 16 to
+  26 GB against about 32 GB, and the integration takes a third to almost half less
+  time (3.5 to 4.0 s against 5.7 to 6.6 s). The time saved does not come
+  from the larger calls, since `True` is fastest at 3,000 points; an earlier
+  profile found most of it in the time the default spends reserving GPU
+  memory for the pass's values ({ref}`ug-pass-array-oom`).
+
+```{include} ../reference/generated/memory_options_table.md
+```

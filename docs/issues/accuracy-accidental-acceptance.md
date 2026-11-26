@@ -45,18 +45,40 @@ A = 0.3183098861837907
 lo = torch.tensor([0.0], dtype=torch.float64)
 hi = torch.tensor([1.0], dtype=torch.float64)
 cases = {
-    "sin(2e5 t), gk21": (lambda t: torch.sin(2e5 * t), "gk21", (1 - math.cos(2e5)) / 2e5),
-    "peak 1e-4, gk21": (lambda t: torch.exp(-0.5 * ((t - A) / 1e-4) ** 2), "gk21",
-                        1e-4 * math.sqrt(2 * math.pi)),
+    "sin(2e5 t), gk21": (
+        lambda t: torch.sin(2e5 * t),
+        "gk21",
+        (1 - math.cos(2e5)) / 2e5,
+    ),
+    "peak 1e-4, gk21": (
+        lambda t: torch.exp(-0.5 * ((t - A) / 1e-4) ** 2),
+        "gk21",
+        1e-4 * math.sqrt(2 * math.pi),
+    ),
     "jump, gk7": (lambda t: (t > A).to(t.dtype), "gk7", 1 - A),
 }
 for name, (f, method, exact) in cases.items():
     for seed in range(10):
         torch.manual_seed(seed)
-        r, _ = integrate(f, method, atol=1e-8, rtol=0.0, mesh_init=lo, mesh_final=hi,
-                         device="cpu", take_gradient=False, max_batch=1_000_000)
-        print(name, seed, f"{abs(float(r.integral) - exact):.1e}", r.converged,
-              len(r.h), r.max_split_depth)
+        r, _ = integrate(
+            f,
+            method,
+            atol=1e-8,
+            rtol=0.0,
+            mesh_init=lo,
+            mesh_final=hi,
+            device="cpu",
+            take_gradient=False,
+            max_batch=1_000_000,
+        )
+        print(
+            name,
+            seed,
+            f"{abs(float(r.integral) - exact):.1e}",
+            r.converged,
+            len(r.h),
+            r.max_split_depth,
+        )
 ```
 
 What the runs show (the full sweep over tolerances and methods, and the

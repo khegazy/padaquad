@@ -127,7 +127,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_convergence_rate.py` | Empirical convergence-rate slope matches each method's theoretical rate |
 | `test_autodiff_consistency.py` | $\nabla_\theta\int f_\theta dt$ via backprop equals $\int \nabla_\theta f_\theta dt$ |
 | `test_error_indicator.py` | Behavior of absolute vs cumulative error indicators (Bug B8 investigation) |
-| `test_bug_regressions.py` | Regression tests for bugs B4, B6 fixed in Phase 1; `runtime_checks` (old name `error_on_nonfinite` raises; False skips the order and finite checks with the same result); reuse by passing the returned state (no state on the solver, `same_f` and constructor bounds gone); the interval rules (bounds required, cut, outside extends, rounding snap, one-ULP cut, mesh validation, keyword-only options) |
+| `test_bug_regressions.py` | Regression tests for bugs B4, B6 fixed in Phase 1; `runtime_checks` (old name `error_on_nonfinite` raises; False skips the order and finite checks with the same result); reuse by passing the returned state (no state on the solver, `same_f` and constructor bounds gone); the interval rules (bounds required, cut, outside extends, rounding snap, one-ULP cut, mesh validation, keyword-only options); a subinterval too narrow to halve ends the call with `converged=False` (a jump with `atol=rtol=0`, both `runtime_checks`, both `take_gradient`, a second call from the state) |
 | `test_snapshots.py` | Golden-value regression net for the file-split refactor; CPU-only float64 |
 | `test_public_api.py` | Smoke test of every public symbol and `IntegrationResult` fields |
 | `test_rk_integral.py` | `_RK_integral`: constant / linear / multi-step / multi-dim / zero-width / variable-b inputs; the weighted sum in blocks of rows (`_BLOCK_BYTES`) equals one sum bit for bit, N = 0 included |
@@ -135,10 +135,10 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_error_computation.py` | `_error_norm`, `_rec_remove`, `_compute_error_ratios_absolute`/`_cumulative` |
 | `test_interpolation.py` | `_compute_nodes`: endpoints, shapes, monotonicity, tableau-c matching |
 | `test_sorted_insert.py` | `_get_sorted_indices` and `_insert_sorted_results` (a new array; the old record is read, not cloned) |
-| `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables` (f and y0; the bound defaults through `_setup_integral_bounds`), `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects); `atol`/`rtol` stored as floats, `ValueError` when not one finite number >= 0 (a list or tensor per output component included), unchanged by a dtype round trip (the error ratios of a float64 call after a float32 one); host waits on CUDA (none to build a solver, one per read of a fresh starting mesh) |
+| `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables` (f and y0; the bound defaults through `_setup_integral_bounds`), `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects); `atol`/`rtol` stored as floats, `ValueError` when not one finite number >= 0 (a list or tensor per output component included), unchanged by a dtype round trip (the error ratios of a float64 call after a float32 one); host waits on CUDA (none to build a solver, one per read of a fresh starting mesh, two per mesh update (the number accepted and `_get_mesh_indices`) plus one per array kept on the CPU, none in `_evaluate_f_on_mesh` but the finite check of each call of `f`) |
 | `test_methods_extra.py` | Variable-mode `adaptive_heun` (the uniform heun object) weights, the generic `VariableMethodClass` (normalized nodes reach the weight function, shape check), node-fraction validation, `MethodClass.to` (device and dtype) |
 | `test_solver_methods.py` | `adaptive_quadrature` factory, `method.weights` through both solvers, per-step node count `solver.C` |
-| `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed error ratios, midpoint placement |
+| `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed accept masks (`_keep_mask`, the loop's rule), midpoint placement, the returned `keep_idx`, the split cap, a subinterval one ULP wide accepted (`_splittable`, T = 1 and 2) |
 | `test_record_and_sort.py` | `_record_results` and `_sort_record` (a record in order is not copied); `_flatten_output` equals the concatenation, values and gradient |
 | `test_evaluate_and_merge.py` | The variable solver's `_evaluate_adaptive_nodes` (split with reuse; not called by `integrate`) |
 | `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: the state's mesh re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
@@ -298,7 +298,9 @@ is a boolean array where `True` means the panel still needs evaluation.
    uniform-feature integrands). With a `mesh` (for example an earlier
    call's `state.mesh`), start from it, cut to any bounds inside it
    (`_setup_integral_bounds`).
-2. **Main loop.** While any `mesh_trackers` are `True`:
+2. **Main loop.** While any `mesh_trackers` are `True` (one
+   `torch.nonzero(mesh_trackers)` per turn gives the condition and `waiting`,
+   the ascending left mesh indices `_evaluate_f_on_mesh` takes):
    - Size the next call of `f` with `_batch_for` (the call's batch size, or
      10 times it while not converged; see Memory management).
    - `_evaluate_f_on_mesh` evaluates and integrates: with `take_gradient=True`
@@ -325,9 +327,16 @@ is a boolean array where `True` means the panel still needs evaluation.
      `evaluation_buffer`, and logs three warnings only when no `state` is given
      (the first call of a series).
    - Compute error ratios (absolute or cumulative mode).
-   - `_adaptively_increase_mesh`: panels with ratio `< 1` are accepted;
-     panels with ratio `>= 1` are split at midpoint into two
-     sub-panels for re-evaluation.
+   - `_adaptively_increase_mesh(method_output, keep_mask, ...)`: the steps of
+     `keep_mask` (`_accept_reject_masks`) are accepted, the others split at
+     the midpoint into two sub-steps for re-evaluation, except those
+     `_splittable` refuses (at `max_adaptive_splits`, or one ULP wide: the
+     midpoint rounds onto an end), which are accepted. One read of the device
+     per update (the number accepted); a stable sort of the mask gives
+     `keep_idx` (returned, slot 8) and the split positions, and every field
+     is indexed with integers; `idxs_transfer` maps each old mesh point to
+     its new position. The mesh stays strictly increasing by construction,
+     so no order check runs.
    - Record accepted results into the running record.
    - If `take_gradient`: per-batch `loss.backward()`.
 3. **Post-convergence.** Sort the record; read the split statistics off
@@ -370,8 +379,8 @@ reducing to `|error| / max(atol, rtol*|I|) < 1` (norm family) or
 argument; None means `not take_gradient`, True with `take_gradient=True` raises
 `ValueError`): Step 4b judges every recorded step, from its stored
 `mesh_quadratures` / `mesh_quadrature_errors` (no call of `f`), against the same
-reference as the batch, via `_failed_record_positions`, and the failures below
-`max_adaptive_splits` are split in the same mesh update (`extra_split_idxs`)
+reference as the batch, via `_failed_record_positions`, and the failures that
+`_splittable` allows are split in the same mesh update (`extra_split_idxs`)
 and removed from the record (`_remove_failed_record_panels`). A fixed
 `error_integral_reference` turns Step 4b off; with `enforce_convergence`, Step 7
 drops it once no tracker is True: the record is judged against its own
@@ -556,7 +565,8 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   rows, with no list of calls to join (when one call covers the pass, its
   output is the array, no copy; `_keep_rows` copies from a view such as it); `_adaptively_increase_mesh` keeps the
   accepted rows by moving them to the front of that array
-  (`_keep_rows(in_place=not take_gradient)`, blocks of `_BLOCK_BYTES`; a
+  (`_keep_rows(x, keep_idx, in_place=not take_gradient)`, integer positions,
+  blocks of `_BLOCK_BYTES`; a
   view, so no copy), or keeps the array as it is when all are accepted; the
   loop deletes the batch's values (`kept_y`, `intermediate_results`) after
   recording. An out-of-memory error allocating the pass's array is raised

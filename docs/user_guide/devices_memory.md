@@ -462,11 +462,12 @@ On the host (`result_device="cpu"`) the resident memory agrees with these
 numbers for records of a few hundred MB and more (2.0 R for 3.9 GB of `bosh3`
 values); the copy into mesh order often stays below 2 R there, because a page
 of the new array counts only once written, while the arrays it is copied from
-are freed one by one. It can also be higher: the C library (glibc) keeps freed
-blocks smaller than its mmap threshold (at most 32 MiB) resident, so after
-many small batches, for example with `take_gradient=True` and a small
-`max_batch`, the resident size can stay up to R above the memory in use (3.0 R
-measured for 331 MB of values in 25 batches).
+are freed one by one. It can also be higher: for 331 MB of `bosh3` values
+recorded in 25 batches (`take_gradient=True`), the resident size stayed 0.4 to
+1 R above the memory in use after that copy, and the call's peak was 2.4 R on
+one node and 3.0 R on another. The cause was not established; fixing the C
+library's mmap threshold at 1 MiB (`MALLOC_MMAP_THRESHOLD_`), so that freed
+blocks above it return to the system, did not change it.
 
 The result `loss_fxn` receives for each batch has its `y` and
 `tracked_variables` on `result_device` with `trade_speed_for_memory=True`, and

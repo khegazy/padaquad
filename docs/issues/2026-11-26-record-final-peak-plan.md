@@ -82,8 +82,7 @@ temporaries). The documented "about twice" holds for `gk21` (2.15 R) and not
 for methods with few nodes: 2.5 R for `bosh3`, 4 R for `adaptive_heun`. On the
 host, `VmHWM` agrees with the allocator for large records (`bosh3`, removals,
 3.9 GB: 2.50 R; `gk21`, D = 10^4: 2.15 to 2.2 R) and is higher for records of
-tens to hundreds of MB (up to 3.5 R), because glibc keeps freed blocks below
-its mmap threshold (up to 32 MiB) resident (section 6). At D = 1 the nodes,
+tens to hundreds of MB (up to 3.5 R; section 6). At D = 1 the nodes,
 widths and error ratios are as large as the values, and the record's
 per-subinterval arrays, not the values, set the peak (7 to 11 R, 1,200 bytes
 per subinterval for `gk21` and 290 for `bosh3`).
@@ -208,12 +207,14 @@ more code.
 - Methods with C < 4 (`adaptive_heun`, `fehlberg2`,
   `interpolatory3_variable`): R + 4Q is 3 R and 2.3 R; their result alone is
   (C + 1)/C R.
-- glibc keeps freed blocks smaller than its mmap threshold (at most 32 MiB)
-  resident, so on the host the chunks of many small batches (for example
-  `take_gradient=True`) stay in the resident size after the ordering frees
-  them, and `VmHWM` can exceed the allocator's live set by up to R. `malloc_trim`
-  after the ordering, or `MALLOC_MMAP_THRESHOLD_`, would return them; it is the
-  C library's policy, not PadaQuad's, and is documented rather than changed.
+- On the host, `VmHWM` can exceed the allocator's live set for records of
+  tens to hundreds of MB: after the ordering of 25 batches
+  (`take_gradient=True`, `bosh3`, 331 MB) the resident size stayed 0.4 to 1 R
+  above the memory in use (the call's peak 2.4 R on one node, 3.0 R on
+  another). My first guess, glibc keeping freed blocks below its mmap
+  threshold resident, is not the cause: fixing the threshold at 1 MiB
+  (`MALLOC_MMAP_THRESHOLD_=1048576`) left it unchanged (2.40 R against
+  2.36 R). Not explained; documented as measured.
 - D = 1: the per-subinterval arrays (nodes, widths, ratios) are as large as the
   values; the peak is stated per subinterval.
 
@@ -227,3 +228,70 @@ more code.
    of `_prune_excess_mesh` and of a whole call with `bosh3`.
 4. Documentation: `docs/user_guide/devices_memory.md` (the peaks per case),
    CHANGELOG, CLAUDE.md.
+
+## Implemented (branch `record_peak`, 2026-11-26)
+
+| Step | Commit | What |
+|---|---|---|
+| 1 | `10e1e52` | This plan. |
+| 2 | `327b1a6` | `_flatten_output` returns a view when no node is shared; the nodes, values and tracked variables are joined field by field in the record after the reuse mesh and before the loop's fields move to `result_device`; the error estimates' absolute values are taken in place. Test: `TestFlattenOutput.test_no_shared_node_keeps_every_row` (a view). |
+| 3 | `5183cc3` | `_get_optimal_mesh` copies its inputs itself, computes the norm family's reduced errors first, adds the pair errors into the prediction in place and frees each array once read; `_prune_excess_mesh` selects the kept rows and adds the merged rows into them. Tests: `TestPruneExcessT.test_copies_only_the_kept_rows` and `test_record_device_peak_at_the_end` (gk21 and bosh3, one pass and several; a CPU solver with `result_device="cuda"`), both failing on the base. |
+| 4 | `f39cd54` | User guide section "Memory at the end of a call" (`ug-end-of-call-memory`), CHANGELOG, CLAUDE.md. |
+
+The call's peak on the record's device after the change (exact allocator,
+record on a second A100 40 GB; base in parentheses): `gk21` 2.00 to 2.01 R
+for several passes (2.14 to 2.15), 1.19 to 1.20 R for one pass (2.14 to
+2.15), 1.50 R with a tracked variable as large as the values (2.07);
+`bosh3` 2.00 to 2.04 R in every norm-family case (2.50 to 2.53); `cc17` 1.95
+to 2.04 R (2.12 to 2.18); `adaptive_heun` 3.0 R (4.0 to 4.4);
+`record_evaluations=False` 0.10 R for `gk21` and 0.50 R for `bosh3` (0.14,
+0.75); `bosh3` with `"failure_fraction"` 3.07 R (3.32) and cumulative 2.53 R
+(2.78). The solver's GPU is unchanged with the record on the host and lower
+with `record_evaluations=False` (`bosh3` 1.20 against 1.70 R); with the record
+on the solver's GPU (`result_device="cuda:0"`) the GPU's peak is at most the
+base's in every case (`bosh3` 2.5 to 3.2 R against 2.7 to 3.75 R). On the
+host, `VmHWM` for the 3.9 GB `bosh3` record: 2.00 R (2.50). At D = 1 the
+peak rose by about 16 bytes per subinterval (`bosh3` 292 to 308 bytes,
+`gk21` 1,190 to 1,205): the reduced errors, [N, 2], now live through the merge
+prediction, and at D = 1 they are twice an [N, D] array.
+
+Bit identity against `c70f790` on CPU and CUDA: `compiled-turn/impl/bitgrid_ct.py`
+(2,396 cases), `record-order/impl/bitgrid.py` (856 CPU, 864 CUDA),
+`async-record-copy/impl/bitgrid_arc.py` (424 CPU, 628 CUDA) and this plan's
+`bitgrid_rp.py` (1,530 cases: nine methods with and without end nodes, one
+pass with most pairs merged and several passes, warm calls from each state,
+every error norm, cumulative mode, float32, the record on the solver's device
+and on the CPU, `record_evaluations=False`, tracked variables): no difference,
+except on CUDA in the error ratios of three `adaptive_heun` cases in cumulative
+mode with one output (no other field), which differ the same way between two
+runs of the base (the running sums of `torch.cumsum` on CUDA, user guide
+`ug-error-reference`).
+
+Wall time of whole calls with the record on the host (`time_calls.py`, median
+of 9 calls, three rounds alternating the base and the branch on one A100
+80 GB, nothing else on the node): `gk21`, D = 10^4, one pass 189 to 171 ms
+(-10 %; the join's copy of 335 MB is gone), with removals 280 to 266 ms
+(-5 %); `gk21`, D = 512, several passes -3 %; `gk21`, D = 1, -1.6 %; `bosh3`,
+D = 512, removals -4 %; `bosh3`, D = 10^4, one pass -4 % and removals (3.9 GB)
+-0.8 %, within the spread of the rounds (3,731 to 3,831 ms on the base).
+No case was slower.
+
+Tests at `f39cd54` plus this section (full suite on a compute node): the base
+and the branch both pass everything, CPU 4,279 passed (360 and 365 skipped:
+the five new tests need CUDA), CUDA 4,614 and 4,619 passed. ruff, ruff
+format, mypy (no issues), numpydoc lint and the documentation build (`-W`)
+pass.
+
+## Not done
+
+- `"failure_fraction"` and cumulative mode keep more [N, D] temporaries in
+  the reuse mesh (`bosh3` 3.07 and 2.53 R, `adaptive_heun` cumulative 4.0 R);
+  lowering them needs restructuring `_error_ratios_failure_fraction` and the
+  cumulative tolerance for that one stage.
+- Methods with fewer than four nodes stay above 2 R (`adaptive_heun` 3.0 R);
+  only splitting the reuse mesh into blocks of rows would bring them to about
+  R + 2 arrays of [N, D], at a risk to the bits on CUDA (section 4).
+- The host's resident memory above the allocator's live set for records of
+  tens to hundreds of MB (section 6) is not explained.
+- Removals were not changed: at most 1.6 R of the final values, below the end
+  of the call in every case measured.

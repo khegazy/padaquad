@@ -176,6 +176,7 @@ def test_integrations_do_not_write_into_method_tensors(sampling):
         {"take_gradient": False},
         {"take_gradient": True},
         {"take_gradient": False, "result_device": DEVICE},
+        {"take_gradient": False, "result_device": "cpu"},
         {"take_gradient": False, "record_evaluations": False},
     ):
         _, state = solver.integrate(

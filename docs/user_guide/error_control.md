@@ -222,11 +222,12 @@ The relative tolerance multiplies a reference value of the integral:
   from `mesh_init` through each subinterval, as in ODE solvers. Tolerances then
   change along the domain; where the running integral passes through zero, the
   relative tolerance vanishes and only `atol` remains. On a GPU, PyTorch's
-  running sum (`torch.cumsum`) of a single output is not reproducible from one
-  run to the next over more than about 40,000 subintervals (measured on an A100
-  with PyTorch 2.8), so with one output and that many subintervals the error
-  ratios can differ between runs in their last bits, and with them a decision
-  within rounding of the tolerance. With several outputs, on the CPU, or under
+  running sum (`torch.cumsum`) of a single output can differ from one run to
+  the next from about 17,000 subintervals in float64 and 23,000 in float32,
+  and did for every array tried from 40,000 in float64 and 100,000 in float32
+  (measured on an A100 with PyTorch 2.8), so with one output and that many
+  subintervals the error ratios can differ between runs in their last bits,
+  and with them a decision within rounding of the tolerance. With several outputs, on the CPU, or under
   `torch.use_deterministic_algorithms(True)` this sum is reproducible.
 
 Whatever the mode, `converged` judges every accepted subinterval against the

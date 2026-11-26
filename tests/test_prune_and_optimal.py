@@ -139,6 +139,38 @@ class TestPruneExcessT:
         )
         assert torch.equal(ss[:, 0], torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64))
 
+    @needs_cuda
+    def test_copies_only_the_kept_rows(self):
+        """Each array's kept rows are selected and the merged pairs' right rows
+        added to them: the GPU holds the two merged arrays and one array of
+        added rows at a time, not a whole copy of each input as well (the
+        merge copied each input before selecting its kept rows). The sums are
+        those of the pairs, bit for bit, at random places in a long mesh."""
+        n, d = 4000, 512
+        g = torch.Generator().manual_seed(0)
+        solver = adaptive_quadrature("uniform", "bosh3", device="cuda")
+        mesh = self._make_mesh(0.0, 1.0, n).cuda()
+        ss = torch.randn(n, d, generator=g, dtype=torch.float64).cuda()
+        se = torch.rand(n, d, generator=g, dtype=torch.float64).cuda()
+        er2 = torch.where(torch.rand(n - 1, generator=g) < 0.3, 0.0, 1.0).cuda()
+        merged = torch.where(solver._rec_remove(er2 < solver.remove_cut))[0]
+        torch.cuda.synchronize()
+        before = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        m_p, ss_p, se_p = solver._prune_excess_mesh(
+            mesh, ss, se, er2, solver.remove_cut
+        )
+        torch.cuda.synchronize()
+        row = d * 8
+        held = ss_p.nbytes + se_p.nbytes + len(merged) * row
+        assert torch.cuda.max_memory_allocated() - before < held + 0.05 * n * row
+        keep = torch.ones(n + 1, dtype=torch.bool, device="cuda")
+        keep[merged + 1] = False
+        for x, x_p in ((ss, ss_p), (se, se_p)):
+            expected = x.index_put((merged,), x[merged] + x[merged + 1])[keep[:-1]]
+            assert torch.equal(x_p, expected)
+        assert torch.equal(m_p, mesh[keep])
+
     @pytest.mark.parametrize("method", ["bosh3", "dopri5", "gk21", "cc17"])
     def test_merge_inputs_per_rule(self, method):
         """_merge_inputs returns the merge prediction and cutoff of each
@@ -864,6 +896,36 @@ def test_predicted_does_not_depend_on_the_values_layout(dtype):
         solver._predict_merged_errors(transposed, q, edges),
         solver._predict_merged_errors(y, q, edges),
     )
+
+
+def test_pair_errors_in_the_dtype_of_the_error_estimates(monkeypatch):
+    """A float64 solver given float32 values has a float32 prediction and
+    float64 error estimates; the pair errors are their sum in float64,
+    prediction + e_i + e_{i+1}, bit for bit (adding the estimates into the
+    float32 prediction in place rounded the pair errors to float32 and changed
+    merges at the cutoff)."""
+    solver = make_solver_for_unit_test("gk21")
+    generator = torch.Generator().manual_seed(4)
+    edges = torch.linspace(0.0, 1.0, 41, dtype=torch.float64).unsqueeze(-1)
+    y = torch.randn(40, solver.C, 3, generator=generator, dtype=torch.float32)
+    q = torch.randn(40, 3, generator=generator, dtype=torch.float64)
+    e = torch.rand(40, 3, generator=generator, dtype=torch.float64) * 1e-3
+    seen = {}
+    compute = solver._compute_error_ratios
+
+    def spy(**kwargs):
+        if kwargs.get("pair_errors") is not None:
+            seen["pair_errors"] = kwargs["pair_errors"].clone()
+        return compute(**kwargs)
+
+    monkeypatch.setattr(solver, "_compute_error_ratios", spy)
+    solver._get_optimal_mesh(
+        mesh_quadratures=q, mesh_quadrature_errors=e, integral=q.sum(0), mesh=edges, y=y
+    )
+    prediction = solver._predict_merged_errors(y, q, edges)
+    assert prediction.dtype == torch.float32
+    assert seen["pair_errors"].dtype == torch.float64
+    assert torch.equal(seen["pair_errors"], prediction + e[:-1] + e[1:])
 
 
 def test_predicted_refuses_pairs_without_a_finite_width_ratio():

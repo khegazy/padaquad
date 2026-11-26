@@ -443,6 +443,80 @@ def test_fields_are_copied_one_at_a_time(stage):
     assert torch.cuda.max_memory_allocated() - before < 1.3 * field
 
 
+def _weighted(f, d):
+    """f's one output repeated d times, each with its own weight."""
+    w = torch.linspace(1.0, 1.001, d, dtype=torch.float64)
+    return lambda t: f(t) * w
+
+
+@needs_cuda
+@pytest.mark.parametrize(
+    ("method", "f", "options", "bound"),
+    [
+        ("gk21", _weighted(torch.sin, 4096), {"N_init_steps": 400}, 1.3),
+        ("gk21", _weighted(lambda t: torch.sin(2e3 * t), 256), {}, 2.05),
+        ("bosh3", _weighted(_cancelling_peak, 256), {}, 2.05),
+        ("bosh3", _weighted(torch.sin, 4096), {"N_init_steps": 400}, 2.1),
+    ],
+    ids=["gk21_one_pass", "gk21_passes", "bosh3_removals", "bosh3_one_pass"],
+)
+def test_record_device_peak_at_the_end(method, f, options, bound):
+    """The record's device holds at most about twice the recorded values R over
+    a whole call: the final ordering's chunks and array in mesh order (2 R),
+    or for one pass of a method without end nodes the values once (the join is
+    a view). A CPU solver keeps its record on the GPU (result_device="cuda"),
+    the code path of the host with exact allocator numbers. The join copied
+    the values (2.15 R for gk21) and the reuse mesh held up to six arrays of
+    one number per subinterval and output beside the values (2.5 R for
+    bosh3, whose four nodes make such an array a quarter of R)."""
+    solver = adaptive_quadrature(
+        "uniform", method, atol=1e-9, rtol=1e-6, device="cpu", dtype=torch.float64
+    )
+    torch.cuda.synchronize()
+    before = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    result, _ = solver.integrate(
+        f,
+        mesh_init=torch.tensor([0.0], dtype=torch.float64),
+        mesh_final=torch.tensor([1.0], dtype=torch.float64),
+        take_gradient=False,
+        random_initial_mesh=False,
+        result_device="cuda",
+        **options,
+    )
+    torch.cuda.synchronize()
+    values = len(result.h) * solver.C * result.y.shape[-1] * 8
+    assert torch.cuda.max_memory_allocated() - before < bound * values
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
+@pytest.mark.parametrize("method", ["gk21", "bosh3"])
+def test_result_shares_no_storage_with_f(device, method):
+    """With the record on the solver's device, a one-pass call (every
+    subinterval of the starting mesh accepted, so one call of f covers the
+    pass and its output is recorded as it is) returns values, nodes and
+    tracked variables that share storage with nothing f returned or was given,
+    and not with each other: f = t (its output is its input) and an f that
+    keeps its outputs and inputs."""
+    kept = []
+
+    def f(t):
+        kept.extend([t, t])
+        return t, (t,)
+
+    solver = adaptive_quadrature("uniform", method, device=device, dtype=torch.float64)
+    result, _ = solver.integrate(
+        f,
+        mesh_init=torch.tensor([0.0], dtype=torch.float64, device=device),
+        mesh_final=torch.tensor([1.0], dtype=torch.float64, device=device),
+        result_device=device,
+    )
+    assert len(kept) == 2  # one call of f
+    returned = [result.y, result.nodes, *result.tracked_variables]
+    storages = [x.untyped_storage().data_ptr() for x in returned + kept[:1]]
+    assert len(set(storages)) == len(storages)
+
+
 class TestFlattenOutput:
     """_flatten_output writes the joined values into one array."""
 
@@ -470,10 +544,15 @@ class TestFlattenOutput:
         [[0.2, 0.8], [0.0, 2 / 3], [1 / 3, 1.0]],
         ids=["none", "start", "end"],
     )
-    def test_no_shared_node_keeps_every_row(self, fractions):
+    @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
+    def test_no_shared_node_keeps_every_row(self, fractions, device):
         """Without a node at both ends neighbouring subintervals share no
         node (Gauss-Kronrod has none, a Radau-type rule one), so every row is
-        an evaluated point of its own: N * C rows, in order."""
+        an evaluated point of its own: N * C rows, in order. On the solver's
+        device (the CPU here) they are copied, since the array may be f's own
+        output; elsewhere the array was made by the move to result_device,
+        and the rows are a view of it (a copy held the values twice at the
+        end of a call)."""
         solver = make_solver_for_unit_test()
         c = torch.tensor(fractions, dtype=torch.float64)
         solver.method = UniformMethodClass(
@@ -481,9 +560,11 @@ class TestFlattenOutput:
             error_exponent=2,
             tableau=_Tableau(c=c, b=torch.full_like(c, 0.5), b_error=0 * c),
         )
-        panel_array = torch.arange(3 * 2 * 4, dtype=torch.float64).reshape(3, 2, 4)
+        panel_array = torch.arange(24, dtype=torch.float64, device=device)
+        panel_array = panel_array.reshape(3, 2, 4)
         out = solver._flatten_output(panel_array)
         assert torch.equal(out, panel_array.reshape(6, 4))
+        assert (out.data_ptr() == panel_array.data_ptr()) == (device != "cpu")
 
     def test_gradient_equals_concatenation(self):
         """The gradient reaches every value as through the concatenation."""

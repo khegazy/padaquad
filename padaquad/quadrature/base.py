@@ -1772,6 +1772,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 reference_pinned,
             )
 
+        # The error estimates as they are returned and as the merges below sum
+        # them: absolute values, taken in place, since the record's array is
+        # read by nothing else from here on (a copy held one more [N, D] array
+        # on the solver's device and on result_device).
+        record["mesh_quadrature_errors"].abs_()
+
         # Prune over-resolved steps and refine under-resolved ones. The merge
         # prediction applies the method's weights, so it must run with the
         # method's tables and device-bound allocations co-located with its
@@ -1780,7 +1786,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # record_evaluations=False), with the method converted there for the
         # duration rather than copying the values back. The fields that stay
         # on the integration device (mesh_quadratures and mesh_quadrature_errors,
-        # see _RECORD_LOOP_KEYS, and the integral) are moved to join them. Without
+        # see _RECORD_LOOP_KEYS, and the integral) are copied there by
+        # _get_optimal_mesh, which frees its copies as it prunes them. Without
         # recorded values (record_evaluations=False) y is None, and
         # _merge_inputs uses merge_rule="power_law".
         # mesh_optimal is the mesh a later call starts from when the caller
@@ -1796,17 +1803,22 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             optimal_device = record["nodes"].device
             with self._integration_on_device(optimal_device):
                 mesh_optimal = self._get_optimal_mesh(
-                    mesh_quadratures=record["mesh_quadratures"].to(optimal_device),
-                    # Absolute values: the merge sums two subintervals' errors,
-                    # which signed values could cancel.
-                    mesh_quadrature_errors=torch.abs(
-                        record["mesh_quadrature_errors"]
-                    ).to(optimal_device),
-                    integral=record["integral"].to(optimal_device),
-                    mesh=mesh.to(optimal_device),
+                    mesh_quadratures=record["mesh_quadratures"],
+                    mesh_quadrature_errors=record["mesh_quadrature_errors"],
+                    integral=record["integral"],
+                    mesh=mesh,
                     y=record.get("y"),
                 )
             mesh_optimal = mesh_optimal.to(self.device).detach()
+
+        # Join each subinterval's nodes, values and tracked variables into one
+        # sequence, field by field in the record, so that a field's
+        # per-subinterval array is freed as soon as it is joined: before the
+        # next field is joined and before the loop's fields come to
+        # result_device below.
+        for key in record:
+            if key in ("nodes", "y") or key.startswith(self._TRACKED_KEY_PREFIX):
+                record[key] = self._flatten_output(record[key])
 
         # Move the record fields still on the integration device (the loop's
         # fields and the loss; every one with record_evaluations=False) to
@@ -1835,16 +1847,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # whose ends they are.
             mesh_init=mesh_init,
             mesh_final=mesh_final,
-            nodes=self._flatten_output(record["nodes"]),
+            nodes=record["nodes"],
             h=record["h"],
-            y=self._flatten_output(record["y"]) if "y" in record else None,
-            # Flatten tracked variables the same way so they stay aligned with
-            # the flattened nodes/y.
-            tracked_variables=tuple(self._flatten_output(tv) for tv in record_tracked)
-            if record_tracked
-            else None,
+            y=record.get("y"),
+            tracked_variables=record_tracked or None,
             mesh_quadratures=record["mesh_quadratures"],
-            mesh_quadrature_errors=torch.abs(record["mesh_quadrature_errors"]),
+            mesh_quadrature_errors=record["mesh_quadrature_errors"],
             error_ratios=record["error_ratios"],
             loss=record["loss"],
             gradient_taken=take_gradient,
@@ -3491,21 +3499,22 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             return mesh, mesh_quadratures, mesh_quadrature_errors
 
         # Pair i keeps subinterval i, extended to the end of i + 1: mesh point
-        # i + 1 and row i + 1 go, and row i gets the pair's sums.
+        # i + 1 and row i + 1 go, and row i gets the pair's sums. The kept
+        # rows are selected first and row i + 1 is added where row i lands
+        # (row i moves up by the number of pairs merged before it), so the
+        # only copies are the kept rows and the added ones (one addition per
+        # row: the bits of row i + row i + 1).
         keep = torch.ones(len(mesh), dtype=torch.bool, device=mesh.device)
         keep[merged + 1] = False
         rows = keep[:-1].to(mesh_quadratures.device)
         merged = merged.to(mesh_quadratures.device)
-        return (
-            mesh[keep],
-            mesh_quadratures.index_put(
-                (merged,), mesh_quadratures[merged] + mesh_quadratures[merged + 1]
-            )[rows],
-            mesh_quadrature_errors.index_put(
-                (merged,),
-                mesh_quadrature_errors[merged] + mesh_quadrature_errors[merged + 1],
-            )[rows],
-        )
+        at = merged - torch.arange(len(merged), device=merged.device)
+        pruned = []
+        for x in (mesh_quadratures, mesh_quadrature_errors):
+            kept = x[rows]
+            kept.index_put_((at,), x[merged + 1], accumulate=True)
+            pruned.append(kept)
+        return mesh[keep], pruned[0], pruned[1]
 
     @contextlib.contextmanager
     def _integration_on_device(self, device: torch.device) -> Iterator[None]:
@@ -3570,12 +3579,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
            ``take_gradient=True``) or when ``max_adaptive_splits`` or a
            non-finite value stopped their refinement.
 
-        All inputs must share a device, and the returned mesh is on that
-        device. (The caller runs this on ``result_device`` through
-        ``_integration_on_device`` and moves the result back to the
-        integration device.) The subintervals are those of ``mesh``, in
-        order: the record of a finished integration covers its final mesh
-        once.
+        It runs on ``self.device``, where ``y`` must be (the caller runs this
+        on ``result_device`` through ``_integration_on_device`` and moves the
+        result back to the integration device). The other inputs are copied
+        there here, not by the caller, so that the copies are freed once
+        merged; the inputs are not modified. Few [N, D] arrays are alive at
+        once, since with few nodes each is a fair share of the values ``y``
+        held beside them (a quarter for ``bosh3``). The subintervals are those
+        of ``mesh``, in order: the record of a finished integration covers its
+        final mesh once.
 
         Parameters
         ----------
@@ -3599,36 +3611,54 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         torch.Tensor
             The optimal mesh. Shape: [M_opt, T].
         """
+        mesh_quadratures = mesh_quadratures.to(self.device)
+        mesh_quadrature_errors = mesh_quadrature_errors.to(self.device)
+        integral = integral.detach().to(self.device)
+        mesh = mesh.to(self.device)
         # Merge pairs of over-resolved neighbors: the one place where the pair
         # ratio (error_ratios_2steps) is computed and decides anything. Its
-        # numerator is each pair's summed errors, plus the merge prediction
-        # (adding a Python 0 is exact, so both cases sum in the same order).
-        merge_prediction, merge_cut = self._merge_inputs(y, mesh_quadratures, mesh)
+        # numerator is each pair's summed errors, plus the merge prediction,
+        # added to the prediction in place in the order of the sum
+        # prediction + e_i + e_{i+1}, in the estimates' dtype (the prediction
+        # has the values' dtype, which can be narrower: float32 values of a
+        # float64 solver).
+        reduced_errors = (
+            None
+            if self._is_failure_fraction
+            else self._reduced_errors(mesh_quadrature_errors, mesh_quadratures)
+        )
+        pair_errors, merge_cut = self._merge_inputs(y, mesh_quadratures, mesh)
+        pair_errors = (
+            mesh_quadrature_errors[:-1] + mesh_quadrature_errors[1:]
+            if pair_errors is None
+            else pair_errors.to(mesh_quadrature_errors.dtype)
+            .add_(mesh_quadrature_errors[:-1])
+            .add_(mesh_quadrature_errors[1:])
+        )
         _, error_ratios_2steps, _ = self._compute_error_ratios(
             mesh_quadrature_errors=mesh_quadrature_errors,
             mesh_quadratures=mesh_quadratures,
-            integral=integral.detach(),
-            pair_errors=(0 if merge_prediction is None else merge_prediction)
-            + mesh_quadrature_errors[:-1]
-            + mesh_quadrature_errors[1:],
+            integral=integral,
+            pair_errors=pair_errors,
+            reduced_errors=reduced_errors,
         )
+        del pair_errors, reduced_errors
         assert error_ratios_2steps is not None  # computed with pair_errors
-        mesh_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned = (
-            self._prune_excess_mesh(
-                mesh,
-                mesh_quadratures,
-                mesh_quadrature_errors,
-                error_ratios_2steps,
-                merge_cut,
-            )
+        # Rebinding the names frees the copies made above.
+        mesh, mesh_quadratures, mesh_quadrature_errors = self._prune_excess_mesh(
+            mesh,
+            mesh_quadratures,
+            mesh_quadrature_errors,
+            error_ratios_2steps,
+            merge_cut,
         )
 
         # Split the subintervals that fail against the final integral; only
         # the per-subinterval ratios are needed here.
         error_ratios, _, error_ratios_per_dim = self._compute_error_ratios(
-            mesh_quadrature_errors=mesh_quadrature_errors_pruned,
-            mesh_quadratures=mesh_quadratures_pruned,
-            integral=integral.detach(),
+            mesh_quadrature_errors=mesh_quadrature_errors,
+            mesh_quadratures=mesh_quadratures,
+            integral=integral,
         )
         keep_mask, _, _ = self._accept_reject_masks(error_ratios, error_ratios_per_dim)
         adaptive_step = self._adaptively_increase_mesh(
@@ -3636,11 +3666,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             keep_mask=keep_mask,
             y_step_eval=None,
             nodes=None,
-            mesh=mesh_pruned,
-            mesh_idxs=torch.arange(len(mesh_pruned) - 1, device=mesh_pruned.device),
-            mesh_trackers=torch.zeros(
-                len(mesh_pruned), dtype=torch.bool, device=mesh_pruned.device
-            ),
+            mesh=mesh,
+            mesh_idxs=torch.arange(len(mesh) - 1, device=mesh.device),
+            mesh_trackers=torch.zeros(len(mesh), dtype=torch.bool, device=mesh.device),
         )
         _, _, _, _, mesh_optimal, _, _, _, _ = adaptive_step
 
@@ -4896,7 +4924,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         subinterval are kept and the first entry of every later one, which
         repeats the previous subinterval's last entry, is dropped. Otherwise
         (for example Gauss-Kronrod, whose nodes are all interior) no node is
-        shared, and every entry is kept.
+        shared, and every entry is kept. The result is a new array, except
+        without shared nodes off the solver's device, where it is
+        ``panel_array`` itself, viewed (not copied) when it is contiguous.
 
         Parameters
         ----------
@@ -4913,6 +4943,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         fractions = self.method.node_fractions()
         # The number of entries a subinterval shares with its left neighbor.
         k = int(float(fractions[0]) == 0.0 and float(fractions[-1]) == 1.0)
+        # Off the solver's device the array was made by the move to
+        # result_device and shares storage with nothing, so it is returned
+        # without a copy (which held the values twice at the end of a call).
+        # On it, it may be f's own output (one call of f covered a pass) or
+        # the nodes f was given, which a returned tensor must not share.
+        if k == 0 and panel_array.device != self.device:
+            return panel_array.flatten(0, 1)
         # Written straight into the output: flattening the non-contiguous
         # panel_array[1:, k:] and then concatenating made two full copies, 3
         # times the values on the host at the peak (measured 2026-11-26).

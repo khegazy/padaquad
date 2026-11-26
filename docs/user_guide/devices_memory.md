@@ -446,6 +446,63 @@ device. It works independently of the other options.
 | `"cpu"` (default) | Copying values to the host takes time that grows with their size; for integrands with many outputs it is most of the run time. | Holds only the values waiting for their quadrature calculation, and, until the end of the call, the small per-subinterval results of the accepted subintervals: nodes, widths, contributions, error estimates and error ratios (with `gk21` in float64, about 200 bytes per subinterval for one output). | Holds the values of every accepted subinterval. |
 | `None` | Fastest, since nothing is copied. `None` means the solver device. | Holds the values of every accepted subinterval until the end, which gives the highest peak. | Nothing. |
 
+(ug-end-of-call-memory)=
+#### Memory at the end of a call
+
+After the last pass, PadaQuad puts the accepted subintervals in the order of
+the mesh, checks the integral, builds the state's mesh and assembles the
+result, all on `result_device`. Below, R is the size of the recorded integrand
+values (one value per subinterval, node and output, plus the tracked
+variables), and a peak is the most memory the device held during the call
+above what it held before. All numbers are float64, on Perlmutter GPU nodes
+(A100 40 GB, PyTorch 2.8).
+
+**A GPU solver with the record on another device** (measured with the record
+on a second A100, exact allocator numbers; on the host the same steps run):
+
+- **Several passes**, the usual case: 2.0 R (2.00 to 2.06 R for records of
+  16 to 126 MiB, `gk21` and `bosh3`, 512 and 10,000 outputs). The values come
+  in one array per pass and are copied into one array in the order of the
+  mesh, so both exist for a moment.
+- **One pass** (for example a call that starts from a state): 1.2 R for the
+  Gauss-Kronrod methods, whose nodes are all inside the subintervals, such as
+  the default `gk21` (275 MiB record), since the values that came to
+  `result_device` become `result.y` without a copy; 2.1 R for `bosh3`
+  (52 MiB), whose subintervals share their end nodes, so that `result.y`
+  lists each shared node once, in a new array.
+- **Small records.** The merge prediction that builds the state's mesh works
+  in blocks and holds up to 5.5 MiB, whatever the record's size; for a record
+  of a few MiB this sets the peak (3.2 R for a 2.1 MiB `bosh3` record).
+- **Methods with few nodes.** The contributions and error estimates hold one
+  number per subinterval and output, 1/C of R for a method with C nodes, and
+  building the state's mesh holds the values and up to four such arrays:
+  3.0 R for `adaptive_heun` (2 nodes; 13 to 511 MiB). For `bosh3` with
+  `error_norm="failure_fraction"` it was 3.1 R (845 MiB), in cumulative mode
+  2.5 R (142 MiB). `build_state_mesh=False` skips this.
+- **`record_evaluations=False`**: no values are kept; the peak is 0.1 R for
+  `gk21` and 0.5 R for `bosh3` of the values that were not kept.
+- **One output** (D = 1): the nodes, widths and error ratios are as large as
+  the values; the peak was 1,170 bytes per subinterval for `gk21`, 354 for
+  `bosh3` and 258 for `adaptive_heun` (about 2,000 subintervals).
+
+On the host itself (`result_device="cpu"`, GPU solver, Linux's peak resident
+size `VmHWM`), records of 200 MiB and more agree: 1.24 R for one pass of
+`gk21` (275 MiB), 2.03 R for `bosh3` (210 and 624 MiB), 2.0 R for 3.9 GB of
+`bosh3` values; several passes of `gk21` gave 1.85 R (252 MiB), since a page
+of the array in mesh order counts only once written while the arrays copied
+into it are freed one by one. Records of 6 to 35 MiB gave 1.2 to 3.1 R,
+varying between repeats of the same call.
+
+**The record on the solver's device** (`result_device` equal to the solver's
+device, for example a CPU solver with the default `result_device="cpu"`): the
+values are copied when `result.y` is assembled, also for one pass of a
+Gauss-Kronrod method, since there they may be the very tensor `f` returned.
+The peak then includes the integration's own arrays: on the solver's A100,
+2.4 R for one pass of `gk21` (275 MiB), 2.1 R for several passes (16 MiB),
+2.5 R for one pass of `bosh3` (52 MiB) and 2.8 R with removals (126 MiB); for
+a CPU solver (`VmHWM`), 2.3 to 2.4 R for `gk21` (252 and 275 MiB) and 2.6 to 2.8 R
+for `bosh3` (210 and 624 MiB), and 2.4 to 4.2 R for records of 6 to 35 MiB.
+
 The result `loss_fxn` receives for each batch has its `y` and
 `tracked_variables` on `result_device` with `trade_speed_for_memory=True`, and
 on the solver device without it; its other tensors stay on the solver device.

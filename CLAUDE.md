@@ -140,7 +140,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_solver_methods.py` | `adaptive_quadrature` factory, `method.weights` through both solvers, per-step node count `solver.C` |
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed error ratios, midpoint placement |
 | `test_record_and_sort.py` | `_record_results` and `_sort_record` (a record in order is not copied); `_flatten_output` equals the concatenation, values and gradient |
-| `test_evaluate_and_merge.py` | `_evaluate_adaptive_nodes` + `_merge_excess_nodes` for both uniform and variable solvers |
+| `test_evaluate_and_merge.py` | The variable solver's `_evaluate_adaptive_nodes` (split with reuse; not called by `integrate`) |
 | `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: the state's mesh re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
 | `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
@@ -152,6 +152,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_max_adaptive_splits.py` | The `max_adaptive_splits` depth cap |
 | `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks`; `get_max_batch(f=..., t=...)` (measurement, argument checks, `evaluation_buffer` kept free twice) and the measured `result.max_batch` |
 | `test_methods_registry.py` | Registry consistency: table shapes and dtypes, `degree` / `error_exponent` types |
+| `test_interior_nodes.py` | Gauss-Kronrod (nodes all interior): C points of `f` per subinterval, none at a mesh point (start-up calls included), `1/sqrt(t)` and `log(t)` at a bound converge, result rows = evaluated points, bound gradients against the closed form |
 | `test_multi_d_integrand.py` | Integrands with D > 1 outputs |
 | `test_oom_recovery.py` | The out-of-memory catch-and-retry path (direct calls of `_evaluate_f_on_split_nodes`, including retries that end inside a subinterval; `integrate` with and without `trade_speed_for_memory`) |
 | `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance (with `take_gradient=False` the drift is between passes: `_cancelling_peak` hides its cancelling part in a narrow peak the first passes miss); `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN) |
@@ -214,9 +215,11 @@ MethodClass (ABC, methods/_base.py)        one quadrature rule
 The two concrete solvers (`UniformAdaptiveQuadrature` and
 `VariableAdaptiveQuadrature`) are what user code instantiates, either
 via `adaptive_quadrature(...)` factory or directly. They differ only in
-`sampling_type` (which selects the method registry) and in
-`_evaluate_adaptive_nodes` / `_merge_excess_nodes`. Node placement and
-`_calculate_integral` live once in `AdaptiveQuadrature` and reach the
+`sampling_type` (which selects the method registry); the variable solver also
+keeps `_evaluate_adaptive_nodes`, which `integrate` does not call. Node
+placement, `_calculate_integral` and the merging of the optimal mesh
+(`_prune_excess_mesh` drops a merged pair's shared mesh point) live once in
+`AdaptiveQuadrature` and reach the
 rule only through `MethodClass.node_fractions()` and
 `MethodClass.weights(nodes)` (both families return weights `[N, C, 1]`).
 Every registered rule is an instance of one of the two generic classes,
@@ -272,7 +275,9 @@ evaluations on smooth regions.
 
 - **N**: number of integration steps in a batch
 - **C**: number of quadrature points per step (`method.n_nodes`,
-  e.g. 4 for bosh3, 7 for dopri5, 23 for gk21 with endpoint padding)
+  e.g. 4 for bosh3, 5 for dopri5, 21 for gk21, whose nodes are all
+  interior: a subinterval's width and place come from the mesh, never from
+  its first and last node)
 - **T**: dimensionality of time (usually 1, but supports multi-D)
 - **D**: dimensionality of `f`'s output
 
@@ -419,8 +424,9 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   are constants.
   - *Splitting*: discards old evaluations, places fresh quadrature
     points at standard `c` positions in the new sub-panels.
-  - *Merging*: re-interpolates C nodes at standard `c` positions
-    spanning `[A.start, B.end]`.
+  - *Merging* (optimal mesh): the pair's shared mesh point is removed and
+    the merged subinterval carries the pair's summed contribution and error;
+    no nodes are built for it (the same for both solvers).
 - **Variable** (`quadrature/variable.py`): weights computed from each
   panel's actual nodes by `method.weights(nodes)`
   (`VariableMethodClass.weight_function`; for `interpolatory3_variable`
@@ -434,10 +440,7 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
     `integrate()` (checked 2026-11-12: 0 calls on a run with 2495
     subintervals). It also allocates its node array with last dimension D
     instead of T (latent; wrong shape only when D != T).
-  - *Merging*: concatenates points from both panels (C + C-1 = 2C-1,
-    shared boundary not duplicated), then subsamples every other point
-    to get C. `method.weights(nodes)` recomputes the right weights for
-    the new layout.
+  - *Merging*: as for uniform sampling.
 
 ### Memory management
 

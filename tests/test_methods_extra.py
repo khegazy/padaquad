@@ -132,12 +132,22 @@ class TestVariableMethodClass:
         "c",
         [
             torch.tensor([[0.0, 1.0]], dtype=torch.float64),  # not 1-D
-            torch.tensor([0.0], dtype=torch.float64),  # one node
-            torch.tensor([0.1, 0.5, 1.0], dtype=torch.float64),  # does not start at 0
-            torch.tensor([0.0, 0.5, 0.9], dtype=torch.float64),  # does not end at 1
+            torch.tensor([0.5], dtype=torch.float64),  # one node
+            torch.tensor([0.5, 0.5], dtype=torch.float64),  # all equal
+            torch.tensor([-0.1, 0.5, 1.0], dtype=torch.float64),  # below 0
+            torch.tensor([0.0, 0.5, 1.2], dtype=torch.float64),  # above 1
+            torch.tensor([0.0, float("nan"), 1.0], dtype=torch.float64),  # NaN
             torch.tensor([0.0, 0.7, 0.5, 1.0], dtype=torch.float64),  # decreases
         ],
-        ids=["not-1d", "one-node", "start", "end", "decreasing"],
+        ids=[
+            "not-1d",
+            "one-node",
+            "all-equal",
+            "below-0",
+            "above-1",
+            "nan",
+            "decreasing",
+        ],
     )
     def test_malformed_node_fractions_raise(self, c):
         """Both generic rule classes reject malformed node fractions."""
@@ -153,6 +163,29 @@ class TestVariableMethodClass:
                     c=c, b=torch.ones_like(c), b_error=torch.zeros_like(c)
                 ),
             )
+
+    def test_fractions_without_end_nodes(self):
+        """Neither class needs nodes at the ends of a subinterval (the solver
+        takes its width from the mesh; the Gauss-Kronrod nodes are all
+        interior). A variable rule's weight function sees the nodes as
+        fractions of their subinterval: the first and last node at the first
+        and last fraction."""
+        c = torch.tensor([0.25, 0.5, 0.75], dtype=torch.float64)
+        UniformMethodClass(
+            degree=0,
+            error_exponent=2,
+            tableau=_Tableau(c=c, b=torch.ones_like(c) / 3, b_error=0 * c),
+        )
+        seen = []
+
+        def spy(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            seen.append(x.clone())
+            return _equal_weights(x)
+
+        rule = VariableMethodClass(degree=0, error_exponent=2, c=c, weight_function=spy)
+        # Subinterval [2, 6]: nodes at 3, 4, 5
+        rule.weights(torch.tensor([[[3.0], [4.0], [5.0]]], dtype=torch.float64))
+        assert torch.equal(seen[0], c.view(1, 3, 1))
 
     @pytest.mark.parametrize(
         ("degree", "error_exponent", "bad"),

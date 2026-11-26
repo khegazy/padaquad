@@ -72,7 +72,7 @@
   howpublished = {Netlib},
   year         = {1983},
   url          = {https://netlib.org/quadpack/},
-  checked      = {Files dqk15.f, dqk21.f, dqk31.f downloaded 2026-11-12 (revision date 830518). Header: nodes and weights "evaluated with 80 decimal digit arithmetic by L. W. Fullerton, Bell Labs, Nov. 1981". Every xgk/wgk/wg data value compared digit-by-digit with PadaQuad _GK15_*, _GK21_*, _GK31_*: 86 of 87 identical to all 33 digits; dqk21 wgk(3) differs in the 33rd digit (PadaQuad ...244582, Netlib ...244580; Netlib is correctly rounded). Also checked the error logic (dqk21.f lines 176-180: |resk - resg| * hlgth, (200*abserr/resasc)^1.5 rescaling, max(50*epmach*resabs, abserr)). Companion book: Piessens, de Doncker-Kapenga, Ueberhuber, Kahaner, QUADPACK, Springer 1983, doi:10.1007/978-3-642-61786-7 (book not opened).}
+  checked      = {Files dqk15.f, dqk21.f, dqk31.f downloaded 2026-11-12 (revision date 830518). Header: nodes and weights "evaluated with 80 decimal digit arithmetic by L. W. Fullerton, Bell Labs, Nov. 1981". Every xgk/wgk/wg data value compared digit-by-digit with PadaQuad _GK15_*, _GK21_*, _GK31_*: 86 of 87 identical to all 33 digits; dqk21 wgk(3) differs in the 33rd digit (PadaQuad ...244582, Netlib ...244580; Netlib is correctly rounded). Also checked the error logic (dqk21.f lines 176-180: |resk - resg| * hlgth, (200*abserr/resasc)^1.5 rescaling, max(50*epmach*resabs, abserr)). dqk21.f downloaded again 2026-11-25: lines 134-166 evaluate f only at centr = (a+b)/2 and at centr -+ hlgth*xgk(j), j = 1..10, every xgk(j) < 1 (xgk(1) = 0.995657...), never at a or b. Companion book: Piessens, de Doncker-Kapenga, Ueberhuber, Kahaner, QUADPACK, Springer 1983, doi:10.1007/978-3-642-61786-7 (book not opened).}
 }
 
 @misc{scipy_quadvec,

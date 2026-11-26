@@ -207,7 +207,7 @@ was measured on Linux or on a GPU.
 
 13. *An out-of-memory error can leave too small a batch.* An out-of-memory
     error during the benchmark at N points caps the batch at 0.75·N, which can
-    be below the nodes of one subinterval (gk21, with 23 nodes, running out of
+    be below the nodes of one subinterval (gk21, with 21 nodes, running out of
     memory at N = 10 gives 7). `integrate(take_gradient=True)` then fails,
     because it evaluates whole subintervals.
 14. *A wrong reason near 1e9 points.* When the calls double near 1e9 points,

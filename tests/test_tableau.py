@@ -133,14 +133,13 @@ RK_LOWER_WEIGHTS = {
     "adaptive_heun": [0, 1],
     "fehlberg2": [Fraction(1, 256), Fraction(255, 256), 0],
     "bosh3": [Fraction(7, 24), Fraction(1, 4), Fraction(1, 3), Fraction(1, 8)],
+    # dopri5's two stages at fraction 1 are one node: 649/6300 + 1/60.
     "dopri5": [
         Fraction(1951, 21600),
-        0,
         Fraction(22642, 50085),
         Fraction(451, 720),
         Fraction(-12231, 42400),
-        Fraction(649, 6300),
-        Fraction(1, 60),
+        Fraction(649, 6300) + Fraction(1, 60),
     ],
 }
 

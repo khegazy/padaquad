@@ -12,9 +12,9 @@ not call it. The integration loop places the nodes of every subinterval, split
 or not, at the method's node fractions and evaluates the integrand there, as
 for uniform sampling.
 
-This class holds the variable-specific overrides of the abstract methods
-declared in ``AdaptiveQuadrature``; everything else, including node
-placement and the integral computation, is shared.
+Everything else, including node placement, the integral computation and the
+merging of subintervals for the optimal mesh, is shared with the uniform
+solver in ``AdaptiveQuadrature``.
 """
 
 from __future__ import annotations
@@ -158,89 +158,3 @@ class VariableAdaptiveQuadrature(AdaptiveQuadrature):
         y_add_combined = torch.reshape(y_add_combined, (len(idxs_add) * 2, self.C, D))
 
         return y_add_combined, nodes_new
-
-    def _merge_excess_nodes(
-        self,
-        nodes: torch.Tensor,
-        mesh_quadratures: torch.Tensor,
-        mesh_quadrature_errors: torch.Tensor,
-        remove_idxs: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Merge pairs of neighboring over-resolved subintervals into one each.
-
-        For variable sampling, merging concatenates the nodes of both
-        subintervals (C + C-1 = 2C-1 nodes, since the shared endpoint is not
-        taken twice), then keeps every other node to get back to C nodes. The
-        merged subinterval is not evaluated: its contribution and error are
-        the sums of the pair's, and only its endpoints enter the optimal mesh.
-
-        Parameters
-        ----------
-        nodes : torch.Tensor
-            Node positions of all subintervals. Shape: [N, C, T].
-        mesh_quadratures : torch.Tensor
-            Integral contribution of each subinterval. Shape: [N, D].
-        mesh_quadrature_errors : torch.Tensor
-            Error estimate of each subinterval. Shape: [N, D].
-        remove_idxs : torch.Tensor
-            Index of the first subinterval of each pair to merge.
-            The pair (remove_idxs[i], remove_idxs[i]+1) is merged.
-            Shape: [R].
-
-        Returns
-        -------
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-            Tuple of (nodes_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned)
-            with the merged subintervals replacing the original pairs. Each has
-            N-R entries along the first dimension.
-        """
-        if len(remove_idxs) == 0 or len(nodes) == 1:
-            return nodes, mesh_quadratures, mesh_quadrature_errors
-        if self.runtime_checks:
-            nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=1)
-            assert torch.all(nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0)
-
-        # Concatenate points from both steps (skip first point of second step
-        # since it equals the last point of the first step), giving 2C-1 points
-        combined_steps = torch.concatenate(
-            [nodes[remove_idxs, :], nodes[remove_idxs + 1, 1:]], dim=1
-        )
-        mesh_quadratures_replace = (
-            mesh_quadratures[remove_idxs] + mesh_quadratures[remove_idxs + 1]
-        )
-        mesh_quadrature_errors_replace = (
-            mesh_quadrature_errors[remove_idxs]
-            + mesh_quadrature_errors[remove_idxs + 1]
-        )
-        # Subsample every other point to reduce 2C-1 back to C points
-        keep_idxs = torch.arange(self.C, dtype=torch.long, device=self.device) * 2
-
-        # Remove the first step of each pair from the arrays
-        remove_mask = torch.ones(len(nodes), dtype=torch.bool, device=self.device)
-        remove_mask[remove_idxs] = False
-        nodes_pruned = nodes[remove_mask]
-        mesh_quadratures_pruned = mesh_quadratures[remove_mask]
-        mesh_quadrature_errors_pruned = mesh_quadrature_errors[remove_mask]
-
-        # Place the merged step data at the position of the second (kept) step,
-        # adjusting indices to account for earlier removals shifting positions
-        update_idxs = remove_idxs - torch.arange(len(remove_idxs), device=self.device)
-        nodes_pruned[update_idxs] = combined_steps[:, keep_idxs]
-        mesh_quadratures_pruned[update_idxs] = mesh_quadratures_replace
-        mesh_quadrature_errors_pruned[update_idxs] = mesh_quadrature_errors_replace
-
-        # Verify time ordering and step continuity after merging
-        if self.runtime_checks:
-            nodes_pruned_flat = torch.flatten(nodes_pruned, start_dim=0, end_dim=1)
-            assert torch.all(
-                nodes_pruned_flat[1:] - nodes_pruned_flat[:-1] + self.atol_assert >= 0
-            )
-            assert torch.allclose(
-                nodes_pruned[:-1, -1, :],
-                nodes_pruned[1:, 0, :],
-                atol=self.atol_assert,
-                rtol=self.rtol_assert,
-            )
-
-        return nodes_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned

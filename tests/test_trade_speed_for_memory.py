@@ -32,11 +32,11 @@ BOUNDS = {
     "mesh_final": torch.tensor([1.0], dtype=torch.float64),
 }
 DEVICES = ["cpu", pytest.param("cuda", marks=needs_cuda)]
-# The calls of f end inside a subinterval for all of these with gk7 (C = 9):
-# below C (5, 7), and not multiples of C (18 is, 23 and 100 are not).
-MAX_BATCHES = [5, 7, 18, 23, 100]
+# The calls of f end inside a subinterval for all of these with gk7 (C = 7)
+# but one: below C (5, 6), and not multiples of C (14 is, 23 and 100 are not).
+MAX_BATCHES = [5, 6, 14, 23, 100]
 # The settings compared with the default. A buffer of 1,000 bytes holds a few
-# gk7 subintervals of one float64 output (72 bytes each); 1e9 holds every pass.
+# gk7 subintervals of one float64 output (56 bytes each); 1e9 holds every pass.
 SETTINGS = {
     "trade": {"trade_speed_for_memory": True},
     "trade_small_buffer": {"trade_speed_for_memory": True, "evaluation_buffer": 1000},
@@ -190,9 +190,9 @@ def _integration_sizes(max_batch, **options):
     calculate = solver._calculate_integral
     evaluate = solver._evaluate_f_on_split_nodes
 
-    def spy_calculate(t, y, y0=None):
+    def spy_calculate(t, y, mesh_left, mesh_right, y0=None):
         sizes.append(len(t))
-        return calculate(t, y, y0)
+        return calculate(t, y, mesh_left, mesh_right, y0)
 
     def spy_evaluate(f, f_args, mesh, step_idxs, *args):
         passes.append(len(step_idxs))
@@ -230,7 +230,7 @@ def test_buffer_bounds_what_waits():
     one call's subintervals (they are integrated as soon as they reach it), and
     fewer integrations run than without a buffer."""
     max_batch, buffer = 23, 1000
-    per_subinterval = 9 * 8  # gk7: C = 9 float64 values of one output
+    per_subinterval = 7 * 8  # gk7: C = 7 float64 values of one output
     sizes, _, C = _integration_sizes(
         max_batch, trade_speed_for_memory=True, evaluation_buffer=buffer
     )

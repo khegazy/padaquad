@@ -31,12 +31,12 @@ class TestGradientFlowRKIntegral:
 
     def test_gradient_flows_to_y(self):
         """Gradients propagate from integral back to y."""
-        t = torch.tensor([[[0.0], [1.0]]])
+        h = torch.tensor([[1.0]])
         y = torch.tensor([[[1.0], [1.0]]], requires_grad=True)
         b = torch.tensor([[[0.5], [0.5]]])
         y0 = torch.tensor([0.0])
 
-        integral, _rk_steps, _h = _RK_integral(t, y, b, y0)
+        integral, _rk_steps = _RK_integral(h, y, b, y0)
         integral.sum().backward()
 
         assert y.grad is not None
@@ -44,12 +44,12 @@ class TestGradientFlowRKIntegral:
 
     def test_gradient_flows_to_y0(self):
         """d(integral)/d(y0) = 1.0 since integral = y0 + sum(...)."""
-        t = torch.tensor([[[0.0], [1.0]]])
+        h = torch.tensor([[1.0]])
         y = torch.tensor([[[1.0], [1.0]]])
         b = torch.tensor([[[0.5], [0.5]]])
         y0 = torch.tensor([0.0], requires_grad=True)
 
-        integral, _rk_steps, _h = _RK_integral(t, y, b, y0)
+        integral, _rk_steps = _RK_integral(h, y, b, y0)
         integral.sum().backward()
 
         assert y0.grad is not None
@@ -58,12 +58,12 @@ class TestGradientFlowRKIntegral:
     def test_gradient_correct_value(self):
         """b=[0.5,0.5], y=[[a,a]], h=1 → d(integral)/da = 1.0."""
         a = torch.tensor([1.0], requires_grad=True)
-        t = torch.tensor([[[0.0], [1.0]]])
+        h = torch.tensor([[1.0]])
         y = a.unsqueeze(0).unsqueeze(0).expand(1, 2, 1)
         b = torch.tensor([[[0.5], [0.5]]])
         y0 = torch.tensor([0.0])
 
-        integral, _rk_steps, _h = _RK_integral(t, y, b, y0)
+        integral, _rk_steps = _RK_integral(h, y, b, y0)
         # integral = y0 + h * (b0*a + b1*a) = 0 + 1*(0.5a + 0.5a) = a
         integral.sum().backward()
 
@@ -72,12 +72,12 @@ class TestGradientFlowRKIntegral:
 
     def test_no_gradient_when_detached(self):
         """y without requires_grad produces no gradient."""
-        t = torch.tensor([[[0.0], [1.0]]])
+        h = torch.tensor([[1.0]])
         y = torch.tensor([[[1.0], [1.0]]])
         b = torch.tensor([[[0.5], [0.5]]])
         y0 = torch.tensor([0.0])
 
-        _integral, _rk_steps, _h = _RK_integral(t, y, b, y0)
+        _integral, _rk_steps = _RK_integral(h, y, b, y0)
 
         assert y.grad is None
 
@@ -156,7 +156,7 @@ class TestErrorDetaching:
         y = torch.ones(1, C, 1, dtype=torch.float64, requires_grad=True)
         y0 = torch.tensor([0.0], dtype=torch.float64)
 
-        method_output = solver._calculate_integral(t, y, y0)
+        method_output = solver._calculate_integral(t, y, t[:, 0], t[:, -1], y0=y0)
 
         assert method_output.integral_error.grad_fn is None
         assert method_output.mesh_quadrature_errors.grad_fn is None
@@ -169,7 +169,7 @@ class TestErrorDetaching:
         y = torch.ones(1, C, 1, dtype=torch.float64, requires_grad=True)
         y0 = torch.tensor([0.0], dtype=torch.float64)
 
-        method_output = solver._calculate_integral(t, y, y0)
+        method_output = solver._calculate_integral(t, y, t[:, 0], t[:, -1], y0=y0)
 
         assert method_output.integral.grad_fn is not None
         assert method_output.mesh_quadratures.grad_fn is not None
@@ -183,7 +183,7 @@ class TestErrorDetaching:
         y = torch.ones(1, C, 1, dtype=torch.float64, requires_grad=True)
         y0 = torch.tensor([0.0], dtype=torch.float64)
 
-        method_output = solver._calculate_integral(t, y, y0)
+        method_output = solver._calculate_integral(t, y, t[:, 0], t[:, -1], y0=y0)
 
         assert method_output.integral_error.grad_fn is None
         assert method_output.mesh_quadrature_errors.grad_fn is None

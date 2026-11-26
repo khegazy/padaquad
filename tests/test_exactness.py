@@ -128,8 +128,13 @@ def test_measure_degree_rejects_other_nodes_for_fixed_weights() -> None:
     [
         torch.tensor([0.0, 1.0], dtype=torch.float64),  # wrong count
         torch.tensor([0.0, 0.7, 0.5], dtype=torch.float64),  # malformed
+        # The weights take a subinterval's ends from its first and last node,
+        # at the method's first and last fraction (0 and 1 here): at these
+        # nodes they were Simpson's weights for 0, 1/2, 1 (measured degree 1).
+        torch.tensor([0.2, 0.5, 0.8], dtype=torch.float64),
+        torch.tensor([0.1, 0.5, 1.0], dtype=torch.float64),
     ],
-    ids=["wrong-count", "malformed"],
+    ids=["wrong-count", "malformed", "ends-inside", "first-inside"],
 )
 def test_measure_degree_rejects_bad_nodes(nodes: torch.Tensor) -> None:
     method = VARIABLE_METHODS["interpolatory3_variable"]

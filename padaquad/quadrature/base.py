@@ -49,7 +49,6 @@ import math
 import numbers
 import operator
 import time
-from abc import abstractmethod
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import torch
@@ -84,11 +83,11 @@ _BLOCK_BYTES = 2**27
 
 
 def _RK_integral(
-    t: torch.Tensor,
+    h: torch.Tensor,
     y: torch.Tensor,
     tableau_b: torch.Tensor,
     y0: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply the method's weights to a batch of subintervals and sum the results.
 
@@ -103,10 +102,10 @@ def _RK_integral(
 
     Parameters
     ----------
-    t : torch.Tensor
-        Nodes of each subinterval. The width is ``t[:, -1] - t[:, 0]``,
-        because every method's first and last node are the subinterval's
-        endpoints. Shape: [N, C, T].
+    h : torch.Tensor
+        Width of each subinterval, the difference of its two mesh points (not
+        of its first and last node: a method's nodes need not include the
+        ends). Shape: [N, T].
     y : torch.Tensor
         Integrand values at the nodes. Shape: [N, C, D].
     tableau_b : torch.Tensor
@@ -116,15 +115,10 @@ def _RK_integral(
 
     Returns
     -------
-    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-        Tuple ``(integral, RK_steps, h)``: the total ``y0`` plus all
-        contributions [D], the contribution of each subinterval [N, D], and
-        the width of each subinterval [N, T].
+    tuple[torch.Tensor, torch.Tensor]
+        Tuple ``(integral, RK_steps)``: the total ``y0`` plus all
+        contributions [D], and the contribution of each subinterval [N, D].
     """
-    # Step size: difference between last and first time point in each step
-    h = t[:, -1] - t[:, 0]
-    logger.debug("H shape=%s values=%s", h.shape, h)
-
     # Weighted sum over the C nodes (dim 1) of each subinterval, scaled by its
     # width, in blocks of rows (one block when N = 0, giving an empty sum).
     row_bytes = y.shape[1:].numel() * y.element_size()
@@ -137,7 +131,7 @@ def _RK_integral(
     logger.debug("RK_steps shape=%s values=%s", RK_steps.shape, RK_steps)
     # Sum all step contributions to get the total integral
     integral = y0 + torch.sum(RK_steps, dim=0)
-    return integral, RK_steps, h
+    return integral, RK_steps
 
 
 def _keep_rows(x: torch.Tensor, keep: torch.Tensor, in_place: bool) -> torch.Tensor:
@@ -203,8 +197,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     6. Builds the optimal mesh, which a later call can start from by passing
        it as ``mesh``.
 
-    Subclasses set ``sampling_type`` and define how a split subinterval gets
-    its nodes and how two neighboring subintervals are merged.
+    Subclasses set ``sampling_type``, which selects the method registry.
 
     Attributes
     ----------
@@ -588,7 +581,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         )
 
     def _calculate_integral(
-        self, t: torch.Tensor, y: torch.Tensor, y0: torch.Tensor | None = None
+        self,
+        t: torch.Tensor,
+        y: torch.Tensor,
+        mesh_left: torch.Tensor,
+        mesh_right: torch.Tensor,
+        y0: torch.Tensor | None = None,
     ) -> MethodOutput:
         """
         Compute the integral and the error estimate for a batch of subintervals.
@@ -600,12 +598,21 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         autograd graph: they only drive the accept-or-split decisions, so no
         gradient flows through them and the graph they would hold is not kept.
 
+        The widths come from the mesh points, not from the nodes, because a
+        method's nodes need not include the ends of its subinterval. Pass the
+        same mesh points the nodes were placed from (``_compute_nodes``), so
+        that a bound that requires grad reaches the integral through both.
+
         Parameters
         ----------
         t : torch.Tensor
             Nodes of each subinterval. Shape: [N, C, T].
         y : torch.Tensor
             Integrand values at the nodes. Shape: [N, C, D].
+        mesh_left : torch.Tensor
+            Left mesh point of each subinterval. Shape: [N, T].
+        mesh_right : torch.Tensor
+            Right mesh point of each subinterval. Shape: [N, T].
         y0 : torch.Tensor or None
             Value added to the integral. Shape: [D]. None adds nothing (a
             zero of the solver's dtype and device).
@@ -614,92 +621,22 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         -------
         MethodOutput
             The integral, its error estimate, and the contribution, error
-            estimate and width of each subinterval.
+            estimate, width and left mesh point of each subinterval.
         """
         if y0 is None:
             y0 = torch.zeros(1, device=self.device, dtype=self.dtype)
         b, b_error = self.method.weights(t)
-        integral, mesh_quadratures, h = _RK_integral(t, y, b, y0=y0)
-        integral_error, mesh_quadrature_errors, _ = _RK_integral(t, y, b_error, y0=y0)
+        h = mesh_right - mesh_left
+        integral, mesh_quadratures = _RK_integral(h, y, b, y0=y0)
+        integral_error, mesh_quadrature_errors = _RK_integral(h, y, b_error, y0=y0)
         return MethodOutput(
             integral=integral,
             integral_error=integral_error.detach(),
             mesh_quadratures=mesh_quadratures,
             mesh_quadrature_errors=mesh_quadrature_errors.detach(),
             h=h,
+            mesh_left=mesh_left,
         )
-
-    # -------------------------------------------------------------------------------- #
-    #                                 ABSTRACT METHODS                                 #
-    # -------------------------------------------------------------------------------- #
-
-    @abstractmethod
-    def _evaluate_adaptive_nodes(
-        self,
-        f: Callable[..., Any],
-        idxs_add: torch.Tensor,
-        y: torch.Tensor,
-        nodes: torch.Tensor,
-        f_args: tuple[Any, ...] = (),
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Evaluate the integrand at the nodes of the halves of split subintervals.
-
-        A subinterval that fails the tolerance is split into two halves. This
-        method evaluates the integrand at the nodes the halves need. Uniform
-        and variable sampling do this differently.
-
-        Parameters
-        ----------
-        f : Callable[..., Any]
-            The integrand.
-        idxs_add : torch.Tensor
-            Indices of the subintervals to split. Shape: [n_add].
-        y : torch.Tensor
-            Integrand values of all subintervals. Shape: [N, C, D].
-        nodes : torch.Tensor
-            Nodes of all subintervals. Shape: [N, C, T].
-        f_args : tuple[Any, ...]
-            Extra arguments passed to f.
-
-        Returns
-        -------
-        tuple[torch.Tensor, torch.Tensor]
-            Tuple ``(y_new, nodes_new)``: the integrand values and the nodes of
-            the halves that replace the split subintervals.
-        """
-
-    @abstractmethod
-    def _merge_excess_nodes(
-        self,
-        nodes: torch.Tensor,
-        mesh_quadratures: torch.Tensor,
-        mesh_quadrature_errors: torch.Tensor,
-        remove_idxs: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Merge each pair of neighboring subintervals into one subinterval.
-
-        Pair i is subintervals ``remove_idxs[i]`` and ``remove_idxs[i] + 1``.
-
-        Parameters
-        ----------
-        nodes : torch.Tensor
-            Nodes of all subintervals. Shape: [N, C, T].
-        mesh_quadratures : torch.Tensor
-            Integral contribution of each subinterval. Shape: [N, D].
-        mesh_quadrature_errors : torch.Tensor
-            Error estimate of each subinterval. Shape: [N, D].
-        remove_idxs : torch.Tensor
-            Index of the first subinterval of each pair to merge. Shape: [R].
-
-        Returns
-        -------
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-            Tuple ``(nodes, mesh_quadratures, mesh_quadrature_errors)`` with
-            each merged pair replaced by one subinterval (N - R in all); a
-            merged subinterval's contribution and error are the pair's sums.
-        """
 
     # -------------------------------------------------------------------------------- #
     #                            PRIMARY INTEGRATION METHOD                            #
@@ -1114,9 +1051,17 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # Make sure f exists and provides the correct output. Running this
         # before the test calls also warms f up, so one-time costs (CUDA
         # start-up, lazy model loading, cuBLAS workspace) stay out of them.
-        # One point, shaped [1, T] like every batch f receives. mesh_init is
-        # already on the solver's dtype and device (_setup_integral_bounds).
-        test_integrand, _ = self._split_f_output(f(mesh_init.reshape(1, -1), *f_args))
+        # One point, shaped [1, T] like every batch f receives: the first node
+        # of the whole interval, which is mesh_init (bit for bit) for a method
+        # with a node at the start of a subinterval and an interior point
+        # otherwise, so f is not called at a bound the method never evaluates
+        # (where f may be singular, as 1/sqrt(t) at 0 with Gauss-Kronrod).
+        # The bounds are already on the solver's dtype and device
+        # (_setup_integral_bounds).
+        probe = self._compute_nodes(
+            mesh_init.reshape(1, -1), mesh_final.reshape(1, -1)
+        )[:, 0]
+        test_integrand, _ = self._split_f_output(f(probe, *f_args))
         if test_integrand.dim() < 2:
             raise ValueError(
                 "f must return values of shape [N, D] for points of shape "
@@ -1174,7 +1119,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             self._batch, self._batch_converged = self._initialize_max_batch(
                 f,
                 f_args,
-                mesh_init.reshape(1, -1),
+                probe,
                 n_start_steps * self.C,
                 total_mem_usage,
             )
@@ -1247,11 +1192,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 # Subsequent batches: add to previously recorded integral
                 current_integral = record["integral"] + method_output.integral.detach()
                 # Merge new steps into the sorted record to compute cumulative
-                # sums. Placement is by mesh order (each panel's left barrier
-                # looked up in mesh_indices), robust for any time dimension.
+                # sums. Placement is by mesh order (each subinterval's left mesh
+                # point looked up in mesh_indices), robust for any time dimension.
                 idxs_keep, idxs_input = self._merge_positions(
-                    self._mesh_order(record["nodes"][:, 0, :], mesh_indices),
-                    self._mesh_order(nodes[:, 0, :], mesh_indices),
+                    self._mesh_order(record["mesh_left"], mesh_indices),
+                    self._mesh_order(method_output.mesh_left, mesh_indices),
                 )
                 all_mesh_quadratures = self._insert_sorted_results(
                     record["mesh_quadratures"],
@@ -1453,6 +1398,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     record=record,
                     take_gradient=take_gradient,
                     results=intermediate_results,
+                    mesh_left=method_output.mesh_left,
                     mesh_indices=mesh_indices,
                     # Without record_evaluations nothing large is recorded,
                     # and the nodes stay on the solver's device until the end.
@@ -1772,7 +1718,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         _, rec_remove, _ = self._record_error_check(
             record, cum_mesh_quadratures, integral
         )
-        rec_positions = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
+        rec_positions = self._mesh_order(record["mesh_left"], mesh_indices)
         # Respect the split cap so the record stays consistent with the mesh: a
         # failing subinterval already at the cap is not split, so it must stay
         # recorded.
@@ -2121,6 +2067,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 keep_mask
             ]
             method_output.h = method_output.h[keep_mask]
+            method_output.mesh_left = method_output.mesh_left[keep_mask]
             method_output.integral = torch.sum(method_output.mesh_quadratures, 0)
             method_output.integral_error = torch.sum(
                 method_output.mesh_quadrature_errors, 0
@@ -2397,7 +2344,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # Place C quadrature points within each of the first max_mesh_steps
             # steps; flatten [N, C, T] -> [N*C, T] for one call of f.
             idxs = step_idxs[:max_mesh_steps]
-            nodes = self._compute_nodes(mesh[idxs], mesh[idxs + 1])
+            mesh_left, mesh_right = mesh[idxs], mesh[idxs + 1]
+            nodes = self._compute_nodes(mesh_left, mesh_right)
             nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
             if self.runtime_checks:
                 assert torch.all(
@@ -2456,7 +2404,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             f_evals,
             tracked_out,
             step_idxs,
-            self._calculate_integral(nodes, f_evals),
+            self._calculate_integral(nodes, f_evals, mesh_left, mesh_right),
         )
 
     def _evaluate_f_in_batches(
@@ -2626,11 +2574,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             the remedies in its message.
         """
         C = self.C
-        nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
+        mesh_left, mesh_right = mesh[step_idxs], mesh[step_idxs + 1]
+        nodes = self._compute_nodes(mesh_left, mesh_right)
         nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
 
-        # Per integration of waiting values: the contributions, error estimates
-        # and widths of their subintervals (solver's device). The values and
+        # Per integration of waiting values: the contributions and error
+        # estimates of their subintervals (solver's device). The values and
         # tracked variables go into arrays for the whole pass on values_device
         # (f_evals, tracked_out): written as each call returns when in_place,
         # else at each integration, unless the first integration covers the
@@ -2638,7 +2587,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # same device). in_place is decided at the first whole subinterval.
         quadrature_parts: list[torch.Tensor] = []
         error_parts: list[torch.Tensor] = []
-        width_parts: list[torch.Tensor] = []
         f_evals: torch.Tensor | None = None
         tracked_out: tuple[torch.Tensor, ...] | None = None
         in_place: bool | None = None
@@ -2780,10 +2728,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 )
             waiting, waiting_tracked, waiting_bytes = [], [], 0
             n_block = len(block)
-            out = self._calculate_integral(nodes[n_done : n_done + n_block], block)
+            rows = slice(n_done, n_done + n_block)
+            out = self._calculate_integral(
+                nodes[rows], block, mesh_left[rows], mesh_right[rows]
+            )
             quadrature_parts.append(out.mesh_quadratures)
             error_parts.append(out.mesh_quadrature_errors)
-            width_parts.append(out.h)
             if in_place:
                 pass  # already in f_evals
             elif values_device is not None and n_block == len(step_idxs):
@@ -2814,13 +2764,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadratures = torch.cat(quadrature_parts)
         mesh_quadrature_errors = torch.cat(error_parts)
         del quadrature_parts, error_parts
-        # The same sums as _calculate_integral's (y0 = 0) over the whole pass.
+        # The same sums and widths as _calculate_integral's (y0 = 0) over the
+        # whole pass.
         method_output = MethodOutput(
             integral=torch.sum(mesh_quadratures, 0),
             integral_error=torch.sum(mesh_quadrature_errors, 0),
             mesh_quadratures=mesh_quadratures,
             mesh_quadrature_errors=mesh_quadrature_errors,
-            h=torch.cat(width_parts),
+            h=mesh_right - mesh_left,
+            mesh_left=mesh_left,
         )
         if values_device is None:
             f_evals, tracked_out = None, None  # the in_place arrays are dropped
@@ -2850,6 +2802,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         nodes: torch.Tensor,
         y: torch.Tensor | None,
         mesh_quadratures: torch.Tensor,
+        mesh: torch.Tensor,
     ) -> tuple[torch.Tensor | None, float]:
         """
         Return the merge prediction and the cutoff that decide which pairs merge.
@@ -2888,6 +2841,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             were not kept.
         mesh_quadratures : torch.Tensor
             Integral contribution of each subinterval. Shape: [N, D].
+        mesh : torch.Tensor
+            The mesh whose N subintervals these are. Shape: [N + 1, T].
 
         Returns
         -------
@@ -2902,15 +2857,18 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         power_law_cut = self.remove_cut / 2 ** (self.method.error_exponent - 1)
         if self.merge_rule == "power_law" or y is None or len(nodes) < 2:
             return None, power_law_cut
-        if nodes.shape[-1] != 1:
+        if mesh.shape[-1] != 1:
             logger.warning(
                 "merge_rule='predicted' needs a one-coordinate integration "
                 "variable (T == 1); T = %d here, so the optimal mesh is built "
                 "with merge_rule='power_law'.",
-                nodes.shape[-1],
+                mesh.shape[-1],
             )
             return None, power_law_cut
-        return self._predict_merged_errors(nodes, y, mesh_quadratures), self.remove_cut
+        return (
+            self._predict_merged_errors(nodes, y, mesh_quadratures, mesh),
+            self.remove_cut,
+        )
 
     def _merged_pair_weights(
         self, rho: torch.Tensor
@@ -2945,7 +2903,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             fractions: ``weights[:, 0]`` is ``(alpha_L, gamma_L)`` and
             ``weights[:, 1]`` is ``(alpha_R, gamma_R)``. ``first`` is the index
             of each distinct fraction in ``node_fractions()``, shape [U]
-            (dopri5 repeats the fraction 1, whose stored values are equal).
+            (a method may repeat a fraction; its stored values there are
+            equal).
         """
         if len(rho) > self._RATIO_BLOCK:
             blocks = [
@@ -2966,34 +2925,48 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         bary = bary / bary.abs().max()
 
         # Merged nodes with the left neighbor at [0, 1] and the right one at
-        # [1, 1 + rho]. A merged node on the shared point 1 is taken from the
-        # left neighbor; its last value and the right one's first value are
-        # the integrand at the same point (up to the last bit, since
-        # _compute_nodes computes that point from either side).
+        # [1, 1 + rho]. A merged node inside one neighbor takes that
+        # neighbor's polynomial; one between a neighbor's outermost node and
+        # its end (Gauss-Kronrod has no node at the ends) is extrapolated
+        # slightly: Eq. (4.2) holds at every x that is not a node, inside or
+        # outside the nodes, because the identity it divides by, Eq. (4.1),
+        # does. A merged node on the shared point 1 (the middle node when
+        # rho = 1) takes the mean of both neighbors' polynomials: when 1 is not
+        # a node, their extrapolations err in opposite directions where the
+        # nodes are rounded (float32 far from 0: the prediction was 100 times
+        # larger with the left one alone, measured 2026-11-26).
         x = c[None, :] * (1.0 + rho[:, None])  # [R, C]
-        in_left = x <= 1.0
-        s = torch.where(in_left, x, (x - 1.0) / rho[:, None])
-        to_node = s[..., None] - u  # [R, C, U]
-        on_node = to_node == 0
-        hits = on_node.any(dim=-1, keepdim=True)
-        terms = torch.where(
-            hits, on_node.to(torch.float64), bary / torch.where(on_node, 1.0, to_node)
-        )
-        basis = terms / terms.sum(dim=-1, keepdim=True)  # Eq. (4.2), [R, C, U]
-
+        left_share = torch.where(x < 1.0, 1.0, torch.where(x == 1.0, 0.5, 0.0))
         b, b_err = self.method.weights(
             x.unsqueeze(-1).to(self.method.node_fractions().dtype)
         )
-        # [R, 2 (b, b_err), C, U] summed over the merged nodes in each neighbor
-        weighted = torch.stack([b, b_err], dim=1).to(torch.float64) * basis[:, None]
-        left = in_left[:, None, :, None]
-        weights = torch.stack(
-            [(weighted * left).sum(dim=2), (weighted * ~left).sum(dim=2)], dim=1
-        )
+        # [R, 2 (b, b_err), C, 1]
+        bb = torch.stack([b, b_err], dim=1).to(torch.float64)
+        sides = []
+        for s, share in ((x, left_share), ((x - 1.0) / rho[:, None], 1.0 - left_share)):
+            to_node = s[..., None] - u  # [R, C, U]
+            on_node = to_node == 0
+            hits = on_node.any(dim=-1, keepdim=True)
+            terms = torch.where(
+                hits,
+                on_node.to(torch.float64),
+                bary / torch.where(on_node, 1.0, to_node),
+            )
+            basis = terms / terms.sum(dim=-1, keepdim=True)  # Eq. (4.2), [R, C, U]
+            # [R, 2, U]: summed over the merged nodes, each by its share (a
+            # merged node far outside this neighbor, share 0, can make its
+            # basis non-finite, so it is masked rather than multiplied by 0)
+            shared = torch.where(share[..., None] > 0, basis * share[..., None], 0.0)
+            sides.append((bb * shared[:, None]).sum(dim=2))
+        weights = torch.stack(sides, dim=1)
         return weights, first.to(rho.device)
 
     def _predict_merged_errors(
-        self, nodes: torch.Tensor, y: torch.Tensor, mesh_quadratures: torch.Tensor
+        self,
+        nodes: torch.Tensor,
+        y: torch.Tensor,
+        mesh_quadratures: torch.Tensor,
+        mesh: torch.Tensor,
     ) -> torch.Tensor:
         """
         Predict the errors of merging each pair of neighboring subintervals.
@@ -3029,6 +3002,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Integrand values at the nodes. Shape: [N, C, D].
         mesh_quadratures : torch.Tensor
             Integral contribution of each subinterval. Shape: [N, D].
+        mesh : torch.Tensor
+            The mesh whose N subintervals these are, in order; the widths come
+            from it (a method's nodes need not include the ends). Shape:
+            [N + 1, 1].
 
         Returns
         -------
@@ -3039,17 +3016,17 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Raises
         ------
         ValueError
-            If the nodes are not at the method's node fractions of their
-            subintervals (the prediction assumes it; ``_compute_nodes`` places
-            every node there).
+            If the nodes are not at the method's node fractions of the
+            subintervals of ``mesh`` (the prediction assumes it;
+            ``_compute_nodes`` places every node there).
         """
         # The record keeps the autograd graph when take_gradient=False; the
         # prediction is only a decision.
-        nodes, y = nodes.detach(), y.detach()
+        nodes, y, mesh = nodes.detach(), y.detach(), mesh.detach()
         mesh_quadratures = mesh_quadratures.detach()
         eps = torch.finfo(nodes.dtype).eps
-        left_end = nodes[:, 0, 0].to(torch.float64)
-        widths = nodes[:, -1, 0].to(torch.float64) - left_end
+        mesh64 = mesh[:, 0].to(torch.float64)
+        widths = mesh64[1:] - mesh64[:-1]
         log_ratio = torch.log2(widths[1:] / widths[:-1]) * self._RATIO_QUANTUM
         # A non-finite ratio (zero, overflowing or NaN widths) has no int64 key
         # (the conversion is undefined); such a pair is never merged (below).
@@ -3060,10 +3037,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         chunk_size = max(1, self._MERGE_CHUNK // y.shape[-1])
         for lo in range(0, n_pairs, chunk_size):
             hi = min(lo + chunk_size, n_pairs)
-            # Nodes off the fractions would be mispredicted. Checked per chunk
-            # (bounded memory), each subinterval against its own largest |node|.
+            # Nodes off the fractions of their subintervals of the mesh would
+            # be mispredicted. Checked per chunk (bounded memory), each
+            # subinterval against its own largest |node|.
             chunk = nodes[lo : hi + 1]
-            offset = chunk - self._compute_nodes(chunk[:, 0], chunk[:, -1])
+            offset = chunk - self._compute_nodes(
+                mesh[lo : hi + 1], mesh[lo + 1 : hi + 2]
+            )
             if bool((offset.abs() > 16 * eps * chunk.abs().amax(1, True)).any()):
                 raise ValueError(
                     "merge_rule='predicted' needs the nodes at the method's node "
@@ -3136,7 +3116,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
     def _prune_excess_mesh(
         self,
-        nodes: torch.Tensor,
+        mesh: torch.Tensor,
         mesh_quadratures: torch.Tensor,
         mesh_quadrature_errors: torch.Tensor,
         error_ratios_2steps: torch.Tensor,
@@ -3149,14 +3129,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         ``error_ratios_2steps[i]`` is below ``merge_cut``; both come from the
         configured ``merge_rule`` (``_merge_inputs``). Of several adjacent
         qualifying pairs, ``_rec_remove`` keeps every other one, so no
-        subinterval is merged twice; one call merges at most one level. The
-        merge itself is ``_merge_excess_nodes`` (uniform or variable
-        sampling); the merged subinterval is not evaluated.
+        subinterval is merged twice; one call merges at most one level. A
+        merge removes the pair's shared mesh point; the merged subinterval is
+        not evaluated, and its contribution and error are the pair's sums.
 
         Parameters
         ----------
-        nodes : torch.Tensor
-            Nodes of each subinterval. Shape: [N, C, T].
+        mesh : torch.Tensor
+            The mesh of the N subintervals. Shape: [N + 1, T].
         mesh_quadratures : torch.Tensor
             Integral contribution of each subinterval. Shape: [N, D].
         mesh_quadrature_errors : torch.Tensor
@@ -3170,26 +3150,38 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Returns
         -------
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
-            Tuple ``(nodes, mesh_quadratures, mesh_quadrature_errors)`` with
-            each merged pair replaced by one subinterval whose contribution
-            and error are the pair's sums. Shapes: [N-R, C, T], [N-R, D],
-            [N-R, D] for R merged pairs.
+            Tuple ``(mesh, mesh_quadratures, mesh_quadrature_errors)`` with
+            each merged pair's shared mesh point removed and the pair replaced
+            by one subinterval whose contribution and error are the pair's
+            sums. Shapes: [N + 1 - R, T], [N - R, D], [N - R, D] for R merged
+            pairs. The inputs are not modified.
         """
         if len(error_ratios_2steps) == 0:
-            return nodes, mesh_quadratures, mesh_quadrature_errors
+            return mesh, mesh_quadratures, mesh_quadrature_errors
         # Neighboring pairs share a subinterval, which cannot be merged twice;
         # each index is the first subinterval of a merged pair.
-        ratio_idxs_cut = torch.where(self._rec_remove(error_ratios_2steps < merge_cut))[
-            0
-        ]
+        merged = torch.where(self._rec_remove(error_ratios_2steps < merge_cut))[0]
         if self.runtime_checks:
-            assert not torch.any(ratio_idxs_cut[:-1] + 1 == ratio_idxs_cut[1:])
+            assert not torch.any(merged[:-1] + 1 == merged[1:])
 
-        if len(ratio_idxs_cut) == 0:
-            return nodes, mesh_quadratures, mesh_quadrature_errors
+        if len(merged) == 0:
+            return mesh, mesh_quadratures, mesh_quadrature_errors
 
-        return self._merge_excess_nodes(
-            nodes, mesh_quadratures, mesh_quadrature_errors, ratio_idxs_cut
+        # Pair i keeps subinterval i, extended to the end of i + 1: mesh point
+        # i + 1 and row i + 1 go, and row i gets the pair's sums.
+        keep = torch.ones(len(mesh), dtype=torch.bool, device=mesh.device)
+        keep[merged + 1] = False
+        rows = keep[:-1].to(mesh_quadratures.device)
+        merged = merged.to(mesh_quadratures.device)
+        return (
+            mesh[keep],
+            mesh_quadratures.index_put(
+                (merged,), mesh_quadratures[merged] + mesh_quadratures[merged + 1]
+            )[rows],
+            mesh_quadrature_errors.index_put(
+                (merged,),
+                mesh_quadrature_errors[merged] + mesh_quadrature_errors[merged + 1],
+            )[rows],
         )
 
     @contextlib.contextmanager
@@ -3197,7 +3189,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         Temporarily run integration-device-bound operations on ``device``.
 
-        ``_get_optimal_mesh`` (and the subclass node helpers it calls) allocate
+        ``_get_optimal_mesh`` (and the helpers it calls) allocate
         on ``self.device`` and read the method's tensors, which live on
         ``self.device``. To run the optimal-mesh computation on
         ``result_device``, so the large per-subinterval record tensors never
@@ -3259,7 +3251,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         All inputs must share a device, and the returned mesh is on that
         device. (The caller runs this on ``result_device`` through
         ``_integration_on_device`` and moves the result back to the
-        integration device.)
+        integration device.) The subintervals are those of ``mesh``, in
+        order: the record of a finished integration covers its final mesh
+        once.
 
         Parameters
         ----------
@@ -3272,7 +3266,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         integral : torch.Tensor
             The final integral. Shape: [D].
         mesh : torch.Tensor
-            The mesh at the end of the loop. Shape: [M, T].
+            The mesh at the end of the loop, whose N subintervals these are.
+            Shape: [N + 1, T].
         y : torch.Tensor or None
             Integrand values at ``nodes``, used by ``merge_rule="predicted"``,
             shape [N, C, D]; None (not kept) uses ``"power_law"``.
@@ -3283,24 +3278,23 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             The optimal mesh. Shape: [M_opt, T].
         """
         # Merge pairs of over-resolved neighbors
-        merge_prediction, merge_cut = self._merge_inputs(nodes, y, mesh_quadratures)
+        merge_prediction, merge_cut = self._merge_inputs(
+            nodes, y, mesh_quadratures, mesh
+        )
         _, error_ratios_2steps, _ = self._compute_error_ratios(
             mesh_quadrature_errors=mesh_quadrature_errors,
             mesh_quadratures=mesh_quadratures,
             integral=integral.detach(),
             merge_prediction=merge_prediction,
         )
-        nodes_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned = (
+        mesh_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned = (
             self._prune_excess_mesh(
-                nodes,
+                mesh,
                 mesh_quadratures,
                 mesh_quadrature_errors,
                 error_ratios_2steps,
                 merge_cut,
             )
-        )
-        mesh_pruned = torch.concatenate(
-            [nodes_pruned[:, 0, :], mesh[-1].unsqueeze(0)], dim=0
         )
 
         # Add new t steps using converged integral value
@@ -4143,13 +4137,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         Look up the mesh index of each subinterval from its left mesh point.
 
-        A subinterval's left mesh point is ``nodes[:, 0, :]``, its first node,
-        which equals the mesh point bit for bit because every method's
-        ``node_fractions()`` start at 0 and ``_compute_nodes`` places the node
-        at c = 0 exactly on ``mesh_left``. ``mesh_indices`` maps each mesh point (keyed on
-        its full coordinate tuple) to its index in the ordered mesh, so this
-        gives an order for any number of coordinates T without comparing
-        coordinates.
+        The left mesh points are the record's ``mesh_left`` (or a batch's
+        ``MethodOutput.mesh_left``), the mesh points the subintervals' nodes
+        were placed from, bit for bit. ``mesh_indices`` maps each mesh point
+        (keyed on its full coordinate tuple) to its index in the ordered mesh,
+        so this gives an order for any number of coordinates T without
+        comparing coordinates.
 
         Parameters
         ----------
@@ -4258,6 +4251,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         record: dict[str, torch.Tensor],
         take_gradient: bool,
         results: IntegrationResult,
+        mesh_left: torch.Tensor,
         mesh_indices: dict[tuple[float, ...], int],
         result_device: str | torch.device | None = None,
     ) -> dict[str, torch.Tensor]:
@@ -4287,6 +4281,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             detached before recording; if False the graph is kept.
         results : IntegrationResult
             Results of the accepted subintervals of the current batch.
+        mesh_left : torch.Tensor
+            Left mesh point of each of them [N, T] (``MethodOutput.mesh_left``),
+            recorded detached under the key ``mesh_left``: it places a
+            subinterval in the mesh, which its first node does not when the
+            method has no node at the subinterval's start.
         mesh_indices : dict[tuple[float, ...], int]
             ``{tuple(mesh point): index}`` for the current mesh, used to place
             the new subintervals in mesh order (for any T).
@@ -4299,7 +4298,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         dict[str, torch.Tensor]
             Updated record dict with the new results merged in. Keys are the
             IntegrationResult field names, plus one key per tracked variable
-            (see ``_record_fields``).
+            (see ``_record_fields``) and ``mesh_left``.
         """
         if result_device is None:
             result_device = self.device
@@ -4354,6 +4353,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             return value.to(target(key))
 
         fields = self._record_fields(results)
+        fields["mesh_left"] = mesh_left.detach()
         if len(record) == 0:
             # Tracked variables are already detached at evaluation time, so
             # place() leaves them unchanged apart from the device move.
@@ -4362,8 +4362,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             return record
 
         idxs_keep, idxs_input = self._merge_positions(
-            self._mesh_order(record["nodes"][:, 0, :], mesh_indices),
-            self._mesh_order(results.nodes[:, 0, :].detach(), mesh_indices),
+            self._mesh_order(record["mesh_left"], mesh_indices),
+            self._mesh_order(fields["mesh_left"], mesh_indices),
         )
         if fields.keys() != record.keys():
             raise ValueError(
@@ -4383,11 +4383,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # General (any-T) invariant: the record is in strictly increasing mesh
         # order after the merge.
         if self.runtime_checks:
-            merged_order = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
+            merged_order = self._mesh_order(record["mesh_left"], mesh_indices)
             assert torch.all(merged_order[1:] - merged_order[:-1] > 0)
-            # For 1-D time the left-node coordinate must also be strictly ascending.
-            if record["nodes"].shape[-1] == 1:
-                left = record["nodes"][:, 0, 0]
+            # For 1-D time the left mesh points must also be strictly ascending.
+            if record["mesh_left"].shape[-1] == 1:
+                left = record["mesh_left"][:, 0]
                 assert torch.all(left[1:] - left[:-1] > 0)
 
         return record
@@ -4419,7 +4419,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         dict[str, torch.Tensor]
             The record with its per-subinterval tensors in mesh order.
         """
-        order = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
+        order = self._mesh_order(record["mesh_left"], mesh_indices)
         # A record already in order (always, for the one integrate builds) is
         # kept as it is: indexing would copy every field, including the values.
         if not bool(torch.all(order[1:] > order[:-1])):
@@ -4431,11 +4431,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     record[key] = value[sorted_idxs.to(value.device)]
         if self.runtime_checks:
             # General (any-T) invariant: strictly increasing mesh order.
-            sorted_order = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
+            sorted_order = self._mesh_order(record["mesh_left"], mesh_indices)
             assert torch.all(sorted_order[1:] - sorted_order[:-1] > 0)
-            # For 1-D time the left-node coordinate must be strictly monotonic.
-            if record["nodes"].shape[-1] == 1:
-                left = record["nodes"][:, 0, 0]
+            # For 1-D time the left mesh points must be strictly monotonic.
+            if record["mesh_left"].shape[-1] == 1:
+                left = record["mesh_left"][:, 0]
                 all_ascending = torch.all(left[1:] - left[:-1] > 0)
                 all_descending = torch.all(left[1:] - left[:-1] < 0)
                 assert all_ascending or all_descending, (
@@ -4548,11 +4548,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
     def _flatten_output(self, panel_array: torch.Tensor) -> torch.Tensor:
         """
-        Join per-subinterval values into one sequence, dropping shared endpoints.
+        Join per-subinterval values into one sequence, each evaluated point once.
 
-        Keeps all C entries of the first subinterval and drops the first entry
-        of every later one, which repeats the previous subinterval's last entry
-        (node fractions start at 0 and end at 1).
+        When the method's node fractions start at 0 and end at 1, neighboring
+        subintervals share a node, their mesh point: all C entries of the first
+        subinterval are kept and the first entry of every later one, which
+        repeats the previous subinterval's last entry, is dropped. Otherwise
+        (for example Gauss-Kronrod, whose nodes are all interior) no node is
+        shared, and every entry is kept.
 
         Parameters
         ----------
@@ -4562,13 +4565,17 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Returns
         -------
         torch.Tensor
-            The joined values. Shape: [N * (C - 1) + 1, ...].
+            The joined values. Shape: [N * (C - k) + k, ...], with k = 1 when
+            the ends are nodes and 0 otherwise.
         """
-        # Written straight into the output: flattening the non-contiguous
-        # panel_array[1:, 1:] and then concatenating made two full copies, 3
-        # times the values on the host at the peak (measured 2026-11-26).
         n, c, *rest = panel_array.shape
-        out = panel_array.new_empty((n * (c - 1) + 1, *rest))
+        fractions = self.method.node_fractions()
+        # The number of entries a subinterval shares with its left neighbor.
+        k = int(float(fractions[0]) == 0.0 and float(fractions[-1]) == 1.0)
+        # Written straight into the output: flattening the non-contiguous
+        # panel_array[1:, k:] and then concatenating made two full copies, 3
+        # times the values on the host at the peak (measured 2026-11-26).
+        out = panel_array.new_empty((n * (c - k) + k, *rest))
         out[:c] = panel_array[0]
-        out[c:].view(n - 1, c - 1, *rest).copy_(panel_array[1:, 1:])
+        out[c:].view(n - 1, c - k, *rest).copy_(panel_array[1:, k:])
         return out

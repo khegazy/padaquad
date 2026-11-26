@@ -25,7 +25,8 @@ Each method is defined by three arrays of length C (the number of nodes per
 subinterval):
 
 - ``c``, the node fractions: node i of a subinterval [l, r] is at
-  ``l + c_i * (r - l)``, with ``c[0] = 0`` and ``c[-1] = 1``.
+  ``l + c_i * (r - l)``, with the ``c_i`` non-decreasing in [0, 1]; the ends
+  0 and 1 need not be among them (the Gauss-Kronrod nodes are all interior).
 - ``b``, the weights: the method's result on a subinterval of width h is
   ``h * sum_i(b_i * f(t_i))``.
 - ``b_error``, the error weights: ``b`` minus the weights of a lower-degree

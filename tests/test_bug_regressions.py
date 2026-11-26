@@ -265,7 +265,7 @@ def test_bound_gradients_through_a_given_mesh(lo, hi, given_mesh, take_gradient)
         mesh_init=a,
         mesh_final=b,
         take_gradient=take_gradient,
-        max_batch=2 * 23,  # gk21 has 23 nodes per subinterval
+        max_batch=2 * 21,  # gk21 has 21 nodes per subinterval
     )
     if not take_gradient:
         out.integral.sum().backward()

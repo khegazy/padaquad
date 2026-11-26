@@ -16,6 +16,7 @@ def _make_method_output(N, D=1):
         mesh_quadratures=torch.ones(N, D, dtype=torch.float64),
         mesh_quadrature_errors=torch.ones(N, D, dtype=torch.float64) * 0.01,
         h=torch.ones(N, 1, dtype=torch.float64) * 0.5,
+        mesh_left=torch.arange(N, dtype=torch.float64).unsqueeze(-1) * 0.5,
     )
 
 
@@ -187,6 +188,9 @@ class TestAdaptivelyAddSteps:
         )
         assert mo_out.mesh_quadratures.shape[0] == 2
         assert mo_out.h.shape[0] == 2
+        # The left mesh points of the accepted rows (0 and 2), which place
+        # them in the record.
+        assert mo_out.mesh_left[:, 0].tolist() == [0.0, 1.0]
         assert len(er_kept) == 2
 
     def test_single_step_passes(self):

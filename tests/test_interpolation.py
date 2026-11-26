@@ -18,12 +18,13 @@ class TestComputeNodes:
 
     @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
     def test_endpoints(self, method_name, dtype):
-        """First point equals mesh_left and last point equals mesh_right, bit
-        for bit, also on wide subintervals where mesh_right - mesh_left rounds.
-        Sensitive: with mesh_left + c * (mesh_right - mesh_left) the last point
-        of [0.10642713, 1.2113749] in float32 is one rounding step past
-        mesh_right, which broke the node-order check after a merge (CI, the
-        README gradient example)."""
+        """Every node lies in [mesh_left, mesh_right], and a node at fraction 0
+        or 1 equals mesh_left or mesh_right bit for bit, also on wide
+        subintervals where mesh_right - mesh_left rounds (the Gauss-Kronrod
+        methods have no such node). Sensitive: with mesh_left + c *
+        (mesh_right - mesh_left) the last point of [0.10642713, 1.2113749] in
+        float32 is one rounding step past mesh_right, which broke the
+        node-order check after a merge (CI, the README gradient example)."""
         solver = make_solver_for_unit_test(method_name=method_name, dtype=dtype)
         generator = torch.Generator().manual_seed(0)
         left = torch.rand(1000, 1, generator=generator, dtype=torch.float64)
@@ -33,8 +34,11 @@ class TestComputeNodes:
 
         result = solver._compute_nodes(mesh_left, mesh_right)
 
-        assert torch.equal(result[:, 0, :], mesh_left)
-        assert torch.equal(result[:, -1, :], mesh_right)
+        c = solver.method.node_fractions()
+        left, right = mesh_left.unsqueeze(1), mesh_right.unsqueeze(1)
+        assert torch.all((result >= left) & (result <= right))
+        assert torch.equal(result[:, c == 0], left.expand(-1, int((c == 0).sum()), -1))
+        assert torch.equal(result[:, c == 1], right.expand(-1, int((c == 1).sum()), -1))
 
     def test_shape_single_step(self, method_name):
         """Output shape is [1, C, 1] for a single step."""

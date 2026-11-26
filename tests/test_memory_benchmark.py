@@ -1302,7 +1302,7 @@ def test_messages_when_measuring(caplog, monkeypatch):
 
 def test_slow_integrand_gradient_path_completes(monkeypatch):
     """Regression: a slow f used to stop the search at small N, and an
-    estimate tied to N gave gk21 (23 points per panel) a batch below one panel
+    estimate tied to N gave gk21 (then 23 points per panel) a batch below one panel
     on the take_gradient=True path, which then failed its assertion. c is now
     measured, so the batch comes from the fit and integrate() completes."""
     clock = FakeClock()
@@ -1832,7 +1832,7 @@ def test_batch_capped_at_largest_test_call_where_reuse_is_missed(
 def test_batch_cap_at_least_one_subinterval(monkeypatch):
     """A slow f whose search ends at N = 4 (three reliable readings, then the
     1 s limit) on a reader that misses reused memory: the cap is not the
-    largest test call, 4, but the C = 23 nodes of one gk21 subinterval, the
+    largest test call, 4, but the C = 21 nodes of one gk21 subinterval, the
     smallest batch the take_gradient=True path can evaluate. Catches: a cap
     below one subinterval, which made that path fail its assertion."""
     solver = make_solver_for_unit_test(method_name="gk21")
@@ -1841,7 +1841,7 @@ def test_batch_cap_at_least_one_subinterval(monkeypatch):
     calls = stub_calls(solver, monkeypatch, lambda n: 2**20 * n, seconds=lambda n: 2.0)
     benchmark(solver, None)
     assert calls == [1, 2, 4]
-    assert solver.get_max_batch() == solver.C == 23
+    assert solver.get_max_batch() == solver.C == 21
 
 
 def test_limit_benchmark_time_is_a_solver_option():
@@ -1942,7 +1942,7 @@ def test_reuse_cap_never_raises_out_of_memory_cap(monkeypatch):
     """On a reader that misses reused memory, a heavy f (8 MiB per call) runs
     out of memory at N = 10 after one reading at N = 1. The out-of-memory cap
     is int(0.75 * 10) = 7 points; the cap at the largest test call is raised
-    to one gk21 subinterval, 23 points, which is more than the call that
+    to one gk21 subinterval, 21 points, which is more than the call that
     failed. The smaller of the two holds: the batch is 7. Catches: the cap at
     the largest test call replacing the out-of-memory cap instead of taking
     the minimum."""

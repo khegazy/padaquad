@@ -24,9 +24,29 @@ $h$ to the power of that degree plus 2.
 ```{include} ../reference/generated/methods_table.md
 ```
 
-The Gauss-Kronrod methods add two nodes with weight zero at the ends of each
-subinterval, so `gk21` evaluates the integrand at 23 points per subinterval of
-which 21 carry weight.
+The nodes of the Gauss-Kronrod methods are all inside the subinterval, so
+`gk21` evaluates the integrand at 21 points per subinterval and never at a mesh
+point, as QUADPACK's `dqk21` does {cite:p}`quadpack_netlib`. This makes them the
+methods to choose for an integrand that is infinite at a bound but whose
+integral is finite, such as $1/\sqrt{t}$ or $\log t$ on $[0, 1]$: no special
+treatment is needed (the subintervals next to the bound are refined until the
+tolerance is met). This holds for a singularity at $t = 0$, where floating-point
+numbers come as close to the bound as the refinement needs. At a bound $b \ne 0$
+they do not: once a subinterval next to $b$ is narrower than about 230 times the
+spacing of the floating-point numbers at $b$ (`gk21`; 25 times for `gk7`), its
+outermost node rounds onto $b$, `f` is evaluated there, and `ValueError` names
+the point. For $1/\sqrt{1 - t}$ on $[0, 1]$ this happens at the default
+tolerances in float32 and at `atol=1e-10` in float64. Substitute $s = b - t$ to
+move the singularity to 0. The other methods evaluate both ends of every
+subinterval and raise `ValueError` there (`runtime_checks=True`). With a Gauss-Kronrod method,
+`result.nodes` and `result.y` therefore contain no mesh point, not even
+`mesh_init` or `mesh_final`: they list exactly the evaluated points (see
+`IntegrationResult`). An integral that diverges at a bound, such as that of $1/t$
+on $[0, 1]$, is refined toward the bound until the integrand overflows: with
+`gk21` and `atol=1e-6` that takes about 1,000 halvings (3 s on a CPU) before
+`ValueError` names the point. Pass `max_adaptive_splits` to stop sooner; a
+convergent integrand can need several hundred halvings ($t^{-0.9}$ needs 326 at
+`atol=1e-10`).
 
 **Check these numbers yourself.** Every degree in the table is measured from
 the stored nodes and weights by `MethodClass.measure_degree()`, both in the test
@@ -146,7 +166,11 @@ degrees.
   $1951/21600, 0, 22642/50085, 451/720, -12231/42400, 649/6300, 1/60$, come from
   torchdiffeq; SciPy uses a different embedded set. Both satisfy the
   fourth-order conditions, and both have degree 3 as quadrature formulas
-  (checked for this project with exact fractions).
+  (checked for this project with exact fractions). As an ODE method `dopri5` has 7
+  stages at $0, 1/5, 3/10, 4/5, 8/9, 1, 1$; as a quadrature method the stage at
+  $1/5$ has no weight in either set and the two stages at 1 evaluate the same
+  point, so PadaQuad uses 5 nodes, $0, 3/10, 4/5, 8/9, 1$, with the weights of
+  the two stages at 1 added (error weight $71/6300$).
 - `adaptive_heun`'s error weights subtract the rectangle rule that uses the
   right end of the subinterval; the estimate has the same size as with Euler's
   method, which uses the left end.

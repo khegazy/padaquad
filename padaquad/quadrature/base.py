@@ -4709,9 +4709,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         When the method's node fractions start at 0 and end at 1, neighboring
         subintervals share a node, their mesh point: all C entries of the first
         subinterval are kept and the first entry of every later one, which
-        repeats the previous subinterval's last entry, is dropped, in a new
-        array. Otherwise (for example Gauss-Kronrod, whose nodes are all
-        interior) no node is shared, every entry is kept, and the sequence is
+        repeats the previous subinterval's last entry, is dropped. Otherwise
+        (for example Gauss-Kronrod, whose nodes are all interior) no node is
+        shared, and every entry is kept. The result is a new array, except
+        without shared nodes off the solver's device, where it is
         ``panel_array`` itself, viewed (not copied) when it is contiguous.
 
         Parameters
@@ -4727,12 +4728,19 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         n, c, *rest = panel_array.shape
         fractions = self.method.node_fractions()
-        if not (float(fractions[0]) == 0.0 and float(fractions[-1]) == 1.0):
+        # The number of entries a subinterval shares with its left neighbor.
+        k = int(float(fractions[0]) == 0.0 and float(fractions[-1]) == 1.0)
+        # Off the solver's device the array was made by the move to
+        # result_device and shares storage with nothing, so it is returned
+        # without a copy (which held the values twice at the end of a call).
+        # On it, it may be f's own output (one call of f covered a pass) or
+        # the nodes f was given, which a returned tensor must not share.
+        if k == 0 and panel_array.device != self.device:
             return panel_array.flatten(0, 1)
         # Written straight into the output: flattening the non-contiguous
-        # panel_array[1:, 1:] and then concatenating made two full copies, 3
+        # panel_array[1:, k:] and then concatenating made two full copies, 3
         # times the values on the host at the peak (measured 2026-11-26).
-        out = panel_array.new_empty((n * (c - 1) + 1, *rest))
+        out = panel_array.new_empty((n * (c - k) + k, *rest))
         out[:c] = panel_array[0]
-        out[c:].view(n - 1, c - 1, *rest).copy_(panel_array[1:, 1:])
+        out[c:].view(n - 1, c - k, *rest).copy_(panel_array[1:, k:])
         return out

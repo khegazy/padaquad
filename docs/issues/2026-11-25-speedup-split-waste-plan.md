@@ -760,3 +760,89 @@ detail together with `endpoint-evaluations` (b).
   `analyze_ninit.py`, `coincide.py`, `nested.py`, `w.py`; results
   `sweep_*.csv`, `child_*.csv`, `theory_*.csv`, `ninit.csv`, `rtol.csv`, `tests_child4.txt`,
   `analysis_4methods.txt`.
+
+## Implemented (2026-11-26, branch `split_waste`, base `b43da3d`)
+
+| Step | Commit | What |
+|---|---|---|
+| Review | `e88acea` | this plan corrected (section "Review") |
+| D6 (stage 3, step 9) | `9988cdf` | `VariableAdaptiveQuadrature._evaluate_adaptive_nodes`, `tests/test_evaluate_and_merge.py` and the `einops` dependency (its only user) deleted; `variable-sampling-reuse.md` rewritten |
+| Stage 1, steps 1-5 | `b884f6a` | `split_rule` (constructor and `integrate`), `_FOUR_PIECES_RATIO`, `_splittable(halvings=2)`, `_adaptively_increase_mesh(error_ratios=...)`, tests, user guide section `ug-four-pieces`, CHANGELOG, CLAUDE.md |
+| Stage 1, follow-up | `f0c82ef` | the default update reads one count and composes no transfer, as before (the first version cost 6 GPU launches per pass) |
+| D7 | `d18fdef` | `docs/issues/accuracy-accidental-acceptance.md` |
+| Stage 2 | (no code) | measurements below; the default stays `"halve"` |
+
+**Default unchanged.** Bit grid (`record-order/impl/bitgrid.py`, copied to
+`impl/`) against `b43da3d`: 856 integrations on the CPU and 864 on an A100,
+0 differences, at `b884f6a`'s code (the follow-up `f0c82ef` changes only which
+default-path launches run; the final run repeats the grid). On an A100 the
+default's GPU launches and host waits per call equal the base's after
+`f0c82ef` (chirp 2,823 launches and 103 waits; step 4,217 and 146).
+
+**Stage 2: counts** (`impl/sweep.py`, `impl/analyze.py`; `rtol=0` unless said;
+ratios of `"accelerate"` to `"halve"` summed over the cells):
+
+| Sweep | Cells | Points | Passes | Cells with more points |
+|---|---|---|---|---|
+| plan's 9 integrands, 5 methods, CPU | 405 | gk21 0.892, gk15 0.858, gk7 0.918, cc17 0.882, cc33 0.867 | 0.851-0.898 | 4 (3 are gk7 finding a jump halving accepted by accident) |
+| same, A100 (other random meshes) | 405 | gk21 0.873, gk15 0.875, gk7 0.923, cc17 0.896, cc33 0.842 | 0.838-0.862 | 1 (gk15 `many_outputs`, +4.7 %) |
+| 15 integrands not tuned on (`integrand_dict`, the benchmark network, a narrow peak, Runge, abs(sin 50t), a tanh front, log and 1/sqrt singularities near 0, a quadratic chirp, a wave packet, two scales), 5 methods, CPU | 675 | 0.942-0.958 | 0.826-0.864 | 2 (cc33 tanh front +11.8 %; gk21 abs(sin) +5.4 %, where halving's error was 1.8e-7 at atol 1e-10 and the rule's 7.7e-10) |
+| plan's 9, gk31 and cc65, CPU | 162 | 0.915, 0.875 | 0.855, 0.861 | 4 (+2.7 % to +10.5 %) |
+| plan's 9, dopri5 and bosh3 (atol 1e-6, 1e-8), CPU | 108 | 0.998, 0.998 | 0.962, 0.916 | 0 |
+| plan's 9, `take_gradient=True`, gk21 and cc17 | 162 | 0.892, 0.882 | 0.851, 0.854 | 0 |
+| plan's 9, `atol=1e-14`, `rtol=1e-8`, absolute / cumulative, gk21 and cc17 | 108 | 0.810 / 0.809, 0.802 / 0.812 | 0.792 / 0.710, 0.801 / 0.722 | 0 |
+
+No error was worse than max(10 × halving's error, 10 atol) in any of the
+1,620 CPU cells or 405 GPU cells; 9 were better. On 7 of the 15 new
+integrands (the smooth ones and the narrow peak, which no method finds) the
+median cell is unchanged.
+
+**Stage 2: time** (`impl/timing.py`, gk21, `atol=1e-8`, `rtol=0`,
+`max_batch=1e6`, seed 0, median of 5 after a warm-up, two alternating rounds
+of base and branch processes; node nid003137, A100-SXM4-40GB GPU 0, nothing
+else of mine on the node; CPU 8 threads, same node):
+
+| Integrand | A100 base / halve / accelerate (ms) | passes | points | CPU base / halve / accelerate (ms) |
+|---|---|---|---|---|
+| damped_sine | 4.70 / 4.76-4.86 / 5.05-5.13 | 1 / 1 | 231 / 231 | 3.38-3.40 / 3.50-3.52 / 3.60-3.61 |
+| many_outputs | 11.0-12.3 / 10.7-12.7 / 11.6-13.5 | 2 / 2 | 315 / 315 | 6.59-6.60 / 6.75-7.69 / 6.98-8.47 |
+| chirp | 47.6-49.0 / 48.7-49.5 / 43.2-43.7 | 14 / 10 | 3,003 / 2,667 | 14.1-14.3 / 14.4-14.5 / 12.7-12.8 |
+| oscillatory | 47.9-49.1 / 47.5-51.5 / 50.5-53.9 | 13 / 10 | 576,723 / 536,361 | 29.4-29.6 / 29.7-30.9 / 32.7-33.3 |
+| step | 61.8-63.7 / 63.5-64.8 / 63.3-63.9 | 21 / 18 | 1,071 / 1,071 | 22.6-23.1 / 24.0-24.2 / 23.8-24.0 |
+| lorentz | 22.9-23.3 / 23.4-23.8 / 20.4-20.6 | 7 / 5 | 483 / 483 | 9.4-9.6 / 9.3-9.3 / 8.1-8.1 |
+
+(The A100 columns are the second timing, after `f0c82ef`; the CPU columns are
+from before it, so their "halve" column still carries the 6 extra small
+operations per pass.) The rule saves 10-13 % of the wall time where it saves
+passes on an integrand cheap to evaluate (chirp, Lorentzian), but costs
+5-7 % on `oscillatory` although it evaluates 7 % fewer points in 3 fewer
+passes, and 5-7 % on integrands where it never acts (one pass): the
+`_splittable(halvings=2)` test and the larger read add about 30 launches per
+pass with the rule on. Why `oscillatory` is slower was not found (measured,
+not explained). The wall time of an integrand as cheap as these is not where
+the rule pays; its saving is in evaluations of `f` for an expensive `f`.
+
+**D1 (b), the default**: not changed (the brief). On the measurements, the
+rule never made an error worse and saved 5-20 % of the points where it acted,
+but it does trade evaluations: 11 of 2,025 cells needed more points (7 by up
+to 12 % with the integral already accurate, 4 where halving had accepted a
+jump or a kink by accident). The user's rule that evaluations
+of `f` are never traded away argues for keeping it opt-in.
+
+## Not done
+
+- **Stage 3, the carrier** (brief: do not implement). Re-derived in the
+  review (item 5): it would fill 0 points for gk7, gk15, gk21 (default), gk31;
+  11.7 % for cc17, 6.0 % for cc33, 40 % for cc5, 20-67 % for the low-degree
+  and variable methods. It needs a second way of filling a subinterval's
+  values (some from `f`, some carried) in `_evaluate_f_on_split_nodes`, a store
+  of kept values across passes remapped through `idxs_transfer`, values kept on
+  the solver's device with `trade_speed_for_memory` and
+  `record_evaluations=False`, and none with `take_gradient=True`; listed in
+  `docs/issues/variable-sampling-reuse.md`, "What would be needed".
+- **The GPU wall-time sweep over all cells** (section 7) was not run (the
+  node script stopped after its first phase); the per-integrand timing above
+  replaces it.
+- **The cost of the rule's own test** (about 30 launches per pass with the
+  rule on) was not reduced; the four-way test could run only on the failing
+  subintervals with split count >= 1, at the price of one more read.

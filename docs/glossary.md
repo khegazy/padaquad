@@ -28,8 +28,9 @@ node
   subinterval.
 
 node fractions
-  The node positions of a method inside a subinterval of width 1, from 0 to 1.
-  A subinterval $[l, r]$ gets its nodes at $l + c_i (r - l)$.
+  The node positions of a method inside a subinterval of width 1, between 0
+  and 1; the ends 0 and 1 need not be nodes. A subinterval $[l, r]$ gets its
+  nodes at $l + c_i (r - l)$.
 
 method
   A quadrature formula: node fractions plus weights. PadaQuad's methods are

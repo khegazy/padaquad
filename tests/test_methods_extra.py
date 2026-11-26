@@ -158,12 +158,13 @@ class TestVariableMethodClass:
         "c",
         [
             torch.tensor([[0.0, 1.0]], dtype=torch.float64),  # not 1-D
-            torch.tensor([0.0], dtype=torch.float64),  # one node
-            torch.tensor([0.1, 0.5, 1.0], dtype=torch.float64),  # does not start at 0
-            torch.tensor([0.0, 0.5, 0.9], dtype=torch.float64),  # does not end at 1
+            torch.tensor([], dtype=torch.float64),  # no node
+            torch.tensor([-0.1, 0.5, 1.0], dtype=torch.float64),  # below 0
+            torch.tensor([0.0, 0.5, 1.2], dtype=torch.float64),  # above 1
+            torch.tensor([0.0, float("nan"), 1.0], dtype=torch.float64),  # NaN
             torch.tensor([0.0, 0.7, 0.5, 1.0], dtype=torch.float64),  # decreases
         ],
-        ids=["not-1d", "one-node", "start", "end", "decreasing"],
+        ids=["not-1d", "empty", "below-0", "above-1", "nan", "decreasing"],
     )
     def test_malformed_node_fractions_raise(self, c):
         """Both generic rule classes reject malformed node fractions."""
@@ -178,6 +179,37 @@ class TestVariableMethodClass:
                 tableau=_Tableau(
                     c=c, b=torch.ones_like(c), b_error=torch.zeros_like(c)
                 ),
+            )
+
+    @pytest.mark.parametrize(
+        "c",
+        [
+            torch.tensor([0.5], dtype=torch.float64),  # one interior node
+            torch.tensor([0.1, 0.5, 1.0], dtype=torch.float64),  # does not start at 0
+            torch.tensor([0.0, 0.5, 0.9], dtype=torch.float64),  # does not end at 1
+        ],
+        ids=["one-interior-node", "start", "end"],
+    )
+    def test_only_variable_methods_need_both_ends(self, c):
+        """A uniform method's nodes need not include the subinterval's ends
+        (the solver takes the width from the mesh, and the Gauss-Kronrod nodes
+        are all interior); a variable method's must, because its weights are
+        computed from the nodes rescaled by the first and last. The check
+        holds also for fractions passed to measure_degree."""
+        UniformMethodClass(
+            degree=0,
+            error_exponent=2,
+            tableau=_Tableau(
+                c=c, b=torch.ones_like(c) / len(c), b_error=torch.zeros_like(c)
+            ),
+        )
+        with pytest.raises(ValueError, match="start at 0 and end at 1"):
+            VariableMethodClass(
+                degree=0, error_exponent=2, c=c, weight_function=_equal_weights
+            )
+        with pytest.raises(ValueError, match="start at 0 and end at 1"):
+            VARIABLE_METHODS["interpolatory3_variable"].measure_degree(
+                torch.tensor([0.0, 0.5, 0.9], dtype=torch.float64)
             )
 
     @pytest.mark.parametrize(

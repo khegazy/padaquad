@@ -11,7 +11,7 @@ abstract `MethodClass` (`node_fractions()`, `weights(nodes)`, `degree`, `order`,
 
 | Item | Meaning |
 |---|---|
-| node fractions `c` | Positions of the nodes in a subinterval scaled to $[0, 1]$: a 1-D float64 tensor starting at 0, ending at 1, never decreasing. Methods whose nodes do not include the ends add them with weight 0 (as the Gauss-Kronrod methods do). |
+| node fractions `c` | Positions of the nodes in a subinterval scaled to $[0, 1]$: a 1-D float64 tensor of values in $[0, 1]$, never decreasing. The ends 0 and 1 need not be nodes (the Gauss-Kronrod nodes are all interior): the solver takes a subinterval's width from its mesh points. A `VariableMethodClass` method must start at 0 and end at 1, because its weights are computed from the nodes rescaled by the first and last. |
 | weights `b` | The method's weights; the subinterval's integral is $h \sum_i b_i f(t_i)$. They sum to 1. |
 | error weights `b_error` | `b` minus the weights of a lower-degree method on the same nodes; the error estimate is $h \sum_i b^\text{error}_i f(t_i)$. |
 | `degree` | The highest polynomial degree `b` integrates exactly. `order` is computed as `degree + 1`. |

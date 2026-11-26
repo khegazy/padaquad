@@ -1050,9 +1050,17 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # Make sure f exists and provides the correct output. Running this
         # before the test calls also warms f up, so one-time costs (CUDA
         # start-up, lazy model loading, cuBLAS workspace) stay out of them.
-        # One point, shaped [1, T] like every batch f receives. mesh_init is
-        # already on the solver's dtype and device (_setup_integral_bounds).
-        test_integrand, _ = self._split_f_output(f(mesh_init.reshape(1, -1), *f_args))
+        # One point, shaped [1, T] like every batch f receives: the first node
+        # of the whole interval, which is mesh_init (bit for bit) for a method
+        # with a node at the start of a subinterval and an interior point
+        # otherwise, so f is not called at a bound the method never evaluates
+        # (where f may be singular, as 1/sqrt(t) at 0 with Gauss-Kronrod).
+        # The bounds are already on the solver's dtype and device
+        # (_setup_integral_bounds).
+        probe = self._compute_nodes(
+            mesh_init.reshape(1, -1), mesh_final.reshape(1, -1)
+        )[:, 0]
+        test_integrand, _ = self._split_f_output(f(probe, *f_args))
         if test_integrand.dim() < 2:
             raise ValueError(
                 "f must return values of shape [N, D] for points of shape "
@@ -1110,7 +1118,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             self._batch, self._batch_converged = self._initialize_max_batch(
                 f,
                 f_args,
-                mesh_init.reshape(1, -1),
+                probe,
                 int(mesh_trackers.sum()) * self.C,
                 total_mem_usage,
             )
@@ -4532,11 +4540,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
     def _flatten_output(self, panel_array: torch.Tensor) -> torch.Tensor:
         """
-        Join per-subinterval values into one sequence, dropping shared endpoints.
+        Join per-subinterval values into one sequence, each evaluated point once.
 
-        Keeps all C entries of the first subinterval and drops the first entry
-        of every later one, which repeats the previous subinterval's last entry
-        (node fractions start at 0 and end at 1).
+        When the method's node fractions start at 0 and end at 1, neighboring
+        subintervals share a node, their mesh point: all C entries of the first
+        subinterval are kept and the first entry of every later one, which
+        repeats the previous subinterval's last entry, is dropped. Otherwise
+        (for example Gauss-Kronrod, whose nodes are all interior) no node is
+        shared, and every entry is kept.
 
         Parameters
         ----------
@@ -4546,12 +4557,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Returns
         -------
         torch.Tensor
-            The joined values. Shape: [N * (C - 1) + 1, ...].
+            The joined values. Shape: [N * (C - 1) + 1, ...] when the ends are
+            nodes, else [N * C, ...].
         """
+        n, c, *rest = panel_array.shape
+        fractions = self.method.node_fractions()
+        if float(fractions[0]) != 0.0 or float(fractions[-1]) != 1.0:
+            return panel_array.reshape(n * c, *rest)
         # Written straight into the output: flattening the non-contiguous
         # panel_array[1:, 1:] and then concatenating made two full copies, 3
         # times the values on the host at the peak (measured 2026-11-26).
-        n, c, *rest = panel_array.shape
         out = panel_array.new_empty((n * (c - 1) + 1, *rest))
         out[:c] = panel_array[0]
         out[c:].view(n - 1, c - 1, *rest).copy_(panel_array[1:, 1:])

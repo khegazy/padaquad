@@ -8,6 +8,7 @@ import pytest
 import torch
 from _helpers import make_solver_for_unit_test
 
+from padaquad.methods import UniformMethodClass, _Tableau
 from padaquad.results import IntegrationResult
 
 
@@ -407,6 +408,26 @@ class TestFlattenOutput:
         out = solver._flatten_output(panel_array)
         assert out.dtype == dtype
         assert torch.equal(out, self._joined(panel_array))
+
+    @pytest.mark.parametrize(
+        "fractions",
+        [[0.2, 0.8], [0.0, 2 / 3], [1 / 3, 1.0]],
+        ids=["none", "start", "end"],
+    )
+    def test_no_shared_node_keeps_every_row(self, fractions):
+        """Without a node at both ends neighbouring subintervals share no
+        node (Gauss-Kronrod has none, a Radau-type rule one), so every row is
+        an evaluated point of its own: N * C rows, in order."""
+        solver = make_solver_for_unit_test()
+        c = torch.tensor(fractions, dtype=torch.float64)
+        solver.method = UniformMethodClass(
+            degree=0,
+            error_exponent=2,
+            tableau=_Tableau(c=c, b=torch.full_like(c, 0.5), b_error=0 * c),
+        )
+        panel_array = torch.arange(3 * 2 * 4, dtype=torch.float64).reshape(3, 2, 4)
+        out = solver._flatten_output(panel_array)
+        assert torch.equal(out, panel_array.reshape(6, 4))
 
     def test_gradient_equals_concatenation(self):
         """The gradient reaches every value as through the concatenation."""

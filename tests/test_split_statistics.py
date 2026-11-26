@@ -527,6 +527,110 @@ def test_warning_separates_failing_from_all_steps(caplog):
     ) in message
 
 
+def _ulps_around(x, n, dtype=torch.float64):
+    """The floating-point numbers n steps below and above x."""
+    lo = hi = torch.tensor([x], dtype=dtype)
+    for _ in range(n):
+        lo = torch.nextafter(lo, lo - 1)
+        hi = torch.nextafter(hi, hi + 1)
+    return lo, hi
+
+
+def _warning_of(caplog, method, f, dtype=torch.float64, atol=0.0, **kwargs):
+    """The warning of a call that does not converge, on the CPU."""
+    solver = adaptive_quadrature(
+        "uniform", method, atol=atol, rtol=0.0, device="cpu", dtype=dtype
+    )
+    if "mesh" not in kwargs and "mesh_init" not in kwargs:
+        kwargs |= {
+            "mesh_init": torch.tensor([0.0], dtype=dtype),
+            "mesh_final": torch.tensor([1.0], dtype=dtype),
+        }
+    torch.manual_seed(0)
+    with caplog.at_level(logging.WARNING, logger="padaquad.quadrature.base"):
+        out, _ = solver.integrate(f, max_batch=10**5, **kwargs)
+    assert out.converged is False
+    (message,) = _warning_messages(caplog)
+    return message
+
+
+@pytest.mark.parametrize(
+    ("dtype", "where"),
+    [(torch.float64, "0.29999999999999993"), (torch.float32, "0.29999998211860657")],
+    ids=["float64", "float32"],
+)
+def test_warning_names_subintervals_too_narrow_to_halve(caplog, dtype, where):
+    """A jump with zero tolerances (dopri5, a node at each end): the
+    subintervals at the jump fail until their ends are neighbouring
+    floating-point numbers and are then accepted. The warning says where
+    they are, that neither halving nor a call from the state refines them,
+    and the remedies that can (float64 only for a float32 call); it does not
+    offer state=state, max_adaptive_splits or enforce_convergence."""
+    message = _warning_of(
+        caplog,
+        "dopri5",
+        lambda t: torch.sign(t - 0.3),
+        dtype=dtype,
+        take_gradient=False,
+    )
+    name = str(dtype).removeprefix("torch.")
+    assert f"failing subintervals as narrow as {name} allows" in message
+    assert f"they start at t = {where}" in message
+    assert "loosen atol or rtol" in message
+    assert ("integrate in float64" in message) is (dtype == torch.float32)
+    assert "mesh point exactly at the discontinuity or singularity" in message
+    for absent in ("state=state", "max_adaptive_splits", "enforce_convergence"):
+        assert absent not in message
+
+
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_warning_near_a_singularity_with_a_positive_tolerance(caplog, take_gradient):
+    """1/(t - 0.5)^2 on 32 ULPs starting 1e-11 below 0.5, gk21, atol=1e-6: the
+    integrand's own rounding fails the tolerance on each one-ULP subinterval
+    (a small form of the integral over [0, 1], where this happens after about
+    60 passes). Every failing subinterval is too narrow to halve, so the
+    warning offers neither state=state nor take_gradient=False, and says the
+    integral may not exist."""
+    lo = torch.tensor([0.5 - 1e-11], dtype=torch.float64)
+    hi = _ulps_around(float(lo), 32)[1]
+    message = _warning_of(
+        caplog,
+        "gk21",
+        lambda t: 1 / (t - 0.5) ** 2,
+        atol=1e-6,
+        mesh_init=lo,
+        mesh_final=hi,
+        take_gradient=take_gradient,
+    )
+    assert "for the 32 failing subintervals as narrow as float64 allows" in message
+    assert "and 27 more" in message
+    assert "the integral may not exist" in message
+    assert "state=state" not in message
+    assert "take_gradient=False" not in message
+
+
+def test_warning_lists_both_kinds(caplog):
+    """A jump inside a subinterval four ULPs wide, and sin(30 t) elsewhere
+    with max_adaptive_splits=2 and zero tolerances: the jump's subintervals
+    become too narrow to halve, the others stop at the cap. The warning gives
+    the cap's remedies (a higher cap, a call from the state) and names the
+    narrow ones at the jump."""
+    lo, hi = _ulps_around(0.3, 2)
+    zero, one = (torch.tensor([x], dtype=torch.float64) for x in (0.0, 1.0))
+    message = _warning_of(
+        caplog,
+        "dopri5",
+        lambda t: torch.sign(t - 0.3) + torch.sin(30 * t),
+        mesh=torch.stack([zero, lo, hi, one]),
+        take_gradient=False,
+        max_adaptive_splits=2,
+    )
+    assert "raise max_adaptive_splits" in message
+    assert "call again with the state it returned (state=state)" in message
+    assert "for the 2 failing subintervals as narrow as float64 allows" in message
+    assert "they start at t = 0.29999999999999993, 0.29999999999999999)" in message
+
+
 def test_warning_reports_one_output_component(caplog):
     """D = 2 with very different scales: the error, total error and |integral|
     in the message all belong to component 0, the one whose failing error is

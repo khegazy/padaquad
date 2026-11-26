@@ -1740,6 +1740,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 final_ratios,
                 final_fails,
                 nonfinite,
+                mesh,
+                split_counts,
                 max_adaptive_splits,
                 take_gradient,
                 enforce_convergence,
@@ -1944,6 +1946,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         final_ratios: torch.Tensor,
         final_fails: torch.Tensor,
         nonfinite: torch.Tensor,
+        mesh: torch.Tensor,
+        split_counts: torch.Tensor,
         max_adaptive_splits: int | None,
         take_gradient: bool,
         enforce_convergence: bool,
@@ -1959,6 +1963,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         subintervals' summed error is largest relative to the absolute value
         of its integral.
 
+        The remedies depend on why each finite failing subinterval was
+        accepted, as ``_splittable`` tells: one too narrow to halve (its ends
+        are neighbouring floating-point numbers) is named by its place, and
+        only remedies that can help it are offered (another call from the
+        state meets it again); one stopped by ``max_adaptive_splits`` and one
+        accepted against a tolerance that changed afterwards can be refined by
+        a higher cap or by another call from the state.
+
         Parameters
         ----------
         record : dict[str, torch.Tensor]
@@ -1973,6 +1985,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         nonfinite : torch.Tensor
             Subintervals whose error ratio is NaN or Inf [N] (a non-finite
             error estimate, or a non-finite tolerance from the integral).
+        mesh : torch.Tensor
+            The final mesh [N + 1, T]; the record's row i is its subinterval i.
+        split_counts : torch.Tensor
+            Split count of the subinterval starting at each mesh point [N + 1].
         max_adaptive_splits : int | None
             The split cap used by the call, or None.
         take_gradient : bool
@@ -1987,6 +2003,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             not re-checked, and the loop judged them against that reference).
         """
         finite_fails = final_fails & ~nonfinite
+        # Why each finite failing subinterval could not be refined:
+        # _splittable without the cap tells the ones too narrow to halve, with
+        # it also the ones at the cap.
+        rows = torch.arange(len(final_fails), device=mesh.device)
+        narrow = finite_fails & ~self._splittable(mesh, rows, None, None)
+        refinable = finite_fails & ~narrow
+        capped = refinable & ~self._splittable(
+            mesh, rows, split_counts, max_adaptive_splits
+        )
         # Per-component sums of |per-step error estimate| [D], over the finite
         # failing steps and over all finite steps. Absolute values, unlike
         # integral_error, whose signed per-step errors can cancel.
@@ -2009,22 +2034,37 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             else ""
         )
         remedies = []
-        if max_adaptive_splits is not None:
+        if bool(capped.any()):
             remedies.append("raise max_adaptive_splits")
-        if not enforce_convergence:
+        if bool(refinable.any()) and not enforce_convergence:
             remedies.append(
                 "pass take_gradient=False with enforce_convergence None or True "
                 "(accepted steps are then re-checked)"
                 if take_gradient
                 else "pass enforce_convergence=True"
             )
-        if reference_pinned:
+        if bool(refinable.any()) and reference_pinned:
             remedies.append(
                 "use an error_integral_reference no larger than |integral| "
                 "(converged is judged against the final integral)"
             )
-        if bool(finite_fails.any()):
+        if bool(refinable.any()):
             remedies.append("call again with the state it returned (state=state)")
+        if bool(narrow.any()):
+            places = mesh[:-1][narrow]
+            remedies.append(
+                f"for the {len(places)} failing subintervals as narrow as "
+                f"{str(self.dtype).removeprefix('torch.')} allows (their ends "
+                "are neighbouring floating-point numbers; they start at t = "
+                f"{', '.join(f'{v:.17g}' for v in places[:5, 0].tolist())}"
+                f"{f' and {len(places) - 5} more' if len(places) > 5 else ''}), "
+                "which neither halving nor another call from the state can "
+                "refine: loosen atol or rtol"
+                + (", integrate in float64" if self.dtype == torch.float32 else "")
+                + ", or pass a mesh= with a mesh point exactly at the "
+                "discontinuity or singularity there; if the integrand is "
+                "singular there, the integral may not exist"
+            )
         if bool((final_fails & nonfinite).any()):
             remedies.append(
                 "find where the integrand or the integral is NaN/Inf "

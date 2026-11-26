@@ -30,6 +30,14 @@ of the error is logged. Common causes:
   own rounding error can fail the tolerance on every subinterval close to it,
   and the refinement can go on for a long time and use much memory before
   each of them is that narrow: pass `max_adaptive_splits` to stop it sooner.
+  The warning names these subintervals by the point where each starts (the
+  first five) and says that neither halving nor another call from the state
+  can refine them. What can help: a looser `atol` or `rtol`; float64, if the
+  call used float32; or a mesh point placed exactly at the jump or
+  singularity, in a mesh passed as `mesh=`. If the integrand is singular
+  there, the integral may not exist. The warning offers a higher
+  `max_adaptive_splits` and a call from the state only for the failing
+  subintervals they can refine.
 
 `result.error_ratios` holds each subinterval's ratio when it was accepted, so
 every entry can be below 1 while `converged` is `False`. With

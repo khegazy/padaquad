@@ -617,7 +617,7 @@ final commit are in the implementing agent's final report
   item 3); in `main`, replace `torch.set_num_threads(len(os.sched_getaffinity(0)))`
   (128 on a GPU node, two threads per core, the slowest setting of 2.6) by
   one fixed count for every torch-based solver, at most one per physical
-  core (8 was within 2 to 8 % of the fastest for PadaQuad in every case of
+  core (8 was within 8 % of the fastest for PadaQuad in every case of
   2.6), from a command-line option; in `metadata`, the count, the CPU set,
   `OMP_*` and `GOMP_SPINCOUNT`; in `render_markdown`, the range beside the
   median in PadaQuad's own table. In `run_benchmark.sh`, start the Python

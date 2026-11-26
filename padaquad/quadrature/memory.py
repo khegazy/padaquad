@@ -690,10 +690,14 @@ class _MemoryManagement:
         total_gpu = mem_info[1] / _GB
         # Memory that is free outside of the PyTorch cache
         free_gpu = mem_info[0] / _GB
+        # One build of PyTorch's statistics dictionary (about 60 µs each on an
+        # A100, once per batch with take_gradient=True), read under the keys
+        # torch.cuda.memory_reserved and memory_allocated read.
+        stats = torch.cuda.memory_stats(self.device)
         # Memory reserved for the PyTorch cache
-        torch_cache = torch.cuda.memory_reserved(self.device) / _GB
+        torch_cache = stats.get("reserved_bytes.all.current", 0) / _GB
         # Cache memory being used by tensors
-        torch_cache_used = torch.cuda.memory_allocated(self.device) / _GB
+        torch_cache_used = stats.get("allocated_bytes.all.current", 0) / _GB
         # Total free amount of memory that can be used
         total_free = free_gpu + (torch_cache - torch_cache_used)
 

@@ -190,9 +190,9 @@ def _integration_sizes(max_batch, **options):
     calculate = solver._calculate_integral
     evaluate = solver._evaluate_f_on_split_nodes
 
-    def spy_calculate(t, y, y0=None):
+    def spy_calculate(t, y, mesh_left, mesh_right, y0=None):
         sizes.append(len(t))
-        return calculate(t, y, y0)
+        return calculate(t, y, mesh_left, mesh_right, y0)
 
     def spy_evaluate(f, f_args, mesh, step_idxs, *args):
         passes.append(len(step_idxs))

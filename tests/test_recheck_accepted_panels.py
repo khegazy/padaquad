@@ -445,7 +445,9 @@ def _make_record(solver, n_panels=4, result_device=None):
         [nodes[:, 0, :], torch.tensor([[1.0]], dtype=torch.float64)], dim=0
     )
     mi = solver._get_mesh_indices(mesh)
-    record = solver._record_results({}, False, results, mi, result_device)
+    record = solver._record_results(
+        {}, False, results, nodes[:, 0, :], mi, result_device
+    )
     return record, quad_vals, err_vals
 
 
@@ -516,7 +518,9 @@ def test_remove_all_then_record_does_not_crash(result_device):
     mi_fresh = solver._get_mesh_indices(
         torch.tensor([[0.0], [1.0]], dtype=torch.float64)
     )
-    record = solver._record_results(record, False, fresh, mi_fresh, result_device)
+    record = solver._record_results(
+        record, False, fresh, fresh_nodes[:, 0, :], mi_fresh, result_device
+    )
     assert record["nodes"].shape[0] == 1
     assert torch.allclose(record["mesh_quadratures"], fresh.mesh_quadratures)
 
@@ -818,7 +822,7 @@ def _signed_error_sum(solver, result, f):
     nodes = left[:, None, :] + c[None, :, None] * h[:, None, :]
     y = f(nodes.reshape(-1, 1)).reshape(nodes.shape[0], nodes.shape[1], -1)
     zero = torch.zeros(1, dtype=torch.float64, device=solver.device)
-    return solver._calculate_integral(nodes, y, y0=zero).integral_error
+    return solver._calculate_integral(nodes, y, left, left + h, y0=zero).integral_error
 
 
 @pytest.mark.parametrize("reference", [None, 1.0])

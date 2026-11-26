@@ -228,14 +228,16 @@ class SolverBase(ABC, DistributedEnvironment):
         self,
         t: torch.Tensor,
         y: torch.Tensor,
+        mesh_left: torch.Tensor,
+        mesh_right: torch.Tensor,
         y0: torch.Tensor | None = None,
     ) -> MethodOutput:
         """
         Compute the integral and error estimate for a batch of subintervals.
 
-        Given the nodes of each subinterval and the integrand values there,
-        applies the method's weights to produce each subinterval's contribution
-        to the integral and its error estimate.
+        Given the nodes of each subinterval, the integrand values there and the
+        subinterval's two mesh points, applies the method's weights to produce
+        each subinterval's contribution to the integral and its error estimate.
 
         Parameters
         ----------
@@ -245,6 +247,10 @@ class SolverBase(ABC, DistributedEnvironment):
         y : torch.Tensor
             Integrand values at the nodes in t. Shape: [N, C, D] (D outputs
             of the integrand).
+        mesh_left : torch.Tensor
+            Left mesh point of each subinterval. Shape: [N, T].
+        mesh_right : torch.Tensor
+            Right mesh point of each subinterval. Shape: [N, T].
         y0 : torch.Tensor or None
             Starting value for the integral accumulator. Shape: [D]. None
             starts from zero.

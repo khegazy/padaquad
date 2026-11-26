@@ -85,17 +85,21 @@ class TestRecordResults:
         self.solver = make_solver_for_unit_test()
 
     def test_first_batch_initializes(self):
-        """Empty record is populated with all keys from first batch."""
+        """Empty record is populated with all keys from first batch, and the
+        left mesh points (the key that places each subinterval in the mesh)."""
         record = {}
         results = _make_integral_output(0.0, 0.5)
         mi = _mesh_indices_for(self.solver, results.nodes)
-        record = self.solver._record_results(record, False, results, mi)
+        record = self.solver._record_results(
+            record, False, results, results.nodes[:, 0, :], mi
+        )
         assert "integral" in record
         assert "nodes" in record
         assert "h" in record
         assert "y" in record
         assert "mesh_quadratures" in record
         assert torch.equal(record["integral"], results.integral)
+        assert torch.equal(record["mesh_left"], results.nodes[:, 0, :])
 
     def test_first_batch_detaches(self):
         """With take_gradient=True, first batch values are detached."""
@@ -105,7 +109,9 @@ class TestRecordResults:
         results.integral = results.integral.clone().requires_grad_(True)
         results.loss = results.loss.clone().requires_grad_(True)
         mi = _mesh_indices_for(self.solver, results.nodes)
-        record = self.solver._record_results(record, True, results, mi)
+        record = self.solver._record_results(
+            record, True, results, results.nodes[:, 0, :], mi
+        )
         assert not record["integral"].requires_grad
         assert not record["loss"].requires_grad
 
@@ -116,8 +122,12 @@ class TestRecordResults:
         batch2 = _make_integral_output(0.0, 0.5, N=2)
         mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
 
-        record = self.solver._record_results(record, False, batch1, mi)
-        record = self.solver._record_results(record, False, batch2, mi)
+        record = self.solver._record_results(
+            record, False, batch1, batch1.nodes[:, 0, :], mi
+        )
+        record = self.solver._record_results(
+            record, False, batch2, batch2.nodes[:, 0, :], mi
+        )
 
         assert record["nodes"].shape[0] == 4  # 2 + 2 steps
         # Times should be sorted ascending
@@ -132,8 +142,12 @@ class TestRecordResults:
         batch2.integral = torch.tensor([0.7], dtype=torch.float64)
         mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
 
-        record = self.solver._record_results(record, False, batch1, mi)
-        record = self.solver._record_results(record, False, batch2, mi)
+        record = self.solver._record_results(
+            record, False, batch1, batch1.nodes[:, 0, :], mi
+        )
+        record = self.solver._record_results(
+            record, False, batch2, batch2.nodes[:, 0, :], mi
+        )
 
         assert torch.allclose(
             record["integral"], torch.tensor([1.0], dtype=torch.float64)
@@ -148,8 +162,12 @@ class TestRecordResults:
         batch2.loss = torch.tensor([2.0], dtype=torch.float64)
         mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
 
-        record = self.solver._record_results(record, False, batch1, mi)
-        record = self.solver._record_results(record, False, batch2, mi)
+        record = self.solver._record_results(
+            record, False, batch1, batch1.nodes[:, 0, :], mi
+        )
+        record = self.solver._record_results(
+            record, False, batch2, batch2.nodes[:, 0, :], mi
+        )
 
         assert torch.allclose(record["loss"], torch.tensor([3.0], dtype=torch.float64))
 
@@ -160,8 +178,12 @@ class TestRecordResults:
         batch2 = _make_integral_output(0.0, 0.3, N=1)
         mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
 
-        record = self.solver._record_results(record, False, batch1, mi)
-        record = self.solver._record_results(record, False, batch2, mi)
+        record = self.solver._record_results(
+            record, False, batch1, batch1.nodes[:, 0, :], mi
+        )
+        record = self.solver._record_results(
+            record, False, batch2, batch2.nodes[:, 0, :], mi
+        )
 
         assert torch.all(record["nodes"][1:, 0, 0] - record["nodes"][:-1, 0, 0] > 0)
 
@@ -181,8 +203,12 @@ class TestRecordResults:
         batchB = _make_multidim_output(mesh[[1, 3]])  # mesh positions 1, 3
 
         record = {}
-        record = self.solver._record_results(record, False, batchA, mi)
-        record = self.solver._record_results(record, False, batchB, mi)
+        record = self.solver._record_results(
+            record, False, batchA, batchA.nodes[:, 0, :], mi
+        )
+        record = self.solver._record_results(
+            record, False, batchB, batchB.nodes[:, 0, :], mi
+        )
 
         order = self.solver._mesh_order(record["nodes"][:, 0, :], mi)
         assert order.tolist() == [0, 1, 2, 3]
@@ -199,8 +225,12 @@ class TestRecordResults:
             batch.tracked_variables = (batch.nodes.clone(), 2 * batch.nodes)
         mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
 
-        record = self.solver._record_results({}, False, batch1, mi)
-        record = self.solver._record_results(record, False, batch2, mi)
+        record = self.solver._record_results(
+            {}, False, batch1, batch1.nodes[:, 0, :], mi
+        )
+        record = self.solver._record_results(
+            record, False, batch2, batch2.nodes[:, 0, :], mi
+        )
 
         assert torch.equal(record["tracked_variables_0"], record["nodes"])
         assert torch.equal(record["tracked_variables_1"], 2 * record["nodes"])
@@ -212,9 +242,13 @@ class TestRecordResults:
         batch2.tracked_variables = (batch2.nodes.clone(),)
         mi = _mesh_indices_for(self.solver, batch1.nodes, batch2.nodes)
 
-        record = self.solver._record_results({}, False, batch1, mi)
+        record = self.solver._record_results(
+            {}, False, batch1, batch1.nodes[:, 0, :], mi
+        )
         with pytest.raises(ValueError, match="different set of tracked variables"):
-            self.solver._record_results(record, False, batch2, mi)
+            self.solver._record_results(
+                record, False, batch2, batch2.nodes[:, 0, :], mi
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +282,7 @@ class TestSortRecord:
             "mesh_quadrature_errors": torch.ones(N, D, dtype=torch.float64) * 0.01,
             "error_ratios": torch.ones(N, dtype=torch.float64) * 0.5,
             "integral_error": torch.tensor([0.01], dtype=torch.float64),
+            "mesh_left": t[:, 0, :],
         }
 
     def _mesh_indices(self, record):
@@ -335,6 +370,7 @@ class TestSortRecord:
             ),
             "mesh_quadrature_errors": torch.ones(N, D, dtype=torch.float64) * 0.01,
             "error_ratios": torch.ones(N, dtype=torch.float64) * 0.5,
+            "mesh_left": mesh[positions],
         }
 
         record = self.solver._sort_record(record, mi)

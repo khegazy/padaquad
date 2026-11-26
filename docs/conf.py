@@ -113,3 +113,8 @@ html_static_path: list[str] = []
 # ACM and SIAM answer automated requests with 403 Forbidden. These DOIs
 # (Gonnet 2012, Trefethen 2008) were confirmed through the Crossref API.
 linkcheck_ignore = [r"https://doi\.org/10\.1145/", r"https://doi\.org/10\.1137/"]
+# docs.pytorch.org answers automated requests with a JavaScript page that has
+# no anchors, so its pages are checked without their anchors. The anchors come
+# from PyTorch's intersphinx inventory (e.g. cuda-memory-envvars, the label in
+# PyTorch's docs/source/notes/cuda.rst).
+linkcheck_anchors_ignore_for_url = [r"https://docs\.pytorch\.org/"]

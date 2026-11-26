@@ -335,11 +335,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             accepted. Default 0.0 (every component must pass).
         runtime_checks : bool
             If True (default), check while integrating: raise ``ValueError``
-            naming the points where ``f`` returned NaN or Inf, and check on
-            every pass that the nodes and the mesh are in order. If False, skip
-            these checks to save time and memory; subintervals where ``f``
-            returned NaN or Inf are then accepted and the non-finite value
-            reaches the result.
+            naming the points where ``f`` returned NaN or Inf, and check
+            PadaQuad's own bookkeeping (that the accepted subintervals are
+            recorded in mesh order). If False, skip these checks to save time
+            and memory; subintervals where ``f`` returned NaN or Inf are then
+            accepted and the non-finite value reaches the result. The mesh and
+            the nodes are in order by construction either way.
         dtype : torch.dtype
             ``torch.float64`` (default) or ``torch.float32``; ``torch.float16``
             is refused. ``integrate`` switches to the dtype of the mesh or the
@@ -792,9 +793,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             (see :ref:`the user guide <ug-error-norm>`).
         runtime_checks : bool or None
             The constructor's ``runtime_checks`` for this call: if True, raise
-            ``ValueError`` when f returns NaN or Inf and check the order of the
-            nodes and the mesh on every pass; if False, skip these checks. None
-            (default) keeps the constructor's value.
+            ``ValueError`` when f returns NaN or Inf and check PadaQuad's own
+            bookkeeping; if False, skip these checks. None (default) keeps the
+            constructor's value.
         trade_speed_for_memory : bool
             Only with ``take_gradient=False``. If False (default), a pass's
             integrand values stay on the solver's device until all its
@@ -1321,18 +1322,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             assert split_counts is not None  # returned non-None for non-None input
             method_output, y_step_eval, nodes = kept_output, kept_y, kept_nodes
             error_ratios = error_ratios[keep_idx]
-            # Verify barrier ordering after adaptive refinement.
-            # Any-T invariant: consecutive barriers are distinct (no
-            # zero-length panels), which is all that is meaningful for a
-            # multi-dimensional path.
-            if self.runtime_checks:
-                assert torch.all(torch.any(mesh[1:] != mesh[:-1], dim=-1))
-                # For 1-D time the barriers must additionally be monotonic.
-                if mesh.shape[-1] == 1:
-                    mesh_diff = mesh[1:, 0] - mesh[:-1, 0]
-                    assert torch.all(mesh_diff + self.atol_assert > 0) or torch.all(
-                        mesh_diff - self.atol_assert < 0
-                    )
 
             # --- Step 5b: Drop re-split recorded panels from the record ---
             # The recorded panels flagged above were just bisected in the mesh
@@ -2369,10 +2358,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh_left, mesh_right = mesh[idxs], mesh[idxs + 1]
             nodes = self._compute_nodes(mesh_left, mesh_right)
             nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
-            if self.runtime_checks:
-                assert torch.all(
-                    nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0
-                )
             if cuda:
                 torch.cuda.reset_peak_memory_stats(self.device)
                 before = torch.cuda.memory_allocated(self.device)

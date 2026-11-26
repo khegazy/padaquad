@@ -1242,13 +1242,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                         f"{list(error_integral_reference.shape)}."
                     )
                 reference_integral = error_integral_reference
-            error_ratios, error_ratios_2steps, error_ratios_per_dim = (
-                self._compute_error_ratios(
-                    mesh_quadrature_errors=method_output.mesh_quadrature_errors,
-                    mesh_quadratures=method_output.mesh_quadratures,
-                    cum_mesh_quadratures=cum_mesh_quadratures,
-                    integral=reference_integral,
-                )
+            error_ratios, _, error_ratios_per_dim = self._compute_error_ratios(
+                mesh_quadrature_errors=method_output.mesh_quadrature_errors,
+                mesh_quadratures=method_output.mesh_quadratures,
+                cum_mesh_quadratures=cum_mesh_quadratures,
+                integral=reference_integral,
             )
             keep_mask, _, _ = self._accept_reject_masks(
                 error_ratios, error_ratios_per_dim
@@ -1256,11 +1254,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             if self.speed_logger:
                 self.speed_logger.debug("calculate errors: %s", time.time() - t0)
             assert len(nodes) == len(error_ratios)
-            assert len(nodes) - 1 == len(error_ratios_2steps), (
-                f"ratios: {error_ratios_2steps.shape} | nodes: {nodes.shape}"
-            )
             logger.debug("error_ratios: %s", error_ratios)
-            logger.debug("error_ratios_2steps: %s", error_ratios_2steps)
 
             # --- Step 4b: Re-check already-accepted (recorded) panels ---
             # The accept/reject denominator (built from reference_integral, Step 4)
@@ -2899,9 +2893,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         -------
         tuple[torch.Tensor | None, float]
             ``(merge_prediction, merge_cut)``: ``_predict_merged_errors`` for
-            ``"predicted"``, shape [N-1, D], which ``_compute_error_ratios``
-            adds to the summed errors, or None; and the cutoff on the pair
-            ratio.
+            ``"predicted"``, shape [N-1, D], which ``_get_optimal_mesh`` adds
+            to the summed errors, or None; and the cutoff on the pair ratio.
         """
         if self.merge_rule == "sum":
             return None, self.remove_cut
@@ -3288,7 +3281,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadratures : torch.Tensor
             Integral contribution of each subinterval. Shape: [N, D].
         mesh_quadrature_errors : torch.Tensor
-            Error estimate of each subinterval. Shape: [N, D].
+            Absolute value of the error estimate of each subinterval (a merge
+            sums two of them, which signed values could cancel). Shape: [N, D].
         integral : torch.Tensor
             The final integral. Shape: [D].
         mesh : torch.Tensor
@@ -3305,15 +3299,19 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             The optimal mesh. Shape: [M_opt, T].
         """
         # Merge pairs of over-resolved neighbors: the one place where the pair
-        # ratio (error_ratios_2steps) decides anything (the loop only checks
-        # its length and logs it).
+        # ratio (error_ratios_2steps) is computed and decides anything. Its
+        # numerator is each pair's summed errors, plus the merge prediction
+        # (adding a Python 0 is exact, so both cases sum in the same order).
         merge_prediction, merge_cut = self._merge_inputs(y, mesh_quadratures, mesh)
         _, error_ratios_2steps, _ = self._compute_error_ratios(
             mesh_quadrature_errors=mesh_quadrature_errors,
             mesh_quadratures=mesh_quadratures,
             integral=integral.detach(),
-            merge_prediction=merge_prediction,
+            pair_errors=(0 if merge_prediction is None else merge_prediction)
+            + mesh_quadrature_errors[:-1]
+            + mesh_quadrature_errors[1:],
         )
+        assert error_ratios_2steps is not None  # computed with pair_errors
         mesh_pruned, mesh_quadratures_pruned, mesh_quadrature_errors_pruned = (
             self._prune_excess_mesh(
                 mesh,
@@ -3738,8 +3736,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadratures: torch.Tensor | None = None,
         cum_mesh_quadratures: torch.Tensor | None = None,
         integral: torch.Tensor | None = None,
-        merge_prediction: torch.Tensor | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+        pair_errors: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         Compute the error ratio of each subinterval, choosing by ``self.error_norm``.
 
@@ -3770,22 +3768,21 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             (cumulative mode only).
         integral : torch.Tensor or None
             Current total integral [D] (absolute mode only; required there).
-        merge_prediction : torch.Tensor or None
-            Predicted error of merging each pair of neighbors [N-1, D]
-            (``merge_rule="predicted"``, see ``_merge_inputs``), added to the
-            pair's summed errors ``abs(e[k]) + abs(e[k+1])`` in the numerator
-            of ``error_ratios_2steps``. None (default) adds nothing.
+        pair_errors : torch.Tensor or None
+            Error of each pair of neighbors merged into one [N-1, D], the
+            numerator of ``error_ratios_2steps``, built by its one reader,
+            ``_get_optimal_mesh``. None (default) skips the pair ratio.
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]
+        tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]
             Tuple ``(error_ratios, error_ratios_2steps, error_ratios_per_dim)``:
 
             - error_ratios: accept-or-split quantity of each subinterval [N]
               (the reduced ratio for the norm family; the failure fraction for
               ``"failure_fraction"``).
             - error_ratios_2steps: merge indicator of each pair of neighbors
-              [N-1].
+              [N-1] when ``pair_errors`` is given, else None.
             - error_ratios_per_dim: ratio of each element [N, D] for
               ``"failure_fraction"`` (so non-finite subintervals can be
               found), else None.
@@ -3807,13 +3804,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # No rounding floor: a zero floor leaves every tolerance as it is.
             mesh_quadratures = torch.zeros_like(mesh_quadrature_errors)
         abs_err = torch.abs(mesh_quadrature_errors)
-        # Numerator of the pair ratio. Adding a Python 0 is exact, so both
-        # cases sum in the same order.
-        pair_errors = (
-            (0 if merge_prediction is None else merge_prediction)
-            + abs_err[:-1]
-            + abs_err[1:]
-        )
         if self._is_failure_fraction:
             return self._error_ratios_failure_fraction(
                 abs_err, mesh_quadratures, cum_mesh_quadratures, integral, pair_errors
@@ -3828,8 +3818,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadratures: torch.Tensor,
         cum_mesh_quadratures: torch.Tensor | None,
         integral: torch.Tensor | None,
-        pair_errors: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, None]:
+        pair_errors: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, None]:
         """
         Error ratios of the norm family: reduce the error vector, then compare.
 
@@ -3877,14 +3867,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             required there). Shape: [N, D].
         integral : torch.Tensor | None
             Total integral (absolute mode). Shape: [D].
-        pair_errors : torch.Tensor
+        pair_errors : torch.Tensor | None
             Error of each pair of neighbors merged into one, the numerator of
-            the pair ratio (see ``_compute_error_ratios``). Shape: [N-1, D].
+            the pair ratio (see ``_compute_error_ratios``), or None to skip the
+            pair ratio. Shape: [N-1, D].
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor, None]
-            ``(error_ratio, error_ratio_2steps, None)``, shapes [N], [N-1].
+        tuple[torch.Tensor, torch.Tensor | None, None]
+            ``(error_ratio, error_ratio_2steps, None)``, shapes [N] and [N-1]
+            (None without ``pair_errors``).
         """
         err = self._reduce_norm(abs_err)
         floor = self._reduce_norm(self._round_floor(mesh_quadratures))
@@ -3907,13 +3899,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             error_tol_2steps = error_tol[1:]
 
         # Broadcasts a scalar (absolute mode) or per-step (cumulative) tol.
-        error_tol = torch.maximum(error_tol, floor)
+        error_ratio = err / torch.maximum(error_tol, floor)
+        if pair_errors is None:
+            return error_ratio, None, None
         error_tol_2steps = torch.maximum(error_tol_2steps, floor[:-1] + floor[1:])
-
-        error_ratio = err / error_tol
-        err_2steps = self._reduce_norm(pair_errors)
-        error_ratio_2steps = err_2steps / error_tol_2steps
-        return error_ratio, error_ratio_2steps, None
+        return error_ratio, self._reduce_norm(pair_errors) / error_tol_2steps, None
 
     def _error_ratios_failure_fraction(
         self,
@@ -3921,8 +3911,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_quadratures: torch.Tensor,
         cum_mesh_quadratures: torch.Tensor | None,
         integral: torch.Tensor | None,
-        pair_errors: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        pair_errors: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]:
         """
         Error ratios of ``"failure_fraction"``: the fraction of failing components.
 
@@ -3958,15 +3948,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             required there). Shape: [N, D].
         integral : torch.Tensor | None
             Total integral (absolute mode). Shape: [D].
-        pair_errors : torch.Tensor
+        pair_errors : torch.Tensor | None
             Error of each pair of neighbors merged into one, the numerator of
-            the pair ratio (see ``_compute_error_ratios``). Shape: [N-1, D].
+            the pair ratio (see ``_compute_error_ratios``), or None to skip the
+            pair ratio. Shape: [N-1, D].
 
         Returns
         -------
-        tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        tuple[torch.Tensor, torch.Tensor | None, torch.Tensor]
             ``(failure_fraction, error_ratio_2steps, ratio)``, shapes [N],
-            [N-1], [N, D].
+            [N-1] (None without ``pair_errors``) and [N, D].
         """
         if self.use_absolute_error_ratio:
             assert integral is not None  # checked in _compute_error_ratios
@@ -3978,23 +3969,20 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # Merged pair's tolerance: step i+1's (see _error_ratios_norm).
             error_tol_2steps = error_tol[1:]
 
+        # torch.maximum broadcasts the [D] or [N, D] tolerance with the floor.
         floor = self._round_floor(mesh_quadratures)  # [N, D]
-        error_tol = torch.maximum(error_tol * torch.ones_like(floor), floor)
-        error_tol_2steps = torch.maximum(
-            error_tol_2steps * torch.ones_like(floor[:-1]),
-            floor[:-1] + floor[1:],
-        )
-
-        ratio = abs_err / error_tol  # [N, D]
+        ratio = abs_err / torch.maximum(error_tol, floor)  # [N, D]
         finite = torch.isfinite(ratio)
         failed = (ratio >= 1.0) & finite
         failure_fraction = failed.to(self.dtype).mean(dim=-1)  # [N]
+        if pair_errors is None:
+            return failure_fraction, None, ratio
 
         # Merge/prune indicator: conservative max-norm of the combined 2-step
         # ratio (compared against remove_cut < 1, so a magnitude is needed here
         # rather than a fraction).
-        ratio_2steps = pair_errors / error_tol_2steps
-        error_ratio_2steps = torch.amax(ratio_2steps, dim=-1)  # [N-1]
+        error_tol_2steps = torch.maximum(error_tol_2steps, floor[:-1] + floor[1:])
+        error_ratio_2steps = torch.amax(pair_errors / error_tol_2steps, dim=-1)
         return failure_fraction, error_ratio_2steps, ratio
 
     @property

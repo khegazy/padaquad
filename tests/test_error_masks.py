@@ -180,7 +180,11 @@ class TestErrorRatiosNormDtype:
         s = _solver(dtype)
         e = torch.tensor([[1e-3, 2e-3], [3e-3, 4e-3]], dtype=dtype)
         integral = torch.tensor([1.0, 1.0], dtype=dtype)
-        r, r2, _ = s._compute_error_ratios(mesh_quadrature_errors=e, integral=integral)
+        r, r2, _ = s._compute_error_ratios(
+            mesh_quadrature_errors=e,
+            integral=integral,
+            pair_errors=e[:-1].abs() + e[1:].abs(),
+        )
         assert r.dtype == dtype
         assert r2.dtype == dtype
 
@@ -226,7 +230,7 @@ class TestErrorRatiosCumulativeDtype:
         e = torch.full((n, 1), 1e-9, dtype=dtype)
         mq = torch.full((n, 1), 0.1, dtype=dtype)
         r, r2, _ = s._compute_error_ratios(
-            mesh_quadrature_errors=e, mesh_quadratures=mq
+            mesh_quadrature_errors=e, mesh_quadratures=mq, pair_errors=2 * e[1:]
         )
         assert r.dtype == dtype
         assert torch.all(r[1:] <= r[:-1] + _close(dtype))
@@ -253,7 +257,7 @@ class TestFailureFractionRatiosDtype:
         e = torch.tensor([[2.0, 0.5, 0.5], [0.5, 0.5, 0.5]], dtype=dtype)
         integral = torch.tensor([1.0, 1.0, 1.0], dtype=dtype)
         frac, two_step, per_dim = s._compute_error_ratios(
-            mesh_quadrature_errors=e, integral=integral
+            mesh_quadrature_errors=e, integral=integral, pair_errors=e[:-1] + e[1:]
         )
         assert frac.dtype == dtype
         assert per_dim.shape == (2, 3)
@@ -408,12 +412,14 @@ class TestAcceptRejectMasksFailure:
 @pytest.mark.parametrize("dtype", DTYPES, ids=DTYPE_IDS)
 @pytest.mark.parametrize("error_norm", ["2", "max", "failure_fraction"])
 @pytest.mark.parametrize("absolute", [True, False], ids=["absolute", "cumulative"])
-def test_merge_prediction_adds_to_the_pair_numerator(dtype, error_norm, absolute):
-    """A supplied merge_prediction is added to abs(e[k]) + abs(e[k+1]) in the
-    pair ratio of both error-norm families, in absolute and cumulative mode, and
-    nothing else changes: the per-subinterval ratios and the pair tolerance
-    (including its rounding floor) are the same. Adding twice the summed errors
-    triples the pair ratio (every norm here scales with its argument)."""
+def test_pair_errors_set_only_the_pair_ratio(dtype, error_norm, absolute):
+    """The pair errors are the numerator of the pair ratio of both error-norm
+    families, in absolute and cumulative mode, and change nothing else: the
+    per-subinterval ratios and the pair tolerance (including its rounding
+    floor) are the same with any pair errors and without them (then no pair
+    ratio is computed), bit for bit. A merge prediction of twice the summed
+    errors, added as _get_optimal_mesh adds it, triples the pair ratio (every
+    norm here scales with its argument)."""
     s = _solver(
         dtype,
         error_norm=error_norm,
@@ -430,14 +436,19 @@ def test_merge_prediction_adds_to_the_pair_numerator(dtype, error_norm, absolute
         "mesh_quadratures": q,
         "integral": q.sum(0) if absolute else None,
     }
-    ratio, pair, per_dim = s._compute_error_ratios(**kwargs)
+    summed = e[:-1].abs() + e[1:].abs()
+    ratio, pair, per_dim = s._compute_error_ratios(**kwargs, pair_errors=0 + summed)
     ratio3, pair3, per_dim3 = s._compute_error_ratios(
-        **kwargs, merge_prediction=2 * (e[:-1].abs() + e[1:].abs())
+        **kwargs, pair_errors=2 * summed + e[:-1].abs() + e[1:].abs()
     )
-    assert torch.equal(ratio3, ratio)
-    assert (per_dim3 is None) == (per_dim is None)
-    if per_dim is not None:
-        assert torch.equal(per_dim3, per_dim)
+    ratio0, pair0, per_dim0 = s._compute_error_ratios(**kwargs)
+    assert pair0 is None
+    for r in (ratio3, ratio0):
+        assert torch.equal(r, ratio)
+    for d in (per_dim3, per_dim0):
+        assert (d is None) == (per_dim is None)
+        if per_dim is not None:
+            assert torch.equal(d, per_dim)
     assert torch.allclose(pair3, 3 * pair, rtol=_close(dtype), atol=0)
 
 

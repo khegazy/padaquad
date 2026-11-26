@@ -94,49 +94,69 @@ subinterval is split into four equal pieces when
 
 - it is itself a piece of a split subinterval (its split count is at least 1),
   and
-- its error ratio is at least $10^4$.
+- its error ratio $r$ is at least $2^k$, where $k$ is the method's
+  `error_exponent` (21 for `gk21`, 15 for `gk15`, 7 for `gk7`).
 
 The four pieces are those that two successive halvings make, and they count as
 two halvings in `max_split_depth` and against `max_adaptive_splits` (one
 halving below the cap, the subinterval is halved). Subintervals judged again by
-the re-check of accepted subintervals are halved, and with
+the re-check of accepted subintervals are halved. With
 `error_norm="failure_fraction"`, whose accept quantity is a fraction rather
-than a ratio, every split is a halving.
+than a ratio, `split_rule="accelerate"` raises `ValueError` (pass
+`split_rule="halve"` or a norm-family `error_norm`).
 
-These conditions and the threshold are PadaQuad's own, chosen on
-measurements, not taken from a paper. On the CPU, over 9 integrands that need
-several levels of refinement (the ones the threshold was chosen on), `atol`
-$10^{-6}$, $10^{-8}$ and $10^{-10}$, `rtol=0` and three random starting
-meshes, `split_rule="accelerate"` evaluates `f` at 8 to 14 % fewer points than
-halving in total (`gk21`: 11 %) and runs 10 to 15 % fewer passes; over 15
-other integrands, 4 to 6 % fewer points and 14 to 17 % fewer passes. It costs
-points when both halves of a four-way split would have passed: of 1,620
-measured runs (9 methods, both `take_gradient` values, absolute and cumulative
-tolerances), 6 needed up to 12 % more points than halving, 4 more needed more
-points because halving had accepted a jump or a kink by accident (an error up
-to $2 \times 10^{-4}$) and the four-way splits did not, and no error grew.
-Integrands with an isolated feature (a kink, a peak), whose failing pieces
-leave one failing piece each, are mostly unchanged.
+**Why $2^k$.** The error estimate of a subinterval of width $h$ is dominated by
+the error of the method's embedded lower-degree method, of degree $k - 2$,
+which is
+$C h^k$ with $C$ proportional to the $(k-1)$-th derivative of $f$ there. Where
+that derivative changes little across the subinterval, each half has
 
-The threshold does not depend on the method. A piece whose error estimate
-already shrinks as $h^k$ ($k$ the method's `error_exponent`, 21 for `gk21`)
-needs one halving for any ratio below $2^k$, and `"accelerate"` splits it in four
-from $10^4$ on. Over 3,944 runs on smooth integrands (sines, Gaussians, Runge
-functions, exponentials; `gk7` to `gk31` and `cc33`; random starting meshes),
-85 needed more points, up to 28 %; on an evenly spaced starting mesh where
-every piece is in that state (a Chebyshev polynomial of degree $k - 1$), the
-option evaluates 57 % more points than halving with `gk15`, `gk21` and `cc33` and
-86 % more with `gk31`, for the same error.
+$$
+e_{1/2} \approx \frac{e}{2^k}, \qquad r_{1/2} \approx \frac{r}{2^k}
+$$ (half-ratio)
 
-It saves little time when `f` is cheap: on an A100, a mesh update takes 53
+when the tolerance does not depend on $h$ (`atol`, `rtol` times the integral),
+and $r_{1/2} \approx r / 2^{k-1}$ when it is the rounding floor, which shrinks
+with $h$. Both halves would pass, and a four-way split would waste the
+evaluation of two pieces, only if $r_{1/2} < 1$ for both, which
+{eq}`half-ratio` excludes for $r \geq 2^k$: such a subinterval's halves would
+fail and be split anyway, and the four-way split saves their evaluation and a
+pass. This derivation is PadaQuad's own reasoning, not taken from a paper;
+measured, a subinterval's estimate is exactly $2^k$ times each half's for a
+polynomial of degree $k - 1$, for every method.
+
+Before the estimate follows $h^k$ (where the integrand is far from resolved),
+it can fall faster than $2^k$ per halving, and a four-way split can then cost
+points. Measured over 5,024 runs (the 9 integrands below, 15 others, and 3,944
+runs on sines, Gaussians, Runge functions and exponentials; `gk7` to `gk31`,
+`cc17`, `cc33`; `atol` $10^{-4}$ to $10^{-12}$; random starting meshes), 11
+needed more points than halving: 6 because halving had accepted an error above
+10 times the tolerance by accident (5 of them a jump with `gk7`), and 5 by 1.3
+to 6.1 % (`gk7`, `gk15`, `cc17`). None was `gk21`, `gk31` or `cc33`, and no
+error was worse than 10 times halving's or 10 times the tolerance. The saving
+depends on the integrand and the method:
+
+| Runs | `gk21` points / passes | `gk15` | `gk7` | `cc33` |
+|---|---|---|---|---|
+| 9 integrands of the plan (405) | 0.985 / 0.956 | 0.885 / 0.877 | 0.798 / 0.788 | 0.932 / 0.938 |
+| 15 other integrands (675) | 0.982 / 0.962 | 0.963 / 0.882 | 0.828 / 0.733 | 0.984 / 0.916 |
+| smooth families (3,944) | 0.877 / 0.861 | 0.825 / 0.838 | 0.781 / 0.724 | 0.882 / 0.870 |
+
+(totals relative to halving). For `gk21` the saving is in oscillatory
+integrands refined to tight tolerances ($\sin(2 \times 10^4 t)$ at
+`atol=1e-11`: 26 % fewer points, 7 passes instead of 10); integrands with an
+isolated feature (a kink, a peak, a jump), whose failing pieces leave one
+failing piece each, are mostly unchanged.
+
+It does not save time when `f` is cheap: on an A100, a mesh update takes 53
 GPU launches when halving; with `"accelerate"`, every update after the call's
 first split takes 31 more for its test, and 35 more when it splits in four.
-Over 270 runs (the 9 integrands above, `gk7` to `cc33`, `atol` $10^{-6}$ to
-$10^{-10}$, two random starting meshes, cheap integrands), the total time was
-1 % less than halving's: 7 % less where it split in four, 6 % more where it did
-not. Use it when `f` is expensive and the integrand needs
-many levels of refinement; with the default, no evaluation of `f` is spent on
-a four-way split whose halves would have passed.
+Over 270 runs (the 9 integrands of the plan, `gk7`, `gk15`, `gk21`, `cc17`,
+`cc33`, `atol` $10^{-6}$ to $10^{-10}$, two random starting meshes), the total
+time was 1 % less than halving's: 9 % less where it split in four, 7 % more
+where it did not; `gk21`, which seldom splits in four there, took 5 % more
+(geometric mean) and `gk7` 10 % less. Use it when `f` is expensive and the
+integrand needs many levels of refinement.
 
 (ug-error-norm)=
 ## Integrands with several outputs

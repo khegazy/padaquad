@@ -200,14 +200,6 @@ def _midpoint(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
     return 0.5 * (left + right)
 
 
-# With split_rule="accelerate", the smallest error ratio at which a failing
-# piece of a split subinterval is split in four instead of halved
-# (_adaptively_increase_mesh). Chosen on a sweep of 9 integrands, 5 methods,
-# 3 tolerances and 3 seeds (docs/issues/2026-11-25-speedup-split-waste-plan.md):
-# above about this ratio both halves of such a piece were usually split again.
-_FOUR_PIECES_RATIO = 1e4
-
-
 # Multi-GPU keyword options the solver forwards to ``DistributedEnvironment``,
 # read from its signature so the names and defaults live only there.
 _DISTRIBUTED_OPTIONS = frozenset(
@@ -360,10 +352,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Default for how a failing subinterval is split (see :ref:`the user
             guide <ug-four-pieces>`): ``"halve"`` (default) splits it in two;
             ``"accelerate"`` splits it in four when it is itself a piece of a
-            split subinterval and its error ratio is at least 1e4, which saves
-            evaluations of f and passes on integrands that need many levels of
-            refinement, at the cost of extra evaluations when both halves would
-            have passed. With ``error_norm="failure_fraction"`` it halves.
+            split subinterval and its error ratio is at least 2**k, k the
+            method's ``error_exponent`` (where its error estimate shrinks as
+            h**k, both halves would fail again), which saves evaluations of f
+            and passes on integrands that need many levels of refinement.
+            ``"accelerate"`` with ``error_norm="failure_fraction"`` raises
+            ``ValueError``.
         use_absolute_error_ratio : bool
             If True (default), the relative tolerance uses the whole integral;
             if False, the running integral from ``mesh_init`` through each
@@ -404,8 +398,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             of the solver.
         ValueError
             If ``remove_cut`` is not below 1, ``merge_rule`` is not one of
-            ``"predicted"``, ``"power_law"`` and ``"sum"``, or another option
-            is invalid.
+            ``"predicted"``, ``"power_law"`` and ``"sum"``,
+            ``split_rule="accelerate"`` is given with
+            ``error_norm="failure_fraction"``, or another option is invalid.
         """
         unknown = set(distributed_options) - _DISTRIBUTED_OPTIONS
         if unknown:
@@ -432,7 +427,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             **distributed_options,
         )
         self._check_max_adaptive_splits(max_adaptive_splits)
-        self._check_split_rule(split_rule)
         self.remove_cut = remove_cut
         self.merge_rule = merge_rule
 
@@ -464,6 +458,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         self._check_mesh_failure_tolerance(mesh_failure_tolerance)
         self.init_error_norm = error_norm
         self.error_norm = error_norm
+        self._check_split_rule(split_rule)
         self.init_mesh_failure_tolerance = mesh_failure_tolerance
         self.mesh_failure_tolerance = mesh_failure_tolerance
         # Construction-time default; the active value lives in
@@ -561,10 +556,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     #: Values accepted by ``split_rule``.
     _VALID_SPLIT_RULES = ("halve", "accelerate")
 
-    @classmethod
-    def _check_split_rule(cls, split_rule: object) -> None:
+    def _check_split_rule(self, split_rule: object) -> None:
         """
-        Validate ``split_rule``.
+        Validate ``split_rule`` against the active ``error_norm``.
+
+        Called by the constructor and by ``integrate`` once ``self.error_norm``
+        holds the value in force (the call's, else the constructor's).
 
         Parameters
         ----------
@@ -574,12 +571,21 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Raises
         ------
         ValueError
-            If the value is not one of ``_VALID_SPLIT_RULES``.
+            If the value is not one of ``_VALID_SPLIT_RULES``, or if it is
+            ``"accelerate"`` while ``error_norm`` is ``"failure_fraction"``.
         """
-        if split_rule not in cls._VALID_SPLIT_RULES:
+        if split_rule not in self._VALID_SPLIT_RULES:
             raise ValueError(
-                f"split_rule must be one of {cls._VALID_SPLIT_RULES}, "
+                f"split_rule must be one of {self._VALID_SPLIT_RULES}, "
                 f"got {split_rule!r}"
+            )
+        if split_rule == "accelerate" and self._is_failure_fraction:
+            raise ValueError(
+                'split_rule="accelerate" splits a subinterval in four by its '
+                'error ratio, which error_norm="failure_fraction" does not '
+                "have (it compares the fraction of failing output components "
+                'with mesh_failure_tolerance). Pass split_rule="halve", or a '
+                'norm-family error_norm ("2", "max", "rms" or a callable).'
             )
 
     # -------------------------------------------------------------------------------- #
@@ -839,9 +845,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         split_rule : str or None
             How a failing subinterval is split: ``"halve"`` or
             ``"accelerate"`` (into four pieces when it is a piece of a split
-            subinterval with an error ratio of at least 1e4; see :ref:`the
-            user guide <ug-four-pieces>`). With
-            ``error_norm="failure_fraction"`` it halves.
+            subinterval with an error ratio of at least 2**error_exponent; see :ref:`the
+            user guide <ug-four-pieces>`). ``"accelerate"`` with
+            ``error_norm="failure_fraction"`` raises ``ValueError``.
         error_norm : str, Callable or None
             How the error of a vector-valued integrand becomes one
             accept-or-split decision (see :ref:`the user guide <ug-error-norm>`).
@@ -939,8 +945,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             given; if an option such as ``error_norm`` or
             ``total_mem_usage`` is invalid; if ``enforce_convergence`` is
             True with ``take_gradient=True``; if ``trade_speed_for_memory`` is
-            True with ``take_gradient=True``; or if ``evaluation_buffer`` is
-            given with ``trade_speed_for_memory=False`` or is not an int >= 1.
+            True with ``take_gradient=True``; if ``split_rule="accelerate"``
+            meets ``error_norm="failure_fraction"`` (from this call or the
+            constructor); or if ``evaluation_buffer`` is given with
+            ``trade_speed_for_memory=False`` or is not an int >= 1.
         TypeError
             If ``enforce_convergence`` is neither None nor a bool.
         BackwardOutOfMemoryError
@@ -1019,8 +1027,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             else max_adaptive_splits
         )
         self._check_max_adaptive_splits(max_adaptive_splits)
-        split_rule = self.init_split_rule if split_rule is None else split_rule
-        self._check_split_rule(split_rule)
 
         # The re-check of accepted subintervals (Step 4b) is on by default only
         # without per-batch backward: with take_gradient=True a batch's
@@ -1110,6 +1116,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # them without threading them through every signature.
         self.error_norm = self.init_error_norm if error_norm is None else error_norm
         self._check_error_norm(self.error_norm)
+        split_rule = self.init_split_rule if split_rule is None else split_rule
+        self._check_split_rule(split_rule)
         self.mesh_failure_tolerance = (
             self.init_mesh_failure_tolerance
             if mesh_failure_tolerance is None
@@ -1386,15 +1394,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 # that requires grad is copied by _keep_rows); the full path's
                 # values are f's output, which f may still hold.
                 in_place=not take_gradient,
-                # The ratios split some subintervals in four; a failure
-                # fraction is not a ratio, so failure_fraction halves. Only a
-                # piece of a split subinterval can be split in four: none
-                # exists until the mesh first grows, so the rule's test (about
-                # 30 GPU launches) is skipped until then.
+                # The ratios split some subintervals in four. Only a piece of a
+                # split subinterval can be split in four: none exists until
+                # the mesh first grows, so the rule's test (about 30 GPU
+                # launches) is skipped until then.
                 error_ratios=error_ratios
-                if split_rule == "accelerate"
-                and not self._is_failure_fraction
-                and len(mesh) - 1 > n_start_steps
+                if split_rule == "accelerate" and len(mesh) - 1 > n_start_steps
                 else None,
             )
             # The batch data passed in comes back filtered to the accepted steps
@@ -2080,9 +2085,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         With ``error_ratios`` (``split_rule="accelerate"``), a failing
         subinterval that is itself a piece of a split one (split count at
-        least 1) and whose error ratio is at least ``_FOUR_PIECES_RATIO`` is
-        split in four instead: both halves are halved again in the same
-        update, so the pieces are those of two successive halvings.
+        least 1) and whose error ratio is at least 2**k, k the method's
+        ``error_exponent``, is split in four instead: both halves are halved
+        again in the same update, so the pieces are those of two successive
+        halvings. Where the error estimate shrinks as h**k, a half's ratio is
+        the parent's divided by 2**k (by 2**(k - 1) when the tolerance is the
+        rounding floor, which shrinks with h), so both halves of such a
+        subinterval would fail and be split again: no evaluation is spent on a
+        four-way split whose halves would have passed.
 
         A subinterval that cannot be split (``_splittable``: its split count
         has reached ``max_adaptive_splits``, when both are given, or its
@@ -2175,7 +2185,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         )
         # How many times each subinterval of the batch is halved: 0 (accepted),
         # 1, or, with error_ratios, 2 (four pieces) for a failing piece of a
-        # failed subinterval whose error ratio is at least _FOUR_PIECES_RATIO
+        # failed subinterval whose error ratio is at least 2**error_exponent
         # and that can be halved twice. The update's one read of the device:
         # how many are accepted and how many are split in four. Integer
         # positions index every field below without another read (a boolean
@@ -2187,7 +2197,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             assert split_counts is not None  # given with error_ratios
             halvings += (
                 ~keep_mask
-                & (error_ratios >= _FOUR_PIECES_RATIO)
+                & (error_ratios >= 2.0**self.method.error_exponent)
                 & (split_counts[mesh_idxs] > 0)
                 & self._splittable(
                     mesh, mesh_idxs, split_counts, max_adaptive_splits, halvings=2

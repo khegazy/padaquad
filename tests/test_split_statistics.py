@@ -683,15 +683,16 @@ def test_accelerate_meets_the_tolerance(method, name, take_gradient):
 
 
 def test_accelerate_saves_points_and_never_more_on_an_isolated_feature():
-    """On sin(2e4 t) the rule evaluates fewer points (seed 0: 56,637 against
-    69,615 with gk21); on a kink, whose failing pieces each leave one failing
-    piece, it never acts and the run is the same bit for bit."""
+    """On sin(2e4 t) at atol 1e-11 the rule evaluates fewer points in fewer
+    passes (seed 0, gk21: 66,759 points in 7 passes against 89,901 in 10); on
+    a kink, whose failing pieces each leave one failing piece, it never acts
+    and the run is the same bit for bit."""
     f, _ = _HARD["oscillatory"]
     (_, _, halve), (_, _, fast) = (
-        _split_rule_run(rule, f, take_gradient=False)
+        _split_rule_run(rule, f, take_gradient=False, atol=1e-11)
         for rule in ("halve", "accelerate")
     )
-    assert sum(fast) < 0.9 * sum(halve)
+    assert sum(fast) < 0.8 * sum(halve)
     assert len(fast) < len(halve)  # passes: one call of f each
     kink = lambda t: torch.abs(t - 1.0 / 3.0)  # noqa: E731
     (halve, s_halve, halve_calls), (fast, s_fast, fast_calls) = (
@@ -705,24 +706,26 @@ def test_accelerate_saves_points_and_never_more_on_an_isolated_feature():
 
 @pytest.mark.parametrize("trade_speed_for_memory", [False, True])
 @pytest.mark.parametrize(
-    ("sampling", "method"),
-    [("uniform", "gk21"), ("variable", "interpolatory3_variable")],
+    ("sampling", "method", "atol"),
+    [("uniform", "gk21", 1e-11), ("variable", "interpolatory3_variable", 1e-7)],
 )
 def test_accelerate_is_the_same_for_any_max_batch(
-    sampling, method, trade_speed_for_memory
+    sampling, method, atol, trade_speed_for_memory
 ):
     """With take_gradient=False every pass is judged whole, so the four-way
     splits, the integral and the state's mesh do not depend on how the calls
     of f are cut (7 points: calls end inside subintervals), and f is
-    evaluated at as many points either way."""
-    f, _ = _HARD["lorentz"]
+    evaluated at as many points either way. (gk21 splits in four on
+    sin(3e3 t) at atol 1e-11; the low-degree variable method, whose 2**k is
+    small, on the Lorentzian at 1e-7.)"""
+    f = (lambda t: torch.sin(3.0e3 * t)) if method == "gk21" else _HARD["lorentz"][0]
     runs = [
         _split_rule_run(
             "accelerate",
             f,
             method=method,
             sampling=sampling,
-            atol=1e-7,
+            atol=atol,
             take_gradient=False,
             trade_speed_for_memory=trade_speed_for_memory,
             max_batch=max_batch,
@@ -734,7 +737,7 @@ def test_accelerate_is_the_same_for_any_max_batch(
     assert torch.equal(small_state.mesh, out_state.mesh)
     assert sum(small_calls) == sum(calls)
     _, _, halve_calls = _split_rule_run(
-        "halve", f, method=method, sampling=sampling, atol=1e-7, take_gradient=False
+        "halve", f, method=method, sampling=sampling, atol=atol, take_gradient=False
     )
     assert len(calls) < len(halve_calls)  # fewer passes: the rule acted
 
@@ -811,48 +814,80 @@ def test_accelerate_tests_no_piece_before_the_first_split(take_gradient):
     assert 2 in tests
 
 
-def test_accelerate_worst_case_of_the_user_guide():
-    """The cost documented in the user guide (ug-four-pieces): f = T_20(2t - 1)
-    on one starting subinterval has gk21 error estimates c h^21 exactly, so one
-    halving divides every ratio by 2^21. At atol 3.2e-11 the halves' ratios lie
-    between 1e4 and 2^21: the rule splits both in four (11 subintervals) where
-    halving them once suffices (7), for the same error."""
-    points, errors = {}, {}
-    for split_rule in ("halve", "accelerate"):
-        calls = []
+@pytest.mark.parametrize("method", ["gk15", "gk21", "cc33"])
+def test_accelerate_spends_nothing_where_one_halving_suffices(method):
+    """f = T_{k-1}(2t - 1), k the method's error_exponent, on one starting
+    subinterval: every error estimate is c h^k exactly, so one halving divides
+    every ratio by 2^k. Below 2^k one halving suffices and the rule halves;
+    with the former fixed threshold 1e4 it split in four (gk21 at atol 3.2e-11:
+    11 subintervals against 7). Over tolerances from 1e-6 to 1e-16 the rule
+    never evaluates more points than halving, for the same integral."""
+    k = adaptive_quadrature("uniform", method, device="cpu").method.error_exponent
+    exact = 1 / (1 - (k - 1) ** 2)  # integral of T_n(2t - 1) on [0, 1], n even
+    for atol in np.logspace(-6, -16, 11):
+        points, errors = {}, {}
+        for split_rule in ("halve", "accelerate"):
+            calls = []
 
-        def f(t, calls=calls):
-            calls.append(t.shape[0])
-            return torch.special.chebyshev_polynomial_t(2 * t - 1, 20)
+            def f(t, calls=calls):
+                calls.append(t.shape[0])
+                return torch.special.chebyshev_polynomial_t(2 * t - 1, k - 1)
 
-        out, _ = integrate(
-            f,
-            "gk21",
-            atol=3.2e-11,
-            rtol=0.0,
-            device="cpu",
-            split_rule=split_rule,
-            mesh=torch.tensor([[0.0], [1.0]], dtype=torch.float64),
-            take_gradient=False,
-        )
-        points[split_rule] = sum(calls)
-        errors[split_rule] = abs(float(out.integral) + 1 / 399)  # exact: -1/399
-    assert points == {"halve": 7 * 21, "accelerate": 11 * 21}
-    assert max(errors.values()) < 1e-15
+            out, _ = integrate(
+                f,
+                method,
+                atol=float(atol),
+                rtol=0.0,
+                device="cpu",
+                split_rule=split_rule,
+                mesh=torch.tensor([[0.0], [1.0]], dtype=torch.float64),
+                take_gradient=False,
+            )
+            points[split_rule] = sum(calls)
+            errors[split_rule] = abs(float(out.integral) - exact)
+        assert points["accelerate"] <= points["halve"], atol
+        assert errors["accelerate"] < max(10 * errors["halve"], 1e-15), atol
 
 
-def test_failure_fraction_always_halves():
-    """With error_norm="failure_fraction" the accept quantity is a fraction,
-    not a ratio, so the rule halves: the same call as split_rule="halve", bit
-    for bit."""
-    f, _ = _HARD["lorentz"]
-    (halve, s_halve, halve_calls), (fast, s_fast, fast_calls) = (
-        _split_rule_run(rule, f, take_gradient=False, error_norm="failure_fraction")
-        for rule in ("halve", "accelerate")
+@pytest.mark.parametrize(
+    ("ctor", "call"),
+    [
+        ({"split_rule": "accelerate", "error_norm": "failure_fraction"}, None),
+        ({"error_norm": "failure_fraction"}, {"split_rule": "accelerate"}),
+        ({"split_rule": "accelerate"}, {"error_norm": "failure_fraction"}),
+    ],
+    ids=["constructor", "call_split_rule", "call_error_norm"],
+)
+def test_accelerate_with_failure_fraction_raises(ctor, call):
+    """split_rule="accelerate" splits by the error ratio, which
+    error_norm="failure_fraction" does not have (it compares the fraction of
+    failing output components): the combination raises before f is called,
+    whether it comes from the constructor, the call, or both."""
+    calls = []
+
+    def f(t):
+        calls.append(t.shape[0])
+        return torch.sin(t)
+
+    with pytest.raises(ValueError, match="failure_fraction") as raised:
+        solver = UniformAdaptiveQuadrature(device="cpu", **ctor)
+        solver.integrate(f=f, mesh=_MESH20, take_gradient=False, **(call or {}))
+    assert 'split_rule="halve"' in str(raised.value)
+    assert calls == []
+
+
+def test_accelerate_with_a_norm_family_call_is_allowed():
+    """A per-call norm-family error_norm makes the constructor's
+    failure_fraction default usable with split_rule="accelerate"."""
+    solver = UniformAdaptiveQuadrature(device="cpu", error_norm="failure_fraction")
+    out, _ = solver.integrate(
+        f=lambda t: torch.sin(t),
+        mesh=_MESH20,
+        take_gradient=False,
+        split_rule="accelerate",
+        error_norm="max",
     )
-    assert fast_calls == halve_calls
-    assert torch.equal(fast.integral, halve.integral)
-    assert torch.equal(s_fast.mesh, s_halve.mesh)
+    assert out.converged
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)

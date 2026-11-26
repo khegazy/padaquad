@@ -141,7 +141,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed accept masks (`_keep_mask`, the loop's rule), midpoint placement, the returned `keep_idx`, the split cap, a subinterval one ULP wide accepted (`_splittable`, T = 1 and 2) |
 | `test_record_and_sort.py` | `_record_results` and `_sort_record` (a record in order is not copied); `_flatten_output` equals the concatenation, values and gradient |
 | `test_evaluate_and_merge.py` | The variable solver's `_evaluate_adaptive_nodes` (split with reuse; not called by `integrate`) |
-| `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: the state's mesh re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
+| `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; `build_state_mesh=False` (no build, `state.mesh` None, the rest bit for bit, the next call needs bounds); end to end: the state's mesh re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
 | `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
 | `test_error_integral_reference.py` | The `error_integral_reference` argument of `integrate()`, with `take_gradient=True` (the one path where a batch is judged before the rest of its pass is evaluated) |
@@ -345,7 +345,8 @@ is a boolean array where `True` means the panel still needs evaluation.
    judge every recorded step against the final integral with
    `_record_error_check` (the same helper the in-loop re-check uses) to set
    `converged`, logging `_warn_not_converged` when it is `False` (a NaN/Inf
-   error counts as failing); then compute the optimal mesh (`state.mesh`) via
+   error counts as failing); then, unless `build_state_mesh=False` (then
+   `state.mesh` is None), compute the optimal mesh (`state.mesh`) via
    `_get_optimal_mesh` (prune low-error pairs, refine
    high-error gaps), returned for the caller to pass to a later call.
 
@@ -640,8 +641,10 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   `mesh_previous`, `previous_max_batch` and the constructor's bounds were
   removed). A call reuses an earlier one only through what it is passed:
   `state=state`, the second value `integrate` returns (its mesh is the optimal mesh, detached, on the solver's
-  device, ends equal to the bounds bit for bit; its batch size and converged
-  flag), or `mesh=` / `max_batch=` directly. `mesh=` with `state=` raises.
+  device, ends equal to the bounds bit for bit, or None with
+  `build_state_mesh=False`, which skips the build; its batch size and converged
+  flag), or `mesh=` / `max_batch=` directly. `mesh=` with `state=` raises. A
+  state whose mesh is None needs both bounds (the error names the switch).
 - Interval rules, all in `_setup_integral_bounds` (returns
   `(mesh, mesh_init, mesh_final)`): a call needs a mesh or both bounds; a
   given mesh must be `[M, T]`, M >= 2, increasing (T = 1) or with distinct

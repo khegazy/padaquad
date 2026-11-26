@@ -37,8 +37,8 @@ class IntegrationState:
         The mesh to start from, shape [M, T]: the optimal mesh of the call
         that returned the state (low-error subintervals merged, failing ones
         split), detached from autograd, on the solver's device, its ends equal
-        to the bounds. None makes a fresh mesh on the bounds, which must then
-        be given.
+        to the bounds; None when that call passed ``build_state_mesh=False``.
+        None makes a fresh mesh on the bounds, which must then be given.
     max_batch : int
         The batch size to start with: the largest number of points per call of
         the integrand known to fit.

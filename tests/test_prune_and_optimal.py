@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import pytest
@@ -418,6 +419,88 @@ def test_repeated_warm_starts_prune_to_a_fixed_point(method, merge_rule):
     assert sizes[-1] == sizes[-2], f"no fixed point: {sizes}"
     assert sizes == sorted(sizes, reverse=True), sizes
     assert sizes[-1] <= 0.6 * sizes[0], sizes
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
+@pytest.mark.parametrize("take_gradient", [False, True])
+@pytest.mark.parametrize(
+    ("sampling", "method"),
+    [("uniform", "gk21"), ("variable", "interpolatory3_variable")],
+)
+def test_build_state_mesh_false_skips_only_the_mesh(
+    sampling, method, take_gradient, device, monkeypatch
+):
+    """build_state_mesh=False does not build the optimal mesh and returns
+    state.mesh = None; the result, the batch size and the gradient equal the
+    default call's bit for bit. A later call with that state and no bounds
+    raises a ValueError that names the switch; with bounds it starts from a
+    fresh mesh with the state's batch size, as a call without a state does."""
+    w = torch.tensor([1.3], dtype=torch.float64, device=device, requires_grad=True)
+    a, b = (torch.tensor([x], dtype=torch.float64) for x in (0.0, 1.0))
+
+    def f(t):
+        return w * torch.sin(9 * t) + t
+
+    def call(build_state_mesh, **kwargs):
+        solver = adaptive_quadrature(
+            sampling, method, atol=1e-9, rtol=1e-9, device=device, dtype=torch.float64
+        )
+        built = []
+        get_optimal_mesh = solver._get_optimal_mesh
+        monkeypatch.setattr(
+            solver,
+            "_get_optimal_mesh",
+            lambda **k: built.append(1) or get_optimal_mesh(**k),
+        )
+        torch.manual_seed(0)
+        w.grad = None
+        result, state = solver.integrate(
+            f,
+            mesh_init=a,
+            mesh_final=b,
+            take_gradient=take_gradient,
+            build_state_mesh=build_state_mesh,
+            **kwargs,
+        )
+        if not take_gradient:
+            result.integral.sum().backward()
+        return solver, result, state, w.grad.clone(), len(built)
+
+    _, default, default_state, default_grad, n_built = call(True, max_batch=SMALL_BATCH)
+    solver, skipped, state, grad, n_skipped = call(False, max_batch=SMALL_BATCH)
+    assert (n_built, n_skipped) == (1, 0)
+    assert state.mesh is None and default_state.mesh is not None
+    assert (state.max_batch, state.max_batch_converged) == (
+        default_state.max_batch,
+        default_state.max_batch_converged,
+    )
+    assert torch.equal(grad, default_grad)
+    for field in dataclasses.fields(default):
+        x, y = getattr(default, field.name), getattr(skipped, field.name)
+        if isinstance(x, torch.Tensor):
+            assert torch.equal(x, y), field.name
+        elif isinstance(x, tuple):
+            assert all(map(torch.equal, x, y)), field.name
+        else:
+            assert x == y, field.name
+
+    with pytest.raises(ValueError, match="build_state_mesh=False"):
+        solver.integrate(f, state=state, take_gradient=take_gradient)
+    # With bounds: a fresh mesh and the state's (given, so fixed) batch size.
+    _, from_state, _, _, _ = call(True, state=state)
+    assert torch.equal(from_state.integral, default.integral)
+    assert from_state.n_start_steps == default.n_start_steps
+
+    _, one_shot_state = integrate(
+        f,
+        mesh_init=a,
+        mesh_final=b,
+        device=device,
+        max_batch=SMALL_BATCH,
+        take_gradient=False,
+        build_state_mesh=False,
+    )
+    assert one_shot_state.mesh is None
 
 
 @pytest.mark.parametrize("n_steps", [1, 2])

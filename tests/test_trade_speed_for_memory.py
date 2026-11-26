@@ -551,8 +551,10 @@ def test_warning_on_first_call_only(name, caplog):
             "evaluation_buffer": 10**6,
             "result_device": None,
         },
+        # No state's mesh is built, so its merge rule does not matter.
+        {"record_evaluations": False, "build_state_mesh": False},
     ],
-    ids=["default", "trade_same_device"],
+    ids=["default", "trade_same_device", "no_record_no_state_mesh"],
 )
 def test_no_warning(options, caplog):
     solver = adaptive_quadrature("uniform", method="gk21", device="cpu")

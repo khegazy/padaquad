@@ -319,7 +319,8 @@ def test_backward_check_control_on_a_fresh_solver(monkeypatch, caplog):
 def test_restart_keeps_every_other_argument():
     """A backward restart repeats the call with every argument: the
     constructor's integrand (``f=None``) and ``y0``, ``f_args``,
-    ``loss_fxn``, ``error_integral_reference`` and a bound that requires grad.
+    ``loss_fxn``, ``error_integral_reference``, a bound that requires grad
+    and ``build_state_mesh=False`` (the restarted call returns no mesh either).
     Integral, loss and both gradients equal an uninterrupted run's."""
 
     def attempt(limit):
@@ -332,7 +333,7 @@ def test_restart_keeps_every_other_argument():
                 y.register_hook(_fail_backward)
             return y
 
-        result, _ = run(
+        result, state = run(
             solver(f=f, y0=torch.tensor([2.0], dtype=torch.float64)),
             mesh_init=A,
             mesh_final=b,
@@ -340,7 +341,9 @@ def test_restart_keeps_every_other_argument():
             loss_fxn=lambda r: 2 * r.integral.sum(),
             state=IntegrationState(None, 100, False),
             error_integral_reference=0.1,
+            build_state_mesh=False,
         )
+        assert state.mesh is None
         return [
             float(result.integral),
             float(result.loss),

@@ -32,7 +32,7 @@ it ({ref}`ug-reuse`).
 
 After the integration converges, PadaQuad builds the optimal mesh,
 `state.mesh`, the mesh a later call starts from when the state is passed as
-`state=` ({ref}`ug-reuse`). Pairs of neighbouring subintervals
+`state=` ({ref}`ug-reuse`), unless the call passes `build_state_mesh=False`. Pairs of neighbouring subintervals
 whose merged subinterval is predicted to pass with a margin are merged, so that a
 mesh finer than needed shrinks, and subintervals that failed are split. The
 merged subinterval is not evaluated during this step; the next call evaluates it.

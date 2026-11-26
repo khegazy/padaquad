@@ -696,6 +696,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         evaluation_buffer: int | None = None,
         record_evaluations: bool = True,
         result_device: str | torch.device | None = "cpu",
+        build_state_mesh: bool = True,
     ) -> tuple[IntegrationResult, IntegrationState]:
         """
         Integrate f over [mesh_init, mesh_final] with adaptive subintervals.
@@ -706,8 +707,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         :ref:`ug-tracked-variables`). The loop evaluates many subintervals in
         one batch, accepts those whose error ratio is below 1 and splits the
         others in half, until every subinterval is accepted. It then builds
-        the optimal mesh. It returns the result and a state, the optimal mesh
-        and the batch size: ``result, state = solver.integrate(...)``. Pass
+        the optimal mesh, unless ``build_state_mesh=False``. It returns the
+        result and a state, the optimal mesh and the batch size: ``result,
+        state = solver.integrate(...)``. Pass
         ``state=state`` to a later call to start from both (see
         :ref:`the user guide <ug-reuse>`); the solver itself keeps nothing
         between calls.
@@ -855,6 +857,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Device of the per-subinterval arrays of the result (default
             ``"cpu"``); None keeps them on the solver's device. The integral and
             the state's mesh stay on the solver's device.
+        build_state_mesh : bool
+            If True (default), build the optimal mesh after the loop and return
+            it as ``state.mesh``. If False, skip it, which saves a few
+            milliseconds per call when no later call starts from the mesh, and
+            return ``state.mesh = None``: a later call given this state keeps
+            its batch size but needs both bounds and starts from a fresh mesh
+            (see :ref:`the user guide <ug-reuse>`).
 
         Returns
         -------
@@ -863,8 +872,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             ``converged``, the nodes and integrand values of every subinterval,
             and split statistics (see :ref:`the user guide <ug-convergence>`).
         state : IntegrationState
-            The optimal mesh and the batch size, for a later call's ``state=``
-            (see :ref:`the user guide <ug-reuse>`).
+            The optimal mesh (None with ``build_state_mesh=False``) and the
+            batch size, for a later call's ``state=`` (see :ref:`the user guide
+            <ug-reuse>`).
 
         Raises
         ------
@@ -1020,7 +1030,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 "integrated together. See %s",
                 guide,
             )
-        if state is None and not record_evaluations and self.merge_rule == "predicted":
+        if (
+            state is None
+            and build_state_mesh
+            and not record_evaluations
+            and self.merge_rule == "predicted"
+        ):
             logger.warning(
                 "record_evaluations=False: the state's mesh is built with "
                 "merge_rule='power_law', because merge_rule='predicted' reads the "
@@ -1565,19 +1580,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # integral; see _DEVICE_RESIDENT_KEYS) are moved to join them. Without
         # recorded values (record_evaluations=False) y is None, and
         # _merge_inputs uses merge_rule="power_law".
-        optimal_device = record["nodes"].device
-        with self._integration_on_device(optimal_device):
-            mesh_optimal = self._get_optimal_mesh(
-                mesh_quadratures=record["mesh_quadratures"].to(optimal_device),
-                # Absolute values: the merge sums two subintervals' errors,
-                # which signed values could cancel.
-                mesh_quadrature_errors=torch.abs(record["mesh_quadrature_errors"]).to(
-                    optimal_device
-                ),
-                integral=record["integral"].to(optimal_device),
-                mesh=mesh.to(optimal_device),
-                y=record.get("y"),
-            )
         # mesh_optimal is the mesh a later call starts from when the caller
         # passes it as mesh=, so it lives on the integration device (its endpoints
         # are mesh_init/mesh_final, which live on self.device). Detached: when a
@@ -1585,7 +1587,23 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # later warm call would backpropagate into the earlier call's bound (or
         # through a graph a take_gradient=True call already freed). The bound's
         # gradient reaches it through this call's nodes, not through the mesh.
-        mesh_optimal = mesh_optimal.to(self.device).detach()
+        # With build_state_mesh=False it is not built, and state.mesh is None.
+        mesh_optimal: torch.Tensor | None = None
+        if build_state_mesh:
+            optimal_device = record["nodes"].device
+            with self._integration_on_device(optimal_device):
+                mesh_optimal = self._get_optimal_mesh(
+                    mesh_quadratures=record["mesh_quadratures"].to(optimal_device),
+                    # Absolute values: the merge sums two subintervals' errors,
+                    # which signed values could cancel.
+                    mesh_quadrature_errors=torch.abs(
+                        record["mesh_quadrature_errors"]
+                    ).to(optimal_device),
+                    integral=record["integral"].to(optimal_device),
+                    mesh=mesh.to(optimal_device),
+                    y=record.get("y"),
+                )
+            mesh_optimal = mesh_optimal.to(self.device).detach()
 
         # Move the record fields still on the integration device (the resident
         # ones; every one with record_evaluations=False) to result_device so
@@ -3412,7 +3430,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         elif mesh_init is None or mesh_final is None:
             raise ValueError(
                 "Pass mesh=, or both mesh_init and mesh_final: a call needs "
-                "an interval to integrate."
+                "an interval to integrate (a state returned by a call with "
+                "build_state_mesh=False has no mesh)."
             )
         # Bounds have shape [T] on every call, like a point of the mesh: the
         # mesh's T, or without a mesh the same shape for both bounds.

@@ -3255,18 +3255,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         -------
         torch.Tensor
             The optimal mesh. Shape: [M_opt, T].
-
-        Raises
-        ------
-        ValueError
-            If the mesh does not have one more point than there are
-            subintervals.
         """
-        if len(mesh) != len(mesh_quadratures) + 1:
-            raise ValueError(
-                f"The mesh has {len(mesh)} points for {len(mesh_quadratures)} "
-                "subintervals; it must have one more point than subintervals."
-            )
         # Merge pairs of over-resolved neighbors
         merge_prediction, merge_cut = self._merge_inputs(
             nodes, y, mesh_quadratures, mesh
@@ -4557,17 +4546,17 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Returns
         -------
         torch.Tensor
-            The joined values. Shape: [N * (C - 1) + 1, ...] when the ends are
-            nodes, else [N * C, ...].
+            The joined values. Shape: [N * (C - k) + k, ...], with k = 1 when
+            the ends are nodes and 0 otherwise.
         """
         n, c, *rest = panel_array.shape
         fractions = self.method.node_fractions()
-        if float(fractions[0]) != 0.0 or float(fractions[-1]) != 1.0:
-            return panel_array.reshape(n * c, *rest)
+        # The number of entries a subinterval shares with its left neighbor.
+        k = int(float(fractions[0]) == 0.0 and float(fractions[-1]) == 1.0)
         # Written straight into the output: flattening the non-contiguous
-        # panel_array[1:, 1:] and then concatenating made two full copies, 3
+        # panel_array[1:, k:] and then concatenating made two full copies, 3
         # times the values on the host at the peak (measured 2026-11-26).
-        out = panel_array.new_empty((n * (c - 1) + 1, *rest))
+        out = panel_array.new_empty((n * (c - k) + k, *rest))
         out[:c] = panel_array[0]
-        out[c:].view(n - 1, c - 1, *rest).copy_(panel_array[1:, 1:])
+        out[c:].view(n - 1, c - k, *rest).copy_(panel_array[1:, k:])
         return out

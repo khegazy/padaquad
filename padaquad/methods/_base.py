@@ -288,22 +288,23 @@ class MethodClass(ABC):
         Raises
         ------
         ValueError
-            Unless the fractions are 1-D with at least one entry, all in
-            [0, 1], and never decrease (repeated values are allowed). The ends
-            0 and 1 need not be among them: the solver takes a subinterval's
-            width from its mesh points.
+            Unless the fractions are 1-D, all in [0, 1], never decrease
+            (repeated values are allowed: dopri5 has two nodes at 1), and the
+            last is above the first. The ends 0 and 1 need not be among them:
+            the solver takes a subinterval's width from its mesh points.
         """
         if c is None:
             c = self.node_fractions()
         if not (
             c.ndim == 1
-            and len(c) >= 1
+            and len(c) >= 2
             and bool(((c >= 0) & (c <= 1)).all())
             and bool((c[1:] >= c[:-1]).all())
+            and float(c[-1]) > float(c[0])
         ):
             raise ValueError(
-                f"{type(self).__name__}: node fractions must be 1-D, at least one, "
-                f"in [0, 1] and never decrease; got {c.tolist()}"
+                f"{type(self).__name__}: node fractions must be 1-D, in [0, 1], "
+                f"never decrease and not all be equal; got {c.tolist()}"
             )
 
     def measure_degree(
@@ -480,8 +481,8 @@ class UniformMethodClass(MethodClass):
         ------
         ValueError
             If ``degree`` is not an int >= 0, ``error_exponent`` is not an
-            int >= 2, or the node fractions are not a 1-D tensor of at least
-            one non-decreasing value in [0, 1].
+            int >= 2, or the node fractions are not a 1-D tensor of
+            non-decreasing values in [0, 1], not all equal.
         """
         super().__init__(degree, error_exponent, references)
         self.tableau = tableau
@@ -563,10 +564,11 @@ class VariableMethodClass(MethodClass):
     Attributes
     ----------
     c : torch.Tensor
-        Node fractions of a new subinterval, non-decreasing from 0 to 1 (both
-        ends are nodes: ``weights`` rescales by them). Shape: [C].
+        Node fractions of a new subinterval, non-decreasing in [0, 1].
+        Shape: [C].
     weight_function : Callable
-        Maps node positions rescaled to [0, 1], shape [N, C, T], to
+        Maps node positions as fractions of their subinterval, shape
+        [N, C, T], to
         ``(b, b_error)``, each of shape [N, C], in the dtype and on the device
         of its input.
     """
@@ -601,42 +603,13 @@ class VariableMethodClass(MethodClass):
         ------
         ValueError
             If ``degree`` is not an int >= 0, ``error_exponent`` is not an
-            int >= 2, or ``c`` is not a 1-D tensor of at least two
-            non-decreasing values from 0 to 1.
+            int >= 2, or ``c`` is not a 1-D tensor of non-decreasing values in
+            [0, 1], not all equal.
         """
         super().__init__(degree, error_exponent, references)
         self.c = c
         self.weight_function = weight_function
         self._check_node_fractions()
-
-    def _check_node_fractions(self, c: torch.Tensor | None = None) -> None:
-        """
-        Validate node fractions, which must also start at 0 and end at 1.
-
-        ``weights`` rescales each subinterval's nodes by its first and last
-        node, so these must be the subinterval's ends. Called by the
-        constructor and by ``measure_degree`` on the fractions it is given.
-
-        Parameters
-        ----------
-        c : torch.Tensor | None
-            Fractions to check. Default: ``node_fractions()``.
-
-        Raises
-        ------
-        ValueError
-            Unless ``MethodClass._check_node_fractions`` accepts the fractions
-            and they start at 0 and end at 1.
-        """
-        if c is None:
-            c = self.node_fractions()
-        super()._check_node_fractions(c)
-        if float(c[0]) != 0.0 or float(c[-1]) != 1.0:
-            raise ValueError(
-                f"{type(self).__name__}: node fractions must start at 0 and end at "
-                f"1, because the weights are computed from the nodes rescaled by "
-                f"the first and last; got {c.tolist()}"
-            )
 
     def node_fractions(self) -> torch.Tensor:
         """
@@ -653,8 +626,9 @@ class VariableMethodClass(MethodClass):
         """
         Compute the weights from each subinterval's actual node positions.
 
-        Rescales each subinterval's nodes to [0, 1] (shift so the first node is
-        0, divide by the subinterval's width) and applies ``weight_function``
+        Rescales each subinterval's nodes to fractions of the subinterval, the
+        first and last node to the first and last node fraction (to 0 and 1
+        when the ends are nodes, bit for bit), and applies ``weight_function``
         there. The weights take the dtype and device of ``nodes``.
 
         Parameters
@@ -674,8 +648,9 @@ class VariableMethodClass(MethodClass):
             tensors (a [1, C] result would broadcast silently in the
             weighted sum).
         """
+        c = self.c.to(nodes)
         norm_dt = nodes - nodes[:, 0, None]
-        norm_dt = norm_dt / norm_dt[:, -1, None]
+        norm_dt = c[0] + (c[-1] - c[0]) * norm_dt / norm_dt[:, -1, None]
         b, b_error = self.weight_function(norm_dt)
         expected = norm_dt.shape[:2]
         if b.shape != expected or b_error.shape != expected:

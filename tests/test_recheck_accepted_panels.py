@@ -261,6 +261,40 @@ def test_recheck_error_norm_max_rms(error_norm):
     assert torch.allclose(result.integral.cpu(), _vector_truth(), atol=1e-4, rtol=1e-3)
 
 
+@pytest.mark.parametrize("error_norm", ["2", "max", "rms", "failure_fraction"], ids=str)
+@pytest.mark.parametrize("absolute", [True, False], ids=["absolute", "cumulative"])
+def test_recorded_subintervals_keep_their_reduced_errors(error_norm, absolute):
+    """For the norm family every judgement of the record (each re-check and
+    the final check) receives each subinterval's reduced error and rounding
+    floor as its batch computed them, in the record's row order (equal here
+    to a recomputation from the record's arrays: D = 2, whose reductions do
+    not depend on the other rows); "failure_fraction" records none, and the
+    returned result carries no such field."""
+    solver = _solver(error_norm=error_norm, use_absolute_error_ratio=absolute)
+    check = solver._record_error_check
+    seen = []
+
+    def spy(record, *args, **kwargs):
+        kept = record.get("reduced_errors")
+        seen.append(
+            kept is None
+            or torch.equal(
+                kept,
+                solver._reduced_errors(
+                    record["mesh_quadrature_errors"], record["mesh_quadratures"]
+                ),
+            )
+        )
+        assert (kept is None) == (error_norm == "failure_fraction")
+        return check(record, *args, **kwargs)
+
+    solver._record_error_check = spy
+    torch.manual_seed(0)
+    result, _ = _run(solver, _vector_cancelling, take_gradient=False)
+    assert len(seen) > 2 and all(seen)
+    assert not hasattr(result, "reduced_errors")
+
+
 # ---------------------------------------------------------------------------
 # B. Gradient correctness through the re-check
 # ---------------------------------------------------------------------------

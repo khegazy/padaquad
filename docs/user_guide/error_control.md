@@ -87,7 +87,9 @@ $e_k$, and `error_norm` turns it into one accept-or-split decision:
   $R(e_k)$ of the error vector is compared with
   $\max(\text{atol}, \text{rtol}\, R(I))$. `"2"` is the Euclidean norm, `"max"`
   the largest absolute component, `"rms"` the root-mean-square; a callable must
-  reduce the last axis of a `[..., D]` tensor.
+  reduce the last axis of a `[..., D]` tensor, each row on its own (a
+  subinterval's reduced error is computed once, with the other subintervals of
+  its batch, and kept for every later check of it).
 - `"failure_fraction"`: each component $d$ is compared with its own tolerance
   $\text{atol} + \text{rtol}\,|I_d|$, and the subinterval is accepted when the
   fraction of failing components is at most `mesh_failure_tolerance` (0 means

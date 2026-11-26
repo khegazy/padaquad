@@ -1242,11 +1242,22 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                         f"{list(error_integral_reference.shape)}."
                     )
                 reference_integral = error_integral_reference
+            # The norm family judges a subinterval by its reduced error and
+            # rounding floor, which never change once it is evaluated: the
+            # record keeps them, so Step 4b, Step 7 and the final check judge
+            # it by the numbers it was accepted with. "failure_fraction"
+            # compares each output with its own tolerance and keeps none.
+            reduced_errors = (
+                None
+                if self._is_failure_fraction
+                else self._reduced_errors(method_output.mesh_quadrature_errors, quads)
+            )
             error_ratios, _, error_ratios_per_dim = self._compute_error_ratios(
                 mesh_quadrature_errors=method_output.mesh_quadrature_errors,
                 mesh_quadratures=quads,
                 cum_mesh_quadratures=cum_mesh_quadratures,
                 integral=reference_integral,
+                reduced_errors=reduced_errors,
             )
             keep_mask, _, _ = self._accept_reject_masks(
                 error_ratios, error_ratios_per_dim
@@ -1408,6 +1419,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     results=intermediate_results,
                     mesh_index=idxs_transfer[step_idxs[keep_idx]],
                     result_device=result_device,
+                    reduced_errors=None
+                    if reduced_errors is None
+                    else reduced_errors[keep_idx],
                 )
                 del intermediate_results
 
@@ -1564,6 +1578,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         final_ratios, final_fails, nonfinite = self._record_error_check(
             record, None, record["integral"].detach()
         )
+        # Read only by the checks above; not moved to result_device.
+        record.pop("reduced_errors", None)
         final_fails = final_fails | nonfinite
         # The split statistics and the check in one read of the device.
         n_unsplit, max_split_depth, failed = torch.stack(
@@ -1683,7 +1699,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         in-loop re-check of accepted subintervals (Step 4b of ``integrate``)
         and by the final ``converged`` check. It uses the same error ratios and
         accept rule as a freshly evaluated batch (``_compute_error_ratios``,
-        ``_accept_reject_masks``).
+        ``_accept_reject_masks``), and for the norm family the reduced error
+        and rounding floor each subinterval was accepted with (the record's
+        ``reduced_errors``), so only the tolerance can change its decision.
 
         Parameters
         ----------
@@ -1713,6 +1731,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh_quadratures=record["mesh_quadratures"].detach(),
             cum_mesh_quadratures=cum_mesh_quadratures,
             integral=integral,
+            reduced_errors=record.get("reduced_errors"),
         )
         _, reject_mask, nonfinite_mask = self._accept_reject_masks(
             error_ratios, error_ratios_per_dim
@@ -3665,7 +3684,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
           ``_max_norm``).
         - ``"rms"``: the root-mean-square ``sqrt(mean(x**2))``; scipy has no
           such option.
-        - a callable: ``error_norm(x)``, which must reduce the last axis.
+        - a callable: ``error_norm(x)``, which must reduce the last axis,
+          each row on its own: the record keeps a subinterval's reduced error
+          from its batch (``_reduced_errors``), so a row's value must not
+          depend on the other rows.
 
         For D = 1 every string option equals ``torch.abs(x)``.
 
@@ -3740,6 +3762,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         cum_mesh_quadratures: torch.Tensor | None = None,
         integral: torch.Tensor | None = None,
         pair_errors: torch.Tensor | None = None,
+        reduced_errors: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         """
         Compute the error ratio of each subinterval, choosing by ``self.error_norm``.
@@ -3775,6 +3798,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Error of each pair of neighbors merged into one [N-1, D], the
             numerator of ``error_ratios_2steps``, built by its one reader,
             ``_get_optimal_mesh``. None (default) skips the pair ratio.
+        reduced_errors : torch.Tensor or None
+            The norm family's reduced error and rounding floor of each
+            subinterval [N, 2] (``_reduced_errors``), as the record keeps them;
+            None (default) computes them from the arrays. Ignored by
+            ``"failure_fraction"``, whose tolerance is per component.
 
         Returns
         -------
@@ -3806,19 +3834,62 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         if mesh_quadratures is None:
             # No rounding floor: a zero floor leaves every tolerance as it is.
             mesh_quadratures = torch.zeros_like(mesh_quadrature_errors)
-        abs_err = torch.abs(mesh_quadrature_errors)
         if self._is_failure_fraction:
             return self._error_ratios_failure_fraction(
-                abs_err, mesh_quadratures, cum_mesh_quadratures, integral, pair_errors
+                torch.abs(mesh_quadrature_errors),
+                mesh_quadratures,
+                cum_mesh_quadratures,
+                integral,
+                pair_errors,
+            )
+        if reduced_errors is None:
+            reduced_errors = self._reduced_errors(
+                mesh_quadrature_errors, mesh_quadratures
             )
         return self._error_ratios_norm(
-            abs_err, mesh_quadratures, cum_mesh_quadratures, integral, pair_errors
+            reduced_errors, cum_mesh_quadratures, integral, pair_errors
+        )
+
+    def _reduced_errors(
+        self, mesh_quadrature_errors: torch.Tensor, mesh_quadratures: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Reduce each subinterval's error estimate and rounding floor with the norm.
+
+        These are the two numbers of the norm family's error ratio that never
+        change once a subinterval is evaluated, ``R(abs(e[k]))`` and
+        ``R(floor[k])`` (``_error_ratios_norm``), with R the configured norm
+        (``_reduce_norm``) and the rounding floor of ``_round_floor``; only the
+        tolerance changes. The integration loop computes them for each batch
+        and the record keeps them, so every later judgement of a recorded
+        subinterval (the re-check and the final check, ``_record_error_check``)
+        uses the very numbers it was accepted with and reduces no [N, D] array
+        again.
+
+        Parameters
+        ----------
+        mesh_quadrature_errors : torch.Tensor
+            Error estimate of each subinterval. Shape: [N, D].
+        mesh_quadratures : torch.Tensor
+            Contribution of each subinterval. Shape: [N, D].
+
+        Returns
+        -------
+        torch.Tensor
+            ``R(abs(e[k]))`` and ``R(floor[k])`` of each subinterval. Shape:
+            [N, 2].
+        """
+        return torch.stack(
+            [
+                self._reduce_norm(torch.abs(mesh_quadrature_errors)),
+                self._reduce_norm(self._round_floor(mesh_quadratures)),
+            ],
+            dim=-1,
         )
 
     def _error_ratios_norm(
         self,
-        abs_err: torch.Tensor,
-        mesh_quadratures: torch.Tensor,
+        reduced_errors: torch.Tensor,
         cum_mesh_quadratures: torch.Tensor | None,
         integral: torch.Tensor | None,
         pair_errors: torch.Tensor | None,
@@ -3860,11 +3931,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         Parameters
         ----------
-        abs_err : torch.Tensor
-            Absolute error estimate of each subinterval. Shape: [N, D].
-        mesh_quadratures : torch.Tensor
-            Contribution of each subinterval (for the rounding floor). Shape:
-            [N, D].
+        reduced_errors : torch.Tensor
+            ``R(abs(e[k]))`` and ``R(floor[k])`` of each subinterval
+            (``_reduced_errors``). Shape: [N, 2].
         cum_mesh_quadratures : torch.Tensor | None
             Running integral through each subinterval (cumulative mode;
             required there). Shape: [N, D].
@@ -3881,9 +3950,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             ``(error_ratio, error_ratio_2steps, None)``, shapes [N] and [N-1]
             (None without ``pair_errors``).
         """
-        err = self._reduce_norm(abs_err)
-        floor = self._reduce_norm(self._round_floor(mesh_quadratures))
-
+        err, floor = reduced_errors.unbind(-1)
         if self.use_absolute_error_ratio:
             assert integral is not None  # checked in _compute_error_ratios
             error_tol = torch.clamp(
@@ -4060,11 +4127,19 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     # Per-subinterval record keys the loop reads, each kept as one tensor on
     # the integration device and appended to every turn: the left mesh index
     # of each recorded subinterval in the current mesh (the order of the
-    # cumulative sums, the re-check's mesh positions), and the contributions
-    # and error estimates (cumulative sums and the re-check of accepted
-    # subintervals in ``integrate``). Every other per-subinterval field is
-    # kept as one chunk per batch (``_record_results``).
-    _RECORD_LOOP_KEYS = ("mesh_index", "mesh_quadratures", "mesh_quadrature_errors")
+    # cumulative sums, the re-check's mesh positions), the contributions and
+    # error estimates (cumulative sums, removals and the re-check of
+    # "failure_fraction"), and for the norm family the reduced error and
+    # rounding floor (``_reduced_errors``; the re-check and the final check),
+    # which ``integrate`` drops after the final check. Every other
+    # per-subinterval field is kept as one chunk per batch
+    # (``_record_results``).
+    _RECORD_LOOP_KEYS = (
+        "mesh_index",
+        "mesh_quadratures",
+        "mesh_quadrature_errors",
+        "reduced_errors",
+    )
 
     # Cumulative scalar keys whose final output stays on the integration device.
     # The integral and its error estimate are the primary answer, so they remain
@@ -4193,6 +4268,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         results: IntegrationResult,
         mesh_index: torch.Tensor,
         result_device: str | torch.device | None = None,
+        reduced_errors: torch.Tensor | None = None,
     ) -> dict[str, torch.Tensor]:
         """
         Append the accepted subintervals of a batch to the record.
@@ -4233,6 +4309,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         result_device : str | torch.device | None
             Device for the values (``y`` and the tracked variables). None keeps
             them on the integration device.
+        reduced_errors : torch.Tensor or None
+            The norm family's reduced error and rounding floor of each of them
+            [N, 2] (``_reduced_errors``), recorded under the key
+            ``reduced_errors``; None (``"failure_fraction"``) records none.
 
         Returns
         -------
@@ -4251,6 +4331,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             result_device = self.device
         fields = self._record_fields(results)
         fields["mesh_index"] = mesh_index
+        if reduced_errors is not None:
+            fields["reduced_errors"] = reduced_errors
         if record and fields.keys() != record.keys() | chunks.keys():
             raise ValueError(
                 "The integrand returned a different set of tracked variables "

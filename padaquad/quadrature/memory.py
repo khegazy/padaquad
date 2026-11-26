@@ -597,6 +597,8 @@ class _MemoryManagement:
             a float32 or float64 point ``t`` of shape [T], if ``f`` does not
             return values of shape [N, D], or if ``evaluation_buffer`` is not
             None or an int >= 1.
+        torch.OutOfMemoryError
+            If one evaluation of ``f`` does not fit in memory.
 
         Examples
         --------
@@ -639,14 +641,9 @@ class _MemoryManagement:
             # A cap from an earlier call or measurement would lower this one.
             self._oom_max_batch = None
             # One point, shaped [1, T] like every batch f receives: checks the
-            # output and keeps one-time costs (CUDA start-up, lazy loading) out
-            # of the benchmark, as integrate() does.
-            integrand, _ = self._split_f_output(f(t.reshape(1, -1), *f_args))
-            if integrand.dim() < 2:
-                raise ValueError(
-                    "f must return values of shape [N, D] for points of shape "
-                    f"[N, T]; got shape {list(integrand.shape)}."
-                )
+            # output (_call_f) and keeps one-time costs (CUDA start-up, lazy
+            # loading) out of the benchmark's readings.
+            self._call_f(f, f_args, t.reshape(1, -1), False)
             return self._setup_memory_checks(
                 f,
                 t,

@@ -2063,6 +2063,22 @@ def test_get_max_batch_with_f_validates_its_arguments(kwargs, monkeypatch):
     assert calls == []
 
 
+@pytest.mark.parametrize("error", [torch.OutOfMemoryError, MemoryError])
+def test_get_max_batch_one_point_out_of_memory(error, monkeypatch):
+    """The one-point call goes through _call_f, like every call of f in
+    integrate: an out-of-memory error of either kind on one point is raised as
+    torch.OutOfMemoryError saying that the batch cannot be reduced."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+    calls = _fake_benchmark(solver, monkeypatch)
+
+    def f(t):
+        raise error("simulated")
+
+    with pytest.raises(torch.OutOfMemoryError, match="on 1 points ran out of memory"):
+        solver.get_max_batch(f=f, t=_T)
+    assert calls == []
+
+
 def test_get_max_batch_measures_in_the_dtype_of_t(monkeypatch):
     """The benchmark runs in t's dtype, not in whatever dtype an earlier call
     left the solver in, and the solver's dtype is not changed."""

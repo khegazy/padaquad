@@ -339,8 +339,9 @@ class MethodClass(ABC):
         ----------
         nodes : torch.Tensor or None
             Node fractions at which to measure a method whose weights depend
-            on the node positions: 1-D, C entries, non-decreasing from 0 to 1.
-            Default: ``node_fractions()``.
+            on the node positions: 1-D, C entries, non-decreasing, from the
+            first to the last of ``node_fractions()`` (0 to 1 for the
+            registered variable methods). Default: ``node_fractions()``.
         tol : float
             Errors at most this large count as exact. The default suits the
             float64 methods of ``UNIFORM_METHODS`` and ``VARIABLE_METHODS``;
@@ -354,7 +355,8 @@ class MethodClass(ABC):
         Raises
         ------
         ValueError
-            If ``nodes`` is malformed or does not have C entries;
+            If ``nodes`` is malformed, does not have C entries, or does not
+            start and end at the first and last node fraction;
             if ``nodes`` differs from the node fractions while the weights
             do not depend on the node positions (the measurement would
             apply the weights at nodes they were not made for); or if no
@@ -383,10 +385,14 @@ class MethodClass(ABC):
         default = self.node_fractions().detach().to("cpu", f64)
         c = default if nodes is None else nodes.detach().to("cpu", f64)
         self._check_node_fractions(c)
-        if c.shape != default.shape:
+        # weights() places a subinterval's first and last node at the first and
+        # last fraction, so nodes that start or end elsewhere would be measured
+        # as another method.
+        if c.shape != default.shape or c[0] != default[0] or c[-1] != default[-1]:
             raise ValueError(
-                f"nodes must have {len(default)} entries (one per node), got "
-                f"shape {tuple(c.shape)}"
+                f"nodes must have {len(default)} entries (one per node) and "
+                f"start and end at the node fractions' first and last values "
+                f"{float(default[0])} and {float(default[-1])}; got {c.tolist()}"
             )
         b, b_error = (w[0, :, 0].to("cpu", f64) for w in self.weights(c[None, :, None]))
         if nodes is not None and not torch.equal(c, default):

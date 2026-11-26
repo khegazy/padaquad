@@ -2,10 +2,7 @@
 
 The variable solver places every subinterval's nodes with ``_compute_nodes``
 (at the method's node fractions) and, like the uniform solver, evaluates fresh
-nodes in both halves of a split: ``_evaluate_adaptive_nodes`` (which would
-interleave old and new nodes to reuse evaluations) is not called by the
-integration loop. ``_merge_excess_nodes`` runs when the optimal mesh is
-built.
+nodes in both halves of a split.
 """
 
 from __future__ import annotations

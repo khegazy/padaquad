@@ -72,7 +72,7 @@ cd padaquad
 pip install -e .
 ```
 
-Runtime dependencies: Python 3.11+, PyTorch, NumPy, SciPy, einops, psutil.
+Runtime dependencies: Python 3.11+, PyTorch, NumPy, SciPy, psutil.
 
 **For developers:**
 

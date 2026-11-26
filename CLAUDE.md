@@ -140,7 +140,6 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_solver_methods.py` | `adaptive_quadrature` factory, `method.weights` through both solvers, per-step node count `solver.C` |
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed accept masks (`_keep_mask`, the loop's rule), midpoint placement, the returned `keep_idx` and `idxs_transfer` (T = 1 and 2), extra split positions in any order, the split cap, a subinterval one ULP wide accepted (`_splittable`, T = 1 and 2) |
 | `test_record_and_sort.py` | `_record_results` (appends in acceptance order: one tensor per loop field, one chunk per batch for the rest; a view of a larger array is copied) and `_sort_record` (rows to their mesh index, T = 1 and 2; one batch in order is not copied; chunk fields moved to the given device; a record that does not cover the mesh once raises; the gradient passes); a removal and the final ordering copy one field at a time (GPU peak); end to end, every path of the record (removals, Step 7, cumulative, tracked, trade, no record, split cap, `take_gradient`, gk21) returns mesh order and the same numbers without `runtime_checks`; `_flatten_output` equals the concatenation, values and gradient |
-| `test_evaluate_and_merge.py` | The variable solver's `_evaluate_adaptive_nodes` (split with reuse; not called by `integrate`) |
 | `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: the state's mesh re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
 | `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
@@ -216,8 +215,7 @@ MethodClass (ABC, methods/_base.py)        one quadrature rule
 The two concrete solvers (`UniformAdaptiveQuadrature` and
 `VariableAdaptiveQuadrature`) are what user code instantiates, either
 via `adaptive_quadrature(...)` factory or directly. They differ only in
-`sampling_type` (which selects the method registry); the variable solver also
-keeps `_evaluate_adaptive_nodes`, which `integrate` does not call. Node
+`sampling_type` (which selects the method registry). Node
 placement, `_calculate_integral` and the merging of the optimal mesh
 (`_prune_excess_mesh` drops a merged pair's shared mesh point) live once in
 `AdaptiveQuadrature` and reach the
@@ -459,11 +457,8 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
     uniform solver it inserts the midpoint into the mesh and places fresh
     nodes in both halves with `_compute_nodes`, at the node fractions, so
     `interpolatory3_variable` always runs as Simpson's rule (a = 1/2).
-    `_evaluate_adaptive_nodes`, which would interleave old and new nodes into
-    two C-point halves, exists and is unit-tested but is never called by
-    `integrate()` (checked 2026-11-12: 0 calls on a run with 2495
-    subintervals). It also allocates its node array with last dimension D
-    instead of T (latent; wrong shape only when D != T).
+    The uncalled reuse method `_evaluate_adaptive_nodes` was deleted; what
+    reuse would need: `docs/issues/variable-sampling-reuse.md`.
   - *Merging*: as for uniform sampling.
 
 ### Memory management
@@ -714,6 +709,6 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 
 ## Dependencies
 
-- **Runtime**: torch, numpy, scipy, einops, psutil.
+- **Runtime**: torch, numpy, scipy, psutil.
 - **Dev**: pytest, pytest-cov, mypy, pre-commit, ruff, typos,
   torchdiffeq (for the speed-test benchmark only).

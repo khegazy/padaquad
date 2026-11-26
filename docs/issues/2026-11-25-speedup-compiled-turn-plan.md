@@ -97,7 +97,8 @@ the prototype of 5.3 as a design, against the code at `c70f790`, PyTorch 2.8.0
 many outputs, but it does not come from not waiting, and it brings two costs
 that 5.3 did not list: the first call of a size is up to 2.9 times slower,
 and the process keeps the pinned memory after the call. The options are at the
-end of this section, for the user to decide.
+end of this section. **Decided by the user on 2026-11-26: option (c), leave the
+copy as it is.**
 
 ### What the review found
 

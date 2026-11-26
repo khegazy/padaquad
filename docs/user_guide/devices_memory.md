@@ -27,18 +27,22 @@ thread count therefore matters on the CPU, and also with a GPU solver, whose
 record (with the default `result_device="cpu"`) and state's mesh are built on
 the host.
 
-`torch.get_num_threads()` returns the count. On the node measured below, with
-`OMP_NUM_THREADS` unset, it was 64 (the node's 64 cores, which have two
-hardware threads each, 128 logical CPUs) in a process allowed to run on every
-logical CPU, and 8 in a process allowed 8 logical CPUs, even when those were
-the two hardware threads of 4 cores: `srun -c 8 --cpu-bind=cores` gave a job
-step exactly that, so PyTorch put two threads on each core. Set the count
-before the first integral: with `torch.set_num_threads(n)` in Python, or with
-`OMP_NUM_THREADS=n` in the environment before Python starts. On a Slurm
-cluster, bind each task to its cores and use at most one thread per core: on
-this node, `srun -c 16 --cpu-bind=cores` gave 8 cores (16 logical CPUs), on
-which `OMP_NUM_THREADS=8`, `OMP_PLACES=cores` and `OMP_PROC_BIND=close` (the
-binding of the tables below) place one thread on each.
+`torch.get_num_threads()` returns the count. PyTorch's default follows the CPUs
+the process may run on: on the node measured below (64 cores with two hardware
+threads each, 128 logical CPUs) it was 64 for a process allowed every logical
+CPU, and 8 for a process allowed 8, also when those were the two hardware
+threads of 4 cores. Set the count before the first integral, with
+`torch.set_num_threads(n)` in Python or `OMP_NUM_THREADS=n` in the environment
+before Python starts, and choose the CPUs the process gets: `taskset` on one
+machine, `srun -c` on a Slurm cluster. On this node,
+`srun -c 16 --cpu-bind=cores` gave a job step 8 whole cores (16 logical CPUs),
+and `srun -c 8 --cpu-bind=cores` gave 4 cores, on which PyTorch's default was 8
+threads. This runs 8 threads on 8 cores (both hardware threads of each, unlike
+the rows below):
+
+```bash
+srun -c 16 --cpu-bind=cores --export=ALL,OMP_NUM_THREADS=8 python run.py
+```
 
 PadaQuad itself never changes the thread count or the settings of Python's
 garbage collector, and outside a distributed job (several processes joined by
@@ -49,16 +53,24 @@ may still hold the failed call's tensors. The same collection runs at the end
 of the memory benchmark of `get_max_batch(f=...)` and before an integral is
 restarted after an out-of-memory error in a backward pass.
 
-The tables give the median time of 30 calls in ms, with the shortest and
-longest in parentheses, measured on one NERSC Perlmutter GPU node (one AMD
-EPYC 7763 with 64 cores; an NVIDIA A100 with 40 GB), PyTorch 2.8.0, Python
-3.12, PadaQuad commit `3eb4507`. Each call: `gk21`, `atol=1e-8`, `rtol=0`,
+The tables are measurements on one node type, one PyTorch version and four
+integrands: the median time of 30 calls in ms, with the shortest and longest
+in parentheses, on one NERSC Perlmutter GPU node (one AMD EPYC 7763 with 64
+cores; an NVIDIA A100 with 40 GB), PyTorch 2.8.0, Python 3.12, PadaQuad commit
+`3eb4507`. Each call: `gk21`, `atol=1e-8`, `rtol=0`, `error_norm="max"`,
 float64, `max_batch=1_000_000`, `take_gradient=False`, after
-`torch.manual_seed(0)`; one process per thread count, with one call of each
-integrand before its 30 timed ones. "Bound" means one thread per core, on n
-cores (`OMP_PROC_BIND=close`, `OMP_PLACES=cores` and `taskset`; with the GPU
-solver, cores beside the GPU); "64, default" is PyTorch's own count with
-nothing set; 128 is two threads per core. The integrands, on [0, 1]:
+`torch.manual_seed(0)`; one process per row, with one call of each integrand
+before its 30 timed ones. The rows:
+
+- "n on n cores": `taskset` to n cores, one logical CPU of each (with the GPU
+  solver, the cores beside the GPU, except for 64), `OMP_NUM_THREADS=n`, and
+  each thread pinned to one core (`OMP_PLACES=cores`, `OMP_PROC_BIND=close`);
+- "not pinned": the same without the pinning variables;
+- "8, all CPUs": `OMP_NUM_THREADS=8` and nothing else;
+- "64, default": nothing set (64 threads, all 128 logical CPUs allowed);
+- "128": `OMP_NUM_THREADS=128`, two threads per core.
+
+The integrands, on [0, 1]:
 
 - `exp(-t) sin(40 t)`: 11 subintervals, one pass of 231 points;
 - `sin(k t)` for 1,000 values of k from 1 to 100 (1,000 outputs): 13
@@ -73,13 +85,14 @@ subintervals there.
 
 | Threads | `exp(-t) sin(40 t)` | 1,000 outputs | `sin(1 / (t + 0.001))` | `sin(200,000 t)` |
 |---|---|---|---|---|
-| 1, bound | 2.70 (2.68-3.01) | 6.67 (6.63-6.89) | 11.5 (11.4-12.5) | 31.7 (27.0-37.4) |
-| 2, bound | 2.68 (2.64-3.17) | 5.64 (5.51-5.88) | 11.3 (11.2-12.3) | 26.6 (22.8-30.9) |
-| 4, bound | 2.68 (2.63-2.96) | 5.13 (4.94-5.40) | 11.5 (11.3-12.4) | 23.4 (20.5-27.6) |
-| 8, bound | 2.85 (2.72-3.12) | 5.23 (4.98-5.43) | 12.1 (11.6-12.8) | 23.0 (20.6-26.9) |
-| 16, bound | 2.99 (2.94-3.19) | 5.72 (5.68-5.82) | 12.6 (12.5-13.6) | 24.2 (21.9-27.4) |
-| 32, bound | 3.00 (2.97-3.25) | 6.00 (5.96-6.30) | 12.8 (12.8-13.9) | 24.9 (23.5-26.3) |
-| 64, bound | 3.03 (2.99-3.26) | 6.44 (6.38-6.69) | 12.7 (12.7-13.7) | 26.3 (24.1-34.0) |
+| 1 on 1 core | 2.70 (2.68-3.01) | 6.67 (6.63-6.89) | 11.5 (11.4-12.5) | 31.7 (27.0-37.4) |
+| 2 on 2 cores | 2.68 (2.64-3.17) | 5.64 (5.51-5.88) | 11.3 (11.2-12.3) | 26.6 (22.8-30.9) |
+| 4 on 4 cores | 2.68 (2.63-2.96) | 5.13 (4.94-5.40) | 11.5 (11.3-12.4) | 23.4 (20.5-27.6) |
+| 8 on 8 cores | 2.85 (2.72-3.12) | 5.23 (4.98-5.43) | 12.1 (11.6-12.8) | 23.0 (20.6-26.9) |
+| 8 on 8 cores, not pinned | 2.66 (2.63-2.99) | 5.07 (4.92-5.44) | 12.0 (11.5-14.4) | 22.9 (20.4-24.5) |
+| 16 on 16 cores | 2.99 (2.94-3.19) | 5.72 (5.68-5.82) | 12.6 (12.5-13.6) | 24.2 (21.9-27.4) |
+| 32 on 32 cores | 3.00 (2.97-3.25) | 6.00 (5.96-6.30) | 12.8 (12.8-13.9) | 24.9 (23.5-26.3) |
+| 64 on 64 cores | 3.03 (2.99-3.26) | 6.44 (6.38-6.69) | 12.7 (12.7-13.7) | 26.3 (24.1-34.0) |
 | 64, default | 2.70 (2.66-3.02) | 6.07 (6.03-6.23) | 12.8 (12.8-14.0) | 30.6 (27.9-76.8) |
 | 128 | 3.67 (3.63-14.3) | 7.77 (7.57-7.81) | 15.9 (15.9-40.8) | 36.8 (32.9-47.3) |
 
@@ -87,30 +100,39 @@ subintervals there.
 
 | Threads | `exp(-t) sin(40 t)` | 1,000 outputs | `sin(1 / (t + 0.001))` | `sin(200,000 t)` |
 |---|---|---|---|---|
-| 1, bound | 4.30 (4.28-4.58) | 7.61 (7.54-8.14) | 30.9 (30.8-32.5) | 30.0 (29.9-32.9) |
-| 8, bound | 4.31 (4.28-4.76) | 7.63 (7.54-9.04) | 31.9 (31.0-34.0) | 29.7 (28.7-31.1) |
-| 16, bound | 4.29 (4.26-4.62) | 8.10 (8.07-8.35) | 34.0 (33.8-34.2) | 31.1 (30.9-32.5) |
-| 64, bound | 4.32 (4.28-4.83) | 8.40 (8.33-9.42) | 34.3 (34.1-34.5) | 32.0 (31.9-33.4) |
+| 1 on 1 core | 4.30 (4.28-4.58) | 7.61 (7.54-8.14) | 30.9 (30.8-32.5) | 30.0 (29.9-32.9) |
+| 8 on 8 cores | 4.31 (4.28-4.76) | 7.63 (7.54-9.04) | 31.9 (31.0-34.0) | 29.7 (28.7-31.1) |
+| 8, all CPUs | 4.30 (4.28-5.45) | 7.89 (7.62-8.14) | 32.2 (31.0-36.3) | 30.0 (29.0-31.5) |
+| 16 on 16 cores | 4.29 (4.26-4.62) | 8.10 (8.07-8.35) | 34.0 (33.8-34.2) | 31.1 (30.9-32.5) |
+| 64 on 64 cores | 4.32 (4.28-4.83) | 8.40 (8.33-9.42) | 34.3 (34.1-34.5) | 32.0 (31.9-33.4) |
 | 64, default | 4.35 (4.32-5.68) | 8.75 (8.25-10.2) | 35.1 (34.4-40.1) | 34.6 (34.4-36.9) |
 | 128 | 4.38 (4.34-4.69) | 10.1 (10.0-10.8) | 35.9 (35.5-42.5) | 35.8 (35.6-47.9) |
 
-On this node:
+What they show:
 
-- **Few values per pass** (`exp(-t) sin(40 t)` and `sin(1 / (t + 0.001))`,
-  a few hundred points with one output): 1 to 4 threads were within 2 % of the
-  fastest on the CPU; PyTorch's default of 64 took up to 14 % longer, and 128
-  up to 41 % longer.
-- **Many values per pass** (1,000 outputs, and `sin(200,000 t)`): 4 to 8
-  threads were within 2 % of the fastest on the CPU; 1 thread took up to 38 %
-  longer, the default of 64 up to 33 % and 128 up to 60 %. With the default,
-  the longest of the 30 calls of `sin(200,000 t)` took 2.5 times their
-  median, against at most 1.3 times with bound threads.
-- **With the GPU solver**, 1 to 8 threads were within 4 % of the fastest on
-  every integrand; the default of 64 took up to 17 % longer.
-- Every thread count and binding returned the same integral, bit for bit.
+- **The number of threads.** With few values per pass (`exp(-t) sin(40 t)`
+  and `sin(1 / (t + 0.001))`), 1 to 4 threads were within 2 % of the fastest
+  on the CPU; PyTorch's default of 64 took up to 14 % longer and 128 up to
+  41 % longer. With many values per pass (1,000 outputs and
+  `sin(200,000 t)`), 4 to 8 threads were within 4 % of the fastest; 1 thread
+  took up to 38 % longer, the default up to 34 % and 128 up to 60 %. With the
+  default, the longest of the 30 calls of `sin(200,000 t)` took 2.5 times
+  their median, against at most 1.3 times with n threads on n cores. With the
+  GPU solver, 1 to 8 threads were within 5 % of the fastest on every
+  integrand, and the default took up to 17 % longer.
+- **Pinning threads to cores** was separated from the thread count in two
+  comparisons, and did not help: with 8 threads on 8 cores, pinned took 0.2
+  to 7 % longer than not pinned; 64 threads pinned one per core, against the
+  default's 64 on all 128 logical CPUs, changed the median by -14 % to +12 %
+  depending on the integrand. With the GPU solver, 8 threads pinned beside
+  the GPU and 8 on all CPUs were within 3.3 % of each other.
+- **Two threads per core** were measured only as 128 threads on 64 cores, the
+  slowest row of both tables. Several threads sharing fewer cores, such as
+  PyTorch's default of 8 threads on the 4 cores of `srun -c 8
+  --cpu-bind=cores`, were not timed.
+- Every row returned the same integral, bit for bit.
 
-The best count depends on the integrand, the machine and what else runs on
-it: time a few counts on your own integral before a long run.
+Time a few thread counts on your own integral before a long run.
 
 (ug-memory)=
 ## Batch size and the memory benchmark

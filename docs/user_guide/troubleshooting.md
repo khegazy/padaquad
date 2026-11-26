@@ -79,9 +79,9 @@ set `trade_speed_for_memory=True` or `record_evaluations=False`
 
 On the CPU, and for the host's share of a GPU solver's work, the number of
 threads PyTorch uses changes the time of a call: on one 64-core node, PyTorch's
-default of 64 threads was up to 33 % slower than 4 to 8 threads bound one per
-core, and its slowest calls took up to 2.5 times its median. Set and bind the
-thread count ({ref}`ug-cpu-threads`).
+default of 64 threads took up to 34 % longer than 4 to 8 threads on as many
+cores, and its slowest call up to 2.5 times its median. Set the thread count
+and the CPUs the process gets ({ref}`ug-cpu-threads`).
 
 ## The error estimate seems unreliable
 

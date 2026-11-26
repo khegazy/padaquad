@@ -3078,9 +3078,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # even when every pair has its own ratio.
             keys, inverse = torch.unique(key[lo:hi], return_inverse=True)
             pair_weights = self._cached_merged_pair_weights(keys)[inverse]
-            # [P, C, D]: the stored values as they are (views when float64)
-            y_l = y[lo:hi].to(torch.float64)
-            y_r = y[lo + 1 : hi + 1].to(torch.float64)
+            # [P, C, D]: the stored values, views when float64 and contiguous.
+            # f's output is recorded as it is, so it can be strided (a
+            # transposed output); bmm on strided values rounds differently.
+            y_l = y[lo:hi].contiguous().to(torch.float64)
+            y_r = y[lo + 1 : hi + 1].contiguous().to(torch.float64)
             width = (widths[lo:hi] + widths[lo + 1 : hi + 1])[:, None, None]
             # [P, 2, D]: row 0 the merged integral Q_hat, row 1 its error E_hat
             q_e_hat = width * (

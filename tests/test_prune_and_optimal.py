@@ -841,6 +841,28 @@ def test_predicted_works_in_bounded_chunks(monkeypatch, n_outputs):
     assert torch.allclose(pieces, whole, rtol=0, atol=1e-14 * float(q.abs().max()))
 
 
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_predicted_does_not_depend_on_the_values_layout(dtype):
+    """The record keeps f's output as it is when one call covers the pass, so
+    an integrand that returns a transposed [N, D] tensor gives values whose
+    slowest dimension is D. The prediction from them equals the prediction
+    from the same values stored contiguously, bit for bit: a product on the
+    strided values rounded differently (up to 4e-13, relative, at D = 1000
+    in float64)."""
+    solver = make_solver_for_unit_test("gk21")
+    generator = torch.Generator().manual_seed(3)
+    widths = torch.rand(40, generator=generator, dtype=torch.float64) + 0.05
+    edges = torch.cat([torch.zeros(1, dtype=torch.float64), widths.cumsum(0)])
+    edges = (edges / edges[-1]).unsqueeze(-1)
+    y = torch.randn(40, solver.C, 1000, generator=generator, dtype=dtype)
+    q = torch.randn(40, 1000, generator=generator, dtype=dtype)
+    transposed = y.permute(2, 0, 1).contiguous().permute(1, 2, 0)
+    assert torch.equal(
+        solver._predict_merged_errors(transposed, q, edges),
+        solver._predict_merged_errors(y, q, edges),
+    )
+
+
 def test_predicted_refuses_pairs_without_a_finite_width_ratio():
     """A pair whose width ratio overflows (mesh [0, 1e-310, 1, 2]: ratio 1e310)
     or is NaN has no int64 key: converting a non-finite float to int64 is

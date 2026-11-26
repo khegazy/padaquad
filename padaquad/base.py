@@ -210,7 +210,7 @@ class SolverBase(ABC, DistributedEnvironment):
         self.init_y0 = (
             y0.to(self.device)
             if y0 is not None
-            else torch.tensor([0], dtype=dtype, device=self.device)
+            else torch.zeros(1, dtype=dtype, device=self.device)
         )
         self._set_dtype(dtype)
 

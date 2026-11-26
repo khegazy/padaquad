@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import warnings
+
 import pytest
 import torch
 from _helpers import (
@@ -13,7 +15,7 @@ from _helpers import (
     needs_cuda,
 )
 
-from padaquad import integrand_dict
+from padaquad import adaptive_quadrature, integrand_dict
 from padaquad.distributed import _resolve_device
 from padaquad.results import IntegrationResult
 
@@ -342,3 +344,46 @@ class TestDeviceSelection:
             assert torch.cuda.current_device() == current
         if check_gpu0:
             assert torch.cuda.memory_stats(0)["allocated_bytes.all.allocated"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Host waits (CUDA)
+# ---------------------------------------------------------------------------
+
+
+def _host_waits(fn):
+    """Run ``fn`` and count the operations that made the host wait for the GPU."""
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        torch.cuda.set_sync_debug_mode("warn")
+        try:
+            fn()
+        finally:
+            torch.cuda.set_sync_debug_mode("default")
+    return sum("synchroniz" in str(w.message) for w in caught)
+
+
+@needs_cuda
+class TestHostWaits:
+    """The fixed cost of a call on a GPU: steps that need no device value read none."""
+
+    def test_construction_waits_for_nothing(self):
+        """Building a solver copies nothing from the host once its method has
+        been converted (the first solver of a method, device and dtype copies
+        the tables): no tolerance or default y0 tensor is copied to the GPU."""
+        adaptive_quadrature("uniform", "gk21", device="cuda")
+        waits = _host_waits(
+            lambda: adaptive_quadrature("uniform", "gk21", device="cuda")
+        )
+        assert waits == 0
+
+    @pytest.mark.parametrize("runtime_checks", [True, False])
+    def test_starting_mesh_reads_once_per_check(self, runtime_checks):
+        """A fresh starting mesh reads the device for its order check (with
+        runtime_checks) and for the dictionary of its points, nothing else."""
+        solver = adaptive_quadrature(
+            "uniform", "gk21", device="cuda", runtime_checks=runtime_checks
+        )
+        a, b = (torch.tensor([x], dtype=torch.float64, device="cuda") for x in (0, 1))
+        waits = _host_waits(lambda: solver._setup_initial_mesh(None, a, b, True, 13))
+        assert waits == 1 + runtime_checks

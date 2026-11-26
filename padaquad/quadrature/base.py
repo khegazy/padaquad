@@ -1175,7 +1175,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 f,
                 f_args,
                 mesh_init.reshape(1, -1),
-                int(mesh_trackers.sum()) * self.C,
+                n_start_steps * self.C,
                 total_mem_usage,
             )
         # Gradients to put back after an out-of-memory error in a backward
@@ -1560,8 +1560,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # counted, and max_adaptive_splits truncates the depth.
         assert split_counts is not None  # always kept in the loop
         step_split_counts = split_counts[:-1]
-        n_start_steps_split = n_start_steps - int((step_split_counts == 0).sum())
-        max_split_depth = int(step_split_counts.max())
 
         # Final error check: does the returned integral meet the tolerance?
         # Every recorded step is judged again against the final integral (in
@@ -1583,7 +1581,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             record["integral"].detach(),
         )
         final_fails = final_fails | nonfinite
-        converged = not bool(final_fails.any())
+        # The split statistics and the check in one read of the device.
+        n_unsplit, max_split_depth, failed = torch.stack(
+            [
+                (step_split_counts == 0).sum(),
+                step_split_counts.max(),
+                final_fails.any(),  # int64, by stack's type promotion
+            ]
+        ).tolist()
+        n_start_steps_split = n_start_steps - n_unsplit
+        converged = not failed
         if not converged:
             self._warn_not_converged(
                 record,
@@ -3605,13 +3612,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh[0] = mesh_init
             mesh[-1] = mesh_final
             if self.runtime_checks:
-                # Any-T: consecutive barriers are distinct (no zero-length panels).
-                assert torch.all(torch.any(mesh[1:] != mesh[:-1], dim=-1))
-                # 1-D: additionally strictly increasing.
+                # 1-D: strictly increasing (so no zero-length subinterval);
+                # any T: consecutive mesh points are distinct. One read each.
                 if mesh.shape[-1] == 1:
                     assert torch.all(mesh[1:] - mesh[:-1] > 0)
-        mesh_trackers = torch.ones(len(mesh), device=self.device).to(torch.bool)
-        mesh_trackers[-1] = False  # mesh_final cannot be a step starting point
+                else:
+                    assert torch.all(torch.any(mesh[1:] != mesh[:-1], dim=-1))
+        # True at every mesh point but the last, which starts no subinterval;
+        # compared on the device, with no copy from the host.
+        mesh_trackers = torch.arange(len(mesh), device=self.device) < len(mesh) - 1
         mesh_indices = self._get_mesh_indices(mesh)
 
         return mesh, mesh_trackers, mesh_indices

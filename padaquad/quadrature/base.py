@@ -2227,8 +2227,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             if self.runtime_checks:
                 assert torch.all(split_idxs[1:] > split_idxs[:-1])
             mesh_trackers.index_fill_(0, split_idxs, True)
-        elif n_four > 0:
-            split_idxs = torch.sort(split_idxs).values
 
         # A split in four is two halvings: the first halves every split
         # subinterval, the second both halves of each four-piece one, so its
@@ -2254,9 +2252,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 len(mesh), device=mesh.device
             )
             # The left mesh point of split subinterval j moves to split_left[j]
-            # = split_idxs[j] + j (split_idxs is strictly ascending, so j
-            # midpoints are inserted before it); its midpoint goes right after
-            # it, at idxs_new[j], and its right mesh point follows. So
+            # = split_idxs[j] + the number of split subintervals to its left
+            # (one midpoint is inserted before it for each), in any order of
+            # split_idxs; its midpoint goes right after it, at idxs_new[j], and
+            # its right mesh point follows. So
             # step_transfer and idxs_new are disjoint and together cover the
             # new mesh, and every entry of the empty arrays below is written.
             split_left = step_transfer[split_idxs]

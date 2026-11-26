@@ -100,9 +100,10 @@ subinterval is split into four equal pieces when
 The four pieces are those that two successive halvings make, and they count as
 two halvings in `max_split_depth` and against `max_adaptive_splits` (one
 halving below the cap, the subinterval is halved). Subintervals judged again by
-the re-check of accepted subintervals are halved, and with
+the re-check of accepted subintervals are halved. With
 `error_norm="failure_fraction"`, whose accept quantity is a fraction rather
-than a ratio, every split is a halving.
+than a ratio, `split_rule="accelerate"` raises `ValueError` (pass
+`split_rule="halve"` or a norm-family `error_norm`).
 
 **Why $2^k$.** The error estimate of a subinterval of width $h$ is dominated by
 the error of the method's embedded lower-degree method, of degree $k - 2$,

@@ -159,7 +159,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_solver_isolation.py` | Solvers of different dtypes keep their own tables; the registry is never changed; `MethodClass.to` returns one shared copy per (method, device, dtype), sharing no memory with its source, dropped with its source (deep copies and pickles of a solver, CUDA); `_Tableau` frozen; no integration writes into a method's tensors (version counters); a replaced registry entry reaches new solvers only; `_integration_on_device` restores the solver's method object, and leaves the solver's device and method when the conversion raises (CUDA) |
 | `test_tracked_variables.py` | The `tracked_variables` feature |
 | `test_docs_performance_table.py` | The Performance page's rendering of `docs/performance/results_*.json`: no file, one, two (name order, hardware headings), unreadable files named in the error; the memory options tables from `docs/performance/memory_options.json` (every setting of every integrand, the field's `EXAMPLE_SETTINGS` in order of `max_batch`, defaults first, missing and unreadable files) |
-| `test_split_statistics.py` | `n_start_steps` / `n_start_steps_split` / `max_split_depth` on integrands with known answers; `converged` against a hand-computed tolerance check (absolute and cumulative, with `y0`), in `failure_fraction` mode (including a NaN component), against the final integral, and its warning (numbers, output component, remedies); `max_adaptive_splits` type check; `split_rule="accelerate"`: validation, exact integrals (Lorentzian, jump, sin(2e4 t); gk21, gk15, gk7, cc17; both `take_gradient`), fewer points and passes on sin(2e4 t), unchanged on a kink, independent of `max_batch` (uniform and variable, with and without `trade_speed_for_memory`), warm start (absolute, cumulative, float32), `failure_fraction` halves, bound and parameter gradients, no four-way test before the first split, no extra points where one halving suffices (T_{k-1}(2t - 1) on one starting subinterval, gk15, gk21, cc33; failed with the former threshold 1e4) |
+| `test_split_statistics.py` | `n_start_steps` / `n_start_steps_split` / `max_split_depth` on integrands with known answers; `converged` against a hand-computed tolerance check (absolute and cumulative, with `y0`), in `failure_fraction` mode (including a NaN component), against the final integral, and its warning (numbers, output component, remedies); `max_adaptive_splits` type check; `split_rule="accelerate"`: validation, exact integrals (Lorentzian, jump, sin(2e4 t); gk21, gk15, gk7, cc17; both `take_gradient`), fewer points and passes on sin(2e4 t), unchanged on a kink, independent of `max_batch` (uniform and variable, with and without `trade_speed_for_memory`), warm start (absolute, cumulative, float32), `failure_fraction` raises (constructor, call, a per-call `error_norm`; a per-call norm-family `error_norm` allows it), bound and parameter gradients, no four-way test before the first split, no extra points where one halving suffices (T_{k-1}(2t - 1) on one starting subinterval, gk15, gk21, cc33; failed with the former threshold 1e4) |
 
 **Snapshot tests** are the regression net for internal refactors: the
 file `tests/test_snapshots_data.json` pins `integral`, `integral_error`,
@@ -332,9 +332,11 @@ is a boolean array where `True` means the panel still needs evaluation.
      `_splittable` refuses (at `max_adaptive_splits`, or one ULP wide: the
      midpoint rounds onto an end), which are accepted. With
      `split_rule="accelerate"` (constructor and `integrate` option, default
-     `"halve"`), Step 5 also passes `error_ratios` (not with
-     `"failure_fraction"`, nor before the call's first split, when the mesh
-     has its starting length and no step can qualify): a failing step with split count >= 1 and ratio >=
+     `"halve"`; with `error_norm="failure_fraction"` it raises `ValueError` in
+     `_check_split_rule`, called by the constructor and by `integrate` once
+     `self.error_norm` is resolved), Step 5 also passes `error_ratios` (not
+     before the call's first split, when the mesh has its starting length and
+     no step can qualify): a failing step with split count >= 1 and ratio >=
      `2**self.method.error_exponent` (where the estimate shrinks as h^k a
      halving divides the ratio by 2^k, so both halves would fail; user guide
      `ug-four-pieces`) that `_splittable(..., halvings=2)` allows is

@@ -849,18 +849,45 @@ def test_accelerate_spends_nothing_where_one_halving_suffices(method):
         assert errors["accelerate"] < max(10 * errors["halve"], 1e-15), atol
 
 
-def test_failure_fraction_always_halves():
-    """With error_norm="failure_fraction" the accept quantity is a fraction,
-    not a ratio, so the rule halves: the same call as split_rule="halve", bit
-    for bit."""
-    f, _ = _HARD["lorentz"]
-    (halve, s_halve, halve_calls), (fast, s_fast, fast_calls) = (
-        _split_rule_run(rule, f, take_gradient=False, error_norm="failure_fraction")
-        for rule in ("halve", "accelerate")
+@pytest.mark.parametrize(
+    ("ctor", "call"),
+    [
+        ({"split_rule": "accelerate", "error_norm": "failure_fraction"}, None),
+        ({"error_norm": "failure_fraction"}, {"split_rule": "accelerate"}),
+        ({"split_rule": "accelerate"}, {"error_norm": "failure_fraction"}),
+    ],
+    ids=["constructor", "call_split_rule", "call_error_norm"],
+)
+def test_accelerate_with_failure_fraction_raises(ctor, call):
+    """split_rule="accelerate" splits by the error ratio, which
+    error_norm="failure_fraction" does not have (it compares the fraction of
+    failing output components): the combination raises before f is called,
+    whether it comes from the constructor, the call, or both."""
+    calls = []
+
+    def f(t):
+        calls.append(t.shape[0])
+        return torch.sin(t)
+
+    with pytest.raises(ValueError, match="failure_fraction") as raised:
+        solver = UniformAdaptiveQuadrature(device="cpu", **ctor)
+        solver.integrate(f=f, mesh=_MESH20, take_gradient=False, **(call or {}))
+    assert 'split_rule="halve"' in str(raised.value)
+    assert calls == []
+
+
+def test_accelerate_with_a_norm_family_call_is_allowed():
+    """A per-call norm-family error_norm makes the constructor's
+    failure_fraction default usable with split_rule="accelerate"."""
+    solver = UniformAdaptiveQuadrature(device="cpu", error_norm="failure_fraction")
+    out, _ = solver.integrate(
+        f=lambda t: torch.sin(t),
+        mesh=_MESH20,
+        take_gradient=False,
+        split_rule="accelerate",
+        error_norm="max",
     )
-    assert fast_calls == halve_calls
-    assert torch.equal(fast.integral, halve.integral)
-    assert torch.equal(s_fast.mesh, s_halve.mesh)
+    assert out.converged
 
 
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)

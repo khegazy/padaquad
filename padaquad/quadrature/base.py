@@ -1604,9 +1604,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # gradient reaches it through this call's nodes, not through the mesh.
         mesh_optimal = mesh_optimal.to(self.device).detach()
 
-        # Move the record fields still on the integration device (the resident
-        # ones; every one with record_evaluations=False) to result_device so
-        # the rest of the returned IntegrationResult lives on result_device.
+        # Move the record fields still on the integration device (the loop's
+        # fields and the loss; every one with record_evaluations=False) to
+        # result_device so the rest of the returned IntegrationResult lives on
+        # result_device.
         # The integration-output scalars (integral, integral_error) and
         # mesh_optimal stay on the integration device -- the scalars are the
         # primary answer and mesh_optimal is reused as the warm-start mesh.
@@ -4224,8 +4225,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         integration device; every other field (``nodes``, ``h``, ``y``,
         ``error_ratios`` and the tracked variables) is appended to its list in
         ``chunks``, one tensor per batch, so the record's values are never
-        copied during the loop. The chunks and the loss are moved to
-        ``result_device`` so they do not accumulate on the GPU. A chunk that is
+        copied during the loop. The values (``y`` and the tracked variables)
+        are moved to ``result_device``, so they do not accumulate on the GPU;
+        the other fields, which are small, wait on the integration device and
+        ``_sort_record`` moves them once, after the loop. A chunk that is
         a view of a larger array, such as the accepted rows moved to the front
         of a pass's values (``_keep_rows``), is copied, so the rest of that
         array is freed. When ``take_gradient`` is True the per-batch
@@ -4249,8 +4252,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Left mesh index of each of them in the current mesh [N], on the
             integration device; recorded under the key ``mesh_index``.
         result_device : str | torch.device | None
-            Device for the chunks and the loss. None keeps everything on the
-            integration device.
+            Device for the values (``y`` and the tracked variables). None keeps
+            them on the integration device.
 
         Returns
         -------
@@ -4282,15 +4285,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # through the returned integral.
             value = field.detach() if take_gradient else field
             if key in self._RECORD_SCALAR_KEYS:
-                if key not in self._RESULT_INTEGRATION_KEYS:
-                    value = value.to(result_device)
                 record[key] = record[key] + value if key in record else value
             elif key in self._RECORD_LOOP_KEYS:
                 record[key] = (
                     torch.cat([record[key], value]) if key in record else value
                 )
             else:
-                value = value.to(result_device)
+                if key == "y" or key.startswith(self._TRACKED_KEY_PREFIX):
+                    value = value.to(result_device)
                 if value.untyped_storage().nbytes() > value.nbytes:
                     value = value.clone()
                 chunks.setdefault(key, []).append(value)
@@ -4436,8 +4438,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         removed_result = IntegrationResult(
             integral=removed_quad_sum,
             integral_error=removed_err_sum,
-            nodes=gone["nodes"].to(self.device),
-            h=gone["h"].to(self.device),
+            nodes=gone["nodes"],
+            h=gone["h"],
             y=gone["y"].to(values_device) if "y" in gone else None,
             tracked_variables=tuple(
                 value.to(values_device)
@@ -4447,7 +4449,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             or None,
             mesh_quadratures=gone["mesh_quadratures"],
             mesh_quadrature_errors=torch.abs(gone["mesh_quadrature_errors"]),
-            error_ratios=gone["error_ratios"].to(self.device),
+            error_ratios=gone["error_ratios"],
             gradient_taken=False,
             mesh_init=mesh_init,
             mesh_final=mesh_final,

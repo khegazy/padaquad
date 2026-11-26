@@ -303,7 +303,7 @@ device. It works independently of the other options.
 
 | Value | Speed | GPU memory | Host memory |
 |---|---|---|---|
-| `"cpu"` (default) | Copying values to the host takes time that grows with their size; for integrands with many outputs it is most of the run time. | Holds only the values waiting for their quadrature calculation. | Holds the values of every accepted subinterval. |
+| `"cpu"` (default) | Copying values to the host takes time that grows with their size; for integrands with many outputs it is most of the run time. | Holds only the values waiting for their quadrature calculation, and, until the end of the call, the small per-subinterval results of the accepted subintervals: nodes, widths, contributions, error estimates and error ratios (with `gk21` in float64, about 200 bytes per subinterval for one output). | Holds the values of every accepted subinterval. |
 | `None` | Fastest, since nothing is copied. `None` means the solver device. | Holds the values of every accepted subinterval until the end, which gives the highest peak. | Nothing. |
 
 The result `loss_fxn` receives for each batch has its `y` and

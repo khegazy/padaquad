@@ -756,3 +756,55 @@ switch. Delete the scratch directory when the work is merged.
 - **My own reasoning, not measured:** the concurrency remark in Section 3.3;
   the claim that a 1e-16 change can flip only pairs within about 1e-16 of the
   cutoff.
+
+## Implemented (2026-11-26, branch `optimal_mesh_cost`, base `cd3ff34`)
+
+| Step (Section 5) | Commit | What |
+|---|---|---|
+| Review | `5ab972b` | this plan, corrected |
+| 1 and 3 (D2, doubt 3) | `f81a10b` | node check and the `nodes` argument removed from `_merge_inputs`, `_predict_merged_errors`, `_get_optimal_mesh`; the split stage discards the pair ratio by name |
+| 2 (D5) | `d09b7fc` | weight vectors over all C nodes, 0 at a repeated fraction; the prediction reads the stored values without copies; `first` leaves the return values and the cache |
+| 6 | `b8d7147` | `results.py` module docstring |
+| 5 | `1a100c7` | `examples/pode/trainer.py` reads `self.integral_state.mesh` |
+| 4 (D1) | `2b52fa6` | `integrate(build_state_mesh=True)`; docs, CHANGELOG, CLAUDE.md, tests |
+| docs | `71e10ab` | CLAUDE.md: the vectors over all nodes |
+| 7 (D4) | `a0c7bb7` | `predicted-merge-cost.md` re-measured with `state=` |
+| docs | this commit | CHANGELOG numbers, this section |
+
+**Bit checks** (`impl/bitgrid_om.py`, `impl/bitcompare.py`; base `cd3ff34`
+against `71e10ab`, whose code is the branch's final code): CPU, 1,353 cases,
+13,760 tensors including every merge prediction of every call, 0 differences.
+CUDA: the same harness at the same commit (a float32 random starting mesh of
+10^4 subintervals fails the starting mesh's order assertion on CUDA in the
+base as on the branch, `_setup_initial_mesh`; recorded as an error in both
+and reported as a separate finding); its result is in the branch's final
+report. `impl/align.py`: `torch.bmm` on a view at an offset equals the same
+values copied in 916 of 916 shapes on the CPU (login node and compute node)
+and on CUDA.
+
+**Measured** (A100 node `nid001109`, GPU 0 alone on the node, base and branch
+alternated twice, `impl/time_parts.py`, medians of 11; gk21, float64,
+`atol=1e-8`, `rtol=0`, `error_norm="max"`, `take_gradient=False`):
+
+| | damped_sine (11) | many_outputs (13, D = 1000) | oscillatory (13,737) |
+|---|---|---|---|
+| `_get_optimal_mesh`, GPU solver, new solver: base / branch | 1.78 / 1.66 ms | 2.53 / 2.14 ms | 9.0 / 8.2 ms |
+| the same, warm solver | 1.23 / 1.11 ms | 1.87 / 1.53 ms | 7.8 / 7.2 ms |
+| `_get_optimal_mesh`, CPU solver, new solver | 1.92 / 1.73 ms | 2.32 / 2.16 ms | 9.0 / 7.7 ms |
+| Whole call, GPU solver: build / `build_state_mesh=False` | 4.51 / 3.03 ms | 9.12 / 7.06 ms | 115 / 108 ms (noisy) |
+| Whole call, CPU solver: build / `build_state_mesh=False` | 2.83 / 1.42 ms | 5.96 / 4.23 ms | 101 / 93 ms (noisy) |
+
+The whole call with the build is the same on base and branch within noise
+(4.58 / 4.51, 9.41 / 9.12 ms on the GPU solver). With 10^4 random starting
+subintervals (`impl/many_ratios.py`, 8 threads) `_get_optimal_mesh` takes 68 /
+44 ms (gk21, cold / warm) and 399 / 187 ms (cc65) with `"predicted"`, 2-3 ms
+with `"power_law"`.
+
+## Not done
+
+- The direct midpoint insertion of the split stage (Review, item 4): its main
+  cost, the mesh dictionary (2.8 ms on `oscillatory`), goes with
+  `record-order`; what is left is about 0.1-0.2 ms.
+- Sharing the merge weight cache between solvers (D3; Review, item 5). A
+  one-shot call pays 0.47-1.2 ms to fill the per-solver cache.
+- Options 2 and 3 of `predicted-merge-cost.md` (D4).

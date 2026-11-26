@@ -102,11 +102,16 @@ class TestTolerances:
             ratios.append(result.error_ratios)
         assert torch.equal(ratios[0], ratios[2])
 
-    @pytest.mark.parametrize("bad", [-1e-6, float("nan"), float("inf")])
+    @pytest.mark.parametrize(
+        "bad",
+        [-1e-6, float("nan"), float("inf"), [1e-5, 1e-9], torch.tensor([1e-5, 1e-9])],
+        ids=["negative", "nan", "inf", "list", "tensor"],
+    )
     @pytest.mark.parametrize("name", ["atol", "rtol"])
-    def test_negative_or_not_finite_raises(self, name, bad):
-        """A negative or non-finite tolerance raises ValueError naming it."""
-        with pytest.raises(ValueError, match=rf"{name} must be finite and >= 0"):
+    def test_not_one_finite_number_raises(self, name, bad):
+        """A negative or non-finite tolerance, or one that is not one number (a
+        tolerance per output component), raises ValueError naming it."""
+        with pytest.raises(ValueError, match=rf"{name} must be a finite number >= 0"):
             make_solver_for_unit_test(**{name: bad})
 
 

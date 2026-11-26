@@ -135,7 +135,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_error_computation.py` | `_error_norm`, `_rec_remove`, `_compute_error_ratios_absolute`/`_cumulative` |
 | `test_interpolation.py` | `_compute_nodes`: endpoints, shapes, monotonicity, tableau-c matching |
 | `test_sorted_insert.py` | `_get_sorted_indices` and `_insert_sorted_results` (a new array; the old record is read, not cloned) |
-| `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables` (f and y0; the bound defaults through `_setup_integral_bounds`), `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects); `atol`/`rtol` stored as floats, `ValueError` when negative or not finite, unchanged by a dtype round trip (the error ratios of a float64 call after a float32 one); host waits on CUDA (none to build a solver, one per read of a fresh starting mesh) |
+| `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables` (f and y0; the bound defaults through `_setup_integral_bounds`), `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects); `atol`/`rtol` stored as floats, `ValueError` when not one finite number >= 0 (a list or tensor per output component included), unchanged by a dtype round trip (the error ratios of a float64 call after a float32 one); host waits on CUDA (none to build a solver, one per read of a fresh starting mesh) |
 | `test_methods_extra.py` | Variable-mode `adaptive_heun` (the uniform heun object) weights, the generic `VariableMethodClass` (normalized nodes reach the weight function, shape check), node-fraction validation, `MethodClass.to` (device and dtype) |
 | `test_solver_methods.py` | `adaptive_quadrature` factory, `method.weights` through both solvers, per-step node count `solver.C` |
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed error ratios, midpoint placement |
@@ -657,7 +657,7 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 ### Dtype management
 
 - Two tolerance levels: `atol` / `rtol` (integration error control;
-  Python floats, checked finite and >= 0 in `SolverBase.__init__`, rounded
+  Python floats, checked to be one finite number >= 0 in `SolverBase.__init__`, rounded
   by each operation to the dtype of the tensor they meet, so a float32 solver
   given float64 integrand values uses them unrounded) and `atol_assert` /
   `rtol_assert` (geometric assertions like time ordering, always looser, set

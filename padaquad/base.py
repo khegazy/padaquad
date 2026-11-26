@@ -180,7 +180,8 @@ class SolverBase(ABC, DistributedEnvironment):
         Raises
         ------
         ValueError
-            If ``atol`` or ``rtol`` is negative or not finite.
+            If ``atol`` or ``rtol`` is not one number, or is negative or not
+            finite.
         """
         super().__init__(device=device, **distributed_options)
 
@@ -199,10 +200,16 @@ class SolverBase(ABC, DistributedEnvironment):
         self.method_name = method.lower()
         # Python floats: an operation rounds them to the dtype of the tensor
         # they meet, and they need no copy to the device.
-        self.atol, self.rtol = float(atol), float(rtol)
-        for name, tol in (("atol", self.atol), ("rtol", self.rtol)):
-            if not (math.isfinite(tol) and tol >= 0.0):
-                raise ValueError(f"{name} must be finite and >= 0, got {tol!r}")
+        tolerances = []
+        for name, tol in (("atol", atol), ("rtol", rtol)):
+            try:
+                value = float(tol)
+            except (TypeError, ValueError):  # not one number, e.g. a list
+                value = math.nan
+            if not (math.isfinite(value) and value >= 0.0):
+                raise ValueError(f"{name} must be a finite number >= 0, got {tol!r}")
+            tolerances.append(value)
+        self.atol, self.rtol = tolerances
         # Construction-time defaults; each integrate() call falls back to these
         # when its corresponding argument is None (resolved in _check_variables).
         # The bounds have no default: each call gives its interval.

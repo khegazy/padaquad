@@ -779,6 +779,38 @@ def test_accelerate_state_restarts_and_float32(absolute, dtype):
         assert abs(float(out.integral) - exact) < 10 * atol
 
 
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_accelerate_tests_no_piece_before_the_first_split(take_gradient):
+    """Until a subinterval of the call is split, none is a piece of a split
+    one, so the rule has nothing to test: a call that ends in its first pass
+    runs the mesh update exactly as halving does (no four-way test, which cost
+    about 30 GPU launches), and later updates test for four pieces."""
+    tests = []
+    solver = _gk21_solver(split_rule="accelerate", max_batch=BIG_BATCH)
+    splittable = solver._splittable
+
+    def spy(*args, halvings=1, **kwargs):
+        tests.append(halvings)
+        return splittable(*args, halvings=halvings, **kwargs)
+
+    solver._splittable = spy
+    smooth, _ = solver.integrate(
+        f=lambda t: torch.exp(-t) * torch.sin(4 * t),
+        mesh=_MESH20,
+        take_gradient=take_gradient,
+    )
+    assert smooth.max_split_depth == 0
+    assert 2 not in tests
+    torch.manual_seed(0)
+    solver.integrate(
+        f=_HARD["lorentz"][0],
+        mesh_init=T_INIT,
+        mesh_final=T_FINAL,
+        take_gradient=take_gradient,
+    )
+    assert 2 in tests
+
+
 def test_failure_fraction_always_halves():
     """With error_norm="failure_fraction" the accept quantity is a fraction,
     not a ratio, so the rule halves: the same call as split_rule="halve", bit

@@ -1375,9 +1375,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 # values are f's output, which f may still hold.
                 in_place=not take_gradient,
                 # The ratios split some subintervals in four; a failure
-                # fraction is not a ratio, so failure_fraction halves.
+                # fraction is not a ratio, so failure_fraction halves. Only a
+                # piece of a split subinterval can be split in four: none
+                # exists until the mesh first grows, so the rule's test (about
+                # 30 GPU launches) is skipped until then.
                 error_ratios=error_ratios
-                if split_rule == "accelerate" and not self._is_failure_fraction
+                if split_rule == "accelerate"
+                and not self._is_failure_fraction
+                and len(mesh) - 1 > n_start_steps
                 else None,
             )
             # The batch data passed in comes back filtered to the accepted steps

@@ -123,15 +123,14 @@ class TestReduceNormDtype:
         [
             (lambda z: z.norm(dim=-1, keepdim=True), r"tensor of shape \[3, 1\]"),
             (lambda z: z.norm(), r"tensor of shape \[\]"),
-            (lambda z: (z.abs().sum(-1) > 1).long(), "torch.int64 tensor"),
             (lambda z: z.norm(dim=-1).tolist(), "list"),
             (lambda z: z.norm(dim=-1).to("meta"), "on meta"),
         ],
-        ids=["keepdim", "all-rows", "integer", "list", "device"],
+        ids=["keepdim", "all-rows", "list", "device"],
     )
     def test_callable_output_checked(self, dtype, norm, got):
-        """A callable that does not return one floating-point number per row on
-        the input's device raises ValueError naming error_norm, the shape
+        """A callable that does not return one number per row on the input's
+        device raises ValueError naming error_norm, the shape
         expected and what it returned (an [N, 1] output failed later with
         "Index has to be a vector/scalar")."""
         s = _solver(dtype)
@@ -148,6 +147,31 @@ class TestReduceNormDtype:
             s._reduce_norm(
                 torch.ones(2, dtype=dtype), lambda z: z.norm(dim=-1, keepdim=True)
             )
+
+    def test_callable_integer_output_accepted(self, dtype):
+        """A callable may return integers (here the number of components above
+        1e-12, which worked before the output was checked): the ratios divide
+        them by a floating-point tolerance, so the integral, the error ratios
+        and the state's mesh equal those of the same norm cast to the dtype,
+        bit for bit."""
+        outputs = []
+        for cast in (False, True):
+            s = _solver(
+                dtype,
+                error_norm=lambda z, cast=cast: (
+                    (z.abs() > 1e-12).sum(-1).to(z.dtype if cast else torch.long)
+                ),
+            )
+            torch.manual_seed(0)
+            result, state = s.integrate(
+                lambda t: torch.cat([torch.sin(3 * t), torch.cos(5 * t)], -1),
+                mesh_init=torch.tensor([0.0], dtype=dtype),
+                mesh_final=torch.tensor([1.0], dtype=dtype),
+                take_gradient=False,
+            )
+            outputs.append((result.integral, result.error_ratios, state.mesh))
+        for integer, cast in zip(*outputs, strict=True):
+            assert torch.equal(integer, cast)
 
     def test_callable_output_checked_in_integrate(self, dtype):
         """Through integrate, the first callable output with the wrong shape

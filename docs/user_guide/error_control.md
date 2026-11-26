@@ -171,7 +171,7 @@ $e_k$, and `error_norm` turns it into one accept-or-split decision:
   reduce the last axis of a `[..., D]` tensor, each row on its own (a
   subinterval's reduced error is computed once, with the other subintervals of
   its batch, and kept for every later check of it), and return a
-  floating-point tensor of shape `[...]` on the input's device; another output
+  tensor of shape `[...]` on the input's device; another output
   raises `ValueError` where it is first used. That the rows are reduced
   independently is not checked.
 - `"failure_fraction"`: each component $d$ is compared with its own tolerance

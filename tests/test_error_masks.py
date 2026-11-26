@@ -118,6 +118,49 @@ class TestReduceNormDtype:
         with pytest.raises(ValueError, match="error_norm"):
             s._reduce_norm(torch.zeros(1, 2, dtype=dtype), "bogus")
 
+    @pytest.mark.parametrize(
+        ("norm", "got"),
+        [
+            (lambda z: z.norm(dim=-1, keepdim=True), r"tensor of shape \[3, 1\]"),
+            (lambda z: z.norm(), r"tensor of shape \[\]"),
+            (lambda z: (z.abs().sum(-1) > 1).long(), "torch.int64 tensor"),
+            (lambda z: z.norm(dim=-1).tolist(), "list"),
+            (lambda z: z.norm(dim=-1).to("meta"), "on meta"),
+        ],
+        ids=["keepdim", "all-rows", "integer", "list", "device"],
+    )
+    def test_callable_output_checked(self, dtype, norm, got):
+        """A callable that does not return one floating-point number per row on
+        the input's device raises ValueError naming error_norm, the shape
+        expected and what it returned (an [N, 1] output failed later with
+        "Index has to be a vector/scalar")."""
+        s = _solver(dtype)
+        with pytest.raises(
+            ValueError, match=rf"error_norm.*\[3\]; it returned a .*{got}"
+        ):
+            s._reduce_norm(torch.ones(3, 2, dtype=dtype), norm)
+
+    def test_callable_output_checked_on_the_integral(self, dtype):
+        """The integral [D] reduces to one number, shape []: a callable that
+        keeps the axis raises there too."""
+        s = _solver(dtype)
+        with pytest.raises(ValueError, match=r"one of shape \[\]"):
+            s._reduce_norm(
+                torch.ones(2, dtype=dtype), lambda z: z.norm(dim=-1, keepdim=True)
+            )
+
+    def test_callable_output_checked_in_integrate(self, dtype):
+        """Through integrate, the first callable output with the wrong shape
+        raises ValueError, before any subinterval is judged."""
+        s = _solver(dtype, error_norm=lambda z: z.norm(dim=-1, keepdim=True))
+        with pytest.raises(ValueError, match="A callable error_norm must reduce"):
+            s.integrate(
+                lambda t: torch.cat([torch.sin(t), torch.cos(t)], -1),
+                mesh_init=torch.tensor([0.0], dtype=dtype),
+                mesh_final=torch.tensor([1.0], dtype=dtype),
+                take_gradient=False,
+            )
+
 
 # ---------------------------------------------------------------------------
 # _round_floor

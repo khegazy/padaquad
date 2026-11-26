@@ -3889,7 +3889,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         - a callable: ``error_norm(x)``, which must reduce the last axis,
           each row on its own: the record keeps a subinterval's reduced error
           from its batch (``_reduced_errors``), so a row's value must not
-          depend on the other rows.
+          depend on the other rows. Its output must be a floating-point
+          tensor of shape [...] on ``x``'s device; that is checked here, the
+          independence of the rows is not.
 
         For D = 1 every string option equals ``torch.abs(x)``.
 
@@ -3906,10 +3908,37 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         -------
         torch.Tensor
             Reduced values, shape [...].
+
+        Raises
+        ------
+        ValueError
+            If a callable ``error_norm`` returns anything but a floating-point
+            tensor of shape [...] on ``x``'s device.
         """
         error_norm = self.error_norm if error_norm is None else error_norm
         if callable(error_norm):
-            return error_norm(x)
+            # Checked from the output's type, shape, dtype and device, all
+            # known on the host: no read of the device. A shape such as [N, 1]
+            # failed later with an indexing error that named nothing of this.
+            out = error_norm(x)
+            if not (
+                isinstance(out, torch.Tensor)
+                and out.shape == x.shape[:-1]
+                and out.is_floating_point()
+                and out.device == x.device
+            ):
+                got = (
+                    f"{out.dtype} tensor of shape {list(out.shape)} on {out.device}"
+                    if isinstance(out, torch.Tensor)
+                    else type(out).__name__
+                )
+                raise ValueError(
+                    "A callable error_norm must reduce the last axis of its input "
+                    "and return a floating-point tensor on the input's device: for "
+                    f"an input of shape {list(x.shape)} on {x.device}, one of "
+                    f"shape {list(x.shape[:-1])}; it returned a {got}."
+                )
+            return out
         if error_norm == "2":
             return torch.sqrt(torch.sum(x**2, dim=-1))
         if error_norm == "max":

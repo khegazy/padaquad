@@ -170,7 +170,10 @@ $e_k$, and `error_norm` turns it into one accept-or-split decision:
   the largest absolute component, `"rms"` the root-mean-square; a callable must
   reduce the last axis of a `[..., D]` tensor, each row on its own (a
   subinterval's reduced error is computed once, with the other subintervals of
-  its batch, and kept for every later check of it).
+  its batch, and kept for every later check of it), and return a
+  floating-point tensor of shape `[...]` on the input's device; another output
+  raises `ValueError` where it is first used. That the rows are reduced
+  independently is not checked.
 - `"failure_fraction"`: each component $d$ is compared with its own tolerance
   $\text{atol} + \text{rtol}\,|I_d|$, and the subinterval is accepted when the
   fraction of failing components is at most `mesh_failure_tolerance` (0 means

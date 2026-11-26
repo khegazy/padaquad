@@ -351,6 +351,53 @@ def test_default_holds_a_pass_once(record):
     assert peak < 1.8 * 1000 * solver.C * 4096 * 8, peak
 
 
+@needs_cuda
+def test_recording_never_copies_the_record():
+    """With the record on the GPU (result_device=None), recording a pass's
+    accepted subintervals allocates at most their values once (the copy of a
+    view of the pass's array) and the record's contributions and error
+    estimates, whatever values the record already holds: the record is
+    appended to, not merged into a new array (which allocated all its values
+    again on every pass). The passes of test_default_holds_a_pass_once: 500
+    of 1000 subintervals accepted (kept rows, a view, copied), then all 1000
+    halves (the pass's array itself, no copy)."""
+    freqs = torch.linspace(1.0, 2.0, 4096, dtype=torch.float64, device="cuda")
+
+    def f(t):
+        return torch.sin(t * freqs * (1 + 20000 * (t > 0.5)))
+
+    mesh = torch.linspace(0.0, 1.0, 1001, dtype=torch.float64, device="cuda")[:, None]
+    solver = adaptive_quadrature(
+        "uniform", method="gk21", device="cuda", atol=1e-10, rtol=1e-10
+    )
+    grown = []
+    record_results = solver._record_results
+
+    def measured(**kwargs):
+        torch.cuda.synchronize()
+        before = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        record = record_results(**kwargs)
+        torch.cuda.synchronize()
+        values = kwargs["results"].y.nbytes
+        sums = 2 * record["mesh_quadratures"].nbytes  # contributions, errors
+        grown.append((torch.cuda.max_memory_allocated() - before, values, sums))
+        return record
+
+    solver._record_results = measured
+    solver.integrate(
+        f,
+        mesh=mesh,
+        take_gradient=False,
+        max_batch=230,
+        max_adaptive_splits=1,
+        result_device=None,
+    )
+    assert len(grown) == 2
+    for grow, values, sums in grown:
+        assert grow < values + 1.1 * sums, (grow, values, sums)
+
+
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("record", [True, False])
 def test_one_call_pass_keeps_f_output_intact(device, record):

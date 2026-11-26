@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import warnings
 
 import pytest
@@ -17,6 +18,7 @@ from _helpers import (
 
 from padaquad import adaptive_quadrature, integrand_dict
 from padaquad.distributed import _resolve_device
+from padaquad.quadrature.base import AdaptiveQuadrature
 from padaquad.results import IntegrationResult
 
 # ---------------------------------------------------------------------------
@@ -357,8 +359,19 @@ class TestDeviceSelection:
 # ---------------------------------------------------------------------------
 
 
-def _host_waits(fn):
-    """Run ``fn`` and count the operations that made the host wait for the GPU."""
+def _lines(function, text=""):
+    """The (file, line) of every source line of ``function`` that contains
+    ``text`` (every line by default)."""
+    function = inspect.unwrap(function)
+    source, start = inspect.getsourcelines(function)
+    file = inspect.getsourcefile(function)
+    return {(file, start + i) for i, line in enumerate(source) if text in line}
+
+
+def _host_waits(fn, where=None):
+    """Run ``fn`` and count the operations that made the host wait for the GPU,
+    only those at the (file, line) locations ``where`` when given (a warning
+    names the Python line that waited)."""
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         torch.cuda.set_sync_debug_mode("warn")
@@ -367,7 +380,11 @@ def _host_waits(fn):
         finally:
             torch.cuda.set_sync_debug_mode("default")
     # Not the notice "Synchronization debug mode is a prototype feature ..."
-    return sum("called a synchronizing" in str(w.message) for w in caught)
+    return sum(
+        "called a synchronizing" in str(w.message)
+        and (where is None or (w.filename, w.lineno) in where)
+        for w in caught
+    )
 
 
 @needs_cuda
@@ -387,19 +404,18 @@ class TestHostWaits:
     @pytest.mark.parametrize("runtime_checks", [True, False])
     def test_starting_mesh_reads_once_per_check(self, runtime_checks):
         """A fresh starting mesh reads the device for its order check (with
-        runtime_checks) and for the dictionary of its points, nothing else."""
+        runtime_checks), nothing else."""
         solver = adaptive_quadrature(
             "uniform", "gk21", device="cuda", runtime_checks=runtime_checks
         )
         a, b = (torch.tensor([x], dtype=torch.float64, device="cuda") for x in (0, 1))
         waits = _host_waits(lambda: solver._setup_initial_mesh(None, a, b, True, 13))
-        assert waits == 1 + runtime_checks
+        assert waits == runtime_checks
 
     @pytest.mark.parametrize("values_on", ["cuda", "cpu"])
     def test_mesh_update_reads_once(self, values_on):
         """The mesh update reads the device once, for the number of accepted
-        subintervals (plus once for _get_mesh_indices, the dictionary of the
-        new mesh's points), whatever it keeps: method output, values moved
+        subintervals, whatever it keeps: method output, values moved
         within their array, tracked variables, nodes, split counts, the split
         cap. Values on result_device ("cpu", trade_speed_for_memory) cost one
         more copy of the kept positions per array."""
@@ -429,7 +445,7 @@ class TestHostWaits:
                 in_place=True,
             )
 
-        assert _host_waits(update) == 2 + 2 * (values_on == "cpu")
+        assert _host_waits(update) == 1 + 2 * (values_on == "cpu")
 
     @pytest.mark.parametrize("runtime_checks", [True, False])
     def test_evaluation_reads_only_for_the_finite_check(self, runtime_checks):
@@ -450,3 +466,49 @@ class TestHostWaits:
             )
         )
         assert waits == 3 * runtime_checks  # three calls of f
+
+    @pytest.mark.parametrize("result_device", [None, "cpu"])
+    def test_loop_reads_once_per_pass_and_record_only_values(self, result_device):
+        """Over an integration of several passes, the loop reads the device once
+        per pass at its condition (which subintervals wait) and once when none
+        is left. Recording the accepted subintervals reads nothing with the
+        record on the GPU, and with result_device="cpu" only for the copy of
+        the values to the host (y and the tracked variable); putting the record
+        in mesh order reads twice (whether it is in order, and the runtime
+        check that it covers the mesh once)."""
+        calls = {"passes": 0, "records": 0}
+
+        def run():
+            solver = adaptive_quadrature(
+                "uniform", "gk21", device="cuda", atol=1e-10, rtol=0.0
+            )
+            for name, key in (
+                ("_evaluate_f_on_mesh", "passes"),
+                ("_record_results", "records"),
+            ):
+                method = getattr(solver, name)
+
+                def counted(*args, _method=method, _key=key, **kwargs):
+                    calls[_key] += 1
+                    return _method(*args, **kwargs)
+
+                setattr(solver, name, counted)
+            calls.update(passes=0, records=0)
+            torch.manual_seed(0)
+            solver.integrate(
+                lambda t: (torch.sin(300 * t), (t,)),
+                mesh_init=torch.tensor([0.0], dtype=torch.float64),
+                mesh_final=torch.tensor([1.0], dtype=torch.float64),
+                take_gradient=False,
+                max_batch=10**6,
+                result_device=result_device,
+            )
+
+        condition = _lines(AdaptiveQuadrature.integrate, "while len(waiting")
+        assert len(condition) == 1
+        assert _host_waits(run, condition) == calls["passes"] + 1
+        assert calls["passes"] > 2
+        record = _host_waits(run, _lines(AdaptiveQuadrature._record_results))
+        assert record == (0 if result_device is None else 2 * calls["records"])
+        if result_device is None:
+            assert _host_waits(run, _lines(AdaptiveQuadrature._sort_record)) == 2

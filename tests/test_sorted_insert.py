@@ -1,36 +1,9 @@
-"""Unit tests for _mesh_order, _merge_positions and _insert_sorted_results."""
+"""Unit tests for _merge_positions and _insert_sorted_results."""
 
 from __future__ import annotations
 
 import torch
 from _helpers import make_solver_for_unit_test
-
-
-class TestMeshOrder:
-    """Tests for _mesh_order: map a panel's left barrier to its mesh position."""
-
-    def setup_method(self):
-        self.solver = make_solver_for_unit_test()
-
-    def test_1d(self):
-        """1-D barriers resolve to their mesh positions."""
-        mesh = torch.tensor([[0.0], [0.5], [1.0]], dtype=torch.float64)
-        mi = self.solver._get_mesh_indices(mesh)
-        barriers = torch.tensor([[0.5], [0.0], [1.0]], dtype=torch.float64)
-        order = self.solver._mesh_order(barriers, mi)
-        assert order.tolist() == [1, 0, 2]
-
-    def test_multi_dim_keys_on_full_vector(self):
-        """Multi-D barriers are matched on the whole vector, not coordinate 0.
-
-        Two barriers share coordinate 0 but differ in coordinate 1; the order
-        must come from the full-vector mesh position.
-        """
-        mesh = torch.tensor([[0.0, 0.0], [0.0, 1.0], [1.0, 2.0]], dtype=torch.float64)
-        mi = self.solver._get_mesh_indices(mesh)
-        barriers = torch.tensor([[0.0, 1.0], [0.0, 0.0]], dtype=torch.float64)
-        order = self.solver._mesh_order(barriers, mi)
-        assert order.tolist() == [1, 0]
 
 
 class TestMergePositions:
@@ -67,6 +40,24 @@ class TestMergePositions:
         )
         assert idxs_keep.tolist() == [2]
         assert idxs_input.tolist() == [0, 1, 3]
+
+    def test_record_in_acceptance_order(self):
+        """The record's rows are in the order they were accepted, not in mesh
+        order, and the mesh indices have gaps (subintervals still waiting):
+        each row gets its rank in the union, the position that puts the merged
+        array in mesh order."""
+        idxs_keep, idxs_input = self.solver._merge_positions(
+            torch.tensor([9, 3, 6]), torch.tensor([4, 1])
+        )
+        assert idxs_keep.tolist() == [4, 1, 3]
+        assert idxs_input.tolist() == [2, 0]
+        merged = self.solver._insert_sorted_results(
+            torch.tensor([9.0, 3.0, 6.0]),
+            idxs_keep,
+            torch.tensor([4.0, 1.0]),
+            idxs_input,
+        )
+        assert merged.tolist() == [1.0, 3.0, 4.0, 6.0, 9.0]
 
 
 class TestInsertSortedResults:

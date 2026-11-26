@@ -80,7 +80,7 @@ $\int f\,dx = \int_0^1 2s^2\,ds = 2/3$ and $\int f\,dy = \int_0^1 4s^2\,ds = 4/3
 ## Other known limits
 
 - `_RK_integral`'s docstring says `RK_steps` has shape `[N, D]`. For `T > 1` with `D = 1` it is `[N, T]`.
-- `_get_mesh_indices` keys barriers by their coordinate tuple, so a path that passes through the same point twice would collide.
+- (Fixed on branch `record_order`, 2026-11-26.) `_get_mesh_indices` keyed mesh points by their coordinate tuple, so a path that passes through the same point twice would collide. The record now carries each subinterval's integer mesh index and compares no coordinates.
 - The memory-benchmark path (no `max_batch`) has not been run with `T > 1`.
 - `merge_rule="predicted"` falls back to `"power_law"` with a warning when `T > 1` (`_merge_inputs`); only a unit test reaches that path, because `integrate()` fails first.
 

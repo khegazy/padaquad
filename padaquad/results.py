@@ -255,9 +255,6 @@ class MethodOutput:
     h : torch.Tensor
         Width of each subinterval (its right mesh point minus its left one).
         Shape: [N, T].
-    mesh_left : torch.Tensor
-        Left mesh point of each subinterval, which places it in the mesh (a
-        method's first node need not be the mesh point). Shape: [N, T].
     """
 
     integral: torch.Tensor
@@ -265,4 +262,3 @@ class MethodOutput:
     mesh_quadratures: torch.Tensor
     mesh_quadrature_errors: torch.Tensor
     h: torch.Tensor
-    mesh_left: torch.Tensor

@@ -351,7 +351,7 @@ def test_starting_mesh_has_isqrt_segments(n_init_steps, root):
     is accepted as before."""
     solver = make_solver_for_unit_test()
     a, b = (torch.tensor([x], dtype=torch.float64) for x in (0.0, 1.0))
-    mesh, trackers, _ = solver._setup_initial_mesh(None, a, b, False, n_init_steps)
+    mesh, trackers = solver._setup_initial_mesh(None, a, b, False, n_init_steps)
     assert len(mesh) == root * (root + 1)
     assert trackers.sum() == len(mesh) - 1
     assert not trackers[-1]

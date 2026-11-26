@@ -1,9 +1,10 @@
 """
 Result dataclasses of an integration.
 
-``IntegrationResult`` is what ``integrate()`` and a solver's ``integrate``
-method return: the integral, its error estimate, the mesh to warm-start the
-next call from, and per-subinterval diagnostics.
+``IntegrationResult`` is the first value that ``integrate()`` and a solver's
+``integrate`` method return: the integral, its error estimate and
+per-subinterval diagnostics. ``IntegrationState`` is the second: the mesh and
+the batch size to start the next call from.
 
 ``MethodOutput`` is internal. It holds the integral and the error estimate of
 one batch of subintervals, as computed by the solver's
@@ -36,8 +37,8 @@ class IntegrationState:
         The mesh to start from, shape [M, T]: the optimal mesh of the call
         that returned the state (low-error subintervals merged, failing ones
         split), detached from autograd, on the solver's device, its ends equal
-        to the bounds. None makes a fresh mesh on the bounds, which must then
-        be given.
+        to the bounds; None when that call passed ``build_state_mesh=False``.
+        None makes a fresh mesh on the bounds, which must then be given.
     max_batch : int
         The batch size to start with: the largest number of points per call of
         the integrand known to fit.

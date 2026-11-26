@@ -140,7 +140,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_solver_methods.py` | `adaptive_quadrature` factory, `method.weights` through both solvers, per-step node count `solver.C` |
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed accept masks (`_keep_mask`, the loop's rule), midpoint placement, the returned `keep_idx` and `idxs_transfer` (T = 1 and 2), extra split positions in any order, the split cap, a subinterval one ULP wide accepted (`_splittable`, T = 1 and 2); four-way splits with `error_ratios` (`TestFourPieces`): bit for bit two halving updates, the rule's conditions, the cap, extra positions halved, two ULPs wide halved |
 | `test_record_and_sort.py` | `_record_results` (appends in acceptance order: one tensor per loop field, one chunk per batch for the rest; a view of a larger array is copied) and `_sort_record` (rows to their mesh index, T = 1 and 2; one batch in order is not copied; chunk fields moved to the given device; a record that does not cover the mesh once raises; the gradient passes); a removal and the final ordering copy one field at a time (GPU peak); end to end, every path of the record (removals, Step 7, cumulative, tracked, trade, no record, split cap, `take_gradient`, gk21) returns mesh order and the same numbers without `runtime_checks`; `_flatten_output` equals the concatenation, values and gradient |
-| `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: the state's mesh re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
+| `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; `build_state_mesh=False` (no build, `state.mesh` None, the rest bit for bit, the next call needs bounds); end to end: the state's mesh re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
 | `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
 | `test_error_integral_reference.py` | The `error_integral_reference` argument of `integrate()`, with `take_gradient=True` (the one path where a batch is judged before the rest of its pass is evaluated) |
@@ -367,7 +367,8 @@ is a boolean array where `True` means the panel still needs evaluation.
    judge every recorded step against the final integral with
    `_record_error_check` (the same helper the in-loop re-check uses) to set
    `converged`, logging `_warn_not_converged` when it is `False` (a NaN/Inf
-   error counts as failing); then compute the optimal mesh (`state.mesh`) via
+   error counts as failing); then, unless `build_state_mesh=False` (then
+   `state.mesh` is None), compute the optimal mesh (`state.mesh`) via
    `_get_optimal_mesh` (prune low-error pairs, refine
    high-error gaps), returned for the caller to pass to a later call.
 
@@ -435,8 +436,13 @@ None) and the cutoff for the constructor option `merge_rule`:
   `max(|E_hat|, |Q_hat - Q_i - Q_{i+1}|)`, the predicted merged error estimate
   and the halves-versus-whole difference. Both are linear in the stored
   values, so `_merged_pair_weights` builds four weight vectors per width ratio
-  (log2 ratio quantized to 2^-48), cached on the solver
-  (`_merge_weight_cache`, reset in `_set_solver_dtype`). With T > 1 it falls
+  (log2 ratio quantized to 2^-48), one entry per node (0 at a repeated
+  fraction, so they apply to the stored values as they are: no copy of a
+  contiguous float64 record; a strided one, such as a transposed output of
+  `f`, is made contiguous per chunk, since `bmm` rounds differently on it), cached
+  on the solver (`_merge_weight_cache`, reset in `_set_solver_dtype`; a
+  one-shot call pays 0.5-1.2 ms to fill it). The widths come from the final
+  mesh; the nodes are not read. With T > 1 it falls
   back to `"power_law"` with a warning.
 - `"power_law"` (PadaQuad 1.3.0 and 1.4.0): summed errors, cutoff `remove_cut / 2^(k-1)`
   (assumes the estimate scales as h^k, k = `error_exponent`; on wide steps it
@@ -660,8 +666,10 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   `mesh_previous`, `previous_max_batch` and the constructor's bounds were
   removed). A call reuses an earlier one only through what it is passed:
   `state=state`, the second value `integrate` returns (its mesh is the optimal mesh, detached, on the solver's
-  device, ends equal to the bounds bit for bit; its batch size and converged
-  flag), or `mesh=` / `max_batch=` directly. `mesh=` with `state=` raises.
+  device, ends equal to the bounds bit for bit, or None with
+  `build_state_mesh=False`, which skips the build; its batch size and converged
+  flag), or `mesh=` / `max_batch=` directly. `mesh=` with `state=` raises. A
+  state whose mesh is None needs both bounds (the error names the switch).
 - Interval rules, all in `_setup_integral_bounds` (returns
   `(mesh, mesh_init, mesh_final)`): a call needs a mesh or both bounds; a
   given mesh must be `[M, T]`, M >= 2, increasing (T = 1) or with distinct

@@ -14,7 +14,7 @@
 | `mesh` and bounds inside it | the bounds; a missing one is the mesh's end | `mesh` cut to the bounds: its points between them, plus the bounds |
 | `mesh` and a bound outside it | the bounds; a missing one is the mesh's end | `mesh` extended: all its points between the bounds, plus the bounds; the integration refines the new subinterval |
 | both bounds, no `mesh` | the bounds | a fresh mesh (`N_init_steps`, `random_initial_mesh`) |
-| one bound or none, no `mesh` | — | `ValueError` |
+| one bound or none, no `mesh` (also with a `state` whose mesh is `None`) | — | `ValueError` |
 | both `mesh` and `state` | — | `ValueError`; use `dataclasses.replace(state, mesh=m)` |
 
 - Every given bound becomes an end point of the starting mesh, so its
@@ -52,8 +52,8 @@ and pass each its own `state`.
 
 ## Checkpoints
 
-`dataclasses.asdict(state)` is a dictionary of a tensor, an int and a
-bool, so it can be saved with a model and loaded (also with `torch.load`'s
+`dataclasses.asdict(state)` is a dictionary of a tensor (or `None`), an int
+and a bool, so it can be saved with a model and loaded (also with `torch.load`'s
 default `weights_only=True`) to resume training:
 
 <!-- not-tested -->

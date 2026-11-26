@@ -153,6 +153,12 @@ print(round(float(result.integral), 4), round(float(half.integral), 4))  # 0.776
 | only the batch size (another interval or your own mesh) | the bounds or your mesh, and `max_batch=state.max_batch` (then fixed), or `state=dataclasses.replace(state, mesh=None)` with the bounds |
 | nothing | the bounds, or a mesh |
 
+Building `state.mesh` takes a few milliseconds after the integration. A call
+whose mesh no later call starts from can skip it with
+`build_state_mesh=False`: its `state.mesh` is then `None`, and a later call
+given that state keeps the batch size but needs both bounds and starts from a
+fresh mesh.
+
 A call needs a `mesh`, a `state` with a mesh, or both bounds. Bounds inside the
 mesh cut it; a bound outside it extends it, and the integration refines the new
 subinterval. Without `max_batch` or a state, the first call evaluates its

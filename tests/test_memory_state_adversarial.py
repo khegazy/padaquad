@@ -319,20 +319,26 @@ def test_backward_check_control_on_a_fresh_solver(monkeypatch, caplog):
 def test_restart_keeps_every_other_argument():
     """A backward restart repeats the call with every argument: the
     constructor's integrand (``f=None``) and ``y0``, ``f_args``,
-    ``loss_fxn``, ``error_integral_reference`` and a bound that requires grad.
-    Integral, loss and both gradients equal an uninterrupted run's."""
+    ``loss_fxn``, ``error_integral_reference``, a bound that requires grad
+    and ``build_state_mesh=False`` (the restarted call returns no mesh either).
+    Integral, loss and both gradients equal an uninterrupted run's. The
+    integral converges on the 11 starting subintervals, one call of 231
+    points, so the limit must be below that for a restart to happen (with
+    3,000 none did, and the test passed without restarting)."""
 
     def attempt(limit):
         w = torch.tensor([1.3], dtype=torch.float64, requires_grad=True)
         b = torch.tensor([1.0], dtype=torch.float64, requires_grad=True)
+        failed = []
 
         def f(t, c):
             y = w * torch.sin(40 * t) * c
             if len(t) > limit and y.requires_grad:
                 y.register_hook(_fail_backward)
+                failed.append(len(t))
             return y
 
-        result, _ = run(
+        result, state = run(
             solver(f=f, y0=torch.tensor([2.0], dtype=torch.float64)),
             mesh_init=A,
             mesh_final=b,
@@ -340,7 +346,10 @@ def test_restart_keeps_every_other_argument():
             loss_fxn=lambda r: 2 * r.integral.sum(),
             state=IntegrationState(None, 100, False),
             error_integral_reference=0.1,
+            build_state_mesh=False,
         )
+        assert state.mesh is None
+        assert bool(failed) == (limit < math.inf)  # restarted, or not
         return [
             float(result.integral),
             float(result.loss),
@@ -348,7 +357,7 @@ def test_restart_keeps_every_other_argument():
             float(b.grad),
         ]
 
-    assert attempt(3000) == pytest.approx(attempt(math.inf), rel=1e-10)
+    assert attempt(100) == pytest.approx(attempt(math.inf), rel=1e-10)
 
 
 @pytest.mark.parametrize(

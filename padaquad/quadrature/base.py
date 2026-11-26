@@ -361,8 +361,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         runtime_checks : bool
             If True (default), check while integrating: raise ``ValueError``
             naming the points where ``f`` returned NaN or Inf, and check
-            PadaQuad's own bookkeeping (that the accepted subintervals are
-            recorded in mesh order). If False, skip these checks to save time
+            PadaQuad's own bookkeeping (that the accepted subintervals cover
+            the final mesh once). If False, skip these checks to save time
             and memory; subintervals where ``f`` returned NaN or Inf are then
             accepted and the non-finite value reaches the result. The mesh and
             the nodes are in order by construction either way.
@@ -1390,9 +1390,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     take_gradient=take_gradient,
                     results=intermediate_results,
                     mesh_index=idxs_transfer[step_idxs[keep_idx]],
-                    # Without record_evaluations nothing large is recorded,
-                    # and the nodes stay on the solver's device until the end.
-                    result_device=result_device if record_evaluations else self.device,
+                    result_device=result_device,
                 )
                 del intermediate_results
 
@@ -1742,9 +1740,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Tuple ``(split_positions, record_keep_mask, fails)``: the mesh
             positions of the failing recorded subintervals that can be split
             (in the record's row order), a mask [N] that keeps every other
-            recorded subinterval, and the
-            mask [N] of every failing one (including those that cannot be
-            split).
+            recorded subinterval, and the mask [N] of every failing one
+            (including those that cannot be split).
         """
         _, rec_remove, _ = self._record_error_check(
             record, cum_mesh_quadratures, integral
@@ -2010,10 +2007,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         extra_split_idxs : torch.Tensor | None
             Further mesh indices to split in the same update, besides the
             batch's rejected subintervals: recorded subintervals that failed
-            the re-check after the running integral changed. In any order;
-            disjoint from the batch's ``mesh_idxs``. Their
-            trackers are set True so both halves are evaluated. None splits
-            only the batch's rejected subintervals.
+            the re-check after the running integral changed. In any order
+            (they are sorted with the batch's); disjoint from the batch's
+            ``mesh_idxs``. Their trackers are set True so both halves are
+            evaluated. None splits only the batch's rejected subintervals.
         in_place : bool
             True to keep the accepted subintervals' values and tracked
             variables by moving them to the front of their arrays, which are

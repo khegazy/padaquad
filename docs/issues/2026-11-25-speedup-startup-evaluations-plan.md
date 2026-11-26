@@ -707,3 +707,92 @@ removed calls (23 tests):
   environment variable picks the variant) and not the code to merge.
 - **Not checked:** the variable-sampling solver and float32 in the count
   script (the invariant test of 6.1 covers them); `torch.distributed`.
+
+## 11. Implemented (branch `startup_evaluations`, base `73caae8`)
+
+| Step | Commit | What |
+|---|---|---|
+| Review | `f56d1c1` | this plan, reviewed (section "Review") |
+| 2 (`_call_f`) | `eec8c98` | one check of the output in `_call_f` (≥ 2 dimensions and one row per point, one message), for every call of `f`; the row check of `_evaluate_f_in_batches` removed. Fixes `take_gradient=True`, where an `f` returning two rows per point was reshaped into an integral with two components without an error (checked at `73caae8`) |
+| D5 | `62bd766` | `get_max_batch(f=...)`'s one-point call through `_call_f`; its copy of the check removed |
+| 3 (one-point call) | `1183318`, `07cf507` | the shape-check call removed; the reference check moved into Step 4's reference branch; the `trade_speed_for_memory` warning moved after the loop (Review, item 5); `07cf507` only formats its condition |
+| D1, 4 (test calls) | `2d969f1` | `_initialize_max_batch`, the probe and `_LARGEST_TEST_CALL` removed; the batch size starts at `ceil(min(n_first, _LARGEST_FIRST_CALL) / _GROWTH)`; tests and documentation |
+| 8 (docs) | `ae66c63` | the failed calls of a first call far above the integrand's limit, in the user guide and the changelog |
+
+**Evidence** (scripts and outputs in
+`$SCRATCH/padaquad_speedup_plans/startup-evaluations/impl/`):
+
+- *Bit for bit.* `startgrid.py` (248 integrations without `max_batch`: first
+  passes of 8 and 9 points (bosh3, interpolatory3_variable), 10-99, 100-999,
+  1,000-9,999 and 10,500 to 42,000 points; gk21, cc17, bosh3,
+  interpolatory3_variable; an elementwise integrand with parameters and a
+  tanh network; `take_gradient` True and False with the parameters'
+  gradients; from the bounds or a mesh, from the returned state, with
+  `max_batch`; `trade_speed_for_memory`, `record_evaluations=False`, float32)
+  against `73caae8`: 0 differences in 3,294 tensors on the CPU and 0 on an
+  A100, and the calls of `f` after the removed start-up calls are the same
+  calls (160 cases dropped 1 point, 26 dropped 11, 26 dropped 111, 36 dropped
+  1,111). The standard grid (`std_bitgrid.py`, 656 integrations with
+  `max_batch`): 0 differences in 6,656 tensors on CPU and CUDA.
+  `count_startup.py`: the 32 rows' returned numbers are identical; extra
+  points 0 in every row (`counts_new.txt`).
+- *Stochastic integrand* (`rng_check.py`): the first interior point of the
+  random starting mesh after `torch.manual_seed(0)` moves from 0.0730 to
+  0.1359 for an `f` that draws from the global generator; unchanged with
+  `random_initial_mesh=False` and for a deterministic `f`.
+- *Out of memory* (`oom_quant.py`, simulated limit, CPU, `oom_quant_*.txt`).
+  Points evaluated / lost in failed calls / failed calls, base → branch:
+
+  | Start, limit | `take_gradient=False` | `take_gradient=True` | state after (base → branch) |
+  |---|---|---|---|
+  | default mesh (231), fits | 342 / 0 / 0 → 231 / 0 / 0 | same | (231, False) both |
+  | default mesh, limit 150 | 746 / 404 / 2 → 635 / 404 / 2 | 741 / 399 / 2 → 630 / 399 / 2 | (130 or 126, True) both |
+  | default mesh, limit 60 | 473 / 175 / 2 → 937 / 706 / 5 | 473 / 175 / 2 → 903 / 672 / 5 | False: 56 both; True: 56 → 42 |
+  | 500 subintervals (10,500), fits | 11,611 / 0 / 0 → 10,500 / 0 / 0 | 11,611 → 10,500 | (10,000 or 9,996, False) both |
+  | 500 subintervals, limit 5,000 | 34,736 / 23,125 / 3 → 33,625 / 23,125 / 3 | 34,711 → 33,600 (3 failed both) | same |
+  | 500 subintervals, limit 150 | 14,210 / 3,465 / 7 → 49,964 / 39,464 / 15 | 14,210 / 3,465 / 7 → 49,560 / 39,060 / 14 | 134 both; True: 134 → 147 |
+  | 500 subintervals, limit 60 | 10,742 / 175 / 2 → 50,273 / 39,773 / 18 | 10,742 / 175 / 2 → 49,875 / 39,375 / 17 | 56 both; True: 56 → 42 |
+  | state, limit 60 | 627 / 458 / 4 → 626 / 458 / 4 | 610 / 441 / 4 → 609 / 441 / 4 | same |
+
+  So the plan's "up to about 3 more failed calls" (D1) holds for the default
+  mesh, but not for a large first pass with an integrand that cannot hold
+  1,000 points: each failed call shrinks by a quarter, so a first call of
+  10,000 points takes about 8 more failed calls per factor of 10 between 1,000
+  and the limit than the test calls did (16 more for a limit of 60). For a
+  limit of 1,000 points or more nothing changes, since no test call failed.
+  How much a failed call costs in time depends on where in `f` the
+  allocation fails (a few ms when it fails at once; up to a full call). The
+  retry chain always ends: with `take_gradient=True` at one subinterval (21
+  points) and with `False` at one point, both raising
+  `torch.OutOfMemoryError` ("cannot be reduced"). The state's batch size with
+  `take_gradient=True` is now a whole number of subintervals (42 instead of
+  56), the batch that ran.
+- *Test suite* at `ae66c63` on nid200333 (CPU run with
+  `CUDA_VISIBLE_DEVICES=""`, CUDA run on one A100): base `73caae8` 4,007
+  passed, 339 skipped (CPU) and 4,321 passed, 25 skipped (CUDA), no failure;
+  branch 4,146 passed, 339 skipped (CPU) and 4,460 passed, 25 skipped (CUDA),
+  no failure. `sphinx-build -W` passes.
+- *Time* (A100, GPU 0 of nid200333, nothing else running; base and branch
+  alternated twice; medians in ms):
+
+  | Integrand, start | Base (two rounds) | Branch (two rounds) |
+  |---|---|---|
+  | 6×2048 network, no grad, default mesh (342 → 231 points, 4 → 1 calls) | 6.98, 7.21 | 5.75, 5.71 |
+  | 6×2048 network, no grad, 500 subintervals (11,611 → 10,500, 6 → 2) | 35.55, 35.51 | 33.98, 31.61 |
+  | `exp(-t) sin(40 t)`, default mesh | 5.16, 5.18 | 4.91, 4.95 |
+  | 3×512 network, no grad, default mesh | 5.67, 5.75 | 5.04, 5.08 |
+  | 3×512 network, `take_gradient=True`, default mesh | 7.70, 7.92 | 7.10, 6.87 |
+  | `exp(-t) sin(40 t)`, `state=` | 4.68, 4.69 | 4.61, 4.65 |
+  | 3×512 network, no grad, `state=` | 4.93, 4.96 | 4.76, 4.87 |
+  | 3×512 network, `take_gradient=True`, `state=` | 7.18, 7.06 | 6.80, 6.44 |
+
+  The integrals printed are identical.
+
+## 12. Not done
+
+- A mitigation for a first call far above the integrand's limit (above):
+  for example a first call capped at 1,000 points, or a faster shrink while
+  no call has run. Each needs either changed numbers (smaller first batches
+  with `take_gradient=True`) or a new branch in the retry; not done, reported
+  for a decision.
+- D2's alternative B (no 10,000-point cap) is not done, as decided.

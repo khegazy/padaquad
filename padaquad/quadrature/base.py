@@ -1156,8 +1156,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_grad: torch.Tensor | None = None
         # === Main integration loop ===
         # Continues until all steps have been evaluated and accepted
-        # (mesh_trackers[i] == False for all i)
-        while torch.any(mesh_trackers):
+        # (mesh_trackers[i] == False for all i). waiting, the left mesh
+        # indices of the subintervals to evaluate (ascending), is the turn's
+        # one read of the trackers: it gives the loop's condition and the
+        # subintervals to evaluate.
+        while len(waiting := torch.nonzero(mesh_trackers).flatten()) > 0:
             # The batch's mesh: a detached copy when mesh_grad collects the
             # gradient (see mesh_grad above).
             mesh_eval = mesh.detach().requires_grad_() if collect_mesh_grad else mesh
@@ -1174,7 +1177,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 f,
                 f_args,
                 mesh_eval,
-                mesh_trackers,
+                waiting,
                 take_gradient,
                 values_device,
                 buffer_bytes,
@@ -2177,7 +2180,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         f: Callable[..., Any],
         f_args: tuple[Any, ...],
         mesh: torch.Tensor,
-        mesh_trackers: torch.Tensor,
+        step_idxs: torch.Tensor,
         take_gradient: bool,
         values_device: torch.device | None,
         buffer_bytes: float,
@@ -2205,9 +2208,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Extra arguments passed to ``f`` after the nodes.
         mesh : torch.Tensor
             The current mesh. Shape: [M, T].
-        mesh_trackers : torch.Tensor
-            Boolean, shape [M]: True at the left mesh point of every subinterval
-            that still needs evaluation.
+        step_idxs : torch.Tensor
+            Indices of the left mesh points of the subintervals that need
+            evaluation, ascending, on the solver's device. Shape: [K], K >= 1.
         take_gradient : bool
             If True, evaluate whole subintervals with one call of ``f`` per batch.
         values_device : torch.device or None
@@ -2230,15 +2233,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         # The size of the next call of f: this call's batch size, or 10 times
         # it while it has not converged (_batch_for).
-        batches_left = torch.sum(mesh_trackers) * self.C
-        assert batches_left > 0
-        max_batch = self._batch_for(int(batches_left))
+        max_batch = self._batch_for(len(step_idxs) * self.C)
         if take_gradient and not self._batch_converged:
             # Whole subintervals: a small batch size grows to at least one.
             max_batch = max(max_batch, self.C)
-
-        step_idxs = torch.arange(len(mesh), device=self.device)
-        step_idxs = step_idxs[mesh_trackers]
 
         if take_gradient:
             nodes, f_evals, tracked, step_idxs, method_output = (

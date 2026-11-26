@@ -425,6 +425,49 @@ device. It works independently of the other options.
 | `"cpu"` (default) | Copying values to the host takes time that grows with their size; for integrands with many outputs it is most of the run time. | Holds only the values waiting for their quadrature calculation, and, until the end of the call, the small per-subinterval results of the accepted subintervals: nodes, widths, contributions, error estimates and error ratios (with `gk21` in float64, about 200 bytes per subinterval for one output). | Holds the values of every accepted subinterval. |
 | `None` | Fastest, since nothing is copied. `None` means the solver device. | Holds the values of every accepted subinterval until the end, which gives the highest peak. | Nothing. |
 
+(ug-end-of-call-memory)=
+#### Memory at the end of a call
+
+After the last pass, PadaQuad puts the accepted subintervals in the order of
+the mesh, checks the integral, builds the state's mesh and assembles the
+result, all on `result_device`. With R the size of the recorded integrand
+values (one value per subinterval, node and output, plus the tracked
+variables), the peak of `result_device` above what it held before the call
+was, measured with the record on a second A100 (exact allocator numbers) for
+D = 512 and 10,000 outputs:
+
+- **Several passes**, the usual case: 2.0 R. The values come in one array per
+  pass and are copied into one array in the order of the mesh, so both exist
+  for a moment.
+- **One pass** (for example a call that starts from a state): about 1.2 R
+  with a method whose nodes are all inside the subintervals, such as the
+  default `gk21`, since the recorded values become `result.y` without a copy;
+  2.0 R with a method that has nodes at both ends of each subinterval, such as
+  `bosh3` or `cc17`, since `result.y` lists each shared end point once, in a
+  new array.
+- **Methods with few nodes.** The contributions and error estimates hold one
+  number per subinterval and output, 1/C of R for a method with C nodes.
+  Building the state's mesh holds the values and up to four such arrays: 2.0 R
+  for `bosh3` (4 nodes) and 3.0 R for `adaptive_heun` (2 nodes); with
+  `error_norm="failure_fraction"` 3.1 R and in cumulative mode 2.5 R for
+  `bosh3`. `build_state_mesh=False` skips this.
+- **`record_evaluations=False`**: no values are kept; the peak is the
+  per-subinterval results, 0.1 R for `gk21` and 0.5 R for `bosh3` of the
+  values that were not kept.
+- **One output** (D = 1): the nodes, widths and error ratios are as large as
+  the values, and the peak is about 1,200 bytes per subinterval for `gk21` and
+  300 for `bosh3` in float64.
+
+On the host (`result_device="cpu"`) the resident memory agrees with these
+numbers for records of a few hundred MB and more (2.0 R for 3.9 GB of `bosh3`
+values); the copy into mesh order often stays below 2 R there, because a page
+of the new array counts only once written, while the arrays it is copied from
+are freed one by one. It can also be higher: the C library (glibc) keeps freed
+blocks smaller than its mmap threshold (at most 32 MiB) resident, so after
+many small batches, for example with `take_gradient=True` and a small
+`max_batch`, the resident size can stay up to R above the memory in use (3.0 R
+measured for 331 MB of values in 25 batches).
+
 The result `loss_fxn` receives for each batch has its `y` and
 `tracked_variables` on `result_device` with `trade_speed_for_memory=True`, and
 on the solver device without it; its other tensors stay on the solver device.

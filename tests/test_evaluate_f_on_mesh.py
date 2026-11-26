@@ -726,7 +726,7 @@ class TestIntegration:
             "f": _simple_integrand,
             "f_args": (),
             "mesh": mesh,
-            "mesh_trackers": mesh_trackers,
+            "step_idxs": torch.nonzero(mesh_trackers).flatten(),
             "values_device": CPU,
             "buffer_bytes": 0,
         }
@@ -767,7 +767,13 @@ class TestIntegration:
             solver._batch = max_batch
             nodes_i, f_evals_i, _tracked, idxs_i, method_output = (
                 solver._evaluate_f_on_mesh(
-                    _simple_integrand, (), mesh, mesh_trackers, take_gradient, CPU, 0
+                    _simple_integrand,
+                    (),
+                    mesh,
+                    torch.nonzero(mesh_trackers).flatten(),
+                    take_gradient,
+                    CPU,
+                    0,
                 )
             )
             _assert_integrated(solver, mesh, idxs_i, nodes_i, f_evals_i, method_output)
@@ -807,7 +813,13 @@ class TestIntegration:
                     break
                 solver._batch = max_batch
                 ni, ei, _tracked, ii, mo = solver._evaluate_f_on_mesh(
-                    _simple_integrand, (), mesh, mesh_trackers, take_gradient, CPU, 0
+                    _simple_integrand,
+                    (),
+                    mesh,
+                    torch.nonzero(mesh_trackers).flatten(),
+                    take_gradient,
+                    CPU,
+                    0,
                 )
                 nodes_acc.append(ni)
                 f_evals_acc.append(ei)

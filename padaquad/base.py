@@ -335,15 +335,7 @@ class SolverBase(ABC, DistributedEnvironment):
         """
         Set the floating-point precision for all solver tensors.
 
-        Converts y0 to the new dtype,
-        then calls ``_set_solver_dtype``. Also sets dtype-appropriate assertion
-        tolerances
-        used for internal sanity checks (e.g. verifying that the nodes are in
-        increasing order despite floating-point rounding).
-
-        The assertion tolerances by dtype are:
-            - float64: atol_assert=1e-15, rtol_assert=1e-7
-            - float32: atol_assert=1e-7,  rtol_assert=1e-5
+        Converts y0 to the new dtype, then calls ``_set_solver_dtype``.
 
         float16 is refused (Bug B4): its rounding error, about 1e-3, sits
         *above* typical tolerances, so the solver cannot verify that a
@@ -378,17 +370,6 @@ class SolverBase(ABC, DistributedEnvironment):
 
         self.dtype = dtype
         self.init_y0 = self.init_y0.to(self.dtype)
-
-        # Set assertion tolerances appropriate for this precision level.
-        # These are used in internal sanity checks (e.g., time ordering),
-        # NOT for integration error control (that uses self.atol/self.rtol).
-        if self.dtype == torch.float64:
-            self.atol_assert = 1e-15
-            self.rtol_assert = 1e-7
-        else:  # float32
-            self.atol_assert = 1e-7
-            self.rtol_assert = 1e-5
-
         self._set_solver_dtype(self.dtype)
 
     def set_dtype_by_input(

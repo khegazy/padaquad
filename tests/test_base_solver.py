@@ -25,21 +25,7 @@ from padaquad.results import IntegrationResult
 
 
 class TestSetDtype:
-    """Tests for SolverBase._set_dtype: dtype conversion and assertion tolerances."""
-
-    def test_float64_tolerances(self):
-        """float64 sets tight assertion tolerances."""
-        solver = make_solver_for_unit_test()
-        solver._set_dtype(torch.float64)
-        assert solver.atol_assert == 1e-15
-        assert solver.rtol_assert == 1e-7
-
-    def test_float32_tolerances(self):
-        """float32 sets medium assertion tolerances."""
-        solver = make_solver_for_unit_test()
-        solver._set_dtype(torch.float32)
-        assert solver.atol_assert == 1e-7
-        assert solver.rtol_assert == 1e-5
+    """Tests for SolverBase._set_dtype: dtype conversion."""
 
     def test_float16_raises(self):
         """float16 is refused at _set_dtype time (Bug B4 fix). Its ~1e-3
@@ -408,3 +394,59 @@ class TestHostWaits:
         a, b = (torch.tensor([x], dtype=torch.float64, device="cuda") for x in (0, 1))
         waits = _host_waits(lambda: solver._setup_initial_mesh(None, a, b, True, 13))
         assert waits == 1 + runtime_checks
+
+    @pytest.mark.parametrize("values_on", ["cuda", "cpu"])
+    def test_mesh_update_reads_once(self, values_on):
+        """The mesh update reads the device once, for the number of accepted
+        subintervals (plus once for _get_mesh_indices, the dictionary of the
+        new mesh's points), whatever it keeps: method output, values moved
+        within their array, tracked variables, nodes, split counts, the split
+        cap. Values on result_device ("cpu", trade_speed_for_memory) cost one
+        more copy of the kept positions per array."""
+        solver = adaptive_quadrature("uniform", "gk21", device="cuda")
+        n = 6
+        mesh = torch.linspace(0, 1, n + 1, dtype=torch.float64, device="cuda")[:, None]
+        trackers = torch.arange(n + 1, device="cuda") < n
+        idxs = torch.arange(n, device="cuda")
+        nodes = solver._compute_nodes(mesh[:-1], mesh[1:])
+        y = torch.sin(nodes).to(values_on)
+        output = solver._calculate_integral(nodes, y.to("cuda"), mesh[:-1], mesh[1:])
+        keep = torch.tensor([True, False, True, True, False, True], device="cuda")
+        split_counts = torch.zeros(n + 1, dtype=torch.long, device="cuda")
+
+        def update():
+            return solver._adaptively_increase_mesh(
+                output,
+                keep,
+                y,
+                nodes,
+                mesh,
+                idxs,
+                trackers,
+                tracked_step_eval=(y.clone(),),
+                split_counts=split_counts,
+                max_adaptive_splits=10,
+                in_place=True,
+            )
+
+        assert _host_waits(update) == 2 + 2 * (values_on == "cpu")
+
+    @pytest.mark.parametrize("runtime_checks", [True, False])
+    def test_evaluation_reads_only_for_the_finite_check(self, runtime_checks):
+        """Evaluating and integrating the waiting subintervals reads the
+        device only for the finite check of each call of f (runtime_checks):
+        the batch size comes from the number of waiting subintervals, known on
+        the host."""
+        solver = adaptive_quadrature(
+            "uniform", "gk21", device="cuda", runtime_checks=runtime_checks
+        )
+        mesh = torch.linspace(0, 1, 9, dtype=torch.float64, device="cuda")[:, None]
+        waiting = torch.arange(8, device="cuda")
+        solver._batch, solver._batch_converged = 3 * solver.C, True
+        cuda = torch.device("cuda", torch.cuda.current_device())
+        waits = _host_waits(
+            lambda: solver._evaluate_f_on_mesh(
+                torch.sin, (), mesh, waiting, False, cuda, float("inf")
+            )
+        )
+        assert waits == 3 * runtime_checks  # three calls of f

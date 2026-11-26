@@ -20,6 +20,16 @@ of the error is logged. Common causes:
   `error_integral_reference` no larger than |integral|.
 - **A non-finite value** with `runtime_checks=False`. Refining cannot
   remove it; pass `runtime_checks=True` to raise where it first appears.
+- **A subinterval too narrow to halve.** When the ends of a failing
+  subinterval are neighboring floating-point numbers, its midpoint rounds onto
+  one of them, so it cannot be split; it is accepted as it is, like a
+  subinterval at `max_adaptive_splits`. This happens at a jump of the
+  integrand when the tolerance is at rounding level, and near a singularity
+  inside the interval, such as that of $1/(t - 0.5)^2$ on $[0, 1]$. Near
+  such a point $t - 0.5$ keeps only a few correct digits, so the integrand's
+  own rounding error can fail the tolerance on every subinterval close to it,
+  and the refinement can go on for a long time and use much memory before
+  each of them is that narrow: pass `max_adaptive_splits` to stop it sooner.
 
 `result.error_ratios` holds each subinterval's ratio when it was accepted, so
 every entry can be below 1 while `converged` is `False`. With

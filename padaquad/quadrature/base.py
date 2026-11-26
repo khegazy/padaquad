@@ -136,26 +136,27 @@ def _RK_integral(
     return integral, RK_steps
 
 
-def _keep_rows(x: torch.Tensor, keep: torch.Tensor, in_place: bool) -> torch.Tensor:
+def _keep_rows(x: torch.Tensor, idx: torch.Tensor, in_place: bool) -> torch.Tensor:
     """
-    Return the rows of ``x`` where ``keep`` is True, in order.
+    Return the rows ``idx`` of ``x``, in order.
 
     With ``in_place``, the kept rows are moved to the front of ``x`` and the
     first of them are returned, a view of ``x``: no second array as large as
     the kept rows is allocated, only blocks of at most ``_BLOCK_BYTES``.
-    Kept row j comes from row ``idx[j] >= j``, so a block never overwrites a
-    row a later block reads. ``x`` is overwritten, so ``in_place`` is only for
-    an array nothing else reads. Even then, an ``x`` that requires grad is
-    indexed (a copy), since its autograd graph may need the old rows, and so
-    is a view of another tensor, such as f's own output kept as the pass's
-    values when one call covers the pass (f may still hold it).
+    Kept row j comes from row ``idx[j] >= j`` (``idx`` is ascending), so a
+    block never overwrites a row a later block reads. ``x`` is overwritten, so
+    ``in_place`` is only for an array nothing else reads. Even then, an ``x``
+    that requires grad is indexed (a copy), since its autograd graph may need
+    the old rows, and so is a view of another tensor, such as f's own output
+    kept as the pass's values when one call covers the pass (f may still hold
+    it).
 
     Parameters
     ----------
     x : torch.Tensor
         Values of N subintervals. Shape: [N, ...].
-    keep : torch.Tensor
-        True for the rows to keep, on any device. Shape: [N].
+    idx : torch.Tensor
+        Positions of the rows to keep, ascending, on any device. Shape: [K].
     in_place : bool
         True to move the kept rows within ``x``; False to index ``x``.
 
@@ -164,16 +165,38 @@ def _keep_rows(x: torch.Tensor, keep: torch.Tensor, in_place: bool) -> torch.Ten
     torch.Tensor
         The kept rows. Shape: [K, ...].
     """
-    keep = keep.to(x.device)
+    idx = idx.to(x.device)
     if not in_place or x.requires_grad or x._base is not None:
-        return x[keep]
-    idx = torch.nonzero(keep).flatten()
+        return x[idx]
     row_bytes = x.shape[1:].numel() * x.element_size()
     rows = max(1, _BLOCK_BYTES // max(1, row_bytes))
     for i in range(0, len(idx), rows):
         block = idx[i : i + rows]
         x[i : i + len(block)] = x[block]
     return x[: len(idx)]
+
+
+def _midpoint(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+    """
+    Return the mesh point that a split inserts between ``left`` and ``right``.
+
+    The one formula of the midpoint: ``_splittable`` refuses a split whose
+    midpoint rounds onto an end, which holds only if the mesh update inserts
+    the same bits.
+
+    Parameters
+    ----------
+    left : torch.Tensor
+        Left ends of the subintervals. Shape: [N, T].
+    right : torch.Tensor
+        Right ends of the subintervals. Shape: [N, T].
+
+    Returns
+    -------
+    torch.Tensor
+        ``0.5 * (left + right)``. Shape: [N, T].
+    """
+    return 0.5 * (left + right)
 
 
 # Multi-GPU keyword options the solver forwards to ``DistributedEnvironment``,
@@ -337,11 +360,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             accepted. Default 0.0 (every component must pass).
         runtime_checks : bool
             If True (default), check while integrating: raise ``ValueError``
-            naming the points where ``f`` returned NaN or Inf, and check on
-            every pass that the nodes and the mesh are in order. If False, skip
-            these checks to save time and memory; subintervals where ``f``
-            returned NaN or Inf are then accepted and the non-finite value
-            reaches the result.
+            naming the points where ``f`` returned NaN or Inf, and check
+            PadaQuad's own bookkeeping (that the accepted subintervals are
+            recorded in mesh order). If False, skip these checks to save time
+            and memory; subintervals where ``f`` returned NaN or Inf are then
+            accepted and the non-finite value reaches the result. The mesh and
+            the nodes are in order by construction either way.
         dtype : torch.dtype
             ``torch.float64`` (default) or ``torch.float32``; ``torch.float16``
             is refused. ``integrate`` switches to the dtype of the mesh or the
@@ -794,9 +818,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             (see :ref:`the user guide <ug-error-norm>`).
         runtime_checks : bool or None
             The constructor's ``runtime_checks`` for this call: if True, raise
-            ``ValueError`` when f returns NaN or Inf and check the order of the
-            nodes and the mesh on every pass; if False, skip these checks. None
-            (default) keeps the constructor's value.
+            ``ValueError`` when f returns NaN or Inf and check PadaQuad's own
+            bookkeeping; if False, skip these checks. None (default) keeps the
+            constructor's value.
         trade_speed_for_memory : bool
             Only with ``take_gradient=False``. If False (default), a pass's
             integrand values stay on the solver's device until all its
@@ -1110,8 +1134,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh_grad: torch.Tensor | None = None
         # === Main integration loop ===
         # Continues until all steps have been evaluated and accepted
-        # (mesh_trackers[i] == False for all i)
-        while torch.any(mesh_trackers):
+        # (mesh_trackers[i] == False for all i). waiting, the left mesh
+        # indices of the subintervals to evaluate (ascending), is the turn's
+        # one read of the trackers: it gives the loop's condition and the
+        # subintervals to evaluate.
+        while len(waiting := torch.nonzero(mesh_trackers).flatten()) > 0:
             # The batch's mesh: a detached copy when mesh_grad collects the
             # gradient (see mesh_grad above).
             mesh_eval = mesh.detach().requires_grad_() if collect_mesh_grad else mesh
@@ -1128,7 +1155,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 f,
                 f_args,
                 mesh_eval,
-                mesh_trackers,
+                waiting,
                 take_gradient,
                 values_device,
                 buffer_bytes,
@@ -1196,7 +1223,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     integral=reference_integral,
                 )
             )
-            keep_mask, remove_mask, _ = self._accept_reject_masks(
+            keep_mask, _, _ = self._accept_reject_masks(
                 error_ratios, error_ratios_per_dim
             )
             if self.speed_logger:
@@ -1239,6 +1266,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     record,
                     torch.cumsum(all_mesh_quadratures.detach(), 0)[idxs_keep],
                     reference_integral,
+                    mesh,
                     mesh_indices,
                     split_counts,
                     max_adaptive_splits,
@@ -1257,11 +1285,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 mesh,
                 mesh_trackers,
                 mesh_indices,
-                error_ratios,
+                keep_idx,
                 split_counts,
             ) = self._adaptively_increase_mesh(
                 method_output=method_output,
-                error_ratios=error_ratios,
+                keep_mask=keep_mask,
                 y_step_eval=y_step_eval,
                 nodes=nodes,
                 mesh=mesh,
@@ -1270,8 +1298,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 tracked_step_eval=tracked_step_eval,
                 split_counts=split_counts,
                 max_adaptive_splits=max_adaptive_splits,
-                keep_mask=keep_mask,
-                remove_mask=remove_mask,
                 extra_split_idxs=extra_split_idxs,
                 # The split path's arrays are the solver's own (an f output
                 # that requires grad is copied by _keep_rows); the full path's
@@ -1285,18 +1311,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             assert kept_nodes is not None
             assert split_counts is not None  # returned non-None for non-None input
             method_output, y_step_eval, nodes = kept_output, kept_y, kept_nodes
-            # Verify barrier ordering after adaptive refinement.
-            # Any-T invariant: consecutive barriers are distinct (no
-            # zero-length panels), which is all that is meaningful for a
-            # multi-dimensional path.
-            if self.runtime_checks:
-                assert torch.all(torch.any(mesh[1:] != mesh[:-1], dim=-1))
-                # For 1-D time the barriers must additionally be monotonic.
-                if mesh.shape[-1] == 1:
-                    mesh_diff = mesh[1:, 0] - mesh[:-1, 0]
-                    assert torch.all(mesh_diff + self.atol_assert > 0) or torch.all(
-                        mesh_diff - self.atol_assert < 0
-                    )
+            error_ratios = error_ratios[keep_idx]
 
             # --- Step 5b: Drop re-split recorded panels from the record ---
             # The recorded panels flagged above were just bisected in the mesh
@@ -1411,6 +1426,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                         record,
                         torch.cumsum(record["mesh_quadratures"].detach(), 0),
                         record["integral"].detach(),
+                        mesh,
                         mesh_indices,
                         split_counts,
                         max_adaptive_splits,
@@ -1421,8 +1437,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     logger.info(
                         "error_integral_reference dropped once every step was "
                         "accepted: %d of %d accepted steps fail against the "
-                        "integral; %d of them (those below max_adaptive_splits) "
-                        "are split.",
+                        "integral; %d of them (those below max_adaptive_splits "
+                        "whose midpoint differs from both ends) are split.",
                         int(fails.sum()),
                         len(fails),
                         split_positions.numel(),
@@ -1432,8 +1448,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     (_, _, _, _, mesh, mesh_trackers, mesh_indices, _, split_counts) = (
                         self._adaptively_increase_mesh(
                             method_output=None,
-                            error_ratios=torch.empty(
-                                0, dtype=self.dtype, device=self.device
+                            keep_mask=torch.empty(
+                                0, dtype=torch.bool, device=self.device
                             ),
                             y_step_eval=None,
                             nodes=None,
@@ -1667,6 +1683,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         record: dict[str, torch.Tensor],
         cum_mesh_quadratures: torch.Tensor,
         integral: torch.Tensor,
+        mesh: torch.Tensor,
         mesh_indices: dict[tuple[float, ...], int],
         split_counts: torch.Tensor | None,
         max_adaptive_splits: int | None,
@@ -1675,7 +1692,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Find the recorded subintervals to split again, from their stored errors.
 
         Judges every recorded subinterval with ``_record_error_check`` (no call
-        of the integrand) and keeps the failing ones below the split cap. Used
+        of the integrand) and keeps the failing ones that can be split
+        (``_splittable``: below the split cap, and wide enough to halve). Used
         by the in-loop re-check (Step 4b of ``integrate``) and when a fixed
         ``error_integral_reference`` is dropped (Step 7).
 
@@ -1688,6 +1706,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             cumulative mode only).
         integral : torch.Tensor
             Reference integral [D] for the absolute-mode tolerance.
+        mesh : torch.Tensor
+            The current mesh [M, T].
         mesh_indices : dict[tuple[float, ...], int]
             ``{tuple(mesh point): index}`` for the current mesh.
         split_counts : torch.Tensor or None
@@ -1700,23 +1720,21 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         -------
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
             Tuple ``(split_positions, record_keep_mask, fails)``: the mesh
-            positions of the failing recorded subintervals below the cap, a
-            mask [N] that keeps every other recorded subinterval, and the mask
-            [N] of every failing one (including those at the cap).
+            positions of the failing recorded subintervals that can be split,
+            a mask [N] that keeps every other recorded subinterval, and the
+            mask [N] of every failing one (including those that cannot be
+            split).
         """
         _, rec_remove, _ = self._record_error_check(
             record, cum_mesh_quadratures, integral
         )
         rec_positions = self._mesh_order(record["mesh_left"], mesh_indices)
-        # Respect the split cap so the record stays consistent with the mesh: a
-        # failing subinterval already at the cap is not split, so it must stay
-        # recorded.
-        splittable = rec_remove
-        if max_adaptive_splits is not None:
-            assert split_counts is not None  # always kept in the loop
-            splittable = rec_remove & (
-                split_counts[rec_positions] < max_adaptive_splits
-            )
+        # A failing subinterval that cannot be split (at the split cap, or too
+        # narrow to halve) is not split, so it must stay recorded: the record
+        # stays consistent with the mesh.
+        splittable = rec_remove & self._splittable(
+            mesh, rec_positions, split_counts, max_adaptive_splits
+        )
         return rec_positions[splittable], ~splittable, rec_remove
 
     def _warn_not_converged(
@@ -1845,10 +1863,56 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     #                             ADAPTIVE MESH REFINEMENT                             #
     # -------------------------------------------------------------------------------- #
 
+    def _splittable(
+        self,
+        mesh: torch.Tensor,
+        idxs: torch.Tensor,
+        split_counts: torch.Tensor | None,
+        max_adaptive_splits: int | None,
+    ) -> torch.Tensor:
+        """
+        Tell which subintervals can be split in half, on the device.
+
+        A subinterval cannot be split when its split count has reached
+        ``max_adaptive_splits`` (with ``split_counts`` given), or when its
+        midpoint (``_midpoint``, the mesh point a split inserts in
+        ``_adaptively_increase_mesh``) rounds onto one of its ends: its ends
+        are neighboring floating-point numbers, so one half would have width
+        zero and the other would be the subinterval again. Either way it is
+        accepted instead; the final check counts it as failing if its error
+        ratio is 1 or above. Every split goes through this test: the batch's
+        (``_adaptively_increase_mesh``, including the optimal mesh's) and the
+        re-check's (``_failed_record_positions``), so the mesh stays strictly
+        increasing.
+
+        Parameters
+        ----------
+        mesh : torch.Tensor
+            The mesh. Shape: [M, T].
+        idxs : torch.Tensor
+            Mesh index of the left end of each subinterval. Shape: [N].
+        split_counts : torch.Tensor | None
+            Split count of the subinterval starting at each mesh point [M], or
+            None (no cap).
+        max_adaptive_splits : int | None
+            The split cap, or None.
+
+        Returns
+        -------
+        torch.Tensor
+            True for the subintervals that can be split. Shape: [N].
+        """
+        left, right = mesh[idxs], mesh[idxs + 1]
+        mid = _midpoint(left, right)
+        splittable = ~(torch.all(mid == left, dim=-1) | torch.all(mid == right, dim=-1))
+        if max_adaptive_splits is not None and split_counts is not None:
+            splittable &= split_counts[idxs] < max_adaptive_splits
+        return splittable
+
     def _adaptively_increase_mesh(
         self,
         method_output: MethodOutput | None,
-        error_ratios: torch.Tensor,
+        keep_mask: torch.Tensor,
         y_step_eval: torch.Tensor | None,
         nodes: torch.Tensor | None,
         mesh: torch.Tensor,
@@ -1857,8 +1921,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         tracked_step_eval: tuple[torch.Tensor, ...] | None = None,
         split_counts: torch.Tensor | None = None,
         max_adaptive_splits: int | None = None,
-        keep_mask: torch.Tensor | None = None,
-        remove_mask: torch.Tensor | None = None,
         extra_split_idxs: torch.Tensor | None = None,
         in_place: bool = False,
     ) -> tuple[
@@ -1875,24 +1937,22 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         Accept the accurate subintervals of a batch and split the others in half.
 
-        For each evaluated subinterval, with the masks from
-        ``_accept_reject_masks`` (or, when they are not given, from the error
-        ratio alone):
+        Each evaluated subinterval is accepted where ``keep_mask`` is True
+        (``_accept_reject_masks``: an error ratio below 1, or a non-finite
+        one, which splitting cannot be relied on to remove): its tracker is
+        set False and its contribution is kept. The others are split: a new
+        mesh point is inserted at the midpoint (``_midpoint``), and both
+        halves are evaluated in a later pass.
 
-        - error ratio below 1: accept. Its tracker is set False and its
-          contribution is kept.
-        - error ratio 1 or above: split. A new mesh point is inserted at the
-          midpoint ``(mesh_left + mesh_right) / 2``, and both halves are
-          evaluated in a later pass.
-        - non-finite error ratio (NaN or Inf): accept. Splitting cannot be
-          relied on to remove a non-finite value, so splitting until it is
-          gone might never end. The non-finite value reaches the recorded
-          integral.
+        A subinterval that cannot be split (``_splittable``: its split count
+        has reached ``max_adaptive_splits``, when both are given, or its
+        midpoint rounds onto one of its ends) is accepted even if
+        ``keep_mask`` is False. Both halves of a subinterval with split count
+        n get split count n + 1.
 
-        When ``split_counts`` and ``max_adaptive_splits`` are given, a
-        subinterval whose split count has reached ``max_adaptive_splits`` is
-        accepted even if its error ratio is 1 or above. Both halves of a
-        subinterval with split count n get split count n + 1.
+        The update reads the device once, for the number of accepted
+        subintervals; every other step indexes with integer positions on the
+        device.
 
         Parameters
         ----------
@@ -1900,8 +1960,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Integral and error output of the current batch (None in the
             optimal-mesh pass). If given, the split subintervals are removed
             from it.
-        error_ratios : torch.Tensor
-            Error ratio of each subinterval. Shape: [N_batch].
+        keep_mask : torch.Tensor
+            True for the subintervals of the batch to accept, from
+            ``_accept_reject_masks``. Shape: [N_batch].
         y_step_eval : torch.Tensor | None
             Integrand values of the batch. Shape: [N_batch, C, D].
         nodes : torch.Tensor | None
@@ -1909,8 +1970,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh : torch.Tensor
             All mesh points. Shape: [M, T].
         mesh_idxs : torch.Tensor
-            Mesh index of the left end of each subinterval of the batch.
-            Shape: [N_batch].
+            Mesh index of the left end of each subinterval of the batch,
+            ascending. Shape: [N_batch].
         mesh_trackers : torch.Tensor
             True for the subintervals that still have to be evaluated.
             Shape: [M].
@@ -1925,18 +1986,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         max_adaptive_splits : int | None
             Cap on the split count; a subinterval at or above it is accepted
             instead of split. None disables the cap.
-        keep_mask : torch.Tensor | None
-            Accept mask (True = accept) from ``_accept_reject_masks``, shape
-            [N_batch]. When it and ``remove_mask`` are given they are used
-            as they are; otherwise the masks come from ``error_ratios < 1``
-            with non-finite ratios accepted (for direct callers and tests).
-        remove_mask : torch.Tensor | None
-            Split mask, the complement of ``keep_mask``.
         extra_split_idxs : torch.Tensor | None
             Further mesh indices to split in the same update, besides the
             batch's rejected subintervals: recorded subintervals that failed
             the re-check after the running integral changed. Must be
-            ascending and disjoint from ``mesh_idxs[remove_mask]``. Their
+            ascending and disjoint from the batch's ``mesh_idxs``. Their
             trackers are set True so both halves are evaluated. None splits
             only the batch's rejected subintervals.
         in_place : bool
@@ -1949,7 +2003,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         -------
         tuple[MethodOutput | None, torch.Tensor | None, tuple[torch.Tensor, ...] | None, torch.Tensor | None, torch.Tensor, torch.Tensor, dict[tuple[float, ...], int], torch.Tensor, torch.Tensor | None]
             Tuple ``(method_output, y_step_eval, tracked_step_eval, nodes,
-            mesh_new, mesh_trackers_new, mesh_indices_new, error_ratios_kept,
+            mesh_new, mesh_trackers_new, mesh_indices_new, keep_idx,
             split_counts_new)``:
 
             - method_output: with the split subintervals removed.
@@ -1960,40 +2014,33 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             - mesh_trackers_new: the trackers, True for the new halves.
             - mesh_indices_new: ``{tuple(mesh point): index}`` for mesh_new
               (``_get_mesh_indices``).
-            - error_ratios_kept: error ratios of the accepted subintervals.
+            - keep_idx: positions in the batch of the accepted subintervals,
+              ascending (after the split cap), on the mesh's device.
             - split_counts_new: split counts for mesh_new, with both halves
               of every split subinterval incremented (or None if
               ``split_counts`` is None).
         """
-        if keep_mask is None or remove_mask is None:
-            # Legacy/direct-call path: derive the masks from a scalar error
-            # ratio. Splitting cannot be relied on to remove a non-finite error
-            # ratio (NaN/Inf): a NaN/Inf at a mesh point comes back as an
-            # endpoint of a half, and a NaN/Inf running integral makes every
-            # tolerance non-finite.
-            # Accept such panels unconditionally so the main loop always
-            # terminates -- with the default uncapped max_adaptive_splits,
-            # routing them to the split branch would refine forever (and a +Inf
-            # ratio is >= 1.0, so it would otherwise be split forever too).
-            nonfinite = ~torch.isfinite(error_ratios)
-            keep_mask = (error_ratios < 1.0) | nonfinite
-            remove_mask = (error_ratios >= 1.0) & ~nonfinite
-        # Panels that have already been split the maximum number of times are
-        # accepted as-is rather than split further.
-        if max_adaptive_splits is not None and split_counts is not None:
-            at_max = remove_mask & (split_counts[mesh_idxs] >= max_adaptive_splits)
-            keep_mask = keep_mask | at_max
-            remove_mask = remove_mask & ~at_max
-        mesh_trackers[mesh_idxs[keep_mask]] = False
+        # Subintervals that cannot be split (at the split cap, or too narrow
+        # to halve) are accepted as they are.
+        keep_mask = keep_mask | ~self._splittable(
+            mesh, mesh_idxs, split_counts, max_adaptive_splits
+        )
+        # The batch's positions, accepted ones first and then the split ones,
+        # each ascending (a stable sort of 0 = accept, 1 = split), and the
+        # update's one read of the device: how many are accepted. Integer
+        # positions index every field below without another read (a boolean
+        # mask reads the device for the size of its result).
+        order = torch.sort((~keep_mask).to(torch.uint8), stable=True).indices
+        n_keep = int(keep_mask.sum())
+        keep_idx = order[:n_keep]
+        mesh_trackers.index_fill_(0, mesh_idxs[keep_idx], False)
 
         # Mesh positions to bisect this update: the batch's rejected steps plus
         # any extra positions (already-accepted panels that failed the re-check
         # against the drifted tolerance). The recorded panels were accepted
         # (tracker False), so re-activate the whole split set to ensure both
-        # children of every bisected panel are re-evaluated. With no extras this
-        # is exactly the previous batch-only behaviour (and trackers untouched
-        # here, matching the original).
-        split_idxs = mesh_idxs[remove_mask]
+        # children of every bisected panel are re-evaluated.
+        split_idxs = mesh_idxs[order[n_keep:]]
         if extra_split_idxs is not None and extra_split_idxs.numel() > 0:
             split_idxs = torch.sort(torch.cat([split_idxs, extra_split_idxs])).values
             # Batch (tracker True) and recorded (tracker False) positions are
@@ -2001,62 +2048,54 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # duplicate would corrupt the midpoint-offset math below.
             if self.runtime_checks:
                 assert torch.all(split_idxs[1:] > split_idxs[:-1])
-            mesh_trackers[split_idxs] = True
-
-        N_t_add = len(split_idxs)
-        # Allocate new barriers array with room for inserted midpoints. All
-        # allocations follow ``mesh.device`` so this runs on the integration
-        # device in the loop and on result_device in the post-convergence pass.
-        mesh_new = torch.nan * torch.ones(
-            (N_t_add + len(mesh), mesh.shape[-1]),
-            dtype=self.dtype,
-            device=mesh.device,
-        )
-        mesh_trackers_new = torch.ones(
-            N_t_add + len(mesh), dtype=torch.bool, device=mesh.device
-        )
+            mesh_trackers.index_fill_(0, split_idxs, True)
 
         # Transfer existing barriers to their new positions in the expanded array.
         # Each rejected step causes a +1 offset for all subsequent barriers
         # (because a midpoint is being inserted). idx_offset tracks this shift.
+        # All allocations follow ``mesh.device`` so this runs on the
+        # integration device in the loop and on result_device in the
+        # post-convergence pass.
+        N_t_add = len(split_idxs)
         idx_offset = torch.zeros(len(mesh), dtype=torch.long, device=mesh.device)
-        idx_offset[split_idxs + 1] = 1
-        idx_offset = torch.cumsum(idx_offset, dim=0)
-        idxs_transfer = idx_offset + torch.arange(len(mesh), device=mesh.device)
-        mesh_new[idxs_transfer] = mesh.clone()
-        mesh_trackers_new[idxs_transfer] = mesh_trackers.clone()
-
-        # Insert new midpoint barriers between the start and end of rejected steps.
-        # The midpoint is placed at (left_barrier + right_barrier) / 2.
+        idx_offset.index_fill_(0, split_idxs + 1, 1)
+        idxs_transfer = torch.cumsum(idx_offset, dim=0) + torch.arange(
+            len(mesh), device=mesh.device
+        )
+        # Midpoint j goes between the old points split_idxs[j] and
+        # split_idxs[j] + 1, which move to idxs_new[j] - 1 and idxs_new[j] + 1.
+        # Since split_idxs is strictly ascending, idxs_transfer and idxs_new
+        # are disjoint and together cover the new mesh, so every entry of the
+        # empty arrays below is written.
         idxs_new = split_idxs + torch.arange(N_t_add, device=mesh.device) + 1
-        t_add_barriers = 0.5 * (mesh_new[idxs_new - 1] + mesh_new[idxs_new + 1])
-        mesh_new[idxs_new] = t_add_barriers
-        if self.runtime_checks:
-            assert torch.sum(torch.isnan(mesh_new)) == 0
-        assert len(idxs_new) + len(idxs_transfer) == len(mesh_new)
+        mesh_new = mesh.new_empty((N_t_add + len(mesh), mesh.shape[-1]))
+        mesh_new[idxs_transfer] = mesh
+        mesh_new[idxs_new] = _midpoint(mesh_new[idxs_new - 1], mesh_new[idxs_new + 1])
+        mesh_trackers_new = torch.ones(
+            len(mesh_new), dtype=torch.bool, device=mesh.device
+        )
+        mesh_trackers_new[idxs_transfer] = mesh_trackers
 
         # Expand the per-panel split counts the same way as the barriers: carry
-        # existing counts to their new positions, then bump both children of
+        # existing counts to their new positions, then set both children of
         # each split panel to parent_count + 1.
         if split_counts is not None:
-            split_counts_new = torch.zeros(
-                len(mesh_new), dtype=torch.long, device=mesh_new.device
-            )
-            split_counts_new[idxs_transfer] = split_counts.clone()
-            parent_counts = split_counts[split_idxs]
+            split_counts_new = split_counts.new_empty(len(mesh_new))
+            split_counts_new[idxs_transfer] = split_counts
+            child_counts = split_counts[split_idxs] + 1
             # left child = transferred parent barrier; right child = new midpoint
-            split_counts_new[idxs_transfer[split_idxs]] = parent_counts + 1
-            split_counts_new[idxs_new] = parent_counts + 1
+            split_counts_new[idxs_transfer[split_idxs]] = child_counts
+            split_counts_new[idxs_new] = child_counts
         else:
             split_counts_new = None
 
         if method_output is not None:
-            method_output.mesh_quadratures = method_output.mesh_quadratures[keep_mask]
+            method_output.mesh_quadratures = method_output.mesh_quadratures[keep_idx]
             method_output.mesh_quadrature_errors = method_output.mesh_quadrature_errors[
-                keep_mask
+                keep_idx
             ]
-            method_output.h = method_output.h[keep_mask]
-            method_output.mesh_left = method_output.mesh_left[keep_mask]
+            method_output.h = method_output.h[keep_idx]
+            method_output.mesh_left = method_output.mesh_left[keep_idx]
             method_output.integral = torch.sum(method_output.mesh_quadratures, 0)
             method_output.integral_error = torch.sum(
                 method_output.mesh_quadrature_errors, 0
@@ -2067,15 +2106,15 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # subintervals with 1e5 outputs): a batch whose subintervals are all
         # accepted is kept as it is, and otherwise, with in_place, the accepted
         # rows are moved within the arrays. The nodes are small and copied.
-        all_kept = bool(torch.all(keep_mask))
+        all_kept = n_keep == len(keep_mask)
         if y_step_eval is not None and not all_kept:
-            y_step_eval = _keep_rows(y_step_eval, keep_mask, in_place)
+            y_step_eval = _keep_rows(y_step_eval, keep_idx, in_place)
         if tracked_step_eval is not None and not all_kept:
             tracked_step_eval = tuple(
-                _keep_rows(tv, keep_mask, in_place) for tv in tracked_step_eval
+                _keep_rows(tv, keep_idx, in_place) for tv in tracked_step_eval
             )
         if nodes is not None and not all_kept:
-            nodes = nodes[keep_mask.to(nodes.device)]
+            nodes = nodes[keep_idx]
         return (
             method_output,
             y_step_eval,
@@ -2084,7 +2123,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh_new,
             mesh_trackers_new,
             self._get_mesh_indices(mesh_new),
-            error_ratios[keep_mask],
+            keep_idx,
             split_counts_new,
         )
 
@@ -2194,7 +2233,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         f: Callable[..., Any],
         f_args: tuple[Any, ...],
         mesh: torch.Tensor,
-        mesh_trackers: torch.Tensor,
+        step_idxs: torch.Tensor,
         take_gradient: bool,
         values_device: torch.device | None,
         buffer_bytes: float,
@@ -2222,9 +2261,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Extra arguments passed to ``f`` after the nodes.
         mesh : torch.Tensor
             The current mesh. Shape: [M, T].
-        mesh_trackers : torch.Tensor
-            Boolean, shape [M]: True at the left mesh point of every subinterval
-            that still needs evaluation.
+        step_idxs : torch.Tensor
+            Indices of the left mesh points of the subintervals that need
+            evaluation, ascending, on the solver's device. Shape: [K], K >= 1.
         take_gradient : bool
             If True, evaluate whole subintervals with one call of ``f`` per batch.
         values_device : torch.device or None
@@ -2247,15 +2286,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         # The size of the next call of f: this call's batch size, or 10 times
         # it while it has not converged (_batch_for).
-        batches_left = torch.sum(mesh_trackers) * self.C
-        assert batches_left > 0
-        max_batch = self._batch_for(int(batches_left))
+        max_batch = self._batch_for(len(step_idxs) * self.C)
         if take_gradient and not self._batch_converged:
             # Whole subintervals: a small batch size grows to at least one.
             max_batch = max(max_batch, self.C)
-
-        step_idxs = torch.arange(len(mesh), device=self.device)
-        step_idxs = step_idxs[mesh_trackers]
 
         if take_gradient:
             nodes, f_evals, tracked, step_idxs, method_output = (
@@ -2336,10 +2370,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh_left, mesh_right = mesh[idxs], mesh[idxs + 1]
             nodes = self._compute_nodes(mesh_left, mesh_right)
             nodes_flat = torch.flatten(nodes, start_dim=0, end_dim=-2)
-            if self.runtime_checks:
-                assert torch.all(
-                    nodes_flat[1:] - nodes_flat[:-1] + self.atol_assert >= 0
-                )
             if cuda:
                 torch.cuda.reset_peak_memory_stats(self.device)
                 before = torch.cuda.memory_allocated(self.device)
@@ -3288,12 +3318,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 integral=integral.detach(),
             )
         )
-        keep_mask, remove_mask, _ = self._accept_reject_masks(
-            error_ratios, error_ratios_per_dim
-        )
+        keep_mask, _, _ = self._accept_reject_masks(error_ratios, error_ratios_per_dim)
         adaptive_step = self._adaptively_increase_mesh(
             method_output=None,
-            error_ratios=error_ratios,
+            keep_mask=keep_mask,
             y_step_eval=None,
             nodes=None,
             mesh=mesh_pruned,
@@ -3301,8 +3329,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh_trackers=torch.zeros(
                 len(mesh_pruned), dtype=torch.bool, device=mesh_pruned.device
             ),
-            keep_mask=keep_mask,
-            remove_mask=remove_mask,
         )
         _, _, _, _, mesh_optimal, _, _, _, _ = adaptive_step
 

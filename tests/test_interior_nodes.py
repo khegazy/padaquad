@@ -54,11 +54,11 @@ def test_f_gets_c_points_per_subinterval_and_no_mesh_point(method, max_batch):
     evaluate = solver._evaluate_f_on_mesh
     passes = []
 
-    def spy(f_, f_args, mesh, mesh_trackers, *args):
+    def spy(f_, f_args, mesh, step_idxs, *args):
         start = len(received)
-        out = evaluate(f_, f_args, mesh, mesh_trackers, *args)
+        out = evaluate(f_, f_args, mesh, step_idxs, *args)
         points = torch.cat(received[start:])
-        assert len(points) == solver.C * int(mesh_trackers.sum())
+        assert len(points) == solver.C * len(step_idxs)
         assert not torch.isin(points, mesh.detach()).any()
         passes.append((start, mesh.detach().clone()))
         return out

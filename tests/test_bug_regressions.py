@@ -983,6 +983,63 @@ def test_check_f_output_finite_helper():
 
 
 # -----------------------------------------------------------------------------
+# A subinterval too narrow to halve: its ends are neighboring floating-point
+# numbers, so its midpoint rounds onto one of them. Splitting it inserted a
+# repeated mesh point: with runtime_checks=True an empty AssertionError, with
+# False a loop that never ended (each turn split the same subinterval again).
+# It is now accepted, in the loop, in the re-check and in the state's mesh.
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("sampling", "method"),
+    [("uniform", "dopri5"), ("variable", "interpolatory3_variable")],
+)
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+@pytest.mark.parametrize("runtime_checks", [True, False])
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_subinterval_too_narrow_to_halve_ends_the_call(
+    sampling, method, dtype, runtime_checks, take_gradient
+):
+    """A jump with zero tolerances, for methods with a node at each end: the
+    subinterval that starts at the jump fails until it is one ULP wide (its
+    first node is on the other side of the jump). The call ends with
+    converged=False, the state's mesh is strictly increasing, and a call
+    from that state ends the same way. (interpolatory3_variable returns NaN:
+    its weights on a one-ULP subinterval are not finite.)"""
+    solver = adaptive_quadrature(
+        sampling, method, atol=0.0, rtol=0.0, device="cpu", dtype=dtype
+    )
+
+    def jump(t):
+        return torch.sign(t - 0.3)
+
+    def run(**kwargs):
+        return solver.integrate(
+            jump,
+            take_gradient=take_gradient,
+            runtime_checks=runtime_checks,
+            max_batch=10_000,
+            **kwargs,
+        )
+
+    torch.manual_seed(0)
+    result, state = _run_with_timeout(
+        lambda: run(
+            mesh_init=torch.tensor([0.0], dtype=dtype),
+            mesh_final=torch.tensor([1.0], dtype=dtype),
+        )
+    )
+    assert not result.converged
+    assert torch.all(state.mesh[1:] > state.mesh[:-1])
+    # Refined down to the spacing of the floating-point numbers at the jump.
+    assert result.h.min() <= torch.finfo(dtype).eps
+    again, state = _run_with_timeout(lambda: run(state=state))
+    assert not again.converged
+    assert torch.all(state.mesh[1:] > state.mesh[:-1])
+
+
+# -----------------------------------------------------------------------------
 # The first call of the integrand receives the first pass, shaped [N, T].
 # -----------------------------------------------------------------------------
 

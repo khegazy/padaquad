@@ -289,7 +289,7 @@ class MethodClass(ABC):
         ------
         ValueError
             Unless the fractions are 1-D, all in [0, 1], never decrease
-            (repeated values are allowed: dopri5 has two nodes at 1), and the
+            (repeated values are allowed), and the
             last is above the first. The ends 0 and 1 need not be among them:
             the solver takes a subinterval's width from its mesh points.
         """

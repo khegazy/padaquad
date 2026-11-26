@@ -3,7 +3,7 @@ Uniform-sampling adaptive quadrature: ``UniformAdaptiveQuadrature``.
 
 In uniform sampling, the nodes of every subinterval sit at the method's fixed
 node fractions, the tableau's ``c`` values (dopri5 always uses
-``c = [0, 1/5, 3/10, 4/5, 8/9, 1, 1]``), and the weights ``b`` are constants.
+``c = [0, 3/10, 4/5, 8/9, 1]``), and the weights ``b`` are constants.
 
 When a subinterval is split, both halves are evaluated at fresh nodes at the
 ``c`` positions; the old integrand values are discarded. When the optimal mesh
@@ -29,7 +29,7 @@ class UniformAdaptiveQuadrature(AdaptiveQuadrature):
 
     The nodes of every subinterval sit at the method's fixed node fractions,
     so the weights are fixed numbers. For example, dopri5 always evaluates the
-    integrand at the fractions ``[0, 1/5, 3/10, 4/5, 8/9, 1, 1]`` of each
+    integrand at the fractions ``[0, 3/10, 4/5, 8/9, 1]`` of each
     subinterval's width. When a subinterval fails the tolerance, it is split in
     half and the integrand is evaluated at fresh nodes in both halves.
 

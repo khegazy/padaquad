@@ -194,7 +194,7 @@ class TestNumQuadraturePoints:
         assert make_solver_for_unit_test("bosh3").C == 4
 
     def test_uniform_dopri5(self):
-        assert make_solver_for_unit_test("dopri5").C == 7
+        assert make_solver_for_unit_test("dopri5").C == 5
 
     def test_uniform_adaptive_heun(self):
         assert make_solver_for_unit_test("adaptive_heun").C == 2

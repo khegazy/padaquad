@@ -2895,7 +2895,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             fractions: ``weights[:, 0]`` is ``(alpha_L, gamma_L)`` and
             ``weights[:, 1]`` is ``(alpha_R, gamma_R)``. ``first`` is the index
             of each distinct fraction in ``node_fractions()``, shape [U]
-            (dopri5 repeats the fraction 1, whose stored values are equal).
+            (a method may repeat a fraction; its stored values there are
+            equal).
         """
         if len(rho) > self._RATIO_BLOCK:
             blocks = [

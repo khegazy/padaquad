@@ -159,7 +159,11 @@ degrees.
   $1951/21600, 0, 22642/50085, 451/720, -12231/42400, 649/6300, 1/60$, come from
   torchdiffeq; SciPy uses a different embedded set. Both satisfy the
   fourth-order conditions, and both have degree 3 as quadrature formulas
-  (checked for this project with exact fractions).
+  (checked for this project with exact fractions). As an ODE method `dopri5` has 7
+  stages at $0, 1/5, 3/10, 4/5, 8/9, 1, 1$; as a quadrature method the stage at
+  $1/5$ has no weight in either set and the two stages at 1 evaluate the same
+  point, so PadaQuad uses 5 nodes, $0, 3/10, 4/5, 8/9, 1$, with the weights of
+  the two stages at 1 added (error weight $71/6300$).
 - `adaptive_heun`'s error weights subtract the rectangle rule that uses the
   right end of the subinterval; the estimate has the same size as with Euler's
   method, which uses the left end.

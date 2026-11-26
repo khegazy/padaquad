@@ -275,7 +275,7 @@ evaluations on smooth regions.
 
 - **N**: number of integration steps in a batch
 - **C**: number of quadrature points per step (`method.n_nodes`,
-  e.g. 4 for bosh3, 7 for dopri5, 21 for gk21, whose nodes are all
+  e.g. 4 for bosh3, 5 for dopri5, 21 for gk21, whose nodes are all
   interior: a subinterval's width and place come from the mesh, never from
   its first and last node)
 - **T**: dimensionality of time (usually 1, but supports multi-D)

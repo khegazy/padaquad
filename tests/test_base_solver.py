@@ -360,7 +360,8 @@ def _host_waits(fn):
             fn()
         finally:
             torch.cuda.set_sync_debug_mode("default")
-    return sum("synchroniz" in str(w.message) for w in caught)
+    # Not the notice "Synchronization debug mode is a prototype feature ..."
+    return sum("called a synchronizing" in str(w.message) for w in caught)
 
 
 @needs_cuda

@@ -405,15 +405,19 @@ class TestHostWaits:
         assert waits == 0
 
     @pytest.mark.parametrize("runtime_checks", [True, False])
-    def test_starting_mesh_reads_once_per_check(self, runtime_checks):
-        """A fresh starting mesh reads the device for its order check (with
-        runtime_checks), nothing else."""
+    def test_starting_mesh_reads_once(self, runtime_checks):
+        """A fresh starting mesh reads the device once, with or without
+        runtime_checks: for the number of points kept once those that
+        rounding put on or below an earlier point are dropped. The mesh is
+        then strictly increasing by construction, so no order check reads
+        it (before, one read under runtime_checks and none without, which
+        let a repeated point through)."""
         solver = adaptive_quadrature(
             "uniform", "gk21", device="cuda", runtime_checks=runtime_checks
         )
         a, b = (torch.tensor([x], dtype=torch.float64, device="cuda") for x in (0, 1))
         waits = _host_waits(lambda: solver._setup_initial_mesh(None, a, b, True, 13))
-        assert waits == runtime_checks
+        assert waits == 1
 
     @pytest.mark.parametrize("four_pieces", [False, True])
     @pytest.mark.parametrize("values_on", ["cuda", "cpu"])

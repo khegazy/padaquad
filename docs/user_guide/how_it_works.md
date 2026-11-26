@@ -14,7 +14,11 @@ $s = \lfloor\sqrt{N_\text{init}}\rfloor$, the domain is cut into $s$ equal
 segments, and each segment receives $s + 1$ mesh points: at random positions
 (sorted) by default, or evenly spaced with `random_initial_mesh=False`. The
 mesh has $s(s+1)$ points and $s(s+1) - 1$ subintervals (`result.n_start_steps`
-reports the number).
+reports the number), unless rounding puts a point on or below an earlier one:
+in float32, in float64 far from 0, or with about $10^5$ points or more (the
+random positions are drawn as float32 numbers, with 24 random bits). Such a
+point is dropped, so the mesh is always strictly increasing and may have fewer
+subintervals than $s(s+1) - 1$.
 
 The random positions are the default because evenly spaced subintervals can
 line up with evenly spaced features of the integrand, such as the zeros of a

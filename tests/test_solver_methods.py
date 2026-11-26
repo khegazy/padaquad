@@ -4,6 +4,7 @@ solver, the per-step node count C, and the size of a fresh starting mesh."""
 from __future__ import annotations
 
 import gc
+import math
 
 import pytest
 import torch
@@ -11,6 +12,7 @@ from _helpers import (
     REMOVE_CUT,
     make_solver_for_unit_test,
     make_variable_solver_for_unit_test,
+    needs_cuda,
 )
 
 from padaquad import (
@@ -355,3 +357,107 @@ def test_starting_mesh_has_isqrt_segments(n_init_steps, root):
     assert len(mesh) == root * (root + 1)
     assert trackers.sum() == len(mesh) - 1
     assert not trackers[-1]
+
+
+# Seeds, sizes and intervals whose random starting mesh had a repeated point
+# (float32: offsets closer than the float spacing at the segment start round
+# to one point; float64 at 10^5 points: torch.rand's float32 draws repeat) or,
+# at 10^6 points on [1, 3] with seed 10, a segment's last point one unit in the
+# last place above the next segment's first point; each failed the order
+# assertion, or with runtime_checks=False gave subintervals of width 0.
+_COLLIDING_MESHES = [
+    (torch.float32, 10**4, (0.0, 1.0), range(20)),
+    (torch.float32, 10**5, (0.0, 1.0), range(20)),
+    (torch.float64, 10**5, (0.0, 1.0), range(20)),
+    (torch.float32, 10**6, (1.0, 3.0), [10]),
+    (torch.float32, 13, (1e4, 1e4 + 1), range(100)),
+    (torch.float64, 10**4, (-1e10 - 1, -1e10), range(3)),
+]
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
+@pytest.mark.parametrize("runtime_checks", [True, False])
+@pytest.mark.parametrize(
+    ("dtype", "n_init_steps", "interval", "seeds"),
+    _COLLIDING_MESHES,
+    ids=[
+        "f32-1e4",
+        "f32-1e5",
+        "f64-1e5",
+        "f32-1e6-reversed",
+        "f32-13-far",
+        "f64-1e4-neg",
+    ],
+)
+def test_starting_mesh_drops_colliding_points(
+    dtype, n_init_steps, interval, seeds, runtime_checks, device
+):
+    """A fresh random mesh is strictly increasing whatever rounding does, with
+    the bounds as its ends bit for bit and their gradients: the points that
+    round onto or below an earlier point are dropped (in each case at least one
+    seed drops one), with runtime_checks on and off."""
+    solver = adaptive_quadrature(
+        "uniform", "gk21", device=device, dtype=dtype, runtime_checks=runtime_checks
+    )
+    a, b = (torch.tensor([x], dtype=dtype, device=device) for x in interval)
+    a.requires_grad_(), b.requires_grad_()
+    root = math.isqrt(n_init_steps)
+    dropped = False
+    for seed in seeds:
+        torch.manual_seed(seed)
+        mesh, trackers = solver._setup_initial_mesh(None, a, b, True, n_init_steps)
+        assert bool((mesh[1:] > mesh[:-1]).all())
+        assert torch.equal(mesh[0], a.detach()) and torch.equal(mesh[-1], b.detach())
+        assert int(trackers.sum()) == len(mesh) - 1 and not trackers[-1]
+        dropped |= len(mesh) < root * (root + 1)
+        (2 * mesh[0] + 3 * mesh[-1]).sum().backward()
+        assert float(a.grad) == 2 and float(b.grad) == 3
+        a.grad = b.grad = None
+    assert dropped
+
+
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
+@pytest.mark.parametrize("runtime_checks", [True, False])
+@pytest.mark.parametrize(
+    ("dtype", "n_init_steps", "tol"),
+    [(torch.float32, 10**4, 1e-5), (torch.float64, 10**5, 1e-10)],
+    ids=["f32-1e4", "f64-1e5"],
+)
+def test_colliding_starting_mesh_integrates(
+    dtype, n_init_steps, tol, runtime_checks, device
+):
+    """A starting mesh that had repeated points (the first such seed)
+    integrates e^{-t} sin(40 t) on [0, 1] to its exact value, with no
+    subinterval of width 0 in the result or the state's mesh."""
+    exact = (40 - math.exp(-1) * (math.sin(40) + 40 * math.cos(40))) / 1601
+    solver = adaptive_quadrature(
+        "uniform",
+        "gk7",
+        atol=tol,
+        rtol=tol,
+        device=device,
+        dtype=dtype,
+        runtime_checks=runtime_checks,
+    )
+    a, b = (torch.tensor([x], dtype=dtype, device=device) for x in (0.0, 1.0))
+    root = math.isqrt(n_init_steps)
+    seed = next(
+        seed
+        for seed in range(20)
+        if torch.manual_seed(seed) is not None
+        and len(solver._setup_initial_mesh(None, a, b, True, n_init_steps)[0])
+        < root * (root + 1)
+    )
+    torch.manual_seed(seed)
+    result, state = solver.integrate(
+        lambda t: torch.exp(-t) * torch.sin(40 * t),
+        mesh_init=a,
+        mesh_final=b,
+        N_init_steps=n_init_steps,
+        take_gradient=False,
+        max_batch=10**6,
+    )
+    assert result.n_start_steps < root * (root + 1) - 1  # points were dropped
+    assert bool((result.h > 0).all())
+    assert bool((state.mesh[1:] > state.mesh[:-1]).all())
+    assert float(result.integral) == pytest.approx(exact, rel=10 * tol)

@@ -799,7 +799,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             f; if False, they are evenly spaced (see :ref:`the user guide <ug-mesh>`).
         N_init_steps : int
             Approximate number of subintervals of a fresh starting mesh. The
-            default 13 gives 11 subintervals (see :ref:`the user guide <ug-mesh>`).
+            default 13 gives 11 subintervals; points that rounding puts on or
+            below an earlier point are dropped, so a large mesh, or one far
+            from 0, can have fewer (see :ref:`the user guide <ug-mesh>`).
         f_args : tuple
             Extra positional arguments passed to f; tensors are moved to the
             solver's device. Default ``()``.
@@ -3711,7 +3713,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         The caller's mesh (already validated and cut to the bounds by
         ``_setup_integral_bounds``, on the solver's dtype and device), or a
         fresh mesh of about N_init_steps points: sqrt(N_init_steps) equal segments, each holding
-        sqrt(N_init_steps) + 1 mesh points, placed at random or evenly.
+        sqrt(N_init_steps) + 1 mesh points, placed at random or evenly. A
+        point that rounding puts on or below an earlier point, or on or above
+        ``mesh_final``, is dropped, so a fresh mesh is strictly increasing
+        and may have fewer points.
 
         Parameters
         ----------
@@ -3792,13 +3797,23 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh = torch.flatten(mesh, start_dim=0, end_dim=1)
             mesh[0] = mesh_init
             mesh[-1] = mesh_final
-            if self.runtime_checks:
-                # 1-D: strictly increasing (so no zero-length subinterval);
-                # any T: consecutive mesh points are distinct. One read each.
-                if mesh.shape[-1] == 1:
-                    assert torch.all(mesh[1:] - mesh[:-1] > 0)
-                else:
-                    assert torch.all(torch.any(mesh[1:] != mesh[:-1], dim=-1))
+            # Rounding can put a point on the point before it, or one unit in
+            # the last place below it: offsets closer than the spacing of
+            # floating-point numbers at the segment's start round to the same
+            # point (float32; float64 far from zero, or with more points than
+            # the 24 random bits of torch.rand's float32 draws tell apart),
+            # and the last point of a segment can round above the first of
+            # the next (float32, N_init_steps=10**6 on [1, 3]). Keep the points
+            # above every point before them and below mesh_final, so the mesh
+            # is strictly increasing (for T > 1, which integrate does not
+            # reach, consecutive points differ) and keeps its exact ends; a
+            # mesh that already is keeps every point, bit for bit. One read of
+            # the device, for the number kept.
+            inner = mesh[1:-1]
+            keep = (inner > torch.cummax(mesh[:-2], dim=0).values) & (
+                inner < mesh_final
+            )
+            mesh = torch.cat([mesh[:1], inner[keep.any(-1)], mesh[-1:]])
         # True at every mesh point but the last, which starts no subinterval;
         # compared on the device, with no copy from the host.
         mesh_trackers = torch.arange(len(mesh), device=self.device) < len(mesh) - 1

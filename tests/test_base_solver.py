@@ -25,21 +25,7 @@ from padaquad.results import IntegrationResult
 
 
 class TestSetDtype:
-    """Tests for SolverBase._set_dtype: dtype conversion and assertion tolerances."""
-
-    def test_float64_tolerances(self):
-        """float64 sets tight assertion tolerances."""
-        solver = make_solver_for_unit_test()
-        solver._set_dtype(torch.float64)
-        assert solver.atol_assert == 1e-15
-        assert solver.rtol_assert == 1e-7
-
-    def test_float32_tolerances(self):
-        """float32 sets medium assertion tolerances."""
-        solver = make_solver_for_unit_test()
-        solver._set_dtype(torch.float32)
-        assert solver.atol_assert == 1e-7
-        assert solver.rtol_assert == 1e-5
+    """Tests for SolverBase._set_dtype: dtype conversion."""
 
     def test_float16_raises(self):
         """float16 is refused at _set_dtype time (Bug B4 fix). Its ~1e-3

@@ -12,6 +12,7 @@ With `take_gradient=False`, every pass now evaluates all its waiting subinterval
 
 ### Removed
 
+- **`solver.atol_assert` and `solver.rtol_assert`**, the looser tolerances of the per-pass order checks of the nodes and the mesh, which are gone (the mesh and the nodes are in order by construction; see Changed). No check read `rtol_assert`.
 - **`IntegrationResult.mesh_optimal`** (and the unreleased `IntegrationResult.max_batch`): they are the state's `mesh` and `max_batch`, returned beside the result, `result, state = solver.integrate(...)`. Replace `result.mesh_optimal` by `state.mesh`, and `result = integrate(...)` by `result, state = integrate(...)` (or `result, _ = ...`).
 - **`same_f`, `solver.mesh_previous` and `solver.previous_max_batch`.** The solver no longer stores the mesh and batch size of its last call. Passing `same_f=` raises `TypeError`. To migrate, keep the state the earlier call returned and pass it: replace `result = solver.integrate(f, same_f=True, ...)` by `result, state = solver.integrate(f, state=state, ...)`, where `state` is what the call to start from returned. On the first iteration pass the bounds instead (`state=None`).
 - **`get_max_batch(default_max_batch=...)`.** It returned the value passed in, lowered to the out-of-memory cap, and existed only for the solver's own use; passing it raises `TypeError`. Pass a known batch size to `integrate(max_batch=...)` directly; `get_max_batch` now only measures (`f=`, `t=`) or estimates from what the solver knows.

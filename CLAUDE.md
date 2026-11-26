@@ -659,12 +659,10 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 
 ### Dtype management
 
-- Two tolerance levels: `atol` / `rtol` (integration error control;
-  Python floats, checked to be one finite number >= 0 in `SolverBase.__init__`, rounded
-  by each operation to the dtype of the tensor they meet, so a float32 solver
-  given float64 integrand values uses them unrounded) and `atol_assert` /
-  `rtol_assert` (geometric assertions like time ordering, always looser, set
-  by `SolverBase._set_dtype`).
+- `atol` / `rtol` (integration error control): Python floats, checked to be
+  one finite number >= 0 in `SolverBase.__init__`, rounded by each operation
+  to the dtype of the tensor they meet, so a float32 solver given float64
+  integrand values uses them unrounded.
 - `float64` and `float32` are the supported runtime dtypes. `float16`
   is refused at construction (Bug B4 fix): its ~1e-3 precision floor
   exceeds typical adaptive tolerances, so the previous loose-tolerance

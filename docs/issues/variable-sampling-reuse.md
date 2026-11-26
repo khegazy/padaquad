@@ -11,9 +11,10 @@ The variable-sampling solver (`VariableAdaptiveQuadrature`) computes each
 subinterval's weights from where its nodes are, so that a split could keep the
 parent's integrand values in its halves and evaluate `f` only at new nodes. This
 reuse does not exist, for either solver: when a subinterval fails its
-tolerance, `_adaptively_increase_mesh` inserts its midpoint into the mesh and
-drops its values, and the next pass evaluates `f` at fresh nodes in both
-halves, placed by `_compute_nodes` at the method's node fractions.
+tolerance, `_adaptively_increase_mesh` inserts its midpoint into the mesh (and
+the midpoints of both halves for a split in four, `split_rule="accelerate"`)
+and drops its values, and the next pass evaluates `f` at fresh nodes in every
+piece, placed by `_compute_nodes` at the method's node fractions.
 
 The method that implemented reuse for the variable solver,
 `VariableAdaptiveQuadrature._evaluate_adaptive_nodes`, had no caller since

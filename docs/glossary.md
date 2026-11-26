@@ -71,8 +71,8 @@ tolerance
 
 error ratio
   A subinterval's error estimate divided by its tolerance. Below 1, the
-  subinterval is accepted; otherwise it is split in half and both halves are
-  evaluated again.
+  subinterval is accepted; otherwise it is split in half (or in four, with
+  `split_rule="accelerate"`) and the pieces are evaluated again.
 
 rounding floor
   The size of the error that float64 or float32 rounding alone makes on a

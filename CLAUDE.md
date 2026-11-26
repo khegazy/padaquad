@@ -135,10 +135,10 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_error_computation.py` | `_error_norm`, `_rec_remove`, `_compute_error_ratios_absolute`/`_cumulative` |
 | `test_interpolation.py` | `_compute_nodes`: endpoints, shapes, monotonicity, tableau-c matching |
 | `test_sorted_insert.py` | `_merge_positions` (ranks of mesh indices, the record's in any order) and `_insert_sorted_results` (a new array; the old record is read, not cloned) |
-| `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables` (f and y0; the bound defaults through `_setup_integral_bounds`), `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects); `atol`/`rtol` stored as floats, `ValueError` when not one finite number >= 0 (a list or tensor per output component included), unchanged by a dtype round trip (the error ratios of a float64 call after a float32 one); host waits on CUDA (none to build a solver, one for the check of a fresh starting mesh, one per mesh update (the number accepted) plus one per array kept on the CPU, none in `_evaluate_f_on_mesh` but the finite check of each call of `f`; counted by source line (`_lines`): one per pass at the loop's condition and one when none is left, none in `_record_results` with the record on the GPU and one per value field with `result_device="cpu"`, two in `_sort_record`) |
+| `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables` (f and y0; the bound defaults through `_setup_integral_bounds`), `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects); `atol`/`rtol` stored as floats, `ValueError` when not one finite number >= 0 (a list or tensor per output component included), unchanged by a dtype round trip (the error ratios of a float64 call after a float32 one); host waits on CUDA (none to build a solver, one for the check of a fresh starting mesh, one per mesh update (the number accepted and the number split in four, also with four-way splits) plus one per array kept on the CPU, none in `_evaluate_f_on_mesh` but the finite check of each call of `f`; counted by source line (`_lines`): one per pass at the loop's condition and one when none is left, none in `_record_results` with the record on the GPU and one per value field with `result_device="cpu"`, two in `_sort_record`) |
 | `test_methods_extra.py` | Variable-mode `adaptive_heun` (the uniform heun object) weights, the generic `VariableMethodClass` (normalized nodes reach the weight function, shape check), node-fraction validation, `MethodClass.to` (device and dtype) |
 | `test_solver_methods.py` | `adaptive_quadrature` factory, `method.weights` through both solvers, per-step node count `solver.C` |
-| `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed accept masks (`_keep_mask`, the loop's rule), midpoint placement, the returned `keep_idx` and `idxs_transfer` (T = 1 and 2), extra split positions in any order, the split cap, a subinterval one ULP wide accepted (`_splittable`, T = 1 and 2) |
+| `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed accept masks (`_keep_mask`, the loop's rule), midpoint placement, the returned `keep_idx` and `idxs_transfer` (T = 1 and 2), extra split positions in any order, the split cap, a subinterval one ULP wide accepted (`_splittable`, T = 1 and 2); four-way splits with `error_ratios` (`TestFourPieces`): bit for bit two halving updates, the rule's conditions, the cap, extra positions halved, two ULPs wide halved |
 | `test_record_and_sort.py` | `_record_results` (appends in acceptance order: one tensor per loop field, one chunk per batch for the rest; a view of a larger array is copied) and `_sort_record` (rows to their mesh index, T = 1 and 2; one batch in order is not copied; chunk fields moved to the given device; a record that does not cover the mesh once raises; the gradient passes); a removal and the final ordering copy one field at a time (GPU peak); end to end, every path of the record (removals, Step 7, cumulative, tracked, trade, no record, split cap, `take_gradient`, gk21) returns mesh order and the same numbers without `runtime_checks`; `_flatten_output` equals the concatenation, values and gradient |
 | `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: the state's mesh re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
@@ -148,18 +148,18 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_evaluate_f_on_mesh.py` | `_evaluate_f_on_mesh` and its two evaluation paths; the returned `MethodOutput` equals one `_calculate_integral` call bit for bit however the calls of `f` were cut |
 | `test_trade_speed_for_memory.py` | `trade_speed_for_memory`, `evaluation_buffer`, `record_evaluations`: the same calls of `f`, mesh and integral (bit for bit) with every setting, for every `max_batch`, uniform and variable, CPU and CUDA; when the values are integrated (once per pass, per call, per buffer); the values' device in every result `loss_fxn` receives; lower GPU peak; the `ValueError`s; the three warnings, on the first call only (no state), none for `result_device` on the solver's device; without values, `state.mesh` is the `power_law` one; every feature unchanged; the default holds a pass once (GPU peak < 1.8 × the pass's values); an out-of-memory error at the pass's array names the remedies; `_keep_rows` in place equals indexing |
 | `test_examples_run.py` | Runs `examples/*.py` (with output markers, or self-checking with asserts: `SELF_CHECKING_EXAMPLES`, `MPLBACKEND=Agg`), every script in `examples/verification/`, and every ```python block of the files in its `DOCUMENTS` (the README, `docs/development/adding_a_method.md`; except blocks preceded by `<!-- not-tested -->`) |
-| `test_max_adaptive_splits.py` | The `max_adaptive_splits` depth cap |
+| `test_max_adaptive_splits.py` | The `max_adaptive_splits` depth cap; with `split_rule="accelerate"`, the same K 2^n subintervals in fewer passes |
 | `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks`; `get_max_batch(f=..., t=...)` (measurement, argument checks, `evaluation_buffer` kept free twice) and the measured `result.max_batch` |
 | `test_memory_state.py` | The batch size of `integrate` and the state: the first call is the first pass (at most 10,000 points), every point `f` is called at belongs to the integration (C per evaluated subinterval; every start, both `take_gradient`, with simulated out-of-memory errors), growth by 10, the retry chain of a first call that runs out of memory, a given `max_batch`, the state's mesh and batch size; backward out-of-memory restarts |
 | `test_methods_registry.py` | Registry consistency: table shapes and dtypes, `degree` / `error_exponent` types |
 | `test_interior_nodes.py` | Gauss-Kronrod (nodes all interior): C points of `f` per subinterval, none at a mesh point, no call of `f` before the first pass, `1/sqrt(t)` and `log(t)` at a bound converge, result rows = evaluated points, bound gradients against the closed form |
 | `test_multi_d_integrand.py` | Integrands with D > 1 outputs |
 | `test_oom_recovery.py` | The out-of-memory catch-and-retry path (direct calls of `_evaluate_f_on_split_nodes`, including retries that end inside a subinterval; `integrate` with and without `trade_speed_for_memory`) |
-| `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance (with `take_gradient=False` the drift is between passes: `_cancelling_peak` hides its cancelling part in a narrow peak the first passes miss); `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN) |
+| `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance (with `take_gradient=False` the drift is between passes: `_cancelling_peak` hides its cancelling part in a narrow peak the first passes miss); `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN); the re-check with `split_rule="accelerate"` (fewer passes, no step evaluated twice) |
 | `test_solver_isolation.py` | Solvers of different dtypes keep their own tables; the registry is never changed; `MethodClass.to` returns one shared copy per (method, device, dtype), sharing no memory with its source, dropped with its source (deep copies and pickles of a solver, CUDA); `_Tableau` frozen; no integration writes into a method's tensors (version counters); a replaced registry entry reaches new solvers only; `_integration_on_device` restores the solver's method object, and leaves the solver's device and method when the conversion raises (CUDA) |
 | `test_tracked_variables.py` | The `tracked_variables` feature |
 | `test_docs_performance_table.py` | The Performance page's rendering of `docs/performance/results_*.json`: no file, one, two (name order, hardware headings), unreadable files named in the error; the memory options tables from `docs/performance/memory_options.json` (every setting of every integrand, the field's `EXAMPLE_SETTINGS` in order of `max_batch`, defaults first, missing and unreadable files) |
-| `test_split_statistics.py` | `n_start_steps` / `n_start_steps_split` / `max_split_depth` on integrands with known answers; `converged` against a hand-computed tolerance check (absolute and cumulative, with `y0`), in `failure_fraction` mode (including a NaN component), against the final integral, and its warning (numbers, output component, remedies); `max_adaptive_splits` type check |
+| `test_split_statistics.py` | `n_start_steps` / `n_start_steps_split` / `max_split_depth` on integrands with known answers; `converged` against a hand-computed tolerance check (absolute and cumulative, with `y0`), in `failure_fraction` mode (including a NaN component), against the final integral, and its warning (numbers, output component, remedies); `max_adaptive_splits` type check; `split_rule="accelerate"`: validation, exact integrals (Lorentzian, jump, sin(2e4 t); gk21, gk15, gk7, cc17; both `take_gradient`), fewer points and passes on sin(2e4 t), unchanged on a kink, independent of `max_batch` (uniform and variable, with and without `trade_speed_for_memory`), warm start (absolute, cumulative, float32), `failure_fraction` halves, bound and parameter gradients |
 
 **Snapshot tests** are the regression net for internal refactors: the
 file `tests/test_snapshots_data.json` pins `integral`, `integral_error`,
@@ -330,12 +330,21 @@ is a boolean array where `True` means the panel still needs evaluation.
      `keep_mask` (`_accept_reject_masks`) are accepted, the others split at
      the midpoint into two sub-steps for re-evaluation, except those
      `_splittable` refuses (at `max_adaptive_splits`, or one ULP wide: the
-     midpoint rounds onto an end), which are accepted. One read of the device
-     per update (the number accepted); a stable sort of the mask gives
-     `keep_idx` (returned, slot 8) and the split positions, and every field
-     is indexed with integers; `idxs_transfer` maps each old mesh point to
-     its new position (returned, slot 7). The mesh stays strictly increasing
-     by construction, so no order check runs.
+     midpoint rounds onto an end), which are accepted. With
+     `split_rule="accelerate"` (constructor and `integrate` option, default
+     `"halve"`), Step 5 also passes `error_ratios` (not with
+     `"failure_fraction"`): a failing step with split count >= 1 and ratio >=
+     `_FOUR_PIECES_RATIO` (1e4) that `_splittable(..., halvings=2)` allows is
+     split in four, by running the same insertion block a second time on both
+     halves (the pieces of two successive halvings; split count + 2;
+     `idxs_transfer` composed). The re-check's extra positions, Step 7 and
+     `_get_optimal_mesh` pass no ratios and halve. One read of the device
+     per update (the number accepted and the number in four); a stable sort
+     of the number of halvings gives `keep_idx` (returned, slot 8) and the
+     split positions, and every field is indexed with integers;
+     `idxs_transfer` maps each old mesh point to its new position (returned,
+     slot 7). The mesh stays strictly increasing by construction, so no order
+     check runs.
    - Record accepted results (`_record_results`), in the order they are
      accepted, not in mesh order: each recorded subinterval carries its left
      mesh index (`record["mesh_index"]`, `idxs_transfer[step_idxs[keep_idx]]`
@@ -353,7 +362,8 @@ is a boolean array where `True` means the panel still needs evaluation.
    covers the final mesh once, so row i goes to row `mesh_index[i]`; one
    chunk already in order is kept; checked under `runtime_checks`; the chunk
    fields end on the record's device); read the split statistics off
-   `split_counts` (per-barrier count of halvings, 0 = starting step);
+   `split_counts` (per-barrier count of halvings, 0 = starting step; a split
+   in four adds 2);
    judge every recorded step against the final integral with
    `_record_error_check` (the same helper the in-loop re-check uses) to set
    `converged`, logging `_warn_not_converged` when it is `False` (a NaN/Inf

@@ -398,6 +398,47 @@ def test_recheck_actually_resplits_accepted_panels():
     assert result.converged is True
 
 
+@pytest.mark.parametrize("max_batch", [MAX_BATCH, 7])
+def test_recheck_with_four_way_splits(max_batch):
+    """With ``split_rule="accelerate"`` the recorded subintervals that fail
+    the re-check are halved in the same mesh update as the batch's four-way
+    splits: the call converges in fewer passes than halving, every subinterval
+    is evaluated once, and every point of f belongs to one of them."""
+    passes = {}
+    for split_rule in ("halve", "accelerate"):
+        solver = _solver(split_rule=split_rule)
+        removed = []
+        orig_remove = solver._remove_failed_record_panels
+
+        def counting_remove(record, record_keep_mask, *args, removed=removed):
+            removed.append(int((~record_keep_mask).sum()))
+            return orig_remove(record, record_keep_mask, *args)
+
+        solver._remove_failed_record_panels = counting_remove
+        seen = _spy_evaluated(solver)
+        evaluate = solver._evaluate_f_on_mesh
+        passes[split_rule] = 0
+
+        def count_passes(*args, rule=split_rule, **kwargs):
+            passes[rule] += 1
+            return evaluate(*args, **kwargs)
+
+        solver._evaluate_f_on_mesh = count_passes
+        n_points = [0]
+
+        def f(t, *args, n_points=n_points):
+            n_points[0] += t.shape[0]
+            return _cancelling_peak(t)
+
+        torch.manual_seed(0)
+        result, _ = _run(solver, f, take_gradient=False, max_batch=max_batch)
+        assert sum(removed) > 0
+        assert max(seen.values()) == 1
+        assert n_points[0] == solver.C * len(seen)
+        assert result.converged is True
+    assert passes["accelerate"] < passes["halve"]
+
+
 def test_recheck_determinism():
     """Same seed => identical integral and panel count."""
     s1 = _solver()

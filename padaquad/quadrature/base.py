@@ -199,6 +199,14 @@ def _midpoint(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
     return 0.5 * (left + right)
 
 
+# With split_rule="accelerate", the smallest error ratio at which a failing
+# piece of a split subinterval is split in four instead of halved
+# (_adaptively_increase_mesh). Chosen on a sweep of 9 integrands, 5 methods,
+# 3 tolerances and 3 seeds (docs/issues/2026-11-25-speedup-split-waste-plan.md):
+# above about this ratio both halves of such a piece were usually split again.
+_FOUR_PIECES_RATIO = 1e4
+
+
 # Multi-GPU keyword options the solver forwards to ``DistributedEnvironment``,
 # read from its signature so the names and defaults live only there.
 _DISTRIBUTED_OPTIONS = frozenset(
@@ -217,7 +225,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     3. Computes each subinterval's contribution and error estimate with the
        method's weights.
     4. Accepts the subintervals whose error ratio is below 1 and splits the
-       others in half.
+       others in half (or in four, with ``split_rule="accelerate"``).
     5. Repeats steps 2 to 4 until every subinterval is accepted.
     6. Builds the optimal mesh, which a later call can start from by passing
        it as ``mesh``.
@@ -276,6 +284,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         total_mem_usage: float = 0.9,
         limit_benchmark_time: bool = True,
         max_adaptive_splits: int | None = None,
+        split_rule: str = "halve",
         use_absolute_error_ratio: bool = True,
         error_norm: str | Callable[[torch.Tensor], torch.Tensor] = "2",
         mesh_failure_tolerance: float = 0.0,
@@ -346,6 +355,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Default cap on how many times a subinterval may have been halved
             since the starting mesh; at the cap it is accepted even if it fails
             the tolerance. None (default) means no cap (see :ref:`the user guide <ug-convergence>`).
+        split_rule : str
+            Default for how a failing subinterval is split (see :ref:`the user
+            guide <ug-four-pieces>`): ``"halve"`` (default) splits it in two;
+            ``"accelerate"`` splits it in four when it is itself a piece of a
+            split subinterval and its error ratio is at least 1e4, which saves
+            evaluations of f and passes on integrands that need many levels of
+            refinement, at the cost of extra evaluations when both halves would
+            have passed. With ``error_norm="failure_fraction"`` it halves.
         use_absolute_error_ratio : bool
             If True (default), the relative tolerance uses the whole integral;
             if False, the running integral from ``mesh_init`` through each
@@ -414,6 +431,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             **distributed_options,
         )
         self._check_max_adaptive_splits(max_adaptive_splits)
+        self._check_split_rule(split_rule)
         self.remove_cut = remove_cut
         self.merge_rule = merge_rule
 
@@ -436,6 +454,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # when its corresponding argument is None.
         self.init_max_batch = max_batch
         self.init_max_adaptive_splits = max_adaptive_splits
+        self.init_split_rule = split_rule
         self.use_absolute_error_ratio = use_absolute_error_ratio
 
         # Construction-time defaults; the active values live in self.error_norm
@@ -536,6 +555,30 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         if max_adaptive_splits < 0:
             raise ValueError(
                 f"max_adaptive_splits must be >= 0, got {max_adaptive_splits}"
+            )
+
+    #: Values accepted by ``split_rule``.
+    _VALID_SPLIT_RULES = ("halve", "accelerate")
+
+    @classmethod
+    def _check_split_rule(cls, split_rule: object) -> None:
+        """
+        Validate ``split_rule``.
+
+        Parameters
+        ----------
+        split_rule : object
+            The value to check.
+
+        Raises
+        ------
+        ValueError
+            If the value is not one of ``_VALID_SPLIT_RULES``.
+        """
+        if split_rule not in cls._VALID_SPLIT_RULES:
+            raise ValueError(
+                f"split_rule must be one of {cls._VALID_SPLIT_RULES}, "
+                f"got {split_rule!r}"
             )
 
     # -------------------------------------------------------------------------------- #
@@ -686,6 +729,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         state: IntegrationState | None = None,
         parameters: Iterable[torch.Tensor] | torch.optim.Optimizer | None = None,
         max_adaptive_splits: int | None = None,
+        split_rule: str | None = None,
         error_norm: str | Callable[[torch.Tensor], torch.Tensor] | None = None,
         error_integral_reference: float | torch.Tensor | None = None,
         enforce_convergence: bool | None = None,
@@ -704,7 +748,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         values and the tracked variables (:ref:`ug-shapes`,
         :ref:`ug-tracked-variables`). The loop evaluates many subintervals in
         one batch, accepts those whose error ratio is below 1 and splits the
-        others in half, until every subinterval is accepted. It then builds
+        others (in half, or in four with ``split_rule="accelerate"``), until
+        every subinterval is accepted. It then builds
         the optimal mesh. It returns the result and a state, the optimal mesh
         and the batch size: ``result, state = solver.integrate(...)``. Pass
         ``state=state`` to a later call to start from both (see
@@ -788,6 +833,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Cap on how many times a subinterval may have been halved since the
             starting mesh; at the cap it is accepted even if it fails the
             tolerance (see :ref:`the user guide <ug-convergence>`).
+        split_rule : str or None
+            How a failing subinterval is split: ``"halve"`` or
+            ``"accelerate"`` (into four pieces when it is a piece of a split
+            subinterval with an error ratio of at least 1e4; see :ref:`the
+            user guide <ug-four-pieces>`).
         error_norm : str, Callable or None
             How the error of a vector-valued integrand becomes one
             accept-or-split decision (see :ref:`the user guide <ug-error-norm>`).
@@ -957,6 +1007,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             else max_adaptive_splits
         )
         self._check_max_adaptive_splits(max_adaptive_splits)
+        split_rule = self.init_split_rule if split_rule is None else split_rule
+        self._check_split_rule(split_rule)
 
         # The re-check of accepted subintervals (Step 4b) is on by default only
         # without per-batch backward: with take_gradient=True a batch's
@@ -1307,6 +1359,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 # that requires grad is copied by _keep_rows); the full path's
                 # values are f's output, which f may still hold.
                 in_place=not take_gradient,
+                # The ratios split some subintervals in four; a failure
+                # fraction is not a ratio, so failure_fraction halves.
+                error_ratios=error_ratios
+                if split_rule == "accelerate" and not self._is_failure_fraction
+                else None,
             )
             # The batch data passed in comes back filtered to the accepted steps
             # (None comes back only for None inputs: no values are kept with
@@ -1887,18 +1944,19 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         idxs: torch.Tensor,
         split_counts: torch.Tensor | None,
         max_adaptive_splits: int | None,
+        halvings: int = 1,
     ) -> torch.Tensor:
         """
-        Tell which subintervals can be split in half, on the device.
+        Tell which subintervals can be halved ``halvings`` times, on the device.
 
-        A subinterval cannot be split when its split count has reached
-        ``max_adaptive_splits`` (with ``split_counts`` given), or when its
-        midpoint (``_midpoint``, the mesh point a split inserts in
-        ``_adaptively_increase_mesh``) rounds onto one of its ends: its ends
-        are neighboring floating-point numbers, so one half would have width
-        zero and the other would be the subinterval again. Either way it is
-        accepted instead; the final check counts it as failing if its error
-        ratio is 1 or above. Every split goes through this test: the batch's
+        A subinterval cannot be split when its split count plus ``halvings``
+        would exceed ``max_adaptive_splits`` (with ``split_counts`` given), or
+        when a mesh point the split inserts (``_midpoint`` of its neighbors,
+        as in ``_adaptively_increase_mesh``) rounds onto a neighbor: one piece
+        would have width zero and another would be the subinterval again.
+        Either way it is accepted instead (or, for ``halvings=2``, halved
+        once); the final check counts it as failing if its error ratio is 1
+        or above. Every split goes through this test: the batch's
         (``_adaptively_increase_mesh``, including the optimal mesh's) and the
         re-check's (``_failed_record_positions``), so the mesh stays strictly
         increasing.
@@ -1914,17 +1972,27 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             None (no cap).
         max_adaptive_splits : int | None
             The split cap, or None.
+        halvings : int
+            1 (default) to split in two, 2 to split in four (each half halved
+            again).
 
         Returns
         -------
         torch.Tensor
             True for the subintervals that can be split. Shape: [N].
         """
-        left, right = mesh[idxs], mesh[idxs + 1]
-        mid = _midpoint(left, right)
-        splittable = ~(torch.all(mid == left, dim=-1) | torch.all(mid == right, dim=-1))
+        # The subinterval's ends with, in order, the points each halving
+        # inserts; a piece has width zero where two neighbors are equal in
+        # every coordinate.
+        points = [mesh[idxs], mesh[idxs + 1]]
+        for _ in range(halvings):
+            mids = [_midpoint(a, b) for a, b in itertools.pairwise(points)]
+            points = [*itertools.chain(*zip(points, mids, strict=False)), points[-1]]
+        splittable = torch.stack(
+            [torch.any(a != b, dim=-1) for a, b in itertools.pairwise(points)]
+        ).all(dim=0)
         if max_adaptive_splits is not None and split_counts is not None:
-            splittable &= split_counts[idxs] < max_adaptive_splits
+            splittable &= split_counts[idxs] + halvings <= max_adaptive_splits
         return splittable
 
     def _adaptively_increase_mesh(
@@ -1941,6 +2009,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         max_adaptive_splits: int | None = None,
         extra_split_idxs: torch.Tensor | None = None,
         in_place: bool = False,
+        error_ratios: torch.Tensor | None = None,
     ) -> tuple[
         MethodOutput | None,
         torch.Tensor | None,
@@ -1953,7 +2022,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         torch.Tensor | None,
     ]:
         """
-        Accept the accurate subintervals of a batch and split the others in half.
+        Accept the accurate subintervals of a batch and split the others.
 
         Each evaluated subinterval is accepted where ``keep_mask`` is True
         (``_accept_reject_masks``: an error ratio below 1, or a non-finite
@@ -1962,15 +2031,23 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh point is inserted at the midpoint (``_midpoint``), and both
         halves are evaluated in a later pass.
 
+        With ``error_ratios`` (``split_rule="accelerate"``), a failing
+        subinterval that is itself a piece of a split one (split count at
+        least 1) and whose error ratio is at least ``_FOUR_PIECES_RATIO`` is
+        split in four instead: both halves are halved again in the same
+        update, so the pieces are those of two successive halvings.
+
         A subinterval that cannot be split (``_splittable``: its split count
         has reached ``max_adaptive_splits``, when both are given, or its
         midpoint rounds onto one of its ends) is accepted even if
-        ``keep_mask`` is False. Both halves of a subinterval with split count
-        n get split count n + 1.
+        ``keep_mask`` is False; one that cannot be halved twice is halved
+        once. The pieces of a subinterval with split count n get split count
+        n + 1 (two pieces) or n + 2 (four pieces): the split count is the
+        number of halvings.
 
         The update reads the device once, for the number of accepted
-        subintervals; every other step indexes with integer positions on the
-        device.
+        subintervals and of those split in four; every other step indexes
+        with integer positions on the device.
 
         Parameters
         ----------
@@ -2016,6 +2093,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             variables by moving them to the front of their arrays, which are
             overwritten (``_keep_rows``); only for arrays the solver allocated
             and nothing else reads. False (default) copies them.
+        error_ratios : torch.Tensor | None
+            Error ratio of each subinterval of the batch (norm family), given
+            to split some in four (see above; requires ``split_counts``).
+            Shape: [N_batch]. None (default) halves every split subinterval;
+            ``extra_split_idxs`` are always halved.
 
         Returns
         -------
@@ -2028,29 +2110,45 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             - y_step_eval: integrand values of the accepted subintervals.
             - tracked_step_eval: their tracked variables (or None).
             - nodes: their nodes.
-            - mesh_new: the mesh with the midpoints inserted.
-            - mesh_trackers_new: the trackers, True for the new halves.
+            - mesh_new: the mesh with the new mesh points inserted.
+            - mesh_trackers_new: the trackers, True for the new pieces.
             - idxs_transfer: the position in mesh_new of each point of
               ``mesh`` [M], increasing (``mesh_new[idxs_transfer]`` equals
               ``mesh``).
             - keep_idx: positions in the batch of the accepted subintervals,
               ascending (after the split cap), on the mesh's device.
-            - split_counts_new: split counts for mesh_new, with both halves
-              of every split subinterval incremented (or None if
-              ``split_counts`` is None).
+            - split_counts_new: split counts for mesh_new, with the pieces of
+              every split subinterval incremented by its number of halvings
+              (or None if ``split_counts`` is None).
         """
         # Subintervals that cannot be split (at the split cap, or too narrow
         # to halve) are accepted as they are.
         keep_mask = keep_mask | ~self._splittable(
             mesh, mesh_idxs, split_counts, max_adaptive_splits
         )
-        # The batch's positions, accepted ones first and then the split ones,
-        # each ascending (a stable sort of 0 = accept, 1 = split), and the
-        # update's one read of the device: how many are accepted. Integer
-        # positions index every field below without another read (a boolean
-        # mask reads the device for the size of its result).
-        order = torch.sort((~keep_mask).to(torch.uint8), stable=True).indices
-        n_keep = int(keep_mask.sum())
+        # How many times each subinterval of the batch is halved: 0 (accepted),
+        # 1, or, with error_ratios, 2 (four pieces) for a failing piece of a
+        # failed subinterval whose error ratio is at least _FOUR_PIECES_RATIO
+        # and that can be halved twice.
+        halvings = (~keep_mask).to(torch.uint8)
+        if error_ratios is not None:
+            assert split_counts is not None  # given with error_ratios
+            halvings += (
+                ~keep_mask
+                & (error_ratios >= _FOUR_PIECES_RATIO)
+                & (split_counts[mesh_idxs] > 0)
+                & self._splittable(
+                    mesh, mesh_idxs, split_counts, max_adaptive_splits, halvings=2
+                )
+            )
+        # The batch's positions, accepted ones first, then those halved once,
+        # then those split in four, each group ascending (a stable sort), and
+        # the update's one read of the device: how many are accepted and how
+        # many are split in four. Integer positions index every field below
+        # without another read (a boolean mask reads the device for the size
+        # of its result).
+        order = torch.sort(halvings, stable=True).indices
+        n_keep, n_four = torch.stack([keep_mask.sum(), (halvings == 2).sum()]).tolist()
         keep_idx = order[:n_keep]
         mesh_trackers.index_fill_(0, mesh_idxs[keep_idx], False)
 
@@ -2060,6 +2158,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # (tracker False), so re-activate the whole split set to ensure both
         # children of every bisected panel are re-evaluated.
         split_idxs = mesh_idxs[order[n_keep:]]
+        four_idxs = split_idxs[len(split_idxs) - n_four :]
         if extra_split_idxs is not None and extra_split_idxs.numel() > 0:
             split_idxs = torch.sort(torch.cat([split_idxs, extra_split_idxs])).values
             # Batch (tracker True) and recorded (tracker False) positions are
@@ -2068,45 +2167,66 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             if self.runtime_checks:
                 assert torch.all(split_idxs[1:] > split_idxs[:-1])
             mesh_trackers.index_fill_(0, split_idxs, True)
+        elif n_four > 0:
+            split_idxs = torch.sort(split_idxs).values
 
-        # Transfer existing barriers to their new positions in the expanded array.
-        # Each rejected step causes a +1 offset for all subsequent barriers
-        # (because a midpoint is being inserted). idx_offset tracks this shift.
-        # All allocations follow ``mesh.device`` so this runs on the
-        # integration device in the loop and on result_device in the
-        # post-convergence pass.
-        N_t_add = len(split_idxs)
-        idx_offset = torch.zeros(len(mesh), dtype=torch.long, device=mesh.device)
-        idx_offset.index_fill_(0, split_idxs + 1, 1)
-        idxs_transfer = torch.cumsum(idx_offset, dim=0) + torch.arange(
-            len(mesh), device=mesh.device
-        )
-        # Midpoint j goes between the old points split_idxs[j] and
-        # split_idxs[j] + 1, which move to idxs_new[j] - 1 and idxs_new[j] + 1.
-        # Since split_idxs is strictly ascending, idxs_transfer and idxs_new
-        # are disjoint and together cover the new mesh, so every entry of the
-        # empty arrays below is written.
-        idxs_new = split_idxs + torch.arange(N_t_add, device=mesh.device) + 1
-        mesh_new = mesh.new_empty((N_t_add + len(mesh), mesh.shape[-1]))
-        mesh_new[idxs_transfer] = mesh
-        mesh_new[idxs_new] = _midpoint(mesh_new[idxs_new - 1], mesh_new[idxs_new + 1])
-        mesh_trackers_new = torch.ones(
-            len(mesh_new), dtype=torch.bool, device=mesh.device
-        )
-        mesh_trackers_new[idxs_transfer] = mesh_trackers
+        # A split in four is two halvings: the first halves every split
+        # subinterval, the second both halves of each four-piece one, so its
+        # mesh points are those two successive halvings would insert.
+        # idxs_transfer composes the transfers of the halvings.
+        idxs_transfer = torch.arange(len(mesh), device=mesh.device)
+        for halving in range(1 + (n_four > 0)):
+            if halving == 1:
+                # The halves start at the four-piece subinterval's own mesh
+                # point and at the midpoint inserted right after it.
+                left = idxs_transfer[four_idxs]
+                split_idxs = torch.stack([left, left + 1], dim=-1).flatten()
+            # Transfer existing barriers to their new positions in the expanded
+            # array. Each split causes a +1 offset for all subsequent barriers
+            # (because a midpoint is being inserted). idx_offset tracks this
+            # shift. All allocations follow ``mesh.device`` so this runs on the
+            # integration device in the loop and on result_device in the
+            # post-convergence pass.
+            N_t_add = len(split_idxs)
+            idx_offset = torch.zeros(len(mesh), dtype=torch.long, device=mesh.device)
+            idx_offset.index_fill_(0, split_idxs + 1, 1)
+            step_transfer = torch.cumsum(idx_offset, dim=0) + torch.arange(
+                len(mesh), device=mesh.device
+            )
+            # Midpoint j goes between the old points split_idxs[j] and
+            # split_idxs[j] + 1, which move to idxs_new[j] - 1 and
+            # idxs_new[j] + 1. Since split_idxs is strictly ascending,
+            # step_transfer and idxs_new are disjoint and together cover the
+            # new mesh, so every entry of the empty arrays below is written.
+            idxs_new = split_idxs + torch.arange(N_t_add, device=mesh.device) + 1
+            mesh_new = mesh.new_empty((N_t_add + len(mesh), mesh.shape[-1]))
+            mesh_new[step_transfer] = mesh
+            mesh_new[idxs_new] = _midpoint(
+                mesh_new[idxs_new - 1], mesh_new[idxs_new + 1]
+            )
+            mesh_trackers_new = torch.ones(
+                len(mesh_new), dtype=torch.bool, device=mesh.device
+            )
+            mesh_trackers_new[step_transfer] = mesh_trackers
 
-        # Expand the per-panel split counts the same way as the barriers: carry
-        # existing counts to their new positions, then set both children of
-        # each split panel to parent_count + 1.
-        if split_counts is not None:
-            split_counts_new = split_counts.new_empty(len(mesh_new))
-            split_counts_new[idxs_transfer] = split_counts
-            child_counts = split_counts[split_idxs] + 1
-            # left child = transferred parent barrier; right child = new midpoint
-            split_counts_new[idxs_transfer[split_idxs]] = child_counts
-            split_counts_new[idxs_new] = child_counts
-        else:
-            split_counts_new = None
+            # Expand the per-panel split counts the same way as the barriers:
+            # carry existing counts to their new positions, then set both
+            # children of each split panel to parent_count + 1.
+            if split_counts is not None:
+                split_counts_new = split_counts.new_empty(len(mesh_new))
+                split_counts_new[step_transfer] = split_counts
+                child_counts = split_counts[split_idxs] + 1
+                # left child = transferred parent barrier; right child = midpoint
+                split_counts_new[step_transfer[split_idxs]] = child_counts
+                split_counts_new[idxs_new] = child_counts
+            else:
+                split_counts_new = None
+            idxs_transfer = step_transfer[idxs_transfer]
+            mesh, mesh_trackers, split_counts = (
+                mesh_new,
+                mesh_trackers_new,
+                split_counts_new,
+            )
 
         if method_output is not None:
             method_output.mesh_quadratures = method_output.mesh_quadratures[keep_idx]

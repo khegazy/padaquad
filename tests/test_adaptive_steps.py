@@ -747,3 +747,138 @@ class TestPartialAndBoundary:
         )
         assert len(barriers_new) == 3
         assert split_counts_new.tolist() == [0, 1, 2]
+
+
+class TestFourPieces:
+    """With ``error_ratios`` (``split_rule="accelerate"``), a failing piece of a
+    split subinterval (split count >= 1) whose error ratio is at least 1e4 is
+    split in four: two halvings in one update, with one read of the device."""
+
+    def setup_method(self):
+        self.solver = make_solver_for_unit_test()
+
+    def _update(self, ratios, split_counts, mesh=None, cap=None, **kwargs):
+        """The update of a batch holding every subinterval of ``mesh``."""
+        n = len(ratios)
+        if mesh is None:
+            mesh = torch.linspace(0, 1, n + 1, dtype=torch.float64)[:, None]
+        return self.solver._adaptively_increase_mesh(
+            None,
+            _keep_mask(ratios),
+            None,
+            None,
+            mesh,
+            torch.arange(n),
+            torch.arange(len(mesh)) < n,
+            split_counts=split_counts,
+            max_adaptive_splits=cap,
+            **kwargs,
+        )
+
+    def test_equals_two_successive_halvings(self):
+        """Subintervals 1 and 4 (split count >= 1, ratio >= 1e4) are split in
+        four, 2 (ratio below 1e4) and 3 (split count 0) are halved, 0 is
+        accepted: the mesh, trackers and split counts are bit for bit those of
+        halving every failing subinterval and then both halves of 1 and 4, and
+        idxs_transfer is the composition of the two transfers."""
+        ratios = torch.tensor([0.5, 1e5, 9e3, 1e5, 1e4], dtype=torch.float64)
+        counts = torch.tensor([0, 1, 1, 0, 2, 0])
+        _, _, _, _, mesh, trackers, transfer, keep_idx, new_counts = self._update(
+            ratios, counts, error_ratios=ratios
+        )
+
+        _, _, _, _, mesh1, trackers1, transfer1, _, counts1 = self._update(
+            ratios, counts
+        )
+        halves = torch.tensor(
+            [transfer1[1], transfer1[1] + 1, transfer1[4], transfer1[4] + 1]
+        )
+        _, _, _, _, mesh2, trackers2, transfer2, _, counts2 = (
+            self.solver._adaptively_increase_mesh(
+                None,
+                torch.zeros(4, dtype=torch.bool),
+                None,
+                None,
+                mesh1,
+                halves,
+                trackers1,
+                split_counts=counts1,
+            )
+        )
+        assert keep_idx.tolist() == [0]
+        assert len(mesh) == 6 + 3 + 1 + 1 + 3
+        assert torch.equal(mesh, mesh2)
+        assert torch.equal(trackers, trackers2)
+        assert torch.equal(new_counts, counts2)
+        assert torch.equal(transfer, transfer2[transfer1])
+        _assert_columns_increasing(mesh)
+        _assert_transfer(
+            transfer, torch.linspace(0, 1, 6, dtype=torch.float64)[:, None], mesh
+        )
+        # The pieces of a four-way split get the parent's count + 2.
+        assert new_counts.tolist() == [0, 3, 3, 3, 3, 2, 2, 1, 1, 4, 4, 4, 4, 0]
+        assert trackers.tolist() == [False] + [True] * 12 + [False]
+
+    def test_without_error_ratios_every_split_is_a_halving(self):
+        """``error_ratios=None`` (the default rule, the re-check, Step 7, the
+        state's mesh) halves whatever the ratio."""
+        ratios = torch.tensor([1e8, 1e8], dtype=torch.float64)
+        mesh = self._update(ratios, torch.tensor([3, 3, 0]))[4]
+        assert len(mesh) == 5
+
+    @pytest.mark.parametrize(("cap", "n_points"), [(2, 4), (3, 8), (None, 8)])
+    def test_split_cap(self, cap, n_points):
+        """A subinterval one halving below the cap is halved, not split in
+        four, so no split count exceeds the cap."""
+        ratios = torch.tensor([1e5, 1e5], dtype=torch.float64)
+        mesh, *_, new_counts = self._update(
+            ratios, torch.tensor([1, 1, 0]), cap=cap, error_ratios=ratios
+        )[4:]
+        assert len(mesh) - 1 == n_points
+        assert cap is None or int(new_counts.max()) <= cap
+
+    def test_extra_split_positions_are_halved(self):
+        """Recorded subintervals that failed the re-check are halved in the
+        same update as the batch's four-way split."""
+        mesh = torch.linspace(0, 1, 5, dtype=torch.float64)[:, None]
+        ratios = torch.tensor([1e5], dtype=torch.float64)
+        _, _, _, _, mesh_new, trackers, transfer, _, counts = (
+            self.solver._adaptively_increase_mesh(
+                None,
+                _keep_mask(ratios),
+                None,
+                None,
+                mesh,
+                torch.tensor([2]),
+                torch.tensor([False, False, True, False, False]),
+                split_counts=torch.tensor([1, 1, 1, 1, 0]),
+                extra_split_idxs=torch.tensor([3, 0]),
+                error_ratios=ratios,
+            )
+        )
+        assert counts.tolist() == [2, 2, 1, 3, 3, 3, 3, 2, 2, 0]
+        assert trackers.tolist() == [True] * 2 + [False] + [True] * 6 + [False]
+        _assert_columns_increasing(mesh_new)
+        _assert_transfer(transfer, mesh, mesh_new)
+
+    @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+    def test_too_narrow_to_quarter_is_halved(self, dtype):
+        """A subinterval whose ends are two floating-point numbers apart has a
+        midpoint between them, but its quarter points round onto it or an end:
+        it can be halved but not split in four, so it is halved."""
+        one = torch.tensor(1.0, dtype=dtype)
+        up = torch.tensor(2.0, dtype=dtype)
+        two_ulps = torch.nextafter(torch.nextafter(one, up), up)
+        mesh = torch.stack([torch.zeros((), dtype=dtype), one, two_ulps])[:, None]
+        idxs = torch.tensor([0, 1])
+        assert self.solver._splittable(mesh, idxs, None, None).tolist() == [True, True]
+        assert self.solver._splittable(mesh, idxs, None, None, halvings=2).tolist() == [
+            True,
+            False,
+        ]
+        ratios = torch.tensor([1e5, 1e5], dtype=dtype)
+        mesh_new = self._update(
+            ratios, torch.tensor([1, 1, 0]), mesh=mesh, error_ratios=ratios
+        )[4]
+        assert len(mesh_new) == 3 + 3 + 1
+        _assert_columns_increasing(mesh_new)

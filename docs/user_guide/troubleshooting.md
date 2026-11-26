@@ -44,7 +44,8 @@ every entry can be below 1 while `converged` is `False`. With
   a percentage. A small value means the starting mesh was nearly fine enough,
   which is what a warm start should achieve.
 - `max_split_depth` is the largest number of times any subinterval was halved;
-  it is at most `max_adaptive_splits`.
+  it is at most `max_adaptive_splits`. A split into four pieces
+  (`split_rule="accelerate"`, {ref}`ug-four-pieces`) counts as two halvings.
 
 With `max_adaptive_splits=0` nothing is split, so `n_start_steps_split` is 0
 even when subintervals fail; read `converged` instead.

@@ -319,7 +319,8 @@ the same text. In short:
    $|e| / \max(\text{atol}, \text{rtol} \cdot |I|)$, where $I$ is the
    integral (per output element, $|e_d| / (\text{atol} + \text{rtol} \cdot
    |I_d|)$ with `error_norm="failure_fraction"`), decides: below 1 the
-   subinterval is accepted, otherwise it is split at its midpoint.
+   subinterval is accepted, otherwise it is split at its midpoint (or into
+   four equal pieces, with `split_rule="accelerate"`).
 
 4. **Refinement.** Batches of evaluation and splitting alternate until every
    subinterval is accepted, or until `max_adaptive_splits` stops the

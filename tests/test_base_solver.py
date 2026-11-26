@@ -412,13 +412,16 @@ class TestHostWaits:
         waits = _host_waits(lambda: solver._setup_initial_mesh(None, a, b, True, 13))
         assert waits == runtime_checks
 
+    @pytest.mark.parametrize("four_pieces", [False, True])
     @pytest.mark.parametrize("values_on", ["cuda", "cpu"])
-    def test_mesh_update_reads_once(self, values_on):
+    def test_mesh_update_reads_once(self, values_on, four_pieces):
         """The mesh update reads the device once, for the number of accepted
-        subintervals, whatever it keeps: method output, values moved
-        within their array, tracked variables, nodes, split counts, the split
-        cap. Values on result_device ("cpu", trade_speed_for_memory) cost one
-        more copy of the kept positions per array."""
+        subintervals and of those split in four, whatever it keeps: method
+        output, values moved within their array, tracked variables, nodes,
+        split counts, the split cap, the four-way splits of
+        split_rule="accelerate" (error_ratios). Values on result_device
+        ("cpu", trade_speed_for_memory) cost one more copy of the kept
+        positions per array."""
         solver = adaptive_quadrature("uniform", "gk21", device="cuda")
         n = 6
         mesh = torch.linspace(0, 1, n + 1, dtype=torch.float64, device="cuda")[:, None]
@@ -428,7 +431,8 @@ class TestHostWaits:
         y = torch.sin(nodes).to(values_on)
         output = solver._calculate_integral(nodes, y.to("cuda"), mesh[:-1], mesh[1:])
         keep = torch.tensor([True, False, True, True, False, True], device="cuda")
-        split_counts = torch.zeros(n + 1, dtype=torch.long, device="cuda")
+        split_counts = torch.ones(n + 1, dtype=torch.long, device="cuda")
+        ratios = torch.full((n,), 1e5, dtype=torch.float64, device="cuda")
 
         def update():
             return solver._adaptively_increase_mesh(
@@ -443,9 +447,13 @@ class TestHostWaits:
                 split_counts=split_counts,
                 max_adaptive_splits=10,
                 in_place=True,
+                error_ratios=ratios if four_pieces else None,
             )
 
-        assert _host_waits(update) == 1 + 2 * (values_on == "cpu")
+        meshes = []
+        waits = _host_waits(lambda: meshes.append(update()[4]))
+        assert waits == 1 + 2 * (values_on == "cpu")
+        assert len(meshes[0]) == n + 1 + 2 * (3 if four_pieces else 1)
 
     @pytest.mark.parametrize("runtime_checks", [True, False])
     def test_evaluation_reads_only_for_the_finite_check(self, runtime_checks):

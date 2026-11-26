@@ -39,7 +39,8 @@ the method.
    integrand is called once per batch.
 3. **Accept or split.** Each subinterval's error estimate is compared with its
    tolerance ({ref}`ug-error-control`). Accepted subintervals are recorded;
-   the others are split in half and go back into the queue.
+   the others are split in half (or in four, {ref}`ug-four-pieces`) and go
+   back into the queue.
 4. **Gradients.** With `take_gradient=True`, each batch's contribution is
    back-propagated as soon as it is accepted, so the autograd graph of the
    whole integral is never held at once ({ref}`ug-autodiff`).

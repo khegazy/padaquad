@@ -92,6 +92,41 @@ def test_panel_count_equals_K_times_2_pow_n(sampling, method, n, take_gradient):
         assert result.converged is False
 
 
+@pytest.mark.parametrize("n", [1, 2, 3, 4])
+@pytest.mark.parametrize(("sampling", "method"), SOLVER_CASES[::2], ids=SOLVER_IDS[::2])
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_four_way_splits_respect_the_cap(sampling, method, n, take_gradient):
+    """With ``split_rule="accelerate"`` the halves of a starting step are split
+    in four (their error ratios are far above 1e4) while two halvings remain
+    below the cap, and halved one halving below it: the same K * 2**n panels
+    and statistics as halving, in fewer passes (calls of f) from n = 3 on.
+    (gk21's capped steps pass by the round-off floor from n = 3 on, so the
+    low-degree methods are used.)"""
+    K = 2
+    calls = {}
+    for split_rule in ("halve", "accelerate"):
+        calls[split_rule] = []
+
+        def f(t, rule=split_rule):
+            calls[rule].append(t.shape[0])
+            return _hard_f(t)
+
+        result, _ = adaptive_quadrature(
+            sampling_type=sampling,
+            method=method,
+            atol=ATOL_FAIL,
+            rtol=RTOL_FAIL,
+            max_adaptive_splits=n,
+            split_rule=split_rule,
+        ).integrate(
+            f=f, mesh=_mesh(K), take_gradient=take_gradient, max_batch=BIG_BATCH
+        )
+        assert result.h.shape[0] == K * 2**n
+        assert result.n_start_steps_split == K
+        assert result.max_split_depth == n
+    assert len(calls["accelerate"]) == len(calls["halve"]) - (n - 1) // 2
+
+
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 def test_integrate_arg_takes_priority_over_construction(take_gradient):
     """A solver built with cap=5 but called with cap=1 behaves as cap=1."""

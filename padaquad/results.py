@@ -168,7 +168,8 @@ class IntegrationResult:
         the integration (splits made to build the state's mesh do not count).
     max_split_depth : int or None
         Largest number of times one starting subinterval was halved: 0 if
-        none was split, at most ``max_adaptive_splits``.
+        none was split, at most ``max_adaptive_splits``. A split into four
+        pieces (``split_rule="accelerate"``) counts as two halvings.
 
     Examples
     --------

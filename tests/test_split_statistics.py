@@ -610,3 +610,213 @@ def test_converged_on_cuda_with_cpu_results(take_gradient):
         max_adaptive_splits=0,
     )
     assert capped.converged is False
+
+
+# ---------------------------------------------------------------------------
+# split_rule="accelerate": failing pieces with large error ratios split in four
+# ---------------------------------------------------------------------------
+
+_A = 0.3183098861837907
+# Integrands that need many levels of refinement, with their integrals on [0, 1].
+_HARD = {
+    "lorentz": (
+        lambda t: 1.0 / (1.0 + 1.0e6 * (t - 0.4) ** 2),
+        (math.atan(600) + math.atan(400)) / 1000,
+    ),
+    "step": (lambda t: (t > _A).to(t.dtype), 1 - _A),
+    "oscillatory": (lambda t: torch.sin(2.0e4 * t), (1 - math.cos(2.0e4)) / 2.0e4),
+}
+
+
+def _split_rule_run(split_rule, f, method="gk21", seed=0, atol=1e-9, **kwargs):
+    """Integrate f on [0, 1] from a seeded random starting mesh; return the
+    result, the state and the number of points of each call of f."""
+    calls = []
+
+    def counted(t):
+        calls.append(t.shape[0])
+        return f(t)
+
+    kwargs.setdefault("max_batch", BIG_BATCH)
+    torch.manual_seed(seed)
+    out, out_state = integrate(
+        counted,
+        method,
+        atol=atol,
+        rtol=0.0,
+        device="cpu",
+        split_rule=split_rule,
+        mesh_init=T_INIT,
+        mesh_final=T_FINAL,
+        **kwargs,
+    )
+    return out, out_state, calls
+
+
+@pytest.mark.parametrize("value", ["quarter", None, 4])
+def test_invalid_split_rule_raises(value):
+    if value is not None:
+        with pytest.raises(ValueError, match="split_rule"):
+            UniformAdaptiveQuadrature(split_rule=value, device="cpu")
+    with pytest.raises(ValueError, match="split_rule"):
+        _gk21_solver().integrate(
+            f=_narrow_peak,
+            mesh=_MESH20,
+            take_gradient=False,
+            split_rule="quarter" if value is None else value,
+        )
+
+
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+@pytest.mark.parametrize("name", list(_HARD))
+@pytest.mark.parametrize("method", ["gk21", "gk15", "gk7", "cc17"])
+def test_accelerate_meets_the_tolerance(method, name, take_gradient):
+    """With the rule on, the integral is within 10 atol of the exact value and
+    the call converges (gk7 accepts the step by accident when halving, so its
+    error is checked only with the rule)."""
+    f, exact = _HARD[name]
+    out, _, _ = _split_rule_run(
+        "accelerate", f, method=method, take_gradient=take_gradient
+    )
+    assert out.converged is True
+    assert abs(float(out.integral) - exact) < 1e-8
+
+
+def test_accelerate_saves_points_and_never_more_on_an_isolated_feature():
+    """On sin(2e4 t) the rule evaluates fewer points (seed 0: 56,637 against
+    69,615 with gk21); on a kink, whose failing pieces each leave one failing
+    piece, it never acts and the run is the same bit for bit."""
+    f, _ = _HARD["oscillatory"]
+    (_, _, halve), (_, _, fast) = (
+        _split_rule_run(rule, f, take_gradient=False)
+        for rule in ("halve", "accelerate")
+    )
+    assert sum(fast) < 0.9 * sum(halve)
+    assert len(fast) < len(halve)  # passes: one call of f each
+    kink = lambda t: torch.abs(t - 1.0 / 3.0)  # noqa: E731
+    (halve, s_halve, halve_calls), (fast, s_fast, fast_calls) = (
+        _split_rule_run(rule, kink, take_gradient=False)
+        for rule in ("halve", "accelerate")
+    )
+    assert fast_calls == halve_calls
+    assert torch.equal(fast.integral, halve.integral)
+    assert torch.equal(s_fast.mesh, s_halve.mesh)
+
+
+@pytest.mark.parametrize("trade_speed_for_memory", [False, True])
+@pytest.mark.parametrize(
+    ("sampling", "method"),
+    [("uniform", "gk21"), ("variable", "interpolatory3_variable")],
+)
+def test_accelerate_is_the_same_for_any_max_batch(
+    sampling, method, trade_speed_for_memory
+):
+    """With take_gradient=False every pass is judged whole, so the four-way
+    splits, the integral and the state's mesh do not depend on how the calls
+    of f are cut (7 points: calls end inside subintervals), and f is
+    evaluated at as many points either way."""
+    f, _ = _HARD["lorentz"]
+    runs = [
+        _split_rule_run(
+            "accelerate",
+            f,
+            method=method,
+            sampling=sampling,
+            atol=1e-7,
+            take_gradient=False,
+            trade_speed_for_memory=trade_speed_for_memory,
+            max_batch=max_batch,
+        )
+        for max_batch in (BIG_BATCH, 7)
+    ]
+    (out, out_state, calls), (small, small_state, small_calls) = runs
+    assert torch.equal(small.integral, out.integral)
+    assert torch.equal(small_state.mesh, out_state.mesh)
+    assert sum(small_calls) == sum(calls)
+    _, _, halve_calls = _split_rule_run(
+        "halve", f, method=method, sampling=sampling, atol=1e-7, take_gradient=False
+    )
+    assert len(calls) < len(halve_calls)  # fewer passes: the rule acted
+
+
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+@pytest.mark.parametrize("absolute", [True, False])
+def test_accelerate_state_restarts_and_float32(absolute, dtype):
+    """The state's mesh after four-way splits is a valid starting mesh: a
+    second call from it converges, evaluates fewer points and gives the same
+    integral within the tolerance; in cumulative mode and in float32 too."""
+    f, exact = _HARD["oscillatory"]
+    atol = 1e-9 if dtype == torch.float64 else 1e-4
+    lo, hi = T_INIT.to(dtype), T_FINAL.to(dtype)
+    solver = adaptive_quadrature(
+        "uniform",
+        "gk21",
+        atol=atol,
+        rtol=0.0,
+        device="cpu",
+        dtype=dtype,
+        split_rule="accelerate",
+        use_absolute_error_ratio=absolute,
+        max_batch=BIG_BATCH,
+    )
+    points = []
+
+    def counted(t):
+        points.append(t.shape[0])
+        return f(t)
+
+    torch.manual_seed(0)
+    first, state = solver.integrate(
+        counted, mesh_init=lo, mesh_final=hi, take_gradient=False
+    )
+    n_first = sum(points)
+    second, _ = solver.integrate(counted, state=state, take_gradient=False)
+    assert first.converged
+    assert second.converged
+    assert torch.all(state.mesh[1:] > state.mesh[:-1])
+    assert sum(points) - n_first < n_first
+    for out in (first, second):
+        assert abs(float(out.integral) - exact) < 10 * atol
+
+
+def test_failure_fraction_always_halves():
+    """With error_norm="failure_fraction" the accept quantity is a fraction,
+    not a ratio, so the rule halves: the same call as split_rule="halve", bit
+    for bit."""
+    f, _ = _HARD["lorentz"]
+    (halve, s_halve, halve_calls), (fast, s_fast, fast_calls) = (
+        _split_rule_run(rule, f, take_gradient=False, error_norm="failure_fraction")
+        for rule in ("halve", "accelerate")
+    )
+    assert fast_calls == halve_calls
+    assert torch.equal(fast.integral, halve.integral)
+    assert torch.equal(s_fast.mesh, s_halve.mesh)
+
+
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_accelerate_bound_and_parameter_gradients(take_gradient):
+    """Bounds that require grad get d/da = -f(a) and d/db = f(b) through the
+    mesh points that four-way splits insert (with take_gradient=True the
+    gradient collected on the mesh is carried across both halvings of an
+    update), over several batches, and a parameter its exact gradient."""
+    w = torch.tensor(2.0, dtype=torch.float64, requires_grad=True)
+    a = torch.tensor([0.1], dtype=torch.float64, requires_grad=True)
+    b = torch.tensor([0.9], dtype=torch.float64, requires_grad=True)
+    torch.manual_seed(0)
+    out, _ = integrate(
+        lambda t: w * torch.sin(2.0e4 * t),
+        atol=1e-9,
+        rtol=0.0,
+        device="cpu",
+        split_rule="accelerate",
+        mesh_init=a,
+        mesh_final=b,
+        take_gradient=take_gradient,
+        max_batch=500 * 21,
+    )
+    if not take_gradient:
+        out.integral.sum().backward()
+    assert math.isclose(float(a.grad), -2 * math.sin(2.0e3), rel_tol=1e-9)
+    assert math.isclose(float(b.grad), 2 * math.sin(1.8e4), rel_tol=1e-9)
+    exact = (math.cos(2.0e3) - math.cos(1.8e4)) / 2.0e4
+    assert math.isclose(float(w.grad), exact, rel_tol=1e-6, abs_tol=1e-9)

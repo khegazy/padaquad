@@ -13,7 +13,8 @@ r_k = \frac{|e_k|}{\tau_k}, \qquad
 \tau_k = \max\!\bigl(\text{atol},\ \text{rtol}\,|I|,\ 50\,\varepsilon\,|s_k|\bigr),
 $$ (error-ratio)
 
-is below 1, and split at its midpoint otherwise. Here `atol` and `rtol` are
+is below 1, and split at its midpoint otherwise (or into four pieces,
+{ref}`ug-four-pieces`). Here `atol` and `rtol` are
 the absolute and relative tolerances, $I$ is the integral (see
 {ref}`ug-error-reference` for which value of it), and $\varepsilon$ is the
 machine epsilon of the dtype ($2.2 \times 10^{-16}$ in float64,
@@ -76,6 +77,49 @@ also skips the check, made once at the end of the call, that the accepted
 subintervals cover the final mesh once; the finite check costs time and, for
 integrands with many outputs, memory as large as a call's output. The mesh
 itself stays in order by construction, so it is not checked.
+
+(ug-four-pieces)=
+### Splitting into four pieces
+
+A failing subinterval is split at its midpoint (`split_rule="halve"`, the
+default). Where the integrand is far from resolved, both halves usually fail
+again, and the values computed on the subinterval are discarded at every
+level: with `gk21` at `atol=1e-8`, about half of the points at which
+$\sin(2 \times 10^5 t)$ or $\sin(1/(t + 10^{-3}))$ on $[0, 1]$ is evaluated
+belong to subintervals that are then split, and each level costs one more pass
+of the loop.
+
+With `split_rule="accelerate"` (a constructor or `integrate` option), a failing
+subinterval is split into four equal pieces when
+
+- it is itself a piece of a split subinterval (its split count is at least 1),
+  and
+- its error ratio is at least $10^4$.
+
+The four pieces are those that two successive halvings make, and they count as
+two halvings in `max_split_depth` and against `max_adaptive_splits` (one
+halving below the cap, the subinterval is halved). Subintervals judged again by
+the re-check of accepted subintervals are halved, and with
+`error_norm="failure_fraction"`, whose accept quantity is a fraction rather
+than a ratio, every split is a halving.
+
+These conditions and the threshold are PadaQuad's own, chosen on
+measurements, not taken from a paper. On the CPU, over 9 integrands that need
+several levels of refinement (the ones the threshold was chosen on), `atol`
+$10^{-6}$, $10^{-8}$ and $10^{-10}$, `rtol=0` and three random starting
+meshes, `split_rule="accelerate"` evaluates `f` at 8 to 14 % fewer points than
+halving in total (`gk21`: 11 %) and runs 10 to 15 % fewer passes; over 15
+other integrands, 4 to 6 % fewer points and 14 to 17 % fewer passes. It costs
+points when both halves of a four-way split would have passed: of 1,620
+measured runs (9 methods, both `take_gradient` values, absolute and cumulative
+tolerances), 6 needed up to 12 % more points than halving, 4 more needed more
+points because halving had accepted a jump or a kink by accident (an error up
+to $2 \times 10^{-4}$) and the four-way splits did not, and no error grew.
+Integrands with an isolated feature (a kink, a peak), whose failing pieces
+leave one failing piece each, are mostly unchanged. Use it when the loop's
+passes dominate the time, or when `f` is expensive and the integrand needs
+many levels of refinement; with the default, no evaluation of `f` is spent on
+a four-way split whose halves would have passed.
 
 (ug-error-norm)=
 ## Integrands with several outputs

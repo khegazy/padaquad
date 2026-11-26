@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import inspect
+import sys
+import tracemalloc
 import warnings
 
 import pytest
@@ -584,3 +586,83 @@ class TestHostWaits:
         )
         assert _host_waits(run, where) == calls["rechecks"]
         assert calls["rechecks"] > 2
+
+
+# ---------------------------------------------------------------------------
+# Python work per call (CPU)
+# ---------------------------------------------------------------------------
+
+
+def _python_work(fn):
+    """Run ``fn`` and return the Python lines it executed (``sys.settrace``
+    line events: a loop's every turn counts, also within one line) and the
+    peak of the memory Python allocated above its start (``tracemalloc``;
+    tensor storage does not come from Python's allocator and is not
+    counted)."""
+    lines = [0]
+
+    def trace(frame, event, arg):
+        lines[0] += event == "line"
+        return trace
+
+    previous = sys.gettrace()  # coverage's tracer, restored after
+    tracemalloc.start()
+    tracemalloc.reset_peak()
+    start = tracemalloc.get_traced_memory()[0]
+    sys.settrace(trace)
+    try:
+        fn()
+    finally:
+        sys.settrace(previous)
+        peak = tracemalloc.get_traced_memory()[1]
+        tracemalloc.stop()
+    return lines[0], peak - start
+
+
+class TestPythonWork:
+    """The Python work of a call does not grow with its number of subintervals.
+
+    A Python object per mesh point made the garbage collector run about 100
+    times per call on 13,000 subintervals, a two-speed run time
+    (docs/issues/2026-11-25-speedup-timing-variation-plan.md)."""
+
+    @pytest.mark.parametrize("take_gradient", [False, True])
+    @pytest.mark.parametrize(
+        ("sampling", "method", "atol"),
+        [("uniform", "gk21", 1e-10), ("variable", "interpolatory3_variable", 1e-2)],
+    )
+    def test_same_for_256_times_the_subintervals(
+        self, sampling, method, atol, take_gradient
+    ):
+        """cos(8 pi t) + exp(cos(2 pi t)) on n unit subintervals of [0, n]:
+        each holds the same periods, so the calls with n = 16 and n = 4096
+        take the same decisions in the same passes, the second on 256 times
+        as many subintervals. It executes the same Python lines within 1 % of
+        the subintervals added, and its peak of Python memory exceeds the
+        first's by less than one byte per subinterval added (a list holding
+        one pointer per subinterval takes 8)."""
+        solver = adaptive_quadrature(
+            sampling, method, atol=atol, rtol=0.0, device="cpu"
+        )
+        results = []
+
+        def run(n):
+            mesh = torch.arange(n + 1, dtype=torch.float64)[:, None]
+            result, _ = solver.integrate(
+                lambda t: (
+                    torch.cos(8 * torch.pi * t) + torch.exp(torch.cos(2 * torch.pi * t))
+                ),
+                mesh=mesh,
+                take_gradient=take_gradient,
+                max_batch=10**8,
+            )
+            results.append(len(result.h))
+
+        run(16)  # warm-up: one-time costs such as the method's conversion
+        few_lines, few_peak = _python_work(lambda: run(16))
+        many_lines, many_peak = _python_work(lambda: run(4096))
+        few, many = results[1:]
+        assert many == 256 * few > 256 * 16  # same decisions, at least one split
+        added = many - few
+        assert abs(many_lines - few_lines) < added / 100
+        assert many_peak - few_peak < added

@@ -1016,7 +1016,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             the integral (see ``parameters``); its ``state`` is the state to
             call again with, after resetting the gradients.
         torch.OutOfMemoryError
-            If one point does not fit in memory, or, with
+            If one point (with ``take_gradient=True``, one subinterval) does
+            not fit in memory, or, with
             ``trade_speed_for_memory=False``, the integrand values of a pass
             do not fit in one array; the message names the remedies.
 

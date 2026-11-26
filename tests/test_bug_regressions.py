@@ -21,6 +21,7 @@ from __future__ import annotations
 import math
 import threading
 
+import numpy as np
 import pytest
 import torch
 from tests._helpers import (
@@ -604,6 +605,92 @@ def test_integrate_options_after_the_bounds_are_keyword_only():
     arguments: everything after mesh_final is keyword-only."""
     with pytest.raises(TypeError, match="positional"):
         _solver().integrate(torch.exp, None, _MESH, None, None, True)
+
+
+_BOOL_OPTIONS = [
+    "take_gradient",
+    "enforce_convergence",
+    "runtime_checks",
+    "random_initial_mesh",
+    "trade_speed_for_memory",
+    "record_evaluations",
+    "build_state_mesh",
+]
+#: Values whose truth Python takes silently: "False" is true, the rest false
+#: (None is valid for runtime_checks and enforce_convergence), and a tensor.
+_NOT_BOOLS = ["False", None, 0, [], torch.tensor(True), 1.0]
+
+
+@pytest.mark.parametrize("value", _NOT_BOOLS, ids=repr)
+@pytest.mark.parametrize("option", _BOOL_OPTIONS)
+def test_integrate_true_or_false_options_reject_other_values(option, value):
+    """An integrate option that must be True or False raises TypeError naming
+    it and the value, before f is called; None is valid for runtime_checks
+    and enforce_convergence."""
+    if value is None and option in ("runtime_checks", "enforce_convergence"):
+        pytest.skip("None means the default")
+    calls = []
+    with pytest.raises(TypeError, match=f"{option} must be True or False, got"):
+        _solver().integrate(
+            lambda t: calls.append(t) or torch.exp(t),
+            mesh=_MESH,
+            **({"take_gradient": False} | {option: value}),
+        )
+    assert calls == []
+
+
+@pytest.mark.parametrize("value", _NOT_BOOLS, ids=repr)
+@pytest.mark.parametrize(
+    "option",
+    [
+        "limit_benchmark_time",
+        "use_absolute_error_ratio",
+        "runtime_checks",
+        "output_speed_info",
+    ],
+)
+def test_constructor_true_or_false_options_reject_other_values(option, value):
+    """A constructor option that must be True or False raises TypeError naming
+    it and the value."""
+    with pytest.raises(TypeError, match=f"{option} must be True or False, got"):
+        adaptive_quadrature("uniform", "gk21", device="cpu", **{option: value})
+
+
+@pytest.mark.parametrize(
+    ("true", "false"), [(True, False), (np.True_, np.False_)], ids=["bool", "numpy"]
+)
+def test_true_or_false_options_take_numpy_bools(true, false):
+    """NumPy bools are True or False: every such option accepts them, in the
+    constructor and in integrate, and the integral is the same as with
+    Python bools."""
+    results = []
+    for t, f in ((True, False), (true, false)):
+        solver = adaptive_quadrature(
+            "uniform",
+            "gk21",
+            device="cpu",
+            max_batch=10_000,
+            limit_benchmark_time=t,
+            use_absolute_error_ratio=t,
+            runtime_checks=t,
+            output_speed_info=f,
+        )
+        torch.manual_seed(0)
+        results.append(
+            solver.integrate(
+                torch.exp,
+                mesh_init=_bound(0.0),
+                mesh_final=_bound(1.0),
+                take_gradient=f,
+                enforce_convergence=t,
+                runtime_checks=t,
+                random_initial_mesh=t,
+                trade_speed_for_memory=f,
+                record_evaluations=t,
+                build_state_mesh=t,
+            )[0].integral
+        )
+    assert torch.equal(results[0], results[1])
 
 
 def test_solver_usable_after_a_raising_call():

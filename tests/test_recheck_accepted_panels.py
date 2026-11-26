@@ -666,7 +666,7 @@ def test_enforce_convergence_with_take_gradient_raises():
 @pytest.mark.parametrize("value", [1, "yes"])
 def test_enforce_convergence_rejects_non_bool(value):
     """A value that is neither None nor a bool raises TypeError."""
-    with pytest.raises(TypeError, match="enforce_convergence must be None or a bool"):
+    with pytest.raises(TypeError, match="enforce_convergence must be True or False"):
         _run(_solver(), _cancelling, take_gradient=False, enforce_convergence=value)
 
 

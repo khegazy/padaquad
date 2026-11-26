@@ -52,6 +52,7 @@ import operator
 import time
 from typing import TYPE_CHECKING, Any, ClassVar
 
+import numpy as np
 import torch
 
 from padaquad.base import DEFAULT_METHODS, SolverBase, steps
@@ -394,8 +395,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Raises
         ------
         TypeError
-            If an argument is passed by position, or a keyword is not an option
-            of the solver.
+            If an argument is passed by position, a keyword is not an option
+            of the solver, or ``limit_benchmark_time``,
+            ``use_absolute_error_ratio``, ``runtime_checks`` or
+            ``output_speed_info`` is not a bool (Python or NumPy).
         ValueError
             If ``remove_cut`` is not below 1, ``merge_rule`` is not one of
             ``"predicted"``, ``"power_law"`` and ``"sum"``,
@@ -415,6 +418,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 f"merge_rule must be one of {self._VALID_MERGE_RULES}, "
                 f"got {merge_rule!r}"
             )
+        self._check_bools(
+            limit_benchmark_time=limit_benchmark_time,
+            use_absolute_error_ratio=use_absolute_error_ratio,
+            runtime_checks=runtime_checks,
+            output_speed_info=output_speed_info,
+        )
         super().__init__(
             method=DEFAULT_METHODS[self.sampling_type] if method is None else method,
             atol=atol,
@@ -552,6 +561,35 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             raise ValueError(
                 f"max_adaptive_splits must be >= 0, got {max_adaptive_splits}"
             )
+
+    @staticmethod
+    def _check_bools(**options: object) -> None:
+        """
+        Validate options that must be True or False.
+
+        A Python or NumPy bool passes. Anything else raises, including the
+        values whose truth Python would take silently: a string such as
+        ``"False"`` (true), None, 0 or ``[]`` (false), and a tensor (whose
+        truth on a GPU is a read of the device). The options that also accept
+        None (``runtime_checks`` and ``enforce_convergence`` of ``integrate``)
+        are checked after None is replaced by its meaning.
+
+        Parameters
+        ----------
+        **options : object
+            The values to check, by option name.
+
+        Raises
+        ------
+        TypeError
+            If a value is not a bool, naming the option and the value.
+        """
+        for name, value in options.items():
+            if not isinstance(value, (bool, np.bool_)):
+                raise TypeError(
+                    f"{name} must be True or False, got "
+                    f"{type(value).__name__} {value!r}"
+                )
 
     #: Values accepted by ``split_rule``.
     _VALID_SPLIT_RULES = ("halve", "accelerate")
@@ -952,7 +990,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             constructor); or if ``evaluation_buffer`` is given with
             ``trade_speed_for_memory=False`` or is not an int >= 1.
         TypeError
-            If ``enforce_convergence`` is neither None nor a bool.
+            If ``take_gradient``, ``random_initial_mesh``,
+            ``trade_speed_for_memory``, ``record_evaluations`` or
+            ``build_state_mesh`` is not a bool (Python or NumPy), or
+            ``runtime_checks`` or ``enforce_convergence`` is neither None nor
+            a bool; checked before f is called.
         BackwardOutOfMemoryError
             If a backward pass ran out of memory and PadaQuad cannot restart
             the integral (see ``parameters``); its ``state`` is the state to
@@ -1037,11 +1079,21 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # twice.
         if enforce_convergence is None:
             enforce_convergence = not take_gradient
-        if not isinstance(enforce_convergence, bool):
-            raise TypeError(
-                "enforce_convergence must be None or a bool, got "
-                f"{type(enforce_convergence).__name__} {enforce_convergence!r}"
-            )
+        # Per-call runtime_checks takes priority over the constructor value.
+        # Stored on self so the evaluation helpers can read it without threading
+        # it through every signature.
+        self.runtime_checks = (
+            self.init_runtime_checks if runtime_checks is None else runtime_checks
+        )
+        self._check_bools(
+            take_gradient=take_gradient,
+            enforce_convergence=enforce_convergence,
+            runtime_checks=self.runtime_checks,
+            random_initial_mesh=random_initial_mesh,
+            trade_speed_for_memory=trade_speed_for_memory,
+            record_evaluations=record_evaluations,
+            build_state_mesh=build_state_mesh,
+        )
         if enforce_convergence and take_gradient:
             raise ValueError(
                 "enforce_convergence=True cannot be used with take_gradient=True: "
@@ -1105,13 +1157,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 "begin with more subintervals. Construct the solver with "
                 "merge_rule='power_law' to choose it explicitly."
             )
-
-        # Per-call runtime_checks takes priority over the constructor value.
-        # Stored on self so the evaluation helpers can read it without threading
-        # it through every signature.
-        self.runtime_checks = (
-            self.init_runtime_checks if runtime_checks is None else runtime_checks
-        )
 
         # Per-call error_norm / mesh_failure_tolerance take priority over the
         # constructor values. Stored on self so the error-ratio helpers read

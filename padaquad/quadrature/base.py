@@ -2243,17 +2243,17 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             step_transfer = torch.cumsum(idx_offset, dim=0) + torch.arange(
                 len(mesh), device=mesh.device
             )
-            # Midpoint j goes between the old points split_idxs[j] and
-            # split_idxs[j] + 1, which move to idxs_new[j] - 1 and
-            # idxs_new[j] + 1. Since split_idxs is strictly ascending,
+            # The left mesh point of split subinterval j moves to split_left[j]
+            # = split_idxs[j] + j (split_idxs is strictly ascending, so j
+            # midpoints are inserted before it); its midpoint goes right after
+            # it, at idxs_new[j], and its right mesh point follows. So
             # step_transfer and idxs_new are disjoint and together cover the
-            # new mesh, so every entry of the empty arrays below is written.
-            idxs_new = split_idxs + torch.arange(N_t_add, device=mesh.device) + 1
+            # new mesh, and every entry of the empty arrays below is written.
+            split_left = step_transfer[split_idxs]
+            idxs_new = split_left + 1
             mesh_new = mesh.new_empty((N_t_add + len(mesh), mesh.shape[-1]))
             mesh_new[step_transfer] = mesh
-            mesh_new[idxs_new] = _midpoint(
-                mesh_new[idxs_new - 1], mesh_new[idxs_new + 1]
-            )
+            mesh_new[idxs_new] = _midpoint(mesh_new[split_left], mesh_new[idxs_new + 1])
             mesh_trackers_new = torch.ones(
                 len(mesh_new), dtype=torch.bool, device=mesh.device
             )
@@ -2267,7 +2267,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 split_counts_new[step_transfer] = split_counts
                 child_counts = split_counts[split_idxs] + 1
                 # left child = transferred parent barrier; right child = midpoint
-                split_counts_new[step_transfer[split_idxs]] = child_counts
+                split_counts_new[split_left] = child_counts
                 split_counts_new[idxs_new] = child_counts
             else:
                 split_counts_new = None

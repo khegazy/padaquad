@@ -534,16 +534,18 @@ class TestHostWaits:
         re-check, the failing subintervals (the record on the GPU). Two
         integrals that take different numbers of passes therefore differ in
         their reads by exactly these; what is read before and after the loop
-        is the same for both."""
+        is the same for both. Neither integral splits a recorded subinterval,
+        so the reads of removing those from the record are not covered."""
 
         def reads(frequency):
-            calls = {"update": 0, "recheck": 0, "f": 0}
+            calls = {"update": 0, "recheck": 0, "removal": 0, "f": 0}
             solver = adaptive_quadrature(
                 "uniform", "gk21", device="cuda", atol=1e-10, rtol=0.0
             )
             for name, key in (
                 ("_adaptively_increase_mesh", "update"),
                 ("_failed_record_positions", "recheck"),
+                ("_remove_failed_record_panels", "removal"),
             ):
                 method = getattr(solver, name)
 
@@ -569,13 +571,18 @@ class TestHostWaits:
                     build_state_mesh=False,
                 )
             )
+            # The removal reads the device for the rows it removes; not pinned.
+            assert calls["removal"] == 0
             # Every pass updates the mesh once (no update after the loop
             # without the state's mesh).
             pinned = 2 * calls["update"] + calls["f"] + calls["recheck"]
             return waits - pinned, calls["update"]
 
         (rest_few, passes_few), (rest_many, passes_many) = reads(30.0), reads(300.0)
-        assert passes_many > passes_few + 2
+        # One pass more is enough for a read per pass to show. The numbers of
+        # passes depend on the random starting mesh: over seeds 0-199, 1-2
+        # and 3-5 (A100, torch 2.8), so a larger margin fails for some.
+        assert passes_many > passes_few
         assert rest_many == rest_few
 
     @pytest.mark.parametrize("error_norm", ["2", "failure_fraction"])

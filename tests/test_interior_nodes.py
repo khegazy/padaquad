@@ -2,10 +2,9 @@
 
 The integrand is evaluated only at the points that carry a weight: never at a
 mesh point, and no call of it comes before the first pass. So an integrable
-singularity at a
-bound needs no special treatment, the result lists exactly the evaluated
-points, and the width and the gradient with respect to a bound come from the
-mesh points.
+singularity at a bound needs no special treatment, the result lists exactly the
+evaluated points, and the width and the gradient with respect to a bound come
+from the mesh points.
 """
 
 from __future__ import annotations
@@ -42,8 +41,9 @@ def test_nodes_are_interior_and_counted(method):
 def test_f_gets_c_points_per_subinterval_and_no_mesh_point(method, max_batch):
     """Every pass calls f at C points per waiting subinterval (in one or more
     calls), and none of them is a point of the pass's mesh; no call of f comes
-    before the first pass, with or without max_batch. (The centre node of a subinterval that is then split becomes a mesh point
-    of the halves, which do not evaluate it.)"""
+    before the first pass, with or without max_batch. (The centre node of a
+    subinterval that is then split becomes a mesh point of the halves, which do
+    not evaluate it.)"""
     received = []
 
     def f(t):

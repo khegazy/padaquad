@@ -4349,10 +4349,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 out = parts[0].new_empty((len(rows), *parts[0].shape[1:]))
                 at = rows.to(out.device)
                 start = 0
+                # Each chunk is freed once written (no name keeps the last
+                # one while the next field is written).
                 while parts:
-                    part = parts.pop(0)
-                    out[at[start : start + len(part)]] = part
-                    start += len(part)
+                    n = len(parts[0])
+                    out[at[start : start + n]] = parts.pop(0)
+                    start += n
             record[key] = out.to(device) if key in chunks else out
         return record
 
@@ -4423,11 +4425,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         }
         for key, parts in chunks.items():
             # Joined, so the removed and the kept rows are indexed once; the
-            # kept rows become the field's one chunk.
-            whole = torch.cat(parts)
-            parts.clear()
-            gone[key] = whole[removed.to(whole.device)]
-            parts.append(whole[record_keep_mask.to(whole.device)])
+            # kept rows become the field's one chunk. No name keeps the joined
+            # rows, so they are freed before the next field is joined.
+            parts[:] = [torch.cat(parts)]
+            gone[key] = parts[0][removed.to(parts[0].device)]
+            parts[0] = parts[0][record_keep_mask.to(parts[0].device)]
         removed_quad_sum = gone["mesh_quadratures"].sum(0)
         removed_err_sum = gone["mesh_quadrature_errors"].sum(0)
         # The result loss_fxn receives has the values (y, tracked variables)

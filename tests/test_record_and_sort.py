@@ -328,6 +328,44 @@ def test_every_record_path_returns_mesh_order(options):
     assert torch.equal(state.mesh, other_state.mesh)
 
 
+@needs_cuda
+@pytest.mark.parametrize("stage", ["removal", "final_ordering"])
+def test_fields_are_copied_one_at_a_time(stage):
+    """A removal by the re-check (each field's chunks joined) and the final
+    ordering (each field written in mesh order) free the copy of one field
+    before the next field is copied: with two tracked variables of F bytes
+    each, neighbors in the record, the GPU holds at most one field more than
+    the record (a name left holding the previous field's joined rows, or its
+    last chunk, made it two)."""
+    solver = adaptive_quadrature("uniform", "bosh3", device="cuda")
+    record, chunks = {}, {}
+    for mesh_index in ([3], [2, 0, 1]):  # out of mesh order, the last chunk large
+        batch = _batch(mesh_index)
+        for key in ("nodes", "h", "y", "mesh_quadratures", "mesh_quadrature_errors"):
+            setattr(batch, key, getattr(batch, key).cuda())
+        batch.error_ratios = batch.error_ratios.cuda()
+        tracked = torch.ones(len(mesh_index), 4, 2**17, dtype=torch.float64).cuda()
+        batch.tracked_variables = (tracked, 2 * tracked)
+        record = solver._record_results(
+            record, chunks, False, batch, torch.tensor(mesh_index, device="cuda")
+        )
+    del batch, tracked  # the record's chunks are the only names of the values
+    field = 4 * 4 * 2**17 * 8
+    torch.cuda.synchronize()
+    before = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    if stage == "removal":
+        zero = torch.zeros(1, dtype=torch.float64, device="cuda")
+        keep = torch.tensor([True, False, True, True], device="cuda")
+        solver._remove_failed_record_panels(
+            record, keep, chunks, lambda r: r.integral, zero, zero + 1, "cuda"
+        )
+    else:
+        solver._sort_record(record, chunks, "cuda")
+    torch.cuda.synchronize()
+    assert torch.cuda.max_memory_allocated() - before < 1.3 * field
+
+
 class TestFlattenOutput:
     """_flatten_output writes the joined values into one array."""
 

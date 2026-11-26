@@ -372,6 +372,12 @@ _COLLIDING_MESHES = [
     (torch.float32, 10**6, (1.0, 3.0), [10]),
     (torch.float32, 13, (1e4, 1e4 + 1), range(100)),
     (torch.float64, 10**4, (-1e10 - 1, -1e10), range(3)),
+    # Five units in the last place wide: more points than floating-point
+    # numbers, so points round onto mesh_final, and on the CPU seeds 4 and 5
+    # put a point below one two places before it (a rule that compared each
+    # point with the one before it only would keep it).
+    (torch.float32, 13, (1.0, 1.0000005960464478), range(6)),
+    (torch.float64, 13, (1.0, 1.000000000000001), range(6)),
 ]
 
 
@@ -387,6 +393,8 @@ _COLLIDING_MESHES = [
         "f32-1e6-reversed",
         "f32-13-far",
         "f64-1e4-neg",
+        "f32-13-5ulps",
+        "f64-13-5ulps",
     ],
 )
 def test_starting_mesh_drops_colliding_points(

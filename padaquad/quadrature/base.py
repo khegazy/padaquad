@@ -1183,29 +1183,36 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             )
             batch_size = len(nodes) * self.C
 
-            # The running integral and the cumulative sums, with the record.
+            # The running integral, and in cumulative mode the running sums.
             t0 = time.time()
-            if len(record) == 0:
-                # First batch: integral is just this batch's contribution
-                current_integral = method_output.integral.detach()
-                all_mesh_quadratures = method_output.mesh_quadratures.detach()
-                cum_mesh_quadratures = torch.cumsum(all_mesh_quadratures, 0)
-            else:
-                # Subsequent batches: add to previously recorded integral
-                current_integral = record["integral"] + method_output.integral.detach()
-                # Merge the batch with the record in mesh order to compute
-                # cumulative sums, from the left mesh index of every recorded
-                # and evaluated subinterval (integers, for any time dimension).
+            current_integral = method_output.integral.detach()
+            if record:
+                current_integral = record["integral"] + current_integral
+            # Absolute mode judges against the integral alone. Cumulative mode
+            # judges each subinterval, evaluated or recorded, against the
+            # running integral through it: the record and the batch merged in
+            # mesh order by the left mesh index of each (integers, for any time
+            # dimension; on the first turn the record is empty), one sum for
+            # both.
+            cum_mesh_quadratures = recorded_cum = None
+            if not self.use_absolute_error_ratio:
+                quads = method_output.mesh_quadratures
                 idxs_keep, idxs_input = self._merge_positions(
-                    record["mesh_index"], step_idxs
+                    record.get("mesh_index", step_idxs[:0]), step_idxs
                 )
-                all_mesh_quadratures = self._insert_sorted_results(
-                    record["mesh_quadratures"],
-                    idxs_keep,
-                    method_output.mesh_quadratures,
-                    idxs_input,
+                cum = torch.cumsum(
+                    self._insert_sorted_results(
+                        record.get("mesh_quadratures", quads[:0]),
+                        idxs_keep,
+                        quads,
+                        idxs_input,
+                    ),
+                    0,
                 )
-                cum_mesh_quadratures = torch.cumsum(all_mesh_quadratures, 0)[idxs_input]
+                cum_mesh_quadratures, recorded_cum = (
+                    cum[idxs_input],
+                    cum.detach()[idxs_keep],
+                )
             if self.speed_logger:
                 self.speed_logger.debug("merge with record: %s", time.time() - t0)
 
@@ -1276,15 +1283,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 # All inputs are integration-device-resident (mesh_quadratures
                 # and mesh_quadrature_errors are in _RECORD_LOOP_KEYS;
                 # reference_integral is on self.device) -- no host<->device copy.
-                # The record is non-empty here, so Step 3 took its merge branch
-                # and set idxs_keep. Cumulative mode judges each recorded step
-                # against the running integral through it, which includes this
-                # batch's steps to its left: the merged record+batch cumsum,
-                # restricted to the recorded positions (a cumsum over the record
-                # alone would leave the batch out).
+                # Cumulative mode judges each recorded step against the running
+                # integral through it, which includes this batch's steps to its
+                # left (recorded_cum, from the sum above; None in absolute
+                # mode).
                 extra_split_idxs, record_keep_mask, _ = self._failed_record_positions(
                     record,
-                    torch.cumsum(all_mesh_quadratures.detach(), 0)[idxs_keep],
+                    recorded_cum,
                     reference_integral,
                     mesh,
                     split_counts,
@@ -1557,10 +1562,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # _prune_excess_mesh can merge one with a right neighbour whose running
         # integral, and so its tolerance, is much larger. Runs before the record
         # is moved to result_device, so all inputs are on the integration device.
+        # The record is in mesh order, so in cumulative mode its own running
+        # sum (None) is the final running integral.
         final_ratios, final_fails, nonfinite = self._record_error_check(
-            record,
-            torch.cumsum(record["mesh_quadratures"].detach(), 0),
-            record["integral"].detach(),
+            record, None, record["integral"].detach()
         )
         final_fails = final_fails | nonfinite
         # The split statistics and the check in one read of the device.

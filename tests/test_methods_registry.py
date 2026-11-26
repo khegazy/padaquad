@@ -18,7 +18,7 @@ Risks introduced by the split:
     instead of one of the two generic classes (``UniformMethodClass``,
     ``VariableMethodClass``), so it would need handling of its own.
 
-This file pins all four invariants, plus ``_get_method``'s clone isolation
+This file pins all four invariants, plus ``_get_method``'s copy isolation
 and the ``MethodClass`` interface for every registered rule. It is a lightweight registry-shape
 sanity net for any future family addition.
 """
@@ -151,18 +151,19 @@ def _tensors(method) -> list[torch.Tensor]:
 
 
 @pytest.mark.parametrize(("sampling_type", "name"), _registered())
-def test_get_method_returns_independent_clone(sampling_type, name):
+def test_get_method_returns_a_copy_of_the_registry_entry(sampling_type, name):
     """``_get_method`` returns a copy of the registry instance that shares no
-    tensor storage with it, at both dtypes; changing the copy's dtype leaves
-    the registry instance at float64 (clone isolation guarantee).
+    tensor storage with it, at both dtypes, and leaves the registry instance
+    at float64; the copy is the one ``MethodClass.to`` returns for that key.
     """
     canonical = _registry(sampling_type)[name]
     for dtype in (torch.float64, torch.float32):
         instance = _get_method(sampling_type, name, "cpu", dtype)
         assert isinstance(instance, MethodClass)
         assert instance is not canonical, (
-            f"{name}: _get_method returned the singleton, not a clone"
+            f"{name}: _get_method returned the registry instance, not a copy"
         )
+        assert instance is canonical.to("cpu", dtype)
         canonical_ptrs = {t.data_ptr() for t in _tensors(canonical)}
         assert not canonical_ptrs & {t.data_ptr() for t in _tensors(instance)}, (
             f"{name}: a tensor aliases the registry instance"

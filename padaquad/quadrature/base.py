@@ -529,8 +529,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         Called from ``SolverBase._set_dtype``, which runs at the end of
         ``SolverBase.__init__`` (the method's first build) and on every later
-        dtype change. ``_get_method`` clones the named method from the registry of this
-        solver's ``sampling_type``.
+        dtype change. ``_get_method`` converts the named method of the registry of
+        this solver's ``sampling_type``; the converted method is shared with every
+        solver of the same method, device and dtype (``MethodClass.to``).
 
         Parameters
         ----------
@@ -3194,7 +3195,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         ``self.device``. To run the optimal-mesh computation on
         ``result_device``, so the large per-subinterval record tensors never
         have to be copied back to the integration device, this context manager
-        sets ``self.device`` to ``device`` and moves the method's tensors there
+        sets ``self.device`` to ``device`` and ``self.method`` to the method
+        converted to ``device`` (``MethodClass.to``, built once per process)
         for the duration of the block, restoring both on exit. It does nothing
         when ``device`` already equals ``self.device``.
 
@@ -3206,14 +3208,13 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         if device == self.device:
             yield
             return
-        original_device = self.device
+        original_device, original_method = self.device, self.method
         self.device = device
-        self.method.to_device(device)
+        self.method = original_method.to(device, self.dtype)
         try:
             yield
         finally:
-            self.device = original_device
-            self.method.to_device(original_device)
+            self.device, self.method = original_device, original_method
 
     def _get_optimal_mesh(
         self,

@@ -13,28 +13,9 @@ from _helpers import (
     needs_cuda,
 )
 
-from padaquad import UNIFORM_METHODS, integrand_dict
+from padaquad import integrand_dict
 from padaquad.distributed import _resolve_device
 from padaquad.results import IntegrationResult
-
-
-def _save_tableau(method_name):
-    """Save a copy of a uniform method's tableau tensors (they are singletons)."""
-    tab = UNIFORM_METHODS[method_name].tableau
-    return {
-        "c": tab.c.clone(),
-        "b": tab.b.clone(),
-        "b_error": tab.b_error.clone(),
-    }
-
-
-def _restore_tableau(method_name, saved):
-    """Restore a uniform method's tableau tensors from saved copies."""
-    tab = UNIFORM_METHODS[method_name].tableau
-    tab.c = saved["c"]
-    tab.b = saved["b"]
-    tab.b_error = saved["b_error"]
-
 
 # ---------------------------------------------------------------------------
 # _set_dtype
@@ -53,27 +34,19 @@ class TestSetDtype:
 
     def test_float32_tolerances(self):
         """float32 sets medium assertion tolerances."""
-        saved = _save_tableau("bosh3")
         solver = make_solver_for_unit_test()
-        try:
-            solver._set_dtype(torch.float32)
-            assert solver.atol_assert == 1e-7
-            assert solver.rtol_assert == 1e-5
-        finally:
-            _restore_tableau("bosh3", saved)
+        solver._set_dtype(torch.float32)
+        assert solver.atol_assert == 1e-7
+        assert solver.rtol_assert == 1e-5
 
     def test_float16_raises(self):
         """float16 is refused at _set_dtype time (Bug B4 fix). Its ~1e-3
         precision floor exceeds typical adaptive tolerances; the
         previous "loose-tolerance" path silently produced wrong results.
         """
-        saved = _save_tableau("bosh3")
         solver = make_solver_for_unit_test()
-        try:
-            with pytest.raises(ValueError, match=r"float16|coarse"):
-                solver._set_dtype(torch.float16)
-        finally:
-            _restore_tableau("bosh3", saved)
+        with pytest.raises(ValueError, match=r"float16|coarse"):
+            solver._set_dtype(torch.float16)
 
     def test_invalid_dtype_raises(self):
         """Non-float dtype raises ValueError."""
@@ -93,13 +66,9 @@ class TestSetDtype:
 
     def test_converts_y0(self):
         """y0 dtype matches after conversion."""
-        saved = _save_tableau("bosh3")
         solver = make_solver_for_unit_test()
-        try:
-            solver._set_dtype(torch.float32)
-            assert solver.init_y0.dtype == torch.float32
-        finally:
-            _restore_tableau("bosh3", saved)
+        solver._set_dtype(torch.float32)
+        assert solver.init_y0.dtype == torch.float32
 
 
 # ---------------------------------------------------------------------------
@@ -112,39 +81,27 @@ class TestSetDtypeByInput:
 
     def test_infers_from_t(self):
         """Dtype inferred from t when provided."""
-        saved = _save_tableau("bosh3")
         solver = make_solver_for_unit_test()
-        try:
-            solver.set_dtype_by_input(mesh=torch.tensor([0.0], dtype=torch.float32))
-            assert solver.dtype == torch.float32
-        finally:
-            _restore_tableau("bosh3", saved)
+        solver.set_dtype_by_input(mesh=torch.tensor([0.0], dtype=torch.float32))
+        assert solver.dtype == torch.float32
 
     def test_infers_from_t_init(self):
         """Dtype inferred from mesh_init when t is None."""
-        saved = _save_tableau("bosh3")
         solver = make_solver_for_unit_test()
-        try:
-            solver.set_dtype_by_input(
-                mesh=None, mesh_init=torch.tensor([0.0], dtype=torch.float32)
-            )
-            assert solver.dtype == torch.float32
-        finally:
-            _restore_tableau("bosh3", saved)
+        solver.set_dtype_by_input(
+            mesh=None, mesh_init=torch.tensor([0.0], dtype=torch.float32)
+        )
+        assert solver.dtype == torch.float32
 
     def test_infers_from_t_final(self):
         """Dtype inferred from mesh_final when t and mesh_init are None."""
-        saved = _save_tableau("bosh3")
         solver = make_solver_for_unit_test()
-        try:
-            solver.set_dtype_by_input(
-                mesh=None,
-                mesh_init=None,
-                mesh_final=torch.tensor([1.0], dtype=torch.float32),
-            )
-            assert solver.dtype == torch.float32
-        finally:
-            _restore_tableau("bosh3", saved)
+        solver.set_dtype_by_input(
+            mesh=None,
+            mesh_init=None,
+            mesh_final=torch.tensor([1.0], dtype=torch.float32),
+        )
+        assert solver.dtype == torch.float32
 
     def test_all_none_noop(self):
         """All None leaves dtype unchanged."""
@@ -154,16 +111,12 @@ class TestSetDtypeByInput:
 
     def test_priority_t_over_t_init(self):
         """t takes priority over mesh_init."""
-        saved = _save_tableau("bosh3")
         solver = make_solver_for_unit_test()
-        try:
-            solver.set_dtype_by_input(
-                mesh=torch.tensor([0.0], dtype=torch.float32),
-                mesh_init=torch.tensor([0.0], dtype=torch.float64),
-            )
-            assert solver.dtype == torch.float32
-        finally:
-            _restore_tableau("bosh3", saved)
+        solver.set_dtype_by_input(
+            mesh=torch.tensor([0.0], dtype=torch.float32),
+            mesh_init=torch.tensor([0.0], dtype=torch.float64),
+        )
+        assert solver.dtype == torch.float32
 
     def test_integrate_infers_dtype_from_bounds(self):
         """integrate() given float32 bounds on a float64 solver runs in float32.

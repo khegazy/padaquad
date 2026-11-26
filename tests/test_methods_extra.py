@@ -46,55 +46,29 @@ class TestVariableHeunWeights:
 
 
 # ---------------------------------------------------------------------------
-# _Tableau.to_device / UniformMethodClass.to_device
+# MethodClass.to: device and dtype
 # ---------------------------------------------------------------------------
 
 
-class TestTableauToDevice:
-    """Tests for device movement (CPU-only)."""
+class TestTo:
+    """Tests for ``MethodClass.to`` on both method classes (CPU-only)."""
 
-    def test_tableau_to_device_cpu(self):
-        """_Tableau.to_device('cpu') keeps all tensors on CPU."""
-        tableau = _Tableau(
-            c=torch.tensor([0.0, 1.0]),
-            b=torch.tensor([0.5, 0.5]),
-            b_error=torch.tensor([1.0, -1.0]),
-        )
-        tableau.to_device("cpu")
-        assert tableau.c.device.type == "cpu"
-        assert tableau.b.device.type == "cpu"
-        assert tableau.b_error.device.type == "cpu"
-
-    def test_method_class_to_device_cpu(self):
-        """UniformMethodClass.to_device('cpu') moves tableau to CPU."""
-        # Clone to avoid mutating the singleton (cpu->cpu is a no-op
-        # in terms of values, but keeping the test isolated is good
-        # practice now that singletons are no longer self-protecting).
-        method = UNIFORM_METHODS["bosh3"].clone()
-        method.to_device("cpu")
+    def test_uniform_method_to_cpu(self):
+        """UniformMethodClass.to('cpu', ...) puts every tableau tensor on the CPU."""
+        method = UNIFORM_METHODS["bosh3"].to("cpu", torch.float64)
         assert method.tableau.c.device.type == "cpu"
         assert method.tableau.b.device.type == "cpu"
+        assert method.tableau.b_error.device.type == "cpu"
 
-    def test_variable_method_to_device(self):
-        """VariableMethodClass.to_device('cpu') moves the node fractions to CPU."""
-        method = VARIABLE_METHODS["interpolatory3_variable"].clone()
-        method.to_device("cpu")
+    def test_variable_method_to_cpu(self):
+        """VariableMethodClass.to('cpu', ...) puts the node fractions on the CPU."""
+        method = VARIABLE_METHODS["interpolatory3_variable"].to("cpu", torch.float64)
         assert method.c.device.type == "cpu"
 
-
-# ---------------------------------------------------------------------------
-# VariableMethodClass dtype conversion
-# ---------------------------------------------------------------------------
-
-
-class TestVariableMethodDtype:
-    """Tests for variable method dtype conversion."""
-
-    def test_to_dtype_float32(self):
-        """VariableMethodClass.to_dtype converts the node fractions; the weights
+    def test_variable_method_to_float32(self):
+        """VariableMethodClass.to converts the node fractions; the weights
         follow the dtype of the nodes they are computed from."""
-        method = VARIABLE_METHODS["interpolatory3_variable"].clone()
-        method.to_dtype(torch.float32)
+        method = VARIABLE_METHODS["interpolatory3_variable"].to("cpu", torch.float32)
         assert method.c.dtype == torch.float32
         b, b_error = method.weights(method.c.view(1, 3, 1))
         assert b.dtype == b_error.dtype == torch.float32

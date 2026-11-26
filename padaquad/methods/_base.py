@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-@dataclass
+@dataclass(frozen=True)
 class _Tableau:
     """
     Fixed node fractions and weights of a uniform method.
@@ -40,6 +40,10 @@ class _Tableau:
     Named after the Butcher tableau of a Runge-Kutta method, whose ``c`` and
     ``b`` rows these are for the Runge-Kutta methods; the Gauss-Kronrod and
     Clenshaw-Curtis methods use the same three arrays.
+
+    Frozen: a method is shared by every solver that uses it (see
+    ``MethodClass.to``), so its fields are never reassigned. Freezing does not
+    stop in-place writes into the tensors, which must not be made either.
 
     Attributes
     ----------
@@ -57,36 +61,6 @@ class _Tableau:
     c: torch.Tensor
     b: torch.Tensor
     b_error: torch.Tensor
-
-    def to_dtype(self, dtype: torch.dtype) -> None:
-        """Convert all tableau tensors to the specified dtype.
-
-        Mutates in place. Clone the owning method first
-        (``MethodClass.clone()``) if you want to leave the original tensors
-        at their pre-conversion precision (which is irreversibly lossy when
-        going to lower-precision dtypes).
-
-        Parameters
-        ----------
-        dtype : torch.dtype
-            The dtype to convert ``c``, ``b`` and ``b_error`` to.
-        """
-        self.c = self.c.to(dtype)
-        self.b = self.b.to(dtype)
-        self.b_error = self.b_error.to(dtype)
-
-    def to_device(self, device: str | torch.device) -> None:
-        """
-        Move all tableau tensors to the specified device.
-
-        Parameters
-        ----------
-        device : str or torch.device
-            The device to move ``c``, ``b`` and ``b_error`` to.
-        """
-        self.c = self.c.to(device)
-        self.b = self.b.to(device)
-        self.b_error = self.b_error.to(device)
 
 
 class DegreeMeasurement(NamedTuple):
@@ -113,6 +87,10 @@ class DegreeMeasurement(NamedTuple):
     lower_degree: int
     errors: torch.Tensor
     lower_errors: torch.Tensor
+
+
+# Converted methods by (source method, device, dtype); see MethodClass.to.
+_CONVERTED: dict[tuple[MethodClass, torch.device, torch.dtype], MethodClass] = {}
 
 
 class MethodClass(ABC):
@@ -239,26 +217,62 @@ class MethodClass(ABC):
             ``(b, b_error)``, each of shape [N, C, 1].
         """
 
-    @abstractmethod
-    def to_dtype(self, dtype: torch.dtype) -> None:
+    def to(self, device: str | torch.device, dtype: torch.dtype) -> MethodClass:
         """
-        Convert the method's tensors to ``dtype`` in place.
+        Return this method with its tensors on ``device`` in ``dtype``; built once.
 
-        Parameters
-        ----------
-        dtype : torch.dtype
-            The dtype to convert to.
-        """
+        The converted method is a new object holding copies of the tensors, so it
+        never shares memory with ``self`` and ``self`` is unchanged. It is built
+        on the first call for a ``(self, device, dtype)`` and kept for the life
+        of the process (in ``_CONVERTED``); every later call returns the same
+        object, which every solver of that method, device and dtype then
+        shares. Do not write into its tensors in place: the change would reach
+        all of those solvers.
 
-    @abstractmethod
-    def to_device(self, device: str | torch.device) -> None:
-        """
-        Move the method's tensors to ``device`` in place.
+        The key is the object ``self``, not its name in a registry, so a
+        solver keeps its method when a registry entry is replaced. An index-less
+        ``"cuda"`` means the current CUDA device, as in ``Tensor.to``. Each
+        tensor is moved to ``device`` before its dtype is changed, so the cast
+        runs on ``device``.
 
         Parameters
         ----------
         device : str or torch.device
-            The device to move to.
+            The device of the converted tensors.
+        dtype : torch.dtype
+            The dtype of the converted tensors.
+
+        Returns
+        -------
+        MethodClass
+            The converted method, of the same class as ``self``.
+        """
+        device = torch.device(device)
+        if device.type == "cuda" and device.index is None:
+            device = torch.device("cuda", torch.cuda.current_device())
+        key = (self, device, dtype)
+        if key not in _CONVERTED:
+            # setdefault: when two threads build the same method, both return
+            # the one stored.
+            _CONVERTED.setdefault(
+                key, self._map_tensors(lambda t: t.to(device).to(dtype, copy=True))
+            )
+        return _CONVERTED[key]
+
+    @abstractmethod
+    def _map_tensors(self, fn: Callable[[torch.Tensor], torch.Tensor]) -> Self:
+        """
+        Return a shallow copy of the method with ``fn`` applied to each of its tensors.
+
+        Parameters
+        ----------
+        fn : Callable
+            Maps a tensor of the method to the tensor the copy holds instead.
+
+        Returns
+        -------
+        Self
+            The copy; ``self`` is unchanged.
         """
 
     @property
@@ -421,21 +435,6 @@ class MethodClass(ABC):
         (degree, errors), (lower_degree, lower_errors) = measured
         return DegreeMeasurement(degree, lower_degree, errors, lower_errors)
 
-    def clone(self) -> Self:
-        """
-        Return an independent deep copy (no tensor shared with ``self``).
-
-        Each solver works on its own copy of the registry's float64 method, so
-        dtype or device changes on one solver never reach the registry or
-        another solver (lowering the dtype loses precision).
-
-        Returns
-        -------
-        Self
-            The copy, of the same class as ``self``.
-        """
-        return copy.deepcopy(self)
-
 
 class UniformMethodClass(MethodClass):
     """
@@ -518,27 +517,25 @@ class UniformMethodClass(MethodClass):
             self.tableau.b_error.unsqueeze(-1).expand(n_panels, -1, -1),
         )
 
-    def to_dtype(self, dtype: torch.dtype) -> None:
+    def _map_tensors(self, fn: Callable[[torch.Tensor], torch.Tensor]) -> Self:
         """
-        Convert the tableau to ``dtype``.
+        Return a shallow copy with a new tableau of ``fn`` applied to ``c``, ``b`` and ``b_error``.
 
         Parameters
         ----------
-        dtype : torch.dtype
-            The dtype to convert to.
-        """
-        self.tableau.to_dtype(dtype)
+        fn : Callable
+            Maps each tableau tensor to the copy's.
 
-    def to_device(self, device: str | torch.device) -> None:
+        Returns
+        -------
+        Self
+            The copy.
         """
-        Move the tableau to ``device``.
-
-        Parameters
-        ----------
-        device : str or torch.device
-            The device to move to.
-        """
-        self.tableau.to_device(device)
+        converted = copy.copy(self)
+        converted.tableau = _Tableau(
+            fn(self.tableau.c), fn(self.tableau.b), fn(self.tableau.b_error)
+        )
+        return converted
 
 
 class VariableMethodClass(MethodClass):
@@ -552,7 +549,7 @@ class VariableMethodClass(MethodClass):
     ``methods/interpolatory.py``), as each uniform method is an instance with
     its own tableau.
 
-    ``weight_function`` must be a module-level function: ``clone()`` keeps it
+    ``weight_function`` must be a module-level function: ``to()`` keeps it
     by reference, and solvers can then be pickled (a lambda or a local function
     cannot be pickled). It is stored on the instance; assigning it to the class
     instead would make Python pass ``self`` to it.
@@ -653,24 +650,23 @@ class VariableMethodClass(MethodClass):
             )
         return b.unsqueeze(-1), b_error.unsqueeze(-1)
 
-    def to_dtype(self, dtype: torch.dtype) -> None:
+    def _map_tensors(self, fn: Callable[[torch.Tensor], torch.Tensor]) -> Self:
         """
-        Convert the node fractions to ``dtype``.
+        Return a shallow copy with ``fn`` applied to the node fractions ``c``.
+
+        The copy shares ``weight_function``, a module-level function that holds
+        no state.
 
         Parameters
         ----------
-        dtype : torch.dtype
-            The dtype to convert to.
-        """
-        self.c = self.c.to(dtype)
+        fn : Callable
+            Maps ``c`` to the copy's.
 
-    def to_device(self, device: str | torch.device) -> None:
+        Returns
+        -------
+        Self
+            The copy.
         """
-        Move the node fractions to ``device``.
-
-        Parameters
-        ----------
-        device : str or torch.device
-            The device to move to.
-        """
-        self.c = self.c.to(device)
+        converted = copy.copy(self)
+        converted.c = fn(self.c)
+        return converted

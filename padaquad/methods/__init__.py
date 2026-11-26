@@ -16,9 +16,9 @@ a ``MethodClass`` instance whose weights may depend on the node positions:
 ``adaptive_heun`` (the same object as in ``UNIFORM_METHODS``) and
 ``interpolatory3_variable`` (module ``interpolatory``).
 
-The stored instances use float64 on the CPU. Each solver works on its own copy,
-converted to the solver's dtype and device, so the registries are never
-modified. Read a method's ``degree``, ``order`` and ``n_nodes``, or measure its
+The stored instances use float64 on the CPU and are never modified. A solver
+uses a copy converted to its device and dtype (``MethodClass.to``), built once
+per process and shared by every solver of that method, device and dtype. Read a method's ``degree``, ``order`` and ``n_nodes``, or measure its
 degree with ``measure_degree()``.
 
 Each method is defined by three arrays of length C (the number of nodes per
@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     import torch
 
 # Registries (described in the module docstring). Keys are method names; values
-# are float64 CPU ``MethodClass`` instances that ``_get_method`` clones per solver.
+# are float64 CPU ``MethodClass`` instances that ``_get_method`` converts (``to``).
 UNIFORM_METHODS: dict[str, UniformMethodClass] = {
     **RK_METHODS,
     **GK_METHODS,
@@ -76,13 +76,12 @@ def _get_method(
     dtype: torch.dtype,
 ) -> MethodClass:
     """
-    Retrieve and initialize an integration method by name and sampling type.
+    Return the named method of a sampling type, converted to a device and dtype.
 
-    Each solver gets its own copy of the method: both registries hold float64
-    instances, which are cloned here so that dtype and device changes stay
-    with one solver. Without the copy, two solvers would change each other's
-    weights, and converting the shared instance to float32 would lose
-    precision for every later solver.
+    Both registries hold float64 CPU instances, which are never modified; the
+    method returned is ``registry[method_name].to(device, dtype)``, a copy
+    built once per process and shared by every solver of that method, device
+    and dtype (see ``MethodClass.to``).
 
     Parameters
     ----------
@@ -99,8 +98,7 @@ def _get_method(
     Returns
     -------
     MethodClass
-        An initialized method object with tensors on the correct
-        device/dtype, independent of any other solver instance.
+        The converted method; its tensors must not be modified in place.
 
     Raises
     ------
@@ -116,10 +114,7 @@ def _get_method(
             f"Unknown method {method_name!r} for {sampling_type.name} sampling; "
             f"choose one of {list(registry)}."
         )
-    method = registry[method_name].clone()
-    method.to_device(device)
-    method.to_dtype(dtype)
-    return method
+    return registry[method_name].to(device, dtype)
 
 
 __all__ = [

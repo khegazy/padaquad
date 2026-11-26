@@ -67,7 +67,11 @@ This block runs in the test suite (`tests/test_examples_run.py`), so the
 assertions above are checked.
 
 Registering the method in `UNIFORM_METHODS` at run time makes it available to
-every solver created afterwards; each solver works on its own copy.
+every solver created afterwards. A solver uses a copy of it converted to its
+device and dtype, shared with the other solvers of the same method, device and
+dtype; a solver built before the entry is replaced keeps its own. Do not modify
+a method's tensors in place after it is registered: build a new method
+instead.
 
 ## A method whose weights depend on the node positions
 

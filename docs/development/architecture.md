@@ -22,9 +22,12 @@ Every method is an instance of one of two classes built from data:
 from the node positions). Both implement the interface of the abstract
 `MethodClass`: `node_fractions()`, `weights(nodes)`, `degree`, `order` and
 `error_exponent`. The solver reaches a method only through this interface, so a
-new method needs no solver change. Each solver works on its own copy of its
-method (`MethodClass.clone()`), so changing one solver's precision never
-changes the registries.
+new method needs no solver change. A solver uses its method converted to its
+device and dtype (`MethodClass.to`): a copy built once per process and shared
+by every solver of that method, device and dtype, so the registries never
+change. Never write into a method's tensors in place (for example
+`method.tableau.b.mul_(2)`): the change would reach every solver that shares
+the method.
 
 ## The integration loop
 

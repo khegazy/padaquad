@@ -414,8 +414,11 @@ None) and the cutoff for the constructor option `merge_rule`:
   `max(|E_hat|, |Q_hat - Q_i - Q_{i+1}|)`, the predicted merged error estimate
   and the halves-versus-whole difference. Both are linear in the stored
   values, so `_merged_pair_weights` builds four weight vectors per width ratio
-  (log2 ratio quantized to 2^-48), cached on the solver
-  (`_merge_weight_cache`, reset in `_set_solver_dtype`). With T > 1 it falls
+  (log2 ratio quantized to 2^-48), one entry per node (0 at a repeated
+  fraction, so they apply to the stored values as they are, no copy), cached
+  on the solver (`_merge_weight_cache`, reset in `_set_solver_dtype`; a
+  one-shot call pays 0.5-1.2 ms to fill it). The widths come from the final
+  mesh; the nodes are not read. With T > 1 it falls
   back to `"power_law"` with a warning.
 - `"power_law"` (PadaQuad 1.3.0 and 1.4.0): summed errors, cutoff `remove_cut / 2^(k-1)`
   (assumes the estimate scales as h^k, k = `error_exponent`; on wide steps it

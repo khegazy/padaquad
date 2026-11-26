@@ -59,6 +59,8 @@ from padaquad.distributed import DistributedEnvironment, _resolve_device
 from padaquad.methods import _get_method
 from padaquad.quadrature.memory import (
     _GB,
+    _check_evaluation_buffer,
+    _is_out_of_memory,
     _MemoryManagement,
     _restart_after_backward_oom,
     _save_grad,
@@ -74,6 +76,12 @@ if TYPE_CHECKING:
 
     from padaquad.methods import MethodClass
 
+# Largest temporary (bytes) of the operations on integrand values done in
+# blocks of rows: the weighted sum in ``_RK_integral`` and the selection of the
+# accepted rows in ``_keep_rows``, so neither needs a second copy of all the
+# values.
+_BLOCK_BYTES = 2**27
+
 
 def _RK_integral(
     t: torch.Tensor,
@@ -88,6 +96,10 @@ def _RK_integral(
     weights, summed over the C nodes and multiplied by the width ``h_i``:
     ``R_i = h_i * sum_j(b_ij * y_ij)``, and ``integral = y0 + sum_i(R_i)``.
     The function is used for every method, not only the Runge-Kutta ones.
+    The products ``b_ij * y_ij`` are formed for blocks of subintervals of at
+    most ``_BLOCK_BYTES`` (at least one subinterval), so the temporary
+    stays small however large ``y`` is; each row of the result depends only on
+    its own subinterval, so the blocks give the same bits as one sum.
 
     Parameters
     ----------
@@ -113,13 +125,59 @@ def _RK_integral(
     h = t[:, -1] - t[:, 0]
     logger.debug("H shape=%s values=%s", h.shape, h)
 
-    # Weighted sum of integrand evaluations within each step, scaled by step size.
-    # tableau_b*y: weight each evaluation, dim=1 sums over C quadrature points
-    RK_steps = h * torch.sum(tableau_b * y, dim=1)
+    # Weighted sum over the C nodes (dim 1) of each subinterval, scaled by its
+    # width, in blocks of rows (one block when N = 0, giving an empty sum).
+    row_bytes = y.shape[1:].numel() * y.element_size()
+    rows = max(1, _BLOCK_BYTES // max(1, row_bytes))
+    sums = [
+        torch.sum(tableau_b[i : i + rows] * y[i : i + rows], dim=1)
+        for i in range(0, max(1, len(y)), rows)
+    ]
+    RK_steps = h * (sums[0] if len(sums) == 1 else torch.cat(sums))
     logger.debug("RK_steps shape=%s values=%s", RK_steps.shape, RK_steps)
     # Sum all step contributions to get the total integral
     integral = y0 + torch.sum(RK_steps, dim=0)
     return integral, RK_steps, h
+
+
+def _keep_rows(x: torch.Tensor, keep: torch.Tensor, in_place: bool) -> torch.Tensor:
+    """
+    Return the rows of ``x`` where ``keep`` is True, in order.
+
+    With ``in_place``, the kept rows are moved to the front of ``x`` and the
+    first of them are returned, a view of ``x``: no second array as large as
+    the kept rows is allocated, only blocks of at most ``_BLOCK_BYTES``.
+    Kept row j comes from row ``idx[j] >= j``, so a block never overwrites a
+    row a later block reads. ``x`` is overwritten, so ``in_place`` is only for
+    an array nothing else reads. Even then, an ``x`` that requires grad is
+    indexed (a copy), since its autograd graph may need the old rows, and so
+    is a view of another tensor, such as f's own output kept as the pass's
+    values when one call covers the pass (f may still hold it).
+
+    Parameters
+    ----------
+    x : torch.Tensor
+        Values of N subintervals. Shape: [N, ...].
+    keep : torch.Tensor
+        True for the rows to keep, on any device. Shape: [N].
+    in_place : bool
+        True to move the kept rows within ``x``; False to index ``x``.
+
+    Returns
+    -------
+    torch.Tensor
+        The kept rows. Shape: [K, ...].
+    """
+    keep = keep.to(x.device)
+    if not in_place or x.requires_grad or x._base is not None:
+        return x[keep]
+    idx = torch.nonzero(keep).flatten()
+    row_bytes = x.shape[1:].numel() * x.element_size()
+    rows = max(1, _BLOCK_BYTES // max(1, row_bytes))
+    for i in range(0, len(idx), rows):
+        block = idx[i : i + rows]
+        x[i : i + len(block)] = x[block]
+    return x[: len(idx)]
 
 
 # Multi-GPU keyword options the solver forwards to ``DistributedEnvironment``,
@@ -864,6 +922,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             If a backward pass ran out of memory and PadaQuad cannot restart
             the integral (see ``parameters``); its ``state`` is the state to
             call again with, after resetting the gradients.
+        torch.OutOfMemoryError
+            If one point does not fit in memory, or, with
+            ``trade_speed_for_memory=False``, the integrand values of a pass
+            do not fit in one array; the message names the remedies.
 
         Examples
         --------
@@ -975,14 +1037,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     "after its last call of f. Pass trade_speed_for_memory=True, "
                     "or leave evaluation_buffer as None."
                 )
-            if (
-                isinstance(evaluation_buffer, bool)
-                or operator.index(evaluation_buffer) < 1
-            ):
-                raise ValueError(
-                    "evaluation_buffer must be an int >= 1 (bytes); got "
-                    f"{evaluation_buffer!r}."
-                )
+            _check_evaluation_buffer(evaluation_buffer)
         # Advice for a setting that works but may not do what it is meant to,
         # given once, on the first call of a series (no state yet): later calls
         # pass the state, and repeating it every optimizer step would bury it.
@@ -1305,6 +1360,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 keep_mask=keep_mask,
                 remove_mask=remove_mask,
                 extra_split_idxs=extra_split_idxs,
+                # The split path's arrays are the solver's own (an f output
+                # that requires grad is copied by _keep_rows); the full path's
+                # values are f's output, which f may still hold.
+                in_place=not take_gradient,
             )
             # The batch data passed in comes back filtered to the accepted steps
             # (None comes back only for None inputs: no values are kept with
@@ -1858,6 +1917,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         keep_mask: torch.Tensor | None = None,
         remove_mask: torch.Tensor | None = None,
         extra_split_idxs: torch.Tensor | None = None,
+        in_place: bool = False,
     ) -> tuple[
         MethodOutput | None,
         torch.Tensor | None,
@@ -1936,6 +1996,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             ascending and disjoint from ``mesh_idxs[remove_mask]``. Their
             trackers are set True so both halves are evaluated. None splits
             only the batch's rejected subintervals.
+        in_place : bool
+            True to keep the accepted subintervals' values and tracked
+            variables by moving them to the front of their arrays, which are
+            overwritten (``_keep_rows``); only for arrays the solver allocated
+            and nothing else reads. False (default) copies them.
 
         Returns
         -------
@@ -2053,17 +2118,17 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 method_output.mesh_quadrature_errors, 0
             )
         # The values are on the solver's device, or on result_device with
-        # trade_speed_for_memory; a mask indexes only a tensor on its own device
-        # (or a CUDA tensor with a CPU mask), so it follows each array.
-        # Indexing copies them, so a batch whose subintervals are all accepted
-        # is kept as it is: the copy would hold its values twice (measured: the
-        # peak of a pass of 1,000 gk21 subintervals with 1e5 outputs).
+        # trade_speed_for_memory. Indexing would copy the accepted ones, so the
+        # values would be held twice (measured: the peak of a pass of 1,000 gk21
+        # subintervals with 1e5 outputs): a batch whose subintervals are all
+        # accepted is kept as it is, and otherwise, with in_place, the accepted
+        # rows are moved within the arrays. The nodes are small and copied.
         all_kept = bool(torch.all(keep_mask))
         if y_step_eval is not None and not all_kept:
-            y_step_eval = y_step_eval[keep_mask.to(y_step_eval.device)]
+            y_step_eval = _keep_rows(y_step_eval, keep_mask, in_place)
         if tracked_step_eval is not None and not all_kept:
             tracked_step_eval = tuple(
-                tv[keep_mask.to(tv.device)] for tv in tracked_step_eval
+                _keep_rows(tv, keep_mask, in_place) for tv in tracked_step_eval
             )
         if nodes is not None and not all_kept:
             nodes = nodes[keep_mask.to(nodes.device)]
@@ -2500,6 +2565,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         are the same, bit for bit, whatever the buffer; the pass's integral is
         their sum.
 
+        When the values stay on the solver's device for the whole pass (when
+        ``values_device`` is that device, or is None with ``buffer_bytes``
+        infinite) and f's output does not require grad, the values are written, as each call returns, into one
+        array for the whole pass (its size is known before the first call:
+        no subinterval is split during a pass), and the waiting values are
+        integrated from its rows. The device then holds one copy of the
+        pass's values plus one call's output, not a list of the calls' values
+        and their joined copy. Otherwise the waiting values are kept in a
+        list and joined when they are integrated.
+
         Parameters
         ----------
         f : callable
@@ -2535,6 +2610,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             None); ``step_idxs``; and their integral, error estimate,
             contributions and widths (``MethodOutput``, on the solver's
             device).
+
+        Raises
+        ------
+        torch.OutOfMemoryError
+            If the array for the pass's values does not fit in memory, with
+            the remedies in its message.
         """
         C = self.C
         nodes = self._compute_nodes(mesh[step_idxs], mesh[step_idxs + 1])
@@ -2542,20 +2623,24 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         # Per integration of waiting values: the contributions, error estimates
         # and widths of their subintervals (solver's device). The values and
-        # tracked variables are written into arrays for the whole pass on
-        # values_device, allocated at the first integration, unless the first
-        # integration covers the whole pass, whose values are then kept as
-        # they are (no copy on the same device).
+        # tracked variables go into arrays for the whole pass on values_device
+        # (f_evals, tracked_out): written as each call returns when in_place,
+        # else at each integration, unless the first integration covers the
+        # whole pass, whose values are then kept as they are (no copy on the
+        # same device). in_place is decided at the first whole subinterval.
         quadrature_parts: list[torch.Tensor] = []
         error_parts: list[torch.Tensor] = []
         width_parts: list[torch.Tensor] = []
         f_evals: torch.Tensor | None = None
         tracked_out: tuple[torch.Tensor, ...] | None = None
-        # Values (and tracked variables) of whole subintervals not integrated
-        # yet, [n, C, D] each, and their size in bytes.
+        in_place: bool | None = None
+        # Without in_place: values (and tracked variables) of whole
+        # subintervals not integrated yet, [n, C, D] each. In both cases the
+        # waiting subintervals are n_done to n_filled, of waiting_bytes bytes.
         waiting: list[torch.Tensor] = []
         waiting_tracked: list[tuple[torch.Tensor, ...]] = []
         waiting_bytes = 0
+        n_filled = 0  # subintervals whose nodes are all evaluated
         # The values (and tracked variables) of a subinterval the last call
         # ended inside: fewer than C rows, joined to the next call's.
         leftover: torch.Tensor | None = None
@@ -2582,15 +2667,75 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                         )
                 n_whole = len(values) // C
                 if n_whole > 0:
-                    waiting.append(values[: n_whole * C].reshape(n_whole, C, -1))
-                    waiting_bytes += waiting[-1].numel() * waiting[-1].element_size()
-                    if tracked_values is not None:
-                        waiting_tracked.append(
-                            tuple(
-                                tv[: n_whole * C].reshape(n_whole, C, *tv.shape[1:])
-                                for tv in tracked_values
-                            )
+                    whole = values[: n_whole * C].reshape(n_whole, C, -1)
+                    whole_tracked = (
+                        None
+                        if tracked_values is None
+                        else tuple(
+                            tv[: n_whole * C].reshape(n_whole, C, *tv.shape[1:])
+                            for tv in tracked_values
                         )
+                    )
+                    if in_place is None:
+                        # When the pass's values stay on the solver's device
+                        # anyway: kept there (values_device), or integrated
+                        # once per pass and dropped (no buffer, no record).
+                        # An output that requires grad keeps the list: writing
+                        # it into an array the integration reads would put
+                        # every call in one autograd graph of in-place writes.
+                        in_place = not whole.requires_grad and (
+                            values_device == self.device
+                            or (values_device is None and buffer_bytes == math.inf)
+                        )
+                    if in_place and f_evals is None and n_whole == len(step_idxs):
+                        # One call covers the pass: its values are the pass's
+                        # array, without a copy. They are a view of f's
+                        # output, which _keep_rows copies from, not overwrites.
+                        f_evals, tracked_out = whole, whole_tracked
+                    elif in_place:
+                        if f_evals is None:
+                            try:
+                                f_evals = whole.new_empty(
+                                    (len(step_idxs), *whole.shape[1:])
+                                )
+                                if whole_tracked is not None:
+                                    tracked_out = tuple(
+                                        tv.new_empty((len(step_idxs), *tv.shape[1:]))
+                                        for tv in whole_tracked
+                                    )
+                            except (RuntimeError, MemoryError) as e:
+                                if not _is_out_of_memory(e):
+                                    raise
+                                gb = len(step_idxs) * whole[0].nbytes / _GB
+                                raise torch.OutOfMemoryError(
+                                    f"{e}\n\nThe integrand values of this pass "
+                                    f"({len(step_idxs)} subintervals, {gb:.3g} GB) "
+                                    f"do not fit in one array on {self.device}. "
+                                    "Pass trade_speed_for_memory=True with "
+                                    "record_evaluations=False or result_device="
+                                    "'cpu', so that about one call's values are "
+                                    "held at a time. On a GPU, when the error above "
+                                    "reports much memory reserved but unallocated, "
+                                    "setting the environment variable "
+                                    "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True "
+                                    "before CUDA is first used can also help. See "
+                                    "https://khegazy.github.io/padaquad/user_guide/"
+                                    "devices_memory.html#ug-pass-array-oom"
+                                ) from e
+                        f_evals[n_filled : n_filled + n_whole] = whole
+                        if whole_tracked is not None:
+                            assert tracked_out is not None
+                            for out_tv, tv in zip(
+                                tracked_out, whole_tracked, strict=True
+                            ):
+                                out_tv[n_filled : n_filled + n_whole] = tv
+                    else:
+                        waiting.append(whole)
+                        if whole_tracked is not None:
+                            waiting_tracked.append(whole_tracked)
+                    n_filled += n_whole
+                    waiting_bytes += whole.numel() * whole.element_size()
+                    del whole, whole_tracked
                 # The rows past the last whole subinterval; a copy, so the
                 # slice does not keep this call's values alive.
                 has_rest = len(values) > n_whole * C
@@ -2601,28 +2746,39 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     else None
                 )
                 del values, tracked_values, integrand, tracked
-                if waiting_bytes < buffer_bytes or not waiting:
+                if waiting_bytes < buffer_bytes or n_filled == n_done:
                     continue
-            elif not waiting:
+            elif n_filled == n_done:
                 break
 
             # Integrate the waiting subintervals and send their values on.
-            block = waiting[0] if len(waiting) == 1 else torch.cat(waiting)
-            block_tracked = (
-                None
-                if not waiting_tracked
-                else tuple(
-                    tv[0] if len(tv) == 1 else torch.cat(tv)
-                    for tv in zip(*waiting_tracked, strict=True)
+            if in_place:
+                assert f_evals is not None
+                block = f_evals[n_done:n_filled]
+                block_tracked = (
+                    None
+                    if tracked_out is None
+                    else tuple(tv[n_done:n_filled] for tv in tracked_out)
                 )
-            )
+            else:
+                block = waiting[0] if len(waiting) == 1 else torch.cat(waiting)
+                block_tracked = (
+                    None
+                    if not waiting_tracked
+                    else tuple(
+                        tv[0] if len(tv) == 1 else torch.cat(tv)
+                        for tv in zip(*waiting_tracked, strict=True)
+                    )
+                )
             waiting, waiting_tracked, waiting_bytes = [], [], 0
             n_block = len(block)
             out = self._calculate_integral(nodes[n_done : n_done + n_block], block)
             quadrature_parts.append(out.mesh_quadratures)
             error_parts.append(out.mesh_quadrature_errors)
             width_parts.append(out.h)
-            if values_device is not None and n_block == len(step_idxs):
+            if in_place:
+                pass  # already in f_evals
+            elif values_device is not None and n_block == len(step_idxs):
                 f_evals = block.to(values_device)
                 if block_tracked is not None:
                     tracked_out = tuple(tv.to(values_device) for tv in block_tracked)
@@ -2658,6 +2814,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             mesh_quadrature_errors=mesh_quadrature_errors,
             h=torch.cat(width_parts),
         )
+        if values_device is None:
+            f_evals, tracked_out = None, None  # the in_place arrays are dropped
         return nodes, f_evals, tracked_out, step_idxs, method_output
 
     #: log2 of a pair's width ratio is rounded to a multiple of 2**-48 before

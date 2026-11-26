@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import math
+import sys
 
 import pytest
 import torch
@@ -309,6 +310,130 @@ def test_value_devices(trade, record, values):
     assert result.h.device.type == "cpu"
     assert result.integral.device.type == "cuda"
     assert state.mesh.device.type == "cuda"
+
+
+@needs_cuda
+@pytest.mark.parametrize("record", [True, False])
+def test_default_holds_a_pass_once(record):
+    """Without trade_speed_for_memory, the GPU holds a pass's values about once:
+    gk21, 4096 float64 outputs, a first pass of 1000 subintervals in calls of
+    230 points, of which the 500 on [0.5, 1] are split (a frequency up to
+    40,000 there). Each call is written into one array for the pass, and the
+    accepted rows are moved within it, so the peak is below 1.8 times the
+    pass's values (measured 1.55; 2.43 with a list of calls joined at the end
+    and the accepted rows copied). The rest is the per-subinterval
+    contributions and error estimates of the 4096 outputs. The same with
+    record_evaluations=False, where the values are dropped after each pass."""
+    freqs = torch.linspace(1.0, 2.0, 4096, dtype=torch.float64, device="cuda")
+
+    def f(t):
+        return torch.sin(t * freqs * (1 + 20000 * (t > 0.5)))
+
+    mesh = torch.linspace(0.0, 1.0, 1001, dtype=torch.float64, device="cuda")[:, None]
+    solver = adaptive_quadrature(
+        "uniform", method="gk21", device="cuda", atol=1e-10, rtol=1e-10
+    )
+    torch.cuda.synchronize()
+    torch.cuda.empty_cache()
+    base = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    result, _ = solver.integrate(
+        f,
+        mesh=mesh,
+        take_gradient=False,
+        max_batch=230,
+        max_adaptive_splits=1,
+        record_evaluations=record,
+    )
+    torch.cuda.synchronize()
+    peak = torch.cuda.max_memory_allocated() - base
+    assert len(result.h) == 1500  # 500 of the 1000 were split once
+    assert peak < 1.8 * 1000 * solver.C * 4096 * 8, peak
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("record", [True, False])
+def test_one_call_pass_keeps_f_output_intact(device, record):
+    """When one call covers a pass (max_batch above every pass's points), its
+    output is kept as the pass's values without a copy; the accepted rows are
+    then copied from it, so the tensors f returned are never overwritten, and
+    the result equals a run whose calls are cut (max_batch 23)."""
+    returned, snapshots = [], []
+
+    def f(t):
+        out = torch.exp(30.0 * t)
+        returned.append(out)
+        snapshots.append(out.clone())
+        return out
+
+    torch.manual_seed(0)
+    result, _, _ = _run(f=f, device=device, max_batch=10**6, record_evaluations=record)
+    assert len(returned) > 2  # passes with splits
+    for out, snap in zip(returned, snapshots, strict=True):
+        assert torch.equal(out, snap)
+    torch.manual_seed(0)
+    cut, _, _ = _run(device=device, max_batch=23, record_evaluations=record)
+    assert torch.equal(result.integral, cut.integral)
+    assert torch.equal(result.h, cut.h)
+
+
+def test_keep_rows_in_place(monkeypatch):
+    """_keep_rows with in_place moves the kept rows to the front of x, in
+    blocks (here of 3 rows, so the last block is shorter), and returns a view
+    of x equal to indexing; without in_place, or for an x that requires grad
+    or is a view, it indexes and leaves x unchanged."""
+    import padaquad.quadrature.base as qbase
+
+    g = torch.Generator().manual_seed(0)
+    x = torch.randn(20, 4, 3, generator=g)
+    keep = torch.rand(20, generator=g) < 0.6
+    expected = x[keep].clone()
+    monkeypatch.setattr(qbase, "_BLOCK_BYTES", 3 * 4 * 3 * x.element_size())
+    copied = qbase._keep_rows(x, keep, in_place=False)
+    assert torch.equal(copied, expected)
+    assert copied.data_ptr() != x.data_ptr()
+    grad_x = x.clone().requires_grad_()
+    assert torch.equal(qbase._keep_rows(grad_x, keep, in_place=True), expected)
+    assert torch.equal(grad_x, x)
+    view = x.clone()[:]
+    assert torch.equal(qbase._keep_rows(view, keep, in_place=True), expected)
+    assert torch.equal(view, x)  # a view is copied from, not overwritten
+    kept = qbase._keep_rows(x, keep, in_place=True)
+    assert torch.equal(kept, expected)
+    assert kept.data_ptr() == x.data_ptr()
+    assert len(qbase._keep_rows(x, torch.zeros(20, dtype=torch.bool), True)) == 0
+
+
+def test_pass_array_out_of_memory_names_the_remedies(monkeypatch):
+    """An out-of-memory error at the allocation of a pass's array (default
+    setting, several calls per pass) is raised as torch.OutOfMemoryError
+    naming trade_speed_for_memory and expandable_segments; another error at
+    that allocation passes through unchanged."""
+    new_empty = torch.Tensor.new_empty
+
+    def failing(error):
+        def new_empty_in_split(self, *args, **kwargs):
+            # Only the allocations made by the split evaluation fail.
+            if sys._getframe(1).f_code.co_name == "_evaluate_f_on_split_nodes":
+                raise error
+            return new_empty(self, *args, **kwargs)
+
+        return new_empty_in_split
+
+    monkeypatch.setattr(
+        torch.Tensor,
+        "new_empty",
+        failing(RuntimeError("DefaultCPUAllocator: not enough memory")),
+    )
+    with pytest.raises(torch.OutOfMemoryError) as info:
+        _run(max_batch=5)
+    message = str(info.value)
+    assert "trade_speed_for_memory=True" in message
+    assert "expandable_segments:True" in message
+    assert "#ug-pass-array-oom" in message
+    monkeypatch.setattr(torch.Tensor, "new_empty", failing(RuntimeError("other")))
+    with pytest.raises(RuntimeError, match=r"^other$"):
+        _run(max_batch=5)
 
 
 @needs_cuda

@@ -28,6 +28,7 @@ import gc
 import inspect
 import logging
 import math
+import operator
 import os
 import time
 import weakref
@@ -89,6 +90,28 @@ def _shrink_batch(n: int) -> int:
         The smaller batch size.
     """
     return max(1, int(min(round(_OOM_BACKOFF * n), n - 1)))
+
+
+def _check_evaluation_buffer(evaluation_buffer: Any) -> None:
+    """
+    Check that ``evaluation_buffer`` is an int >= 1 (bytes).
+
+    Parameters
+    ----------
+    evaluation_buffer : Any
+        The value given to ``integrate`` or ``get_max_batch``, not None.
+
+    Raises
+    ------
+    ValueError
+        If it is a bool, or an int below 1.
+    TypeError
+        If it is not an int.
+    """
+    if isinstance(evaluation_buffer, bool) or operator.index(evaluation_buffer) < 1:
+        raise ValueError(
+            f"evaluation_buffer must be an int >= 1 (bytes); got {evaluation_buffer!r}."
+        )
 
 
 # Saved gradients, by id of the tensor: a weak reference to it (so that a
@@ -509,6 +532,7 @@ class _MemoryManagement:
         t: torch.Tensor | None = None,
         take_gradient: bool = True,
         f_args: tuple[Any, ...] = (),
+        evaluation_buffer: int | None = None,
     ) -> int | None:
         """
         Return the largest number of integrand evaluations per batch.
@@ -552,6 +576,13 @@ class _MemoryManagement:
         f_args : tuple
             Extra positional arguments of ``f``; tensors are moved to the
             solver's device. Default ``()``.
+        evaluation_buffer : int or None
+            The ``evaluation_buffer`` (bytes) of the calls that will use the
+            result, with ``trade_speed_for_memory=True``. Twice this many
+            bytes are kept free: the values waiting to be integrated, and
+            their copy when they are joined into one array to be integrated.
+            None (default) keeps nothing free for it. The constructor's
+            ``max_batch``, when given, is returned unchanged.
 
         Returns
         -------
@@ -563,8 +594,9 @@ class _MemoryManagement:
         ------
         ValueError
             If ``total_mem_usage`` is outside (0, 1], if ``f`` is given without
-            a float32 or float64 point ``t`` of shape [T], or if ``f`` does not
-            return values of shape [N, D].
+            a float32 or float64 point ``t`` of shape [T], if ``f`` does not
+            return values of shape [N, D], or if ``evaluation_buffer`` is not
+            None or an int >= 1.
 
         Examples
         --------
@@ -583,6 +615,10 @@ class _MemoryManagement:
         if total_mem_usage is None:
             total_mem_usage = self.init_total_mem_usage
         self._check_total_mem_usage(total_mem_usage)
+        reserved = 0.0
+        if evaluation_buffer is not None:
+            _check_evaluation_buffer(evaluation_buffer)
+            reserved = 2 * evaluation_buffer / _GB
         if f is not None:
             if (
                 not isinstance(t, torch.Tensor)
@@ -617,11 +653,12 @@ class _MemoryManagement:
                 take_gradient=take_gradient,
                 total_mem_usage=total_mem_usage,
                 f_args=f_args,
+                reserved=reserved,
             )
         if self.init_max_batch is not None:
             return self._cap_max_batch(self.init_max_batch)
         if self.f_mem_coeffs is not None:
-            return self._cap_max_batch(self._get_max_f_evals(total_mem_usage))
+            return self._cap_max_batch(self._get_max_f_evals(total_mem_usage, reserved))
         return None
 
     def _get_cpu_memory(self) -> tuple[float, float]:
@@ -770,12 +807,15 @@ class _MemoryManagement:
         take_gradient: bool,
         total_mem_usage: float,
         f_args: tuple[Any, ...] = (),
+        reserved: float = 0.0,
     ) -> int:
         """
         Fit the memory of one call of f on N points (``f_mem_coeffs``, GB).
 
         Returns the batch size the fit gives for the memory free at the end of
-        the measurement (lowered to the out-of-memory cap, ``_cap_max_batch``).
+        the measurement less ``reserved`` (GB; the evaluation buffer's, from
+        ``get_max_batch``), lowered to the out-of-memory cap
+        (``_cap_max_batch``). The test calls are not limited by ``reserved``.
         During an integration the batch size is recomputed at every evaluation
         from the memory free at that moment (``_get_max_f_evals``).
 
@@ -879,6 +919,9 @@ class _MemoryManagement:
             Fraction of total memory allowed (0 < value <= 1).
         f_args : tuple[Any, ...]
             Extra arguments passed to f.
+        reserved : float
+            Memory (GB) kept free for the evaluation buffer when the returned
+            batch size is computed. Default 0.
 
         Returns
         -------
@@ -1214,8 +1257,10 @@ class _MemoryManagement:
         # The estimate depends on take_gradient: the fit includes the factor s
         # only when it is True. _cap_max_batch applies the cap an out-of-memory
         # error above set, so the message reports the batch actually used.
-        usable = self._get_usable_memory(total_mem_usage)
-        max_batch = self._cap_max_batch(self._get_max_f_evals(total_mem_usage))
+        usable = max(0.0, self._get_usable_memory(total_mem_usage) - reserved)
+        max_batch = self._cap_max_batch(
+            self._get_max_f_evals(total_mem_usage, reserved)
+        )
         a, b, d = self.f_mem_coeffs
         note = ""
         if not ready:
@@ -1493,7 +1538,7 @@ class _MemoryManagement:
         buffer = (1 - total_mem_usage) * total
         return max(0, free - buffer)
 
-    def _get_max_f_evals(self, total_mem_usage: float) -> int:
+    def _get_max_f_evals(self, total_mem_usage: float, reserved: float = 0.0) -> int:
         """
         Compute the maximum number of integrand evaluations that fit in memory.
 
@@ -1506,6 +1551,9 @@ class _MemoryManagement:
         ----------
         total_mem_usage : float
             Fraction of total memory allowed.
+        reserved : float
+            Memory (GB) kept free for other uses, subtracted from the usable
+            memory first. Default 0.
 
         Returns
         -------
@@ -1522,7 +1570,7 @@ class _MemoryManagement:
                 "The memory of f is unknown; run the memory benchmark "
                 "(_setup_memory_checks) before sizing a batch."
             )
-        usable = self._get_usable_memory(total_mem_usage)
+        usable = max(0.0, self._get_usable_memory(total_mem_usage) - reserved)
         return _largest_n(self.f_mem_coeffs, _MEMORY_BUDGET * usable)
 
     def _batch_for(self, n_waiting: int) -> int:

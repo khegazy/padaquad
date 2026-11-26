@@ -67,17 +67,33 @@ def test_unreadable_file_is_named(tmp_path: Path, content: str) -> None:
 
 
 def test_memory_options_render_every_setting_of_every_integrand() -> None:
+    """Every integrand's table has a row per setting: the 12 of ``SETTINGS``,
+    defaults first and every later row with a bold value; or, for the
+    examples of ``EXAMPLE_SETTINGS``, those settings in order of max_batch."""
+    extension = _extension()
+    script = extension._load(extension.MEMORY_SCRIPT)
     results = json.loads(MEMORY_COMMITTED.read_text())
-    text = _extension().render_memory_options(MEMORY_COMMITTED)
+    text = extension.render_memory_options(MEMORY_COMMITTED)
     sections = text.split("\n#### ")[1:]
     assert len(sections) == len(results["examples"])
-    for section, example in zip(sections, results["examples"].values(), strict=True):
+    assert set(script.EXAMPLE_SETTINGS) <= set(results["examples"])
+    for section, (name, example) in zip(
+        sections, results["examples"].items(), strict=True
+    ):
+        settings = script.EXAMPLE_SETTINGS.get(name, script.SETTINGS)
+        short = name in script.EXAMPLE_SETTINGS
         lines = section.splitlines()
-        rows = [line for line in lines[lines.index("|" + "---|" * 8) + 1 :] if line]
-        assert len(rows) == len(example["rows"]) == 12
-        # The defaults come first; every later row differs in a bold value.
-        assert "**" not in rows[0]
-        assert all("**" in row for row in rows[1:])
+        columns = 7 if short else 10
+        rows = [
+            line for line in lines[lines.index("|" + "---|" * columns) + 1 :] if line
+        ]
+        assert len(example["rows"]) == len(rows) == len(settings)
+        assert "**" not in rows[0]  # the default setting, or the smallest batch
+        if short:
+            batches = [int(r.split("|")[1].strip(" `").replace(",", "")) for r in rows]
+            assert batches == sorted(batches)
+        else:
+            assert all("**" in row for row in rows[1:])
 
 
 def test_memory_options_missing_file_raises(tmp_path: Path) -> None:

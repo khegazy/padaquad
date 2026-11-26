@@ -1,16 +1,16 @@
 {
  "meta": {
-  "gpu": "NVIDIA A100-SXM4-80GB",
-  "gpu GB": 79,
+  "gpu": "NVIDIA A100-SXM4-40GB",
+  "gpu GB": 39,
   "torch": "2.8.0+cu128",
-  "commit": "2e59d54",
-  "date": "2026-11-25",
+  "commit": "dce0d1d",
+  "date": "2026-11-26",
   "buffer bytes": 268435456,
   "repeats": 2
  },
  "examples": {
   "light": {
-   "description": "A chirp and 50 narrow peaks: 2 outputs, float64, rtol 1e-10, gk21, max_batch 2,300",
+   "description": "A chirp and 50 narrow peaks: 2 outputs, float64, rtol 1e-10, gk21",
    "rows": [
     {
      "setting": {
@@ -18,14 +18,16 @@
       "result_device": "None",
       "record_evaluations": "True"
      },
-     "loop GB": 0.003632068634033203,
-     "call GB": 0.007121562957763672,
+     "loop GB": 0.025222301483154297,
+     "call GB": 0.025222301483154297,
      "host GB": 0.0,
-     "seconds": 0.11646768799982965,
-     "points": 133654,
-     "calls": 66,
+     "seconds": 0.1000066779088229,
+     "points": 133764,
+     "calls": 14,
+     "batch": 32430,
      "subintervals": 2911,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -33,14 +35,16 @@
       "result_device": "cpu",
       "record_evaluations": "True"
      },
-     "loop GB": 0.0026955604553222656,
-     "call GB": 0.0026955604553222656,
+     "loop GB": 0.02469778060913086,
+     "call GB": 0.02469778060913086,
      "host GB": 0.0,
-     "seconds": 0.07927645405288786,
-     "points": 133654,
-     "calls": 66,
+     "seconds": 0.07768228196073323,
+     "points": 133764,
+     "calls": 14,
+     "batch": 32430,
      "subintervals": 2911,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -49,14 +53,16 @@
       "record_evaluations": "True",
       "evaluation_buffer": "268435456"
      },
-     "loop GB": 0.003632068634033203,
-     "call GB": 0.007121562957763672,
+     "loop GB": 0.025222301483154297,
+     "call GB": 0.025222301483154297,
      "host GB": 0.0,
-     "seconds": 0.06799523602239788,
-     "points": 133654,
-     "calls": 66,
+     "seconds": 0.05881047004368156,
+     "points": 133764,
+     "calls": 14,
+     "batch": 32430,
      "subintervals": 2911,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -65,14 +71,16 @@
       "record_evaluations": "True",
       "evaluation_buffer": "268435456"
      },
-     "loop GB": 0.0026955604553222656,
-     "call GB": 0.0026955604553222656,
+     "loop GB": 0.02469778060913086,
+     "call GB": 0.02469778060913086,
      "host GB": 0.0,
-     "seconds": 0.0814725790405646,
-     "points": 133654,
-     "calls": 66,
+     "seconds": 0.07133096107281744,
+     "points": 133764,
+     "calls": 14,
+     "batch": 32430,
      "subintervals": 2911,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -80,14 +88,16 @@
       "result_device": "None",
       "record_evaluations": "True"
      },
-     "loop GB": 0.0037169456481933594,
-     "call GB": 0.007121562957763672,
+     "loop GB": 0.025222301483154297,
+     "call GB": 0.025222301483154297,
      "host GB": 0.0,
-     "seconds": 0.0805203199852258,
-     "points": 133654,
-     "calls": 66,
+     "seconds": 0.06927241699304432,
+     "points": 133764,
+     "calls": 14,
+     "batch": 32430,
      "subintervals": 2911,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -95,14 +105,16 @@
       "result_device": "cpu",
       "record_evaluations": "True"
      },
-     "loop GB": 0.0023660659790039062,
-     "call GB": 0.0023660659790039062,
+     "loop GB": 0.02469778060913086,
+     "call GB": 0.02469778060913086,
      "host GB": 0.0,
-     "seconds": 0.09381559793837368,
-     "points": 133654,
-     "calls": 66,
+     "seconds": 0.07020766206551343,
+     "points": 133764,
+     "calls": 14,
+     "batch": 32430,
      "subintervals": 2911,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -110,14 +122,16 @@
       "result_device": "None",
       "record_evaluations": "False"
      },
-     "loop GB": 0.0029850006103515625,
-     "call GB": 0.0029850006103515625,
+     "loop GB": 0.024883270263671875,
+     "call GB": 0.024883270263671875,
      "host GB": 0.0,
-     "seconds": 0.06519139104057103,
-     "points": 133654,
-     "calls": 66,
+     "seconds": 0.05550971790216863,
+     "points": 133764,
+     "calls": 14,
+     "batch": 32430,
      "subintervals": 2911,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -125,14 +139,16 @@
       "result_device": "cpu",
       "record_evaluations": "False"
      },
-     "loop GB": 0.0029850006103515625,
-     "call GB": 0.0029850006103515625,
+     "loop GB": 0.024883270263671875,
+     "call GB": 0.024883270263671875,
      "host GB": 0.0,
-     "seconds": 0.06142322300001979,
-     "points": 133654,
-     "calls": 66,
+     "seconds": 0.06130095792468637,
+     "points": 133764,
+     "calls": 14,
+     "batch": 32430,
      "subintervals": 2911,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -141,14 +157,16 @@
       "record_evaluations": "False",
       "evaluation_buffer": "268435456"
      },
-     "loop GB": 0.0029850006103515625,
-     "call GB": 0.0029850006103515625,
+     "loop GB": 0.024883270263671875,
+     "call GB": 0.024883270263671875,
      "host GB": 0.0,
-     "seconds": 0.062317749951034784,
-     "points": 133654,
-     "calls": 66,
+     "seconds": 0.051438970025628805,
+     "points": 133764,
+     "calls": 14,
+     "batch": 32430,
      "subintervals": 2911,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -157,14 +175,16 @@
       "record_evaluations": "False",
       "evaluation_buffer": "268435456"
      },
-     "loop GB": 0.0029850006103515625,
-     "call GB": 0.0029850006103515625,
+     "loop GB": 0.024883270263671875,
+     "call GB": 0.024883270263671875,
      "host GB": 0.0,
-     "seconds": 0.06036629097070545,
-     "points": 133654,
-     "calls": 66,
+     "seconds": 0.052237982978112996,
+     "points": 133764,
+     "calls": 14,
+     "batch": 32430,
      "subintervals": 2911,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -172,14 +192,16 @@
       "result_device": "None",
       "record_evaluations": "False"
      },
-     "loop GB": 0.0027189254760742188,
-     "call GB": 0.0027189254760742188,
+     "loop GB": 0.024883270263671875,
+     "call GB": 0.024883270263671875,
      "host GB": 0.0,
-     "seconds": 0.07128811103757471,
-     "points": 133654,
-     "calls": 66,
+     "seconds": 0.06569096399471164,
+     "points": 133764,
+     "calls": 14,
+     "batch": 32430,
      "subintervals": 2911,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -187,19 +209,21 @@
       "result_device": "cpu",
       "record_evaluations": "False"
      },
-     "loop GB": 0.0027189254760742188,
-     "call GB": 0.0027189254760742188,
+     "loop GB": 0.024883270263671875,
+     "call GB": 0.024883270263671875,
      "host GB": 0.0,
-     "seconds": 0.0736472619464621,
-     "points": 133654,
-     "calls": 66,
+     "seconds": 0.05189836700446904,
+     "points": 133764,
+     "calls": 14,
+     "batch": 32430,
      "subintervals": 2911,
-     "converged": true
+     "converged": true,
+     "same bits": true
     }
    ]
   },
   "medium network": {
-   "description": "Fourier-feature network, two hidden layers of 37 units, 100 outputs (~10,000 parameters), float32, rtol 1e-5, gk21, max_batch 4,600",
+   "description": "Fourier-feature network, two hidden layers of 37 units, 100 outputs (~10,000 parameters), float32, rtol 1e-5, gk21",
    "rows": [
     {
      "setting": {
@@ -207,14 +231,16 @@
       "result_device": "None",
       "record_evaluations": "True"
      },
-     "loop GB": 0.03245210647583008,
-     "call GB": 0.05901622772216797,
+     "loop GB": 0.03878068923950195,
+     "call GB": 0.058725833892822266,
      "host GB": 0.0,
-     "seconds": 0.06134789693169296,
-     "points": 72244,
-     "calls": 22,
+     "seconds": 0.06770301703363657,
+     "points": 72354,
+     "calls": 13,
+     "batch": 26082,
      "subintervals": 1576,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -222,14 +248,16 @@
       "result_device": "cpu",
       "record_evaluations": "True"
      },
-     "loop GB": 0.022660255432128906,
-     "call GB": 0.022660255432128906,
-     "host GB": 0.056873321533203125,
-     "seconds": 0.09294466697610915,
-     "points": 72244,
-     "calls": 22,
+     "loop GB": 0.03423929214477539,
+     "call GB": 0.03423929214477539,
+     "host GB": 0.059520721435546875,
+     "seconds": 0.09389072097837925,
+     "points": 72354,
+     "calls": 13,
+     "batch": 26082,
      "subintervals": 1576,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -238,14 +266,16 @@
       "record_evaluations": "True",
       "evaluation_buffer": "268435456"
      },
-     "loop GB": 0.03245210647583008,
-     "call GB": 0.05901622772216797,
+     "loop GB": 0.03878068923950195,
+     "call GB": 0.058725833892822266,
      "host GB": 0.0,
-     "seconds": 0.06545484194066375,
-     "points": 72244,
-     "calls": 22,
+     "seconds": 0.057707993080839515,
+     "points": 72354,
+     "calls": 13,
+     "batch": 26082,
      "subintervals": 1576,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -254,14 +284,16 @@
       "record_evaluations": "True",
       "evaluation_buffer": "268435456"
      },
-     "loop GB": 0.022660255432128906,
-     "call GB": 0.022660255432128906,
-     "host GB": 0.04312896728515625,
-     "seconds": 0.09285856003407389,
-     "points": 72244,
-     "calls": 22,
+     "loop GB": 0.03423929214477539,
+     "call GB": 0.03423929214477539,
+     "host GB": 0.058116912841796875,
+     "seconds": 0.10094128095079213,
+     "points": 72354,
+     "calls": 13,
+     "batch": 26082,
      "subintervals": 1576,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -269,14 +301,16 @@
       "result_device": "None",
       "record_evaluations": "True"
      },
-     "loop GB": 0.033206939697265625,
-     "call GB": 0.05876922607421875,
+     "loop GB": 0.03878068923950195,
+     "call GB": 0.058725833892822266,
      "host GB": 0.0,
-     "seconds": 0.06521147000603378,
-     "points": 72244,
-     "calls": 22,
+     "seconds": 0.057374847936443985,
+     "points": 72354,
+     "calls": 13,
+     "batch": 26082,
      "subintervals": 1576,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -284,14 +318,16 @@
       "result_device": "cpu",
       "record_evaluations": "True"
      },
-     "loop GB": 0.00851297378540039,
-     "call GB": 0.00851297378540039,
-     "host GB": 0.037506103515625,
-     "seconds": 0.09121476800646633,
-     "points": 72244,
-     "calls": 22,
+     "loop GB": 0.03423929214477539,
+     "call GB": 0.03423929214477539,
+     "host GB": 0.05687713623046875,
+     "seconds": 0.10591910197399557,
+     "points": 72354,
+     "calls": 13,
+     "batch": 26082,
      "subintervals": 1576,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -299,14 +335,16 @@
       "result_device": "None",
       "record_evaluations": "False"
      },
-     "loop GB": 0.022701263427734375,
-     "call GB": 0.022701263427734375,
+     "loop GB": 0.03428030014038086,
+     "call GB": 0.03428030014038086,
      "host GB": 0.0,
-     "seconds": 0.052508180029690266,
-     "points": 72244,
-     "calls": 22,
+     "seconds": 0.05074543098453432,
+     "points": 72354,
+     "calls": 13,
+     "batch": 26082,
      "subintervals": 1576,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -314,14 +352,16 @@
       "result_device": "cpu",
       "record_evaluations": "False"
      },
-     "loop GB": 0.022701263427734375,
-     "call GB": 0.022701263427734375,
+     "loop GB": 0.03428030014038086,
+     "call GB": 0.03428030014038086,
      "host GB": 0.0,
-     "seconds": 0.05276575102470815,
-     "points": 72244,
-     "calls": 22,
+     "seconds": 0.050918444991111755,
+     "points": 72354,
+     "calls": 13,
+     "batch": 26082,
      "subintervals": 1576,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -330,14 +370,16 @@
       "record_evaluations": "False",
       "evaluation_buffer": "268435456"
      },
-     "loop GB": 0.022701263427734375,
-     "call GB": 0.022701263427734375,
+     "loop GB": 0.03428030014038086,
+     "call GB": 0.03428030014038086,
      "host GB": 0.0,
-     "seconds": 0.04773243598174304,
-     "points": 72244,
-     "calls": 22,
+     "seconds": 0.046237208996899426,
+     "points": 72354,
+     "calls": 13,
+     "batch": 26082,
      "subintervals": 1576,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -346,14 +388,16 @@
       "record_evaluations": "False",
       "evaluation_buffer": "268435456"
      },
-     "loop GB": 0.022701263427734375,
-     "call GB": 0.022701263427734375,
+     "loop GB": 0.03428030014038086,
+     "call GB": 0.03428030014038086,
      "host GB": 0.0,
-     "seconds": 0.04803667601663619,
-     "points": 72244,
-     "calls": 22,
+     "seconds": 0.04778762208297849,
+     "points": 72354,
+     "calls": 13,
+     "batch": 26082,
      "subintervals": 1576,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -361,14 +405,16 @@
       "result_device": "None",
       "record_evaluations": "False"
      },
-     "loop GB": 0.00855398178100586,
-     "call GB": 0.00855398178100586,
+     "loop GB": 0.03428030014038086,
+     "call GB": 0.03428030014038086,
      "host GB": 0.0,
-     "seconds": 0.055658728000707924,
-     "points": 72244,
-     "calls": 22,
+     "seconds": 0.051476322929374874,
+     "points": 72354,
+     "calls": 13,
+     "batch": 26082,
      "subintervals": 1576,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -376,19 +422,21 @@
       "result_device": "cpu",
       "record_evaluations": "False"
      },
-     "loop GB": 0.00855398178100586,
-     "call GB": 0.00855398178100586,
+     "loop GB": 0.03428030014038086,
+     "call GB": 0.03428030014038086,
      "host GB": 0.0,
-     "seconds": 0.05437576596159488,
-     "points": 72244,
-     "calls": 22,
+     "seconds": 0.04883904103189707,
+     "points": 72354,
+     "calls": 13,
+     "batch": 26082,
      "subintervals": 1576,
-     "converged": true
+     "converged": true,
+     "same bits": true
     }
    ]
   },
   "large network": {
-   "description": "Fourier-feature network, two hidden layers of 583 units, 1,000 outputs (~1,000,000 parameters), float32, rtol 1e-5, gk21, max_batch 4,600",
+   "description": "Fourier-feature network, two hidden layers of 583 units, 1,000 outputs (~1,000,000 parameters), float32, rtol 1e-5, gk21",
    "rows": [
     {
      "setting": {
@@ -396,14 +444,16 @@
       "result_device": "None",
       "record_evaluations": "True"
      },
-     "loop GB": 0.2935023307800293,
-     "call GB": 0.5046911239624023,
+     "loop GB": 0.34476518630981445,
+     "call GB": 0.5043563842773438,
      "host GB": 0.0,
-     "seconds": 0.09753397898748517,
-     "points": 87332,
-     "calls": 25,
+     "seconds": 0.10010792303364724,
+     "points": 87442,
+     "calls": 13,
+     "batch": 29440,
      "subintervals": 1904,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -411,14 +461,16 @@
       "result_device": "cpu",
       "record_evaluations": "True"
      },
-     "loop GB": 0.23999261856079102,
-     "call GB": 0.23999261856079102,
-     "host GB": 0.4344329833984375,
-     "seconds": 0.2856598770013079,
-     "points": 87332,
-     "calls": 25,
+     "loop GB": 0.31319570541381836,
+     "call GB": 0.31319570541381836,
+     "host GB": 0.4458427429199219,
+     "seconds": 0.2695329691050574,
+     "points": 87442,
+     "calls": 13,
+     "batch": 29440,
      "subintervals": 1904,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -427,14 +479,16 @@
       "record_evaluations": "True",
       "evaluation_buffer": "268435456"
      },
-     "loop GB": 0.2935023307800293,
-     "call GB": 0.5046911239624023,
+     "loop GB": 0.34476518630981445,
+     "call GB": 0.5043563842773438,
      "host GB": 0.0,
-     "seconds": 0.0952999620931223,
-     "points": 87332,
-     "calls": 25,
+     "seconds": 0.09240014397073537,
+     "points": 87442,
+     "calls": 13,
+     "batch": 29440,
      "subintervals": 1904,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -443,14 +497,16 @@
       "record_evaluations": "True",
       "evaluation_buffer": "268435456"
      },
-     "loop GB": 0.24089479446411133,
-     "call GB": 0.24089479446411133,
-     "host GB": 0.4780693054199219,
-     "seconds": 0.30791516695171595,
-     "points": 87332,
-     "calls": 25,
+     "loop GB": 0.31319570541381836,
+     "call GB": 0.31319570541381836,
+     "host GB": 0.4739494323730469,
+     "seconds": 0.326677844976075,
+     "points": 87442,
+     "calls": 13,
+     "batch": 29440,
      "subintervals": 1904,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -458,14 +514,16 @@
       "result_device": "None",
       "record_evaluations": "True"
      },
-     "loop GB": 0.29249143600463867,
-     "call GB": 0.5038051605224609,
+     "loop GB": 0.34476518630981445,
+     "call GB": 0.5043563842773438,
      "host GB": 0.0,
-     "seconds": 0.0995844709686935,
-     "points": 87332,
-     "calls": 25,
+     "seconds": 0.09565938508603722,
+     "points": 87442,
+     "calls": 13,
+     "batch": 29440,
      "subintervals": 1904,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -473,14 +531,16 @@
       "result_device": "cpu",
       "record_evaluations": "True"
      },
-     "loop GB": 0.07824325561523438,
-     "call GB": 0.07824325561523438,
-     "host GB": 0.4357109069824219,
-     "seconds": 0.29026203497778624,
-     "points": 87332,
-     "calls": 25,
+     "loop GB": 0.31319570541381836,
+     "call GB": 0.31319570541381836,
+     "host GB": 0.4589424133300781,
+     "seconds": 0.33280769689008594,
+     "points": 87442,
+     "calls": 13,
+     "batch": 29440,
      "subintervals": 1904,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -488,14 +548,16 @@
       "result_device": "None",
       "record_evaluations": "False"
      },
-     "loop GB": 0.24093341827392578,
-     "call GB": 0.24093341827392578,
+     "loop GB": 0.3132343292236328,
+     "call GB": 0.3132343292236328,
      "host GB": 0.0,
-     "seconds": 0.06463348807301372,
-     "points": 87332,
-     "calls": 25,
+     "seconds": 0.06283254607114941,
+     "points": 87442,
+     "calls": 13,
+     "batch": 29440,
      "subintervals": 1904,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -503,14 +565,16 @@
       "result_device": "cpu",
       "record_evaluations": "False"
      },
-     "loop GB": 0.24093341827392578,
-     "call GB": 0.24093341827392578,
+     "loop GB": 0.3132343292236328,
+     "call GB": 0.3132343292236328,
      "host GB": 0.0,
-     "seconds": 0.06585128197912127,
-     "points": 87332,
-     "calls": 25,
+     "seconds": 0.06427944696042687,
+     "points": 87442,
+     "calls": 13,
+     "batch": 29440,
      "subintervals": 1904,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -519,14 +583,16 @@
       "record_evaluations": "False",
       "evaluation_buffer": "268435456"
      },
-     "loop GB": 0.24093341827392578,
-     "call GB": 0.24093341827392578,
+     "loop GB": 0.3132343292236328,
+     "call GB": 0.3132343292236328,
      "host GB": 0.0,
-     "seconds": 0.07397408701945096,
-     "points": 87332,
-     "calls": 25,
+     "seconds": 0.05896707298234105,
+     "points": 87442,
+     "calls": 13,
+     "batch": 29440,
      "subintervals": 1904,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -535,14 +601,16 @@
       "record_evaluations": "False",
       "evaluation_buffer": "268435456"
      },
-     "loop GB": 0.24093341827392578,
-     "call GB": 0.24093341827392578,
+     "loop GB": 0.3132343292236328,
+     "call GB": 0.3132343292236328,
      "host GB": 0.0,
-     "seconds": 0.062331057037226856,
-     "points": 87332,
-     "calls": 25,
+     "seconds": 0.06026818405371159,
+     "points": 87442,
+     "calls": 13,
+     "batch": 29440,
      "subintervals": 1904,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -550,14 +618,16 @@
       "result_device": "None",
       "record_evaluations": "False"
      },
-     "loop GB": 0.07837724685668945,
-     "call GB": 0.07837724685668945,
+     "loop GB": 0.3132343292236328,
+     "call GB": 0.3132343292236328,
      "host GB": 0.0,
-     "seconds": 0.06280746101401746,
-     "points": 87332,
-     "calls": 25,
+     "seconds": 0.05912506801541895,
+     "points": 87442,
+     "calls": 13,
+     "batch": 29440,
      "subintervals": 1904,
-     "converged": true
+     "converged": true,
+     "same bits": true
     },
     {
      "setting": {
@@ -565,14 +635,123 @@
       "result_device": "cpu",
       "record_evaluations": "False"
      },
-     "loop GB": 0.07837724685668945,
-     "call GB": 0.07837724685668945,
+     "loop GB": 0.3132343292236328,
+     "call GB": 0.3132343292236328,
      "host GB": 0.0,
-     "seconds": 0.06468692095950246,
-     "points": 87332,
-     "calls": 25,
+     "seconds": 0.06677063810639083,
+     "points": 87442,
+     "calls": 13,
+     "batch": 29440,
      "subintervals": 1904,
-     "converged": true
+     "converged": true,
+     "same bits": true
+    }
+   ]
+  },
+  "expensive field": {
+   "description": "A field of 512 x 512 outputs (1 MB per point) computed from a state of 64 numbers after 2,000 sequential steps (`SteppedField`), float32, rtol 1e-5, gk21",
+   "rows": [
+    {
+     "setting": {
+      "max_batch": "3000",
+      "trade_speed_for_memory": "False",
+      "record_evaluations": "False"
+     },
+     "loop GB": 32.15326261520386,
+     "call GB": 32.15326261520386,
+     "host GB": 3.9483566284179688,
+     "seconds": 6.402265854994766,
+     "points": 61802,
+     "calls": 28,
+     "batch": 3000,
+     "subintervals": 1349,
+     "converged": true,
+     "same bits": true
+    },
+    {
+     "setting": {
+      "max_batch": "3000",
+      "trade_speed_for_memory": "True",
+      "record_evaluations": "False"
+     },
+     "loop GB": 16.322211742401123,
+     "call GB": 16.322211742401123,
+     "host GB": 3.913097381591797,
+     "seconds": 3.5018342080293223,
+     "points": 61802,
+     "calls": 28,
+     "batch": 3000,
+     "subintervals": 1349,
+     "converged": true,
+     "same bits": true
+    },
+    {
+     "setting": {
+      "max_batch": "4000",
+      "trade_speed_for_memory": "False",
+      "record_evaluations": "False"
+     },
+     "loop GB": 32.15326261520386,
+     "call GB": 32.15326261520386,
+     "host GB": 3.9384918212890625,
+     "seconds": 5.673751519992948,
+     "points": 65802,
+     "calls": 26,
+     "batch": 3000,
+     "subintervals": 1349,
+     "converged": true,
+     "same bits": true
+    },
+    {
+     "setting": {
+      "max_batch": "4000",
+      "trade_speed_for_memory": "True",
+      "record_evaluations": "False"
+     },
+     "loop GB": 20.228699207305908,
+     "call GB": 20.228699207305908,
+     "host GB": 3.9414215087890625,
+     "seconds": 3.7924147250596434,
+     "points": 61802,
+     "calls": 23,
+     "batch": 4000,
+     "subintervals": 1349,
+     "converged": true,
+     "same bits": true
+    },
+    {
+     "setting": {
+      "max_batch": "5550",
+      "trade_speed_for_memory": "False",
+      "record_evaluations": "False"
+     },
+     "loop GB": 32.63180732727051,
+     "call GB": 32.63180732727051,
+     "host GB": 3.9453277587890625,
+     "seconds": 6.56110697099939,
+     "points": 71514,
+     "calls": 27,
+     "batch": 3122,
+     "subintervals": 1349,
+     "converged": true,
+     "same bits": true
+    },
+    {
+     "setting": {
+      "max_batch": "5550",
+      "trade_speed_for_memory": "True",
+      "record_evaluations": "False"
+     },
+     "loop GB": 26.2046537399292,
+     "call GB": 26.2046537399292,
+     "host GB": 3.935565948486328,
+     "seconds": 3.995136020006612,
+     "points": 61802,
+     "calls": 20,
+     "batch": 5550,
+     "subintervals": 1349,
+     "converged": true,
+     "same bits": true
     }
    ]
   }

@@ -71,23 +71,23 @@ def even_mesh(n_subintervals: int) -> torch.Tensor:
 
 @pytest.mark.parametrize(
     ("n_subintervals", "test_calls"),
-    [(11, [10, 100]), (46, [10, 100, 1000]), (500, [10, 100, 1000])],
+    [(11, [10, 100]), (48, [10, 100, 1000]), (500, [10, 100, 1000])],
 )
 def test_test_calls_stop_at_1000_or_the_order_of_the_first_pass(
     n_subintervals, test_calls, caplog
 ):
     """After the one-point output check, f is called on 10, 100 and 1,000
     points, stopping at the largest power of 10 not above the first pass (gk21:
-    23 nodes per subinterval, so 253, 1,058 and 11,500 points). The first call
+    21 nodes per subinterval, so 231, 1,008 and 10,500 points). The first call
     of the pass is then the whole pass, or 10 times the last test call (10,000
-    of the 11,500 points). No memory benchmark runs and none of its messages is
+    of the 10,500 points). No memory benchmark runs and none of its messages is
     logged."""
     f = Recorder()
     with caplog.at_level(logging.WARNING):
         result, result_state = solver().integrate(
             f, mesh=even_mesh(n_subintervals), take_gradient=False
         )
-    first_pass = 23 * n_subintervals
+    first_pass = 21 * n_subintervals
     first_call = min(first_pass, 10 * test_calls[-1])
     assert f.sizes[: len(test_calls) + 1] == [1, *test_calls]
     passes = f.sizes[len(test_calls) + 1 :]
@@ -116,13 +116,13 @@ def test_failed_test_call_shrinks_until_one_runs():
 
 @pytest.mark.parametrize("trade_speed_for_memory", [False, True])
 def test_batch_grows_tenfold_per_call_until_out_of_memory(trade_speed_for_memory):
-    """A state with batch size 100, not converged, and a pass of 11,500 points
-    (500 gk21 subintervals). Calls of 1,000, 10,000, then the 500 left,
+    """A state with batch size 100, not converged, and a pass of 11,508 points
+    (548 gk21 subintervals). Calls of 1,000, 10,000, then the 508 left,
     whether the values stay on the device or not (``trade_speed_for_memory``); with a
     limit of 3,000 points the call of 10,000 fails and shrinks by 0.75 per
     retry until it fits, and the state converges. Both give the right
     integral."""
-    state = IntegrationState(even_mesh(500), 100, False)
+    state = IntegrationState(even_mesh(548), 100, False)
     f = Recorder()
     result, result_state = solver().integrate(
         f,
@@ -131,7 +131,7 @@ def test_batch_grows_tenfold_per_call_until_out_of_memory(trade_speed_for_memory
         trade_speed_for_memory=trade_speed_for_memory,
     )
     assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
-    assert f.sizes[1:4] == [1000, 10000, 500]
+    assert f.sizes[1:4] == [1000, 10000, 508]
     assert (result_state.max_batch, result_state.max_batch_converged) == (
         10000,
         False,
@@ -186,7 +186,7 @@ def test_state_carries_mesh_and_batch_size_to_the_next_call():
     f = Recorder()
     second, _ = solver(max_batch=7).integrate(f, state=first_state, take_gradient=False)
     assert second.n_start_steps == len(first_state.mesh) - 1
-    assert f.sizes[1] == min(23 * second.n_start_steps, 10 * first_state.max_batch)
+    assert f.sizes[1] == min(21 * second.n_start_steps, 10 * first_state.max_batch)
     assert math.isclose(float(second.integral), EXACT, abs_tol=1e-9)
 
 
@@ -288,7 +288,7 @@ def grads(f):
     return float(f.w.grad), float(f.v.grad)
 
 
-GROWING = IntegrationState(even_mesh(500), 100, False)  # passes of 11,500 points
+GROWING = IntegrationState(even_mesh(500), 100, False)  # passes of 10,500 points
 
 
 def test_forward_out_of_memory_is_retried_with_gradients():
@@ -306,11 +306,11 @@ def test_forward_out_of_memory_is_retried_with_gradients():
 def test_backward_out_of_memory_restarts_without_double_counting(
     pass_parameters, caplog
 ):
-    """The backward pass of the batch of 10,000 points fails after the batch of
-    1,000 already added its gradient. The gradients this call added are put
+    """The backward pass of the batch of 9,513 points fails after the batch of
+    987 already added its gradient. The gradients this call added are put
     back (found by the graph walk; v appears only in that later batch) and the
     integral restarts with batches 0.75 times smaller (whole subintervals of
-    23 points: 9,890 fails, then 7,406 and 5,543, then 4,140 runs): the
+    21 points: 9,513 fails, then 7,119 and 5,334, then 3,990 runs): the
     gradients equal one integral's, not more. A gradient held before the call is kept
     and added to."""
     f = GradIntegrand(backward_limit=5000)
@@ -338,7 +338,7 @@ def test_custom_autograd_function_needs_parameters():
     state = info.value.state
     assert torch.equal(state.mesh, GROWING.mesh)
     assert state.max_batch_converged
-    assert state.max_batch == 7418
+    assert state.max_batch == 7135  # 0.75 x 9,513, the batch that failed
     f.w.grad = f.v.grad = None
     f.backward_limit = math.inf
     solver().integrate(f, state=state)

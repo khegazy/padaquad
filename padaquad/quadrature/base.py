@@ -2916,30 +2916,40 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         bary = bary / bary.abs().max()
 
         # Merged nodes with the left neighbor at [0, 1] and the right one at
-        # [1, 1 + rho]. A merged node on the shared point 1 is taken from the
-        # left neighbor; its last value and the right one's first value are
-        # the integrand at the same point (up to the last bit, since
-        # _compute_nodes computes that point from either side).
+        # [1, 1 + rho]. A merged node inside one neighbor takes that
+        # neighbor's polynomial; one between a neighbor's outermost node and
+        # its end (Gauss-Kronrod has no node at the ends) is extrapolated
+        # slightly: Eq. (4.2) holds at every x that is not a node, inside or
+        # outside the nodes, because the identity it divides by, Eq. (4.1),
+        # does. A merged node on the shared point 1 (the middle node when
+        # rho = 1) takes the mean of both neighbors' polynomials: when 1 is not
+        # a node, their extrapolations err in opposite directions where the
+        # nodes are rounded (float32 far from 0: the prediction was 100 times
+        # larger with the left one alone, measured 2026-11-26).
         x = c[None, :] * (1.0 + rho[:, None])  # [R, C]
-        in_left = x <= 1.0
-        s = torch.where(in_left, x, (x - 1.0) / rho[:, None])
-        to_node = s[..., None] - u  # [R, C, U]
-        on_node = to_node == 0
-        hits = on_node.any(dim=-1, keepdim=True)
-        terms = torch.where(
-            hits, on_node.to(torch.float64), bary / torch.where(on_node, 1.0, to_node)
-        )
-        basis = terms / terms.sum(dim=-1, keepdim=True)  # Eq. (4.2), [R, C, U]
-
+        left_share = torch.where(x < 1.0, 1.0, torch.where(x == 1.0, 0.5, 0.0))
         b, b_err = self.method.weights(
             x.unsqueeze(-1).to(self.method.node_fractions().dtype)
         )
-        # [R, 2 (b, b_err), C, U] summed over the merged nodes in each neighbor
-        weighted = torch.stack([b, b_err], dim=1).to(torch.float64) * basis[:, None]
-        left = in_left[:, None, :, None]
-        weights = torch.stack(
-            [(weighted * left).sum(dim=2), (weighted * ~left).sum(dim=2)], dim=1
-        )
+        # [R, 2 (b, b_err), C, 1]
+        bb = torch.stack([b, b_err], dim=1).to(torch.float64)
+        sides = []
+        for s, share in ((x, left_share), ((x - 1.0) / rho[:, None], 1.0 - left_share)):
+            to_node = s[..., None] - u  # [R, C, U]
+            on_node = to_node == 0
+            hits = on_node.any(dim=-1, keepdim=True)
+            terms = torch.where(
+                hits,
+                on_node.to(torch.float64),
+                bary / torch.where(on_node, 1.0, to_node),
+            )
+            basis = terms / terms.sum(dim=-1, keepdim=True)  # Eq. (4.2), [R, C, U]
+            # [R, 2, U]: summed over the merged nodes, each by its share (a
+            # merged node far outside this neighbor, share 0, can make its
+            # basis non-finite, so it is masked rather than multiplied by 0)
+            shared = torch.where(share[..., None] > 0, basis * share[..., None], 0.0)
+            sides.append((bb * shared[:, None]).sum(dim=2))
+        weights = torch.stack(sides, dim=1)
         return weights, first.to(rho.device)
 
     def _predict_merged_errors(

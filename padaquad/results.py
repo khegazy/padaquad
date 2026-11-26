@@ -82,10 +82,15 @@ class IntegrationResult:
     Every field is required and passed by keyword (``kw_only=True``), except
     ``tracked_variables``, ``loss``, ``converged``, ``n_start_steps``,
     ``n_start_steps_split`` and ``max_split_depth``, which default to
-    ``None``. Below, ``N`` is the number of accepted subintervals,
-    ``C`` the number of nodes per subinterval, ``P = C + (N - 1)(C - 1)`` the
-    number of distinct nodes, and ``M`` the number of mesh points (see
-    :ref:`ug-shapes`).
+    ``None``. Below, ``N`` is the number of accepted subintervals, ``C`` the
+    number of nodes per subinterval, ``P`` the number of points the integrand
+    was evaluated at, each listed once, and ``M`` the number of mesh points
+    (see :ref:`ug-shapes`). For a method with a node at both ends of its
+    subintervals (the Runge-Kutta and Clenshaw-Curtis methods and the
+    variable methods), neighbouring subintervals share their mesh point, so
+    ``P = N (C - 1) + 1``; for one without (the Gauss-Kronrod methods, whose
+    nodes are all interior), ``P = N C``, and no mesh point, not even
+    ``mesh_init`` or ``mesh_final``, is among the nodes.
 
     ``integral``, ``integral_error``, ``y0``, ``mesh_init`` and
     ``mesh_final`` are on the solver's device; the other tensors are on
@@ -117,9 +122,9 @@ class IntegrationResult:
     mesh_final : torch.Tensor
         Upper integration bound. Shape ``[T]``.
     nodes : torch.Tensor
-        Nodes of all accepted subintervals in one non-decreasing sequence; the
-        node shared by two neighbouring subintervals appears once. Shape
-        ``[P, T]``.
+        Nodes of all accepted subintervals in one non-decreasing sequence; a
+        node shared by two neighbouring subintervals (their mesh point)
+        appears once. Shape ``[P, T]``.
     h : torch.Tensor
         Width of each accepted subinterval. Shape ``[N, T]``.
     y : torch.Tensor or None

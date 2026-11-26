@@ -50,8 +50,8 @@ $$ (merge-condition)
 where `merge_rule` sets $P$ and the cutoff $\texttt{remove\_cut}'$.
 
 **`merge_rule="predicted"` (the default).** Every method places its nodes at
-fixed fractions of a subinterval, including both ends, and the integrand values
-at those nodes are already stored. On each neighbour, PadaQuad replaces the
+fixed fractions of a subinterval, and the integrand values at those nodes are
+already stored. On each neighbour, PadaQuad replaces the
 integrand by the polynomial through that neighbour's values (barycentric
 interpolation, {cite:t}`berrut2004`, Eqs. (3.2) and (4.2)), evaluates it at the
 nodes the merged subinterval would have, and applies the method's weights. This

@@ -223,7 +223,7 @@ def test_backward_that_never_fits_ends_in_an_error_after_few_restarts(caplog):
 
     with pytest.raises(BackwardOutOfMemoryError, match="cannot hold one subinterval"):
         solver().integrate(f, mesh=even_mesh(100), max_batch=2300)
-    # 2,300 -> 1,725 -> ... -> 23 points: about 15 attempts, each failing once.
+    # 2,289 -> 1,701 -> ... -> 21 points: about 15 attempts, each failing once.
     assert attempts[0] <= 20
     assert float(w.grad) == 5.0
 
@@ -333,8 +333,9 @@ def test_real_out_of_memory_in_f_is_retried(take_gradient):
 def test_real_out_of_memory_in_loss_fxn_puts_back_the_gradients():
     """The GPU version of ``test_out_of_memory_in_loss_fxn_puts_back_the_gradients``:
     f is cheap, and ``loss_fxn`` penalizes every integrand value through a
-    [points, 4096] temporary. The batch grows from 2,300 to 23,000 points, and
-    the loss of the 23,000-point batch (a 720 MiB temporary) does not fit; the
+    [points, 4096] temporary. The batch grows from 2,289 to 22,890 points (whole
+    gk21 subintervals of 21 points), and the loss of the 22,890-point batch (a
+    715 MiB temporary) does not fit; the
     CUDA error propagates with the first batch's gradient in ``w.grad``."""
     w = torch.tensor([1.3], dtype=torch.float64, device="cuda", requires_grad=True)
 

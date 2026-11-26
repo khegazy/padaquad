@@ -121,7 +121,8 @@ def test_saved_gradients_do_not_keep_every_batch_alive(leaf):
             x = t.detach().requires_grad_()
             refs.append(weakref.ref(x))
             return w * torch.sin(40 * x) + 0 * x
-        refs.extend(weakref.ref(v) for v in _leaves(t))
+        if len(t) > 1:  # the shape check's point depends on the bounds, the caller's
+            refs.extend(weakref.ref(v) for v in _leaves(t))
         return torch.sin(40 * t) + t
 
     kwargs = {}
@@ -185,14 +186,14 @@ def test_result_state_after_a_numpy_or_float_max_batch(max_batch):
 
 
 def test_out_of_memory_retry_shrinks_the_call_that_failed():
-    """A state of 100 points, not converged, and a pass of 5,750 points (250
+    """A state of 100 points, not converged, and a pass of 5,754 points (274
     gk21 subintervals). The first call is 1,000 points; the planned size then
-    grows to 10,000, but only 4,750 points are left, and that call fails
-    (limit 4,500). The retry should be 0.75 x 4,750 = 3,562 points, which
+    grows to 10,000, but only 4,754 points are left, and that call fails
+    (limit 4,500). The retry should be 0.75 x 4,754 = 3,565 points, which
     runs: one failed call. With the bug the retry is 0.75 x 10,000 = 7,500,
-    so the same 4,750 points are evaluated again (and fail) until 0.75^k x
-    10,000 drops below 4,750: three failed calls, and the warning says
-    "Reducing max_batch from 10000 to 7500" for a call of 4,750 points."""
+    so the same 4,754 points are evaluated again (and fail) until 0.75^k x
+    10,000 drops below 4,754: three failed calls, and the warning says
+    "Reducing max_batch from 10000 to 7500" for a call of 4,754 points."""
     sizes: list[int] = []
 
     def f(t):
@@ -204,7 +205,7 @@ def test_out_of_memory_retry_shrinks_the_call_that_failed():
     result, _ = run(
         solver(),
         f,
-        state=IntegrationState(even_mesh(250), 100, False),
+        state=IntegrationState(even_mesh(274), 100, False),
         take_gradient=False,
     )
     assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
@@ -213,8 +214,8 @@ def test_out_of_memory_retry_shrinks_the_call_that_failed():
 
 def test_small_unconverged_state_grows_to_one_subinterval_with_gradients():
     """A state whose batch size has not converged is allowed to grow. With
-    ``take_gradient=True`` a call needs whole subintervals (gk21: 23 points),
-    but the dispatcher takes ``min(n_waiting, 10 * 2) // 23 = 0``
+    ``take_gradient=True`` a call needs whole subintervals (gk21: 21 points),
+    but the dispatcher takes ``min(n_waiting, 10 * 2) // 21 = 0``
     subintervals and ``_evaluate_f_on_full_nodes`` fails its assertion "Not
     enough free memory ...", although nothing ran out of memory and the batch
     could grow. (With ``take_gradient=False`` the same state works.)"""
@@ -229,7 +230,7 @@ def test_small_unconverged_state_grows_to_one_subinterval_with_gradients():
 
 def test_refused_restart_puts_back_gradients_it_can():
     """The backward pass of the third batch (one gk21 subinterval each, the
-    given ``max_batch=23``) fails; a smaller batch cannot hold a subinterval,
+    given ``max_batch=21``) fails; a smaller batch cannot hold a subinterval,
     so PadaQuad raises ``BackwardOutOfMemoryError`` and asks the user to reset
     the gradients. The walk had saved every gradient, so it could put them
     back first: here ``w.grad`` held 1.0 from an earlier loss before the call,
@@ -248,7 +249,7 @@ def test_refused_restart_puts_back_gradients_it_can():
         return y
 
     with pytest.raises(BackwardOutOfMemoryError, match="cannot hold one"):
-        run(solver(), f, mesh=even_mesh(20), max_batch=23)
+        run(solver(), f, mesh=even_mesh(20), max_batch=21)
     assert float(w.grad) == 1.0
 
 
@@ -265,7 +266,7 @@ def test_backward_ratio_is_not_computed_from_a_stale_forward_peak(monkeypatch, c
     usable, so its backward pass runs unchecked; only the batch after it, with
     a ratio measured on this call, is dropped. A fresh solver
     (``test_backward_check_control_on_a_fresh_solver``) drops the first one:
-    one call of 2,300 points reaching t > 0.5, not two."""
+    one call of 2,100 points reaching t > 0.5, not two."""
     s = adaptive_quadrature("uniform", "gk21", device="cuda", atol=1e-10, rtol=1e-10)
     w = torch.tensor([1.3], dtype=torch.float64, device="cuda", requires_grad=True)
     # The value an earlier call left (the call's attributes are now put back
@@ -277,12 +278,12 @@ def test_backward_ratio_is_not_computed_from_a_stale_forward_peak(monkeypatch, c
 def _run_mixed_call(s, w, monkeypatch, caplog):
     """Batches of 100 subintervals left to right; f's output requires grad
     only for t > 0.5; the loss always requires grad (a parameter term).
-    Returns the number of calls of 2,300 points that reach t > 0.5."""
+    Returns the number of calls of 2,100 points that reach t > 0.5."""
     p = torch.tensor([0.5], dtype=torch.float64, device="cuda", requires_grad=True)
     calls = []
 
     def f(t):
-        calls.append(len(t) == 2300 and bool((t > 0.5).any()))
+        calls.append(len(t) == 2100 and bool((t > 0.5).any()))
         y = torch.sin(40 * t)
         if bool((t > 0.5).any()):
             y = y + w * torch.clamp(t - 0.5, min=0)
@@ -294,7 +295,7 @@ def _run_mixed_call(s, w, monkeypatch, caplog):
             s,
             f,
             mesh=even_mesh(500).cuda(),
-            max_batch=2300,
+            max_batch=2100,
             loss_fxn=lambda r: r.integral.sum() + 0 * p.sum(),
         )
     assert "predicted not to fit" in caplog.text

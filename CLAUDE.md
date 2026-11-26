@@ -152,6 +152,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_max_adaptive_splits.py` | The `max_adaptive_splits` depth cap |
 | `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks`; `get_max_batch(f=..., t=...)` (measurement, argument checks, `evaluation_buffer` kept free twice) and the measured `result.max_batch` |
 | `test_methods_registry.py` | Registry consistency: table shapes and dtypes, `degree` / `error_exponent` types |
+| `test_interior_nodes.py` | Gauss-Kronrod (nodes all interior): C points of `f` per subinterval, none at a mesh point (start-up calls included), `1/sqrt(t)` and `log(t)` at a bound converge, result rows = evaluated points, bound gradients against the closed form |
 | `test_multi_d_integrand.py` | Integrands with D > 1 outputs |
 | `test_oom_recovery.py` | The out-of-memory catch-and-retry path (direct calls of `_evaluate_f_on_split_nodes`, including retries that end inside a subinterval; `integrate` with and without `trade_speed_for_memory`) |
 | `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance (with `take_gradient=False` the drift is between passes: `_cancelling_peak` hides its cancelling part in a narrow peak the first passes miss); `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN) |
@@ -274,7 +275,9 @@ evaluations on smooth regions.
 
 - **N**: number of integration steps in a batch
 - **C**: number of quadrature points per step (`method.n_nodes`,
-  e.g. 4 for bosh3, 7 for dopri5, 23 for gk21 with endpoint padding)
+  e.g. 4 for bosh3, 7 for dopri5, 21 for gk21, whose nodes are all
+  interior: a subinterval's width and place come from the mesh, never from
+  its first and last node)
 - **T**: dimensionality of time (usually 1, but supports multi-D)
 - **D**: dimensionality of `f`'s output
 

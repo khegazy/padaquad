@@ -24,9 +24,22 @@ $h$ to the power of that degree plus 2.
 ```{include} ../reference/generated/methods_table.md
 ```
 
-The Gauss-Kronrod methods add two nodes with weight zero at the ends of each
-subinterval, so `gk21` evaluates the integrand at 23 points per subinterval of
-which 21 carry weight.
+The nodes of the Gauss-Kronrod methods are all inside the subinterval, so
+`gk21` evaluates the integrand at 21 points per subinterval and never at a mesh
+point, as QUADPACK's `dqk21` does {cite:p}`quadpack_netlib`. This makes them the
+methods to choose for an integrand that is infinite at a bound but whose
+integral is finite, such as $1/\sqrt{t}$ or $\log t$ on $[0, 1]$: no special
+treatment is needed (the subintervals next to the bound are refined until the
+tolerance is met). The other methods evaluate both ends of every subinterval and
+raise `ValueError` there (`runtime_checks=True`). With a Gauss-Kronrod method,
+`result.nodes` and `result.y` therefore contain no mesh point, not even
+`mesh_init` or `mesh_final`: they list exactly the evaluated points (see
+`IntegrationResult`). An integral that diverges at a bound, such as that of $1/t$
+on $[0, 1]$, is refined toward the bound until the integrand overflows: with
+`gk21` and `atol=1e-6` that takes about 1,000 halvings (3 s on a CPU) before
+`ValueError` names the point. Pass `max_adaptive_splits` to stop sooner; a
+convergent integrand can need several hundred halvings ($t^{-0.9}$ needs 326 at
+`atol=1e-10`).
 
 **Check these numbers yourself.** Every degree in the table is measured from
 the stored nodes and weights by `MethodClass.measure_degree()`, both in the test

@@ -432,7 +432,13 @@ class TestHostWaits:
         output = solver._calculate_integral(nodes, y.to("cuda"), mesh[:-1], mesh[1:])
         keep = torch.tensor([True, False, True, True, False, True], device="cuda")
         split_counts = torch.ones(n + 1, dtype=torch.long, device="cuda")
-        ratios = torch.full((n,), 1e5, dtype=torch.float64, device="cuda")
+        # Above 2**error_exponent: every split subinterval is split in four.
+        ratios = torch.full(
+            (n,),
+            2.0 ** (solver.method.error_exponent + 1),
+            dtype=torch.float64,
+            device="cuda",
+        )
 
         def update():
             return solver._adaptively_increase_mesh(

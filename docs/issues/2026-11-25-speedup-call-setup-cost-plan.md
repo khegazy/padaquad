@@ -504,3 +504,68 @@ on the same node and GPU in one session.
 - **Less sure:** wall-time gains (shared GPU nodes, spread about as large as
   single items); whether CUDA's float32 square root and casts agree with the
   CPU's (the grid compares each device with itself only).
+
+## Implemented (2026-11-26, branch `call_setup_cost`)
+
+| Step | Commit | What |
+|---|---|---|
+| Plan review | `be1bf80` | This file, reviewed and corrected |
+| 1. Method conversion (D1) | `314db3c` | `MethodClass.to`, `_map_tensors`, `_CONVERTED`, frozen `_Tableau`; `clone`, `to_dtype`, `to_device` removed; `_get_method` and `_integration_on_device` use `to`; tests and docs |
+| 2. Tolerances as floats (D2) | `787e232` | `SolverBase.__init__` (floats, `ValueError`), `_set_dtype`, both error-ratio helpers (`torch.clamp`); tests in `test_error_masks.py` and `test_base_solver.py` |
+| 3. Host waits of the start and end of a call | `8f40aa6`, `7350a3f` | default `y0`, trackers, the fresh-mesh check, `n_start_steps * self.C`, one read for the split statistics and the check; CUDA host-wait tests (`7350a3f` fixes their count) |
+| 4. A mesh without bounds is not cut | `58d3411` | `_setup_integral_bounds`; test `test_a_mesh_alone_is_used_as_given` |
+| 5. D4 | `d58a45e` | `math.isqrt(int(N_init_steps))`; test `test_starting_mesh_has_isqrt_segments` |
+| 6. Measurements, CHANGELOG, this section | the last commit | |
+
+Dropping D2 alone (`git revert 787e232`) leaves D1 intact; it needs two
+small edits: the CHANGELOG lines next to its entry, and the expected count of
+`TestHostWaits.test_construction_waits_for_nothing` (2 instead of 0: the
+tolerance tensors).
+
+**Measured** on `nid200417` (A100-SXM4-80GB, GPU 0; `impl/measure_cs.py`,
+median of 41 calls, two rounds alternating `d11df47` and the branch on the
+same GPU; `impl/logs/measure_*`). `damped_sine` on [0, 1], gk21, float64,
+`atol=1e-8`, `rtol=0`, `error_norm="max"`.
+
+| Case | `d11df47`: ms (host waits, GPU launches) | branch |
+|---|---|---|
+| Build a solver | 0.320, 0.325 (6, 6) | 0.076, 0.076 (0, 1) |
+| One-shot `padaquad.integrate` (`result_device="cpu"`) | 6.70, 6.69 (61, 267) | 6.06, 6.08 (41, 248) |
+| One-shot, `result_device` on the GPU | 9.46, 9.26 (63, 508) | 8.84, 8.86 (53, 499) |
+| `state=`, no bounds | 5.79, 5.78 (53, 252) | 5.27, 5.27 (39, 224) |
+| `state=` with the bounds equal to the mesh ends | 5.91, 5.91 (57, 260) | 5.69, 5.66 (44, 250) |
+
+`_setup_integral_bounds` (inclusive, synchronized): 0.43 → 0.16 ms in the
+`state=` call without bounds; unchanged (0.56 ms, 5 host waits) with bounds.
+CPU of the same node (8 threads): building 0.198 → 0.043 ms; one-shot 3.32 →
+3.15 ms; `state=` 2.60 → 2.53 ms; `state=` with bounds 2.60 → 2.63 ms (no
+change within noise). `profile_baseline.py` (median of 5, two rounds):
+`damped_sine` 6.2/6.1 → 5.5/5.6 ms, `many_outputs` 13.7/14.8 → 14.3/13.0 ms
+(noise as large as the change), `chirp` 69.3/69.2 → 68.7/68.4 ms,
+`oscillatory` 226/227 → 220/214 ms; 20 fewer host waits in each.
+
+**Checks** (same node; `impl/logs/`). Full suite, `d11df47` → branch: CPU
+3968 passed, 315 skipped → 3997 passed, 337 skipped, no failure on either;
+CUDA 4258 passed, 25 skipped → 4308 passed, 25 skipped, 1 failed
+(`TestHostWaits.test_construction_waits_for_nothing`, which counted PyTorch's
+notice that the sync debug mode is a prototype; fixed in `7350a3f`, after
+which its file and the other changed test files pass on CUDA: 293 passed, 2
+skipped). Bit-identity grid (`impl/bitgrid_cs_parts.py`, 1,288 integrations
+per device, 16,096 tensors): CPU and CUDA each differ only in `error_ratios`
+of the two cases with a float64 integrand on a float32 solver (D2; at most
+4.8e-11 for gk21 and 2.5e-8 for `interpolatory3_variable`, both relative to
+ratios of order 1; integral, error, mesh, nodes and values identical). The
+grid's variable-solver `adaptive_heun` part did not finish within the
+allocation and is not compared. Tolerance arithmetic (`impl/tol_bits_cs.py`):
+2,700 same-dtype cases identical on the CPU and on CUDA. Docs build with
+`-W`: passes. `ruff`, `mypy`, `numpydoc lint`: clean.
+
+## Not done
+
+- **The combined read for given bounds** (old Section 3.3): a call with
+  bounds still spends 0.56 ms and 5 host waits in `_setup_integral_bounds` on
+  the GPU (two copies of the CPU bounds, the order check, two `torch.equal`
+  and the boolean index). Combining them would save perhaps 0.2-0.3 ms there
+  but rewrites the validation of user input; left for a decision.
+- **The merge weight cache on the method object** (Review, item 8).
+- **D5** (distributed construction): a separate issue.

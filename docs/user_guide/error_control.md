@@ -120,20 +120,20 @@ leave one failing piece each, are mostly unchanged.
 
 The threshold does not depend on the method. A piece whose error estimate
 already shrinks as $h^k$ ($k$ the method's `error_exponent`, 21 for `gk21`)
-needs one halving for any ratio below $2^k$, and the rule splits it in four
+needs one halving for any ratio below $2^k$, and `"accelerate"` splits it in four
 from $10^4$ on. Over 3,944 runs on smooth integrands (sines, Gaussians, Runge
 functions, exponentials; `gk7` to `gk31` and `cc33`; random starting meshes),
 85 needed more points, up to 28 %; on an evenly spaced starting mesh where
 every piece is in that state (a Chebyshev polynomial of degree $k - 1$), the
-rule evaluates 57 % more points than halving with `gk15`, `gk21` and `cc33` and
+option evaluates 57 % more points than halving with `gk15`, `gk21` and `cc33` and
 86 % more with `gk31`, for the same error.
 
 It saves little time when `f` is cheap: on an A100, a mesh update takes 53
-GPU launches when halving; with the rule on, every update after the call's
+GPU launches when halving; with `"accelerate"`, every update after the call's
 first split takes 31 more for its test, and 35 more when it splits in four.
 Over 270 runs (the 9 integrands above, `gk7` to `cc33`, `atol` $10^{-6}$ to
 $10^{-10}$, two random starting meshes, cheap integrands), the total time was
-1 % less than halving's: 7 % less where the rule acted, 6 % more where it did
+1 % less than halving's: 7 % less where it split in four, 6 % more where it did
 not. Use it when `f` is expensive and the integrand needs
 many levels of refinement; with the default, no evaluation of `f` is spent on
 a four-way split whose halves would have passed.

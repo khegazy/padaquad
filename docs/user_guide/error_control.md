@@ -72,9 +72,9 @@ the offending points (`runtime_checks=True`, the default). With
 `runtime_checks=False`, subintervals with a non-finite error ratio are
 accepted instead of split, the non-finite value reaches the returned integral,
 and `converged` is `False`. Either way the run ends. `runtime_checks=False`
-also skips the check, made on every pass, that the accepted subintervals are
-recorded in mesh order; together with the finite check, these cost time and,
-for integrands with many outputs, memory as large as a call's output. The mesh
+also skips the check, made once at the end of the call, that the accepted
+subintervals cover the final mesh once; the finite check costs time and, for
+integrands with many outputs, memory as large as a call's output. The mesh
 itself stays in order by construction, so it is not checked.
 
 (ug-error-norm)=

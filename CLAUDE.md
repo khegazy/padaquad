@@ -127,19 +127,19 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_convergence_rate.py` | Empirical convergence-rate slope matches each method's theoretical rate |
 | `test_autodiff_consistency.py` | $\nabla_\theta\int f_\theta dt$ via backprop equals $\int \nabla_\theta f_\theta dt$ |
 | `test_error_indicator.py` | Behavior of absolute vs cumulative error indicators (Bug B8 investigation) |
-| `test_bug_regressions.py` | Regression tests for bugs B4, B6 fixed in Phase 1; `runtime_checks` (old name `error_on_nonfinite` raises; False skips the order and finite checks with the same result); reuse by passing the returned state (no state on the solver, `same_f` and constructor bounds gone); the interval rules (bounds required, cut, outside extends, rounding snap, one-ULP cut, mesh validation, keyword-only options); a subinterval too narrow to halve ends the call with `converged=False` (a jump with `atol=rtol=0`, both `runtime_checks`, both `take_gradient`, a second call from the state) |
+| `test_bug_regressions.py` | Regression tests for bugs B4, B6 fixed in Phase 1; `runtime_checks` (old name `error_on_nonfinite` raises; False skips the record-coverage and finite checks with the same result); reuse by passing the returned state (no state on the solver, `same_f` and constructor bounds gone); the interval rules (bounds required, cut, outside extends, rounding snap, one-ULP cut, mesh validation, keyword-only options); a subinterval too narrow to halve ends the call with `converged=False` (a jump with `atol=rtol=0`, both `runtime_checks`, both `take_gradient`, a second call from the state) |
 | `test_snapshots.py` | Golden-value regression net for the file-split refactor; CPU-only float64 |
 | `test_public_api.py` | Smoke test of every public symbol and `IntegrationResult` fields |
 | `test_rk_integral.py` | `_RK_integral`: constant / linear / multi-step / multi-dim / zero-width / variable-b inputs; the weighted sum in blocks of rows (`_BLOCK_BYTES`) equals one sum bit for bit, N = 0 included |
 | `test_base_and_methods.py` | `get_sampling_type`, the tableau's dtype conversion (`MethodClass.to`), `_get_method` factory (unknown name raises `ValueError`), `error_exponent`, weight formulas |
 | `test_error_computation.py` | `_error_norm`, `_rec_remove`, `_compute_error_ratios_absolute`/`_cumulative` |
 | `test_interpolation.py` | `_compute_nodes`: endpoints, shapes, monotonicity, tableau-c matching |
-| `test_sorted_insert.py` | `_get_sorted_indices` and `_insert_sorted_results` (a new array; the old record is read, not cloned) |
-| `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables` (f and y0; the bound defaults through `_setup_integral_bounds`), `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects); `atol`/`rtol` stored as floats, `ValueError` when not one finite number >= 0 (a list or tensor per output component included), unchanged by a dtype round trip (the error ratios of a float64 call after a float32 one); host waits on CUDA (none to build a solver, one per read of a fresh starting mesh, two per mesh update (the number accepted and `_get_mesh_indices`) plus one per array kept on the CPU, none in `_evaluate_f_on_mesh` but the finite check of each call of `f`) |
+| `test_sorted_insert.py` | `_merge_positions` (ranks of mesh indices, the record's in any order) and `_insert_sorted_results` (a new array; the old record is read, not cloned) |
+| `test_base_solver.py` | `SolverBase._set_dtype`, `set_dtype_by_input`, `_check_variables` (f and y0; the bound defaults through `_setup_integral_bounds`), `_integral_loss`, device selection (`_resolve_device`, indexed GPUs, no global side effects); `atol`/`rtol` stored as floats, `ValueError` when not one finite number >= 0 (a list or tensor per output component included), unchanged by a dtype round trip (the error ratios of a float64 call after a float32 one); host waits on CUDA (none to build a solver, one for the check of a fresh starting mesh, one per mesh update (the number accepted) plus one per array kept on the CPU, none in `_evaluate_f_on_mesh` but the finite check of each call of `f`; counted by source line (`_lines`): one per pass at the loop's condition and one when none is left, none in `_record_results` with the record on the GPU and one per value field with `result_device="cpu"`, two in `_sort_record`) |
 | `test_methods_extra.py` | Variable-mode `adaptive_heun` (the uniform heun object) weights, the generic `VariableMethodClass` (normalized nodes reach the weight function, shape check), node-fraction validation, `MethodClass.to` (device and dtype) |
 | `test_solver_methods.py` | `adaptive_quadrature` factory, `method.weights` through both solvers, per-step node count `solver.C` |
-| `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed accept masks (`_keep_mask`, the loop's rule), midpoint placement, the returned `keep_idx`, the split cap, a subinterval one ULP wide accepted (`_splittable`, T = 1 and 2) |
-| `test_record_and_sort.py` | `_record_results` and `_sort_record` (a record in order is not copied); `_flatten_output` equals the concatenation, values and gradient |
+| `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed accept masks (`_keep_mask`, the loop's rule), midpoint placement, the returned `keep_idx` and `idxs_transfer` (T = 1 and 2), extra split positions in any order, the split cap, a subinterval one ULP wide accepted (`_splittable`, T = 1 and 2) |
+| `test_record_and_sort.py` | `_record_results` (appends in acceptance order: one tensor per loop field, one chunk per batch for the rest; a view of a larger array is copied) and `_sort_record` (rows to their mesh index, T = 1 and 2; one batch in order is not copied; chunk fields moved to the given device; a record that does not cover the mesh once raises; the gradient passes); end to end, every path of the record (removals, Step 7, cumulative, tracked, trade, no record, split cap, `take_gradient`, gk21) returns mesh order and the same numbers without `runtime_checks`; `_flatten_output` equals the concatenation, values and gradient |
 | `test_evaluate_and_merge.py` | The variable solver's `_evaluate_adaptive_nodes` (split with reuse; not called by `integrate`) |
 | `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: the state's mesh re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
@@ -317,7 +317,7 @@ is a boolean array where `True` means the panel still needs evaluation.
      `evaluation_buffer` bytes of them wait (0, after every call, when None);
      bit-identical either way (every row depends only on its panel). It then
      sends their values and tracked variables to `values_device`: the
-     solver's device by default (the record moves the accepted ones to
+     solver's device by default (`_record_results` moves the accepted ones to
      `result_device` after the decision), `result_device` with
      `trade_speed_for_memory`, None (dropped) with `record_evaluations=False`
      (then `state.mesh` uses `merge_rule="power_law"`: `_merge_inputs` with
@@ -336,11 +336,25 @@ is a boolean array where `True` means the panel still needs evaluation.
      per update (the number accepted); a stable sort of the mask gives
      `keep_idx` (returned, slot 8) and the split positions, and every field
      is indexed with integers; `idxs_transfer` maps each old mesh point to
-     its new position. The mesh stays strictly increasing by construction,
-     so no order check runs.
-   - Record accepted results into the running record.
+     its new position (returned, slot 7). The mesh stays strictly increasing
+     by construction, so no order check runs.
+   - Record accepted results (`_record_results`), in the order they are
+     accepted, not in mesh order: each recorded subinterval carries its left
+     mesh index (`record["mesh_index"]`, `idxs_transfer[step_idxs[keep_idx]]`
+     when recorded, remapped through `idxs_transfer` after every mesh update;
+     integers, for any T). The sums and the loop's fields
+     (`_RECORD_LOOP_KEYS`: `mesh_index`, `mesh_quadratures`,
+     `mesh_quadrature_errors`, read by the cumulative sums through
+     `_merge_positions` and by the re-check) are one tensor each on the
+     solver's device; `nodes`, `h`, `y`, `error_ratios` and the tracked
+     variables are one chunk per batch in `chunks` (the values on
+     `result_device`, the rest on the solver's device until the end), never
+     merged during the loop.
    - If `take_gradient`: per-batch `loss.backward()`.
-3. **Post-convergence.** Sort the record; read the split statistics off
+3. **Post-convergence.** Put the record in mesh order (`_sort_record`: it
+   covers the final mesh once, so row i goes to row `mesh_index[i]`; one
+   chunk already in order is kept; checked under `runtime_checks`; the chunk
+   fields end on the record's device); read the split statistics off
    `split_counts` (per-barrier count of halvings, 0 = starting step);
    judge every recorded step against the final integral with
    `_record_error_check` (the same helper the in-loop re-check uses) to set
@@ -573,8 +587,9 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   (`_keep_rows(x, keep_idx, in_place=not take_gradient)`, integer positions,
   blocks of `_BLOCK_BYTES`; a
   view, so no copy), or keeps the array as it is when all are accepted; the
-  loop deletes the batch's values (`kept_y`, `intermediate_results`) after
-  recording. An out-of-memory error allocating the pass's array is raised
+  record appends that as its chunk (copied by `_record_results` when it is a
+  view of a larger array, so the pass's array is freed), and the loop deletes
+  the batch's values (`kept_y`, `intermediate_results`) after recording. An out-of-memory error allocating the pass's array is raised
   as `torch.OutOfMemoryError` naming `trade_speed_for_memory` and
   `expandable_segments` (user guide `ug-pass-array-oom`). The settings'
   memory and time are measured by

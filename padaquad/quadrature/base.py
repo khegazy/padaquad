@@ -3482,7 +3482,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # ratio (error_ratios_2steps) is computed and decides anything. Its
         # numerator is each pair's summed errors, plus the merge prediction,
         # added to the prediction in place in the order of the sum
-        # prediction + e_i + e_{i+1}.
+        # prediction + e_i + e_{i+1}, in the estimates' dtype (the prediction
+        # has the values' dtype, which can be narrower: float32 values of a
+        # float64 solver).
         reduced_errors = (
             None
             if self._is_failure_fraction
@@ -3492,9 +3494,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         pair_errors = (
             mesh_quadrature_errors[:-1] + mesh_quadrature_errors[1:]
             if pair_errors is None
-            else pair_errors.add_(mesh_quadrature_errors[:-1]).add_(
-                mesh_quadrature_errors[1:]
-            )
+            else pair_errors.to(mesh_quadrature_errors.dtype)
+            .add_(mesh_quadrature_errors[:-1])
+            .add_(mesh_quadrature_errors[1:])
         )
         _, error_ratios_2steps, _ = self._compute_error_ratios(
             mesh_quadrature_errors=mesh_quadrature_errors,

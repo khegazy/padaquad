@@ -4226,21 +4226,24 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Merged tensor with both record and result entries in sorted order.
             Shape: [N_record + N_result, ...].
         """
-        add_shape = (len(record) + len(result), *record.shape[1:])
-        old_record = record.clone()
         # Index tensors come from _merge_positions on the integration device;
         # move them to the record's device so a record living on result_device
         # (CPU) merges with CPU indices while a GPU-resident record uses GPU
         # indices. ``result`` is already placed on record.device by the caller.
-        record_idxs = record_idxs.to(record.device)
-        result_idxs = result_idxs.to(record.device)
         # Allocate with the input tensor's own dtype/device so this works for
         # non-float records (e.g. integer/bool tracked variables), not just
         # self.dtype. Every position is overwritten below, so zeros is safe.
-        record = torch.zeros(add_shape, device=record.device, dtype=old_record.dtype)
-        record[record_idxs] = old_record
-        record[result_idxs] = result
-        return record
+        # The record is read, not copied first: the merged array is new, so
+        # the peak is the old record plus the merged one (a clone of the old
+        # record made it 3 times the record on the host, measured 2026-11-26).
+        merged = torch.zeros(
+            (len(record) + len(result), *record.shape[1:]),
+            device=record.device,
+            dtype=record.dtype,
+        )
+        merged[record_idxs.to(record.device)] = record
+        merged[result_idxs.to(record.device)] = result
+        return merged
 
     def _record_results(
         self,
@@ -4408,14 +4411,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         dict[str, torch.Tensor]
             The record with its per-subinterval tensors in mesh order.
         """
-        sorted_idxs = torch.argsort(
-            self._mesh_order(record["nodes"][:, 0, :], mesh_indices), dim=0
-        )
-        # Per-step fields may live on different devices (result_device vs the
-        # integration device), so move the index to each field's device.
-        for key, value in record.items():
-            if key not in self._RECORD_SCALAR_KEYS:
-                record[key] = value[sorted_idxs.to(value.device)]
+        order = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
+        # A record already in order (always, for the one integrate builds) is
+        # kept as it is: indexing would copy every field, including the values.
+        if not bool(torch.all(order[1:] > order[:-1])):
+            sorted_idxs = torch.argsort(order, dim=0)
+            # Per-step fields may live on different devices (result_device vs
+            # the integration device), so move the index to each field's device.
+            for key, value in record.items():
+                if key not in self._RECORD_SCALAR_KEYS:
+                    record[key] = value[sorted_idxs.to(value.device)]
         if self.runtime_checks:
             # General (any-T) invariant: strictly increasing mesh order.
             sorted_order = self._mesh_order(record["nodes"][:, 0, :], mesh_indices)
@@ -4551,10 +4556,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         torch.Tensor
             The joined values. Shape: [N * (C - 1) + 1, ...].
         """
-        return torch.concatenate(
-            [
-                panel_array[0],
-                torch.flatten(panel_array[1:, 1:], start_dim=0, end_dim=1),
-            ],
-            dim=0,
-        )
+        # Written straight into the output: flattening the non-contiguous
+        # panel_array[1:, 1:] and then concatenating made two full copies, 3
+        # times the values on the host at the peak (measured 2026-11-26).
+        n, c, *rest = panel_array.shape
+        out = panel_array.new_empty((n * (c - 1) + 1, *rest))
+        out[:c] = panel_array[0]
+        out[c:].view(n - 1, c - 1, *rest).copy_(panel_array[1:, 1:])
+        return out

@@ -14,7 +14,7 @@ authors:
 # version equals pyproject.toml, and date-released equals that version's date in
 # CHANGELOG.md; tests/test_docs_methods_table.py checks both.
 version: "2.0.0"
-date-released: "2026-11-17"
+date-released: "2026-11-25"
 license: CC-BY-4.0
 repository-code: "https://github.com/khegazy/padaquad"
 url: "https://khegazy.github.io/padaquad/"

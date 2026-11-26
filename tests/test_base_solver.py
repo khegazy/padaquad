@@ -87,6 +87,21 @@ class TestTolerances:
         assert (type(solver.atol), type(solver.rtol)) == (float, float)
         assert (solver.atol, solver.rtol) == (float(torch.tensor(1e-7)), 0.0)
 
+    def test_dtype_round_trip_keeps_them(self):
+        """A float64 call after a float32 call on the same solver has the error
+        ratios of a float64 call before it (as tensors of the solver's dtype,
+        the tolerances stayed rounded to float32 after the switch back)."""
+        solver = make_solver_for_unit_test("gk21", atol=1e-9, rtol=1e-7)
+        ratios = []
+        for dtype in (torch.float64, torch.float32, torch.float64):
+            torch.manual_seed(0)
+            a, b = (torch.tensor([x], dtype=dtype) for x in (0.0, 30.0))
+            result, _ = solver.integrate(
+                torch.sin, mesh_init=a, mesh_final=b, take_gradient=False
+            )
+            ratios.append(result.error_ratios)
+        assert torch.equal(ratios[0], ratios[2])
+
     @pytest.mark.parametrize("bad", [-1e-6, float("nan"), float("inf")])
     @pytest.mark.parametrize("name", ["atol", "rtol"])
     def test_negative_or_not_finite_raises(self, name, bad):

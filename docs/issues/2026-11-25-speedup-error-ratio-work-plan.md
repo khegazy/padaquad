@@ -79,13 +79,12 @@ wrong or is now different, and what changed in this file:
    A second test with views instead of copies found none, so it depends on
    the slice's shape and copy.
 7. **Item E is larger than the plan says.** Not only the rounding floor and
-   the running sums carry the autograd graph into the error ratios: the error
-   estimates themselves (`mesh_quadrature_errors` depends on the same values)
-   and, with `take_gradient=False`, the running integral
-   (`record["integral"]` keeps the graph) do too. Detaching the floor alone
-   would leave `result.error_ratios.requires_grad` True. The inputs of error
-   control (errors, contributions, the recorded integral in the reference,
-   the running sums) are detached.
+   the running sums carry the autograd graph into the error ratios: with
+   `take_gradient=False` the running integral does too (`record["integral"]`
+   keeps the graph). (The error estimates themselves are already detached by
+   `_calculate_integral`; an earlier version of this review said otherwise.)
+   The contributions, the recorded integral in the reference and the running
+   sums are detached.
 8. **Measurements at `c14d6ff`** replace section 2.3's for the decisions:
    section 2.4. The plan's base numbers (619 waits, 3,731 launches on
    `chirp`) are of `0590ccf`; at `c14d6ff` `chirp` takes 103 waits and 2,823

@@ -375,10 +375,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             If True (default), check while integrating: raise ``ValueError``
             naming the points where ``f`` returned NaN or Inf, and check
             PadaQuad's own bookkeeping (that the accepted subintervals cover
-            the final mesh once, each with its own width). If False, skip these checks to save time
-            and memory; subintervals where ``f`` returned NaN or Inf are then
-            accepted and the non-finite value reaches the result. The mesh and
-            the nodes are in order by construction either way.
+            the final mesh once, each with its own width). If False, skip
+            these checks to save time and memory; subintervals where ``f``
+            returned NaN or Inf are then accepted and the non-finite value
+            reaches the result. The mesh and the nodes are in order by
+            construction either way.
         dtype : torch.dtype
             ``torch.float64`` (default) or ``torch.float32``; ``torch.float16``
             is refused. ``integrate`` switches to the dtype of the mesh or the
@@ -3851,14 +3852,16 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # the next (float32, N_init_steps=10**6 on [1, 3]). Keep the points
             # above every point before them and below mesh_final, so the mesh
             # is strictly increasing (for T > 1, which integrate does not
-            # reach, consecutive points differ) and keeps its exact ends; a
-            # mesh that already is keeps every point, bit for bit. One read of
-            # the device, for the number kept.
+            # reach, consecutive points differ) and keeps its exact ends. One
+            # read of the device, whether any point is dropped: dropping (a
+            # boolean index and a copy, six more kernels on a GPU) runs only
+            # then, and a mesh with no such point is kept as it is.
             inner = mesh[1:-1]
-            keep = (inner > torch.cummax(mesh[:-2], dim=0).values) & (
-                inner < mesh_final
-            )
-            mesh = torch.cat([mesh[:1], inner[keep.any(-1)], mesh[-1:]])
+            keep = (
+                (inner > torch.cummax(mesh[:-2], dim=0).values) & (inner < mesh_final)
+            ).any(-1)
+            if not bool(keep.all()):
+                mesh = torch.cat([mesh[:1], inner[keep], mesh[-1:]])
         # True at every mesh point but the last, which starts no subinterval;
         # compared on the device, with no copy from the host.
         mesh_trackers = torch.arange(len(mesh), device=self.device) < len(mesh) - 1

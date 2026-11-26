@@ -716,7 +716,12 @@ class TestPythonWork:
             )
             results.append(len(result.h))
 
-        run(16)  # warm-up: one-time costs such as the method's conversion
+        # Warm-up, traced as the measured calls: one-time costs such as the
+        # method's conversion, and the first trace of the call's functions
+        # (about 45 KB of Python memory on the first parametrization of a
+        # process, which an untraced warm-up left in few_peak, so that 4
+        # bytes per subinterval passed).
+        _python_work(lambda: run(16))
         few_lines, few_peak = _python_work(lambda: run(16))
         many_lines, many_peak = _python_work(lambda: run(4096))
         few, many = results[1:]

@@ -221,8 +221,16 @@ def test_backward_that_never_fits_ends_in_an_error_after_few_restarts(caplog):
         y.register_hook(fail)
         return y
 
-    with pytest.raises(BackwardOutOfMemoryError, match="cannot hold one subinterval"):
+    with pytest.raises(
+        BackwardOutOfMemoryError, match="cannot hold one subinterval"
+    ) as info:
         solver().integrate(f, mesh=even_mesh(100), max_batch=2300)
+    # Not "call again with state=error.state": its batch size is below 21, which
+    # a take_gradient=True call refuses.
+    assert "backward pass of one subinterval (21 points) does not fit" in str(
+        info.value
+    )
+    assert "state=error.state" not in str(info.value)
     # 2,289 -> 1,701 -> ... -> 21 points: about 15 attempts, each failing once.
     assert attempts[0] <= 20
     assert float(w.grad) == 5.0

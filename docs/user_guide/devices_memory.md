@@ -162,7 +162,14 @@ GPU: 0.6 s more than a run with the right batch size from the start, 1.4 s
 from a cold call).
 
 **With `take_gradient=True`.** PadaQuad backpropagates every batch right after
-evaluating it. On a GPU, before each backward pass it compares the memory
+evaluating it, so a call of the integrand evaluates whole subintervals: a
+batch size that does not grow, a given `max_batch` or the converged batch size
+of a state, must be at least the points of one subinterval (21 for gk21), or
+the call raises `ValueError` before the integrand is called. (With
+`take_gradient=False` a call may end inside a subinterval, so any batch size
+works, and the state of such a call can hold a converged batch size below
+it; pass `max_batch` to a `take_gradient=True` call started from that state.)
+On a GPU, before each backward pass it compares the memory
 still usable (keeping `1 - total_mem_usage` of the total free) with what the
 backward pass is predicted to need: the batch's forward peak memory, times the
 ratio of backward to forward peak memory the previous batch measured (1 for

@@ -238,7 +238,10 @@ class BackwardOutOfMemoryError(torch.OutOfMemoryError):
     gradient is added, or ``torch.distributed`` runs more than one process.
     The parameters' ``.grad`` then hold part of the integral's gradient: reset
     them (for example with ``optimizer.zero_grad()``) and call again with
-    ``state=error.state`` (see :ref:`ug-memory`).
+    ``state=error.state`` (see :ref:`ug-memory`). It is also raised when the
+    backward pass of one subinterval ran out of memory, as no smaller batch
+    exists; the gradients are then put back, and the state's batch size,
+    below one subinterval, serves only a ``take_gradient=False`` call.
 
     Attributes
     ----------
@@ -1079,7 +1082,7 @@ class _MemoryManagement:
                 # this call: what the next call must fit in.
                 usable = self._get_usable_memory(total_mem_usage)
                 measured = self._measure_call(
-                    f, f_args, node_test, N, reader.reset, reader.read, total_mem_usage
+                    f, f_args, node_test, N, reader.reset, reader.read
                 )
 
                 if measured is None:
@@ -1455,7 +1458,6 @@ class _MemoryManagement:
         N: int,
         reset_peak: Callable[[], None],
         read_memory: Callable[[], int],
-        total_mem_usage: float,
     ) -> tuple[float, float] | None:
         """
         Call f once on N copies of node_test; return the memory and time it took.
@@ -1477,8 +1479,6 @@ class _MemoryManagement:
         reset_peak, read_memory : Callable[[], None], Callable[[], int]
             The measurement method from
             ``_peak_memory_reader``.
-        total_mem_usage : float
-            Only quoted in the single-evaluation error.
 
         Returns
         -------
@@ -1510,8 +1510,8 @@ class _MemoryManagement:
                 raise
             if N == 1:
                 raise torch.OutOfMemoryError(
-                    f"{e}\n\nA single evaluation of f does not fit in memory on "
-                    f"{self.device} with total_mem_usage={total_mem_usage}."
+                    f"{e}\n\nA single evaluation of f does not fit in the memory "
+                    f"of {self.device}."
                 ) from e
             out_of_memory = True
             outside = not isinstance(e, torch.OutOfMemoryError)
@@ -1778,19 +1778,26 @@ class _MemoryManagement:
                 if (leaf := ref()) is not None:
                     leaf.grad = grad
         if unsafe is not None or restart.max_batch < self.C:
+            # A batch below one subinterval is the failed batch of one
+            # subinterval shrunk; a take_gradient=True call refuses its state.
+            again = (
+                f"call again with state=error.state (batch size {restart.max_batch})."
+                if restart.max_batch >= self.C
+                else f"the backward pass of one subinterval ({self.C} points) "
+                f"does not fit: free memory on {self.device}, or use a method "
+                "with fewer points per subinterval."
+            )
             error = BackwardOutOfMemoryError(
                 f"The backward pass of a batch of {failed_batch} points ran out "
                 "of memory, and padaquad cannot restart the integral ("
                 f"{unsafe or 'a smaller batch cannot hold one subinterval'}). "
                 + (
                     "The gradients now hold part of the integral's gradient: "
-                    "reset them (for example optimizer.zero_grad()) and call "
-                    "again with "
+                    "reset them (for example optimizer.zero_grad()), then "
                     if unsafe is not None
-                    else "The gradients were put back to their values before "
-                    "the call. Call again with "
+                    else "The gradients were put back to their values before the call; "
                 )
-                + f"state=error.state (batch size {restart.max_batch}).",
+                + again,
             )
             error.state = restart
             raise error

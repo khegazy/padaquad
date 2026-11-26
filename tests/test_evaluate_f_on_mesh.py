@@ -183,29 +183,6 @@ class TestFullNodes:
     """Direct calls to ``_evaluate_f_on_full_nodes`` with hand-crafted inputs."""
 
     # -----------------------------------------------------------------------
-    # max_batch < C must assert (max_mesh_steps == 0)
-    # -----------------------------------------------------------------------
-
-    @pytest.mark.tier1
-    @pytest.mark.parametrize(
-        ("method", "max_batch"), _BELOW_C_SWEEP, ids=_BELOW_C_SWEEP_IDS
-    )
-    def test_full_nodes_max_batch_below_C_asserts(self, method, max_batch):
-        """``_evaluate_f_on_full_nodes`` asserts ``max_mesh_steps >= 1``.
-
-        Any ``max_batch < C`` yields ``max_mesh_steps = 0`` and trips the guard.
-        """
-        solver = make_solver_for_unit_test(method)
-        C = solver.C
-        max_mesh_steps = max_batch // C  # always 0 in this range
-        mesh = _make_mesh()
-        step_idxs = _make_step_idxs()
-        with pytest.raises(AssertionError):
-            solver._evaluate_f_on_full_nodes(
-                _simple_integrand, (), mesh, step_idxs, max_mesh_steps
-            )
-
-    # -----------------------------------------------------------------------
     # shapes and values correct
     # -----------------------------------------------------------------------
 
@@ -888,7 +865,7 @@ class TestEndToEnd:
             )
 
     # -----------------------------------------------------------------------
-    # take_gradient=True with max_batch < C must assert at the solver
+    # take_gradient=True with max_batch < C raises ValueError before f
     # -----------------------------------------------------------------------
 
     @pytest.mark.tier1
@@ -896,19 +873,26 @@ class TestEndToEnd:
         ("method", "max_batch"), _BELOW_C_SWEEP, ids=_BELOW_C_SWEEP_IDS
     )
     def test_integrate_take_grad_True_max_batch_below_C_errors(self, method, max_batch):
-        """For take_gradient=True, max_batch < C trips the assertion in
-        _evaluate_f_on_full_nodes."""
+        """For take_gradient=True, a max_batch below one subinterval's C
+        points (constructor's) raises ValueError naming it, the method and C,
+        before f is called."""
         if max_batch == 0:
             pytest.skip("max_batch=0 covered by test_integrate_max_batch_zero_errors")
         f, _, _ = _resolve_integrand("damped_sine")
+        calls = []
         solver = self._solver(method, max_batch=max_batch)
-        with pytest.raises(AssertionError):
+        with pytest.raises(
+            ValueError,
+            match=rf"max_batch {max_batch} is below the {solver.C} points of one "
+            rf"subinterval of {method}: with take_gradient=True",
+        ):
             solver.integrate(
-                f=f,
+                f=lambda t: calls.append(t) or f(t),
                 mesh_init=self.T_INIT,
                 mesh_final=self.T_FINAL,
                 take_gradient=True,
             )
+        assert calls == []
 
     # -----------------------------------------------------------------------
     # Correctness sweep: result matches analytical solution

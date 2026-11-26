@@ -150,7 +150,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_examples_run.py` | Runs `examples/*.py` (with output markers, or self-checking with asserts: `SELF_CHECKING_EXAMPLES`, `MPLBACKEND=Agg`), every script in `examples/verification/`, and every ```python block of the files in its `DOCUMENTS` (the README, `docs/development/adding_a_method.md`; except blocks preceded by `<!-- not-tested -->`) |
 | `test_max_adaptive_splits.py` | The `max_adaptive_splits` depth cap; with `split_rule="accelerate"`, the same K 2^n subintervals in fewer passes |
 | `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks`; `get_max_batch(f=..., t=...)` (measurement, argument checks, `evaluation_buffer` kept free twice) and the measured `result.max_batch` |
-| `test_memory_state.py` | The batch size of `integrate` and the state: the first call is the first pass (at most 10,000 points), every point `f` is called at belongs to the integration (C per evaluated subinterval; every start, both `take_gradient`, with simulated out-of-memory errors), growth by 10, the retry chain of a first call that runs out of memory, a given `max_batch`, the state's mesh and batch size; backward out-of-memory restarts |
+| `test_memory_state.py` | The batch size of `integrate` and the state: the first call is the first pass (at most 10,000 points), every point `f` is called at belongs to the integration (C per evaluated subinterval; every start, both `take_gradient`, with simulated out-of-memory errors), growth by 10, the retry chain of a first call that runs out of memory, a given `max_batch`, the state's mesh and batch size (a converged one below C refused with `take_gradient=True`, before `f`; with `max_batch=21` or not converged it runs); backward out-of-memory restarts |
 | `test_methods_registry.py` | Registry consistency: table shapes and dtypes, `degree` / `error_exponent` types |
 | `test_interior_nodes.py` | Gauss-Kronrod (nodes all interior): C points of `f` per subinterval, none at a mesh point, no call of `f` before the first pass, `1/sqrt(t)` and `log(t)` at a bound converge, result rows = evaluated points, bound gradients against the closed form |
 | `test_multi_d_integrand.py` | Integrands with D > 1 outputs |
@@ -527,7 +527,11 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   `_shrink_batch(failed)`, converged. `integrate` returns `(result, IntegrationState(mesh_optimal,
   _batch, _batch_converged))`; the result has no mesh_optimal or max_batch.
 - **`take_gradient=True`** (`_evaluate_f_on_full_nodes`, one batch per loop
-  turn): a forward OOM drops the outputs and retries with fewer
+  turn, whole subintervals): a batch size that cannot grow (a given
+  `max_batch`, or without it a state's converged one) below C raises
+  `ValueError` in `integrate`, beside the `max_batch` check, before `f` is
+  called (a state's is not raised to C: it is the largest known to fit), so
+  every batch holds at least one subinterval; a forward OOM drops the outputs and retries with fewer
   subintervals; on a GPU, when `f`'s output requires grad, the check
   `usable >= _backward_ratio * F` (F = forward peak via
   `reset_peak_memory_stats`/`max_memory_allocated`, `_backward_ratio` = the

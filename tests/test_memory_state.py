@@ -267,6 +267,31 @@ def test_state_carries_mesh_and_batch_size_to_the_next_call():
     assert math.isclose(float(second.integral), EXACT, abs_tol=1e-9)
 
 
+def test_state_batch_below_one_subinterval_with_take_gradient():
+    """A take_gradient=False call may converge on a batch size below one
+    subinterval's 21 points (here the given max_batch=10). A take_gradient=True
+    call from its state raises ValueError before f is called, since its
+    batches hold whole subintervals and PadaQuad does not exceed a batch size
+    known to fit; a max_batch of 21 given with the state, or the same batch
+    size not converged (it may grow), runs."""
+    _, state = solver().integrate(
+        Recorder(), mesh_init=A, mesh_final=B, take_gradient=False, max_batch=10
+    )
+    assert (state.max_batch, state.max_batch_converged) == (10, True)
+    f = Recorder()
+    with pytest.raises(
+        ValueError, match="The state batch size 10 is below the 21 points"
+    ):
+        solver().integrate(f, state=state, take_gradient=True)
+    assert f.sizes == []
+    for kwargs in (
+        {"state": state, "max_batch": 21},
+        {"state": dataclasses.replace(state, max_batch_converged=False)},
+    ):
+        result, _ = solver().integrate(Recorder(), take_gradient=True, **kwargs)
+        assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
+
+
 def test_state_and_mesh_together_raise():
     state = IntegrationState(even_mesh(4), 100, False)
     with pytest.raises(ValueError, match="mesh= or state="):

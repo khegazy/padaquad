@@ -334,12 +334,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             The older two are kept to reproduce meshes of earlier versions.
         max_batch : int or None
             Default for the largest number of integrand evaluations per call of
-            ``f``. None (default) sets the batch size from the free memory,
-            measured by a memory benchmark (see :ref:`the user guide <ug-memory>`).
+            ``f``, used by calls given no ``max_batch`` and no ``state``; with
+            ``take_gradient=True`` at least the C points of one subinterval.
+            None (default) lets the batch size grow from the first pass until
+            ``f`` runs out of memory (see ``integrate`` and :ref:`the user
+            guide <ug-memory>`).
         total_mem_usage : float
-            Fraction of the device's total memory, in (0, 1], that batches may
-            fill: the batch size leaves ``(1 - total_mem_usage)`` of it free.
-            Used only when no ``max_batch`` is set. Default 0.9.
+            Default fraction of the device's total memory, in (0, 1], that may
+            be in use; see ``integrate``. Default 0.9.
         limit_benchmark_time : bool
             If True (default), the memory benchmark raises ``RuntimeError``
             when it cannot measure the memory of ``f`` within 60 s; False
@@ -860,7 +862,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             over batches. None uses the integral (see :ref:`the user guide <ug-autodiff>`).
         max_batch : int or None
             Largest number of integrand evaluations per call of f, used as it is
-            (it does not grow), also with a ``state``. If this, the ``state``
+            (it does not grow), also with a ``state``. With
+            ``take_gradient=True`` it must be at least the C points of one
+            subinterval (a call of f then evaluates whole subintervals), and so
+            must a ``state``'s batch size that has converged, unless this is
+            given; otherwise ``ValueError``. If this, the ``state``
             and the constructor's value are all None, the first call of f is
             the first pass (at most 10,000 points), and the batch size grows
             from there by factors of 10 until f runs out of memory (see
@@ -989,7 +995,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             True with ``take_gradient=True``; if ``split_rule="accelerate"``
             meets ``error_norm="failure_fraction"`` (from this call or the
             constructor); or if ``evaluation_buffer`` is given with
-            ``trade_speed_for_memory=False`` or is not an int >= 1.
+            ``trade_speed_for_memory=False`` or is not an int >= 1; or if,
+            with ``take_gradient=True``, ``max_batch`` (or, without it, the
+            batch size of a ``state`` that has converged) is below the C
+            points of one subinterval.
         TypeError
             If ``take_gradient``, ``random_initial_mesh``,
             ``trade_speed_for_memory``, ``record_evaluations`` or
@@ -1064,6 +1073,23 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         )
         if given is not None and (isinstance(given, bool) or operator.index(given) < 1):
             raise ValueError(f"max_batch must be an int >= 1; got {given!r}.")
+        # With take_gradient=True every call of f is whole subintervals, each
+        # followed by its backward pass, so a batch size that does not grow
+        # must hold one subinterval: a given one, or a state's converged one
+        # (the largest known to fit; raising it could run out of memory).
+        fixed = given
+        if fixed is None and state is not None and state.max_batch_converged:
+            fixed = state.max_batch
+        if take_gradient and fixed is not None and fixed < self.C:
+            raise ValueError(
+                f"{'max_batch' if given is not None else 'The state batch size'} "
+                f"{fixed} is below the {self.C} points of one subinterval of "
+                f"{self.method_name}: with take_gradient=True every call of f "
+                "evaluates whole subintervals, each followed by its backward "
+                f"pass. Pass max_batch={self.C} or more (it replaces a state's "
+                "batch size), or take_gradient=False, where a call of f may end "
+                "inside a subinterval."
+            )
 
         # Per-call max_adaptive_splits takes priority over the constructor value.
         max_adaptive_splits = (
@@ -2588,7 +2614,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             Indices of the left mesh points of the subintervals that need
             evaluation, ascending. Shape: [K].
         max_mesh_steps : int
-            Largest number of subintervals to evaluate, at least 1.
+            Largest number of subintervals to evaluate, at least 1
+            (``integrate`` refuses a batch size below C points that cannot
+            grow).
 
         Returns
         -------
@@ -2599,9 +2627,6 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             None, the indices of their left mesh points [N], ascending, and
             their integral, error estimate, contributions and widths.
         """
-        assert max_mesh_steps >= 1, (
-            "Not enough free memory to run 1 integration steps for take_gradient=True. Set take_gradient=False if the gradient of the integral is not needed and consider increasing total_mem_usage"
-        )
         cuda = self.device.type == "cuda"
         self._forward_bytes = 0.0  # this batch's, measured below
         # Evaluate the first max_mesh_steps subintervals; while the batch is

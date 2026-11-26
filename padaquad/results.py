@@ -45,7 +45,12 @@ class IntegrationState:
     max_batch_converged : bool
         True when the batch size will not grow again: it was given by the user,
         or a call ran out of memory. While False, a call that needs larger
-        batches tries 10 times the batch size (see :ref:`ug-memory`).
+        batches tries 10 times the batch size (see :ref:`ug-memory`). A
+        converged batch size below the points of one subinterval (possible
+        after a ``take_gradient=False`` call) makes a ``take_gradient=True``
+        call raise ``ValueError`` unless it is given a ``max_batch``: that
+        call's batches hold whole subintervals, and a larger batch than the
+        one known to fit could run out of memory.
 
     Raises
     ------

@@ -69,7 +69,10 @@ and with `take_gradient=True` restarts the integral when a backward pass does
 raises `torch.OutOfMemoryError`. It raises `BackwardOutOfMemoryError` when a
 backward pass ran out of memory and the integrand uses a custom autograd
 function: pass `parameters=` (the tensors, or their optimizer) so PadaQuad can
-restart, or reset the gradients and call again with `state=error.state`. Else
+restart, or reset the gradients and call again with `state=error.state`. It
+raises it also when the backward pass of a single subinterval does not fit (a
+batch holds at least one subinterval with `take_gradient=True`): free memory on
+the device or choose a method with fewer points per subinterval. Else
 pass a smaller `max_batch`, use `take_gradient=True` (which does not keep the
 whole graph), or, with `take_gradient=False` and an integrand with many outputs,
 set `trade_speed_for_memory=True` or `record_evaluations=False`

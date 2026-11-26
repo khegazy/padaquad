@@ -737,7 +737,7 @@ def test_reading_never_below_input_and_output(fake):
     reader = fake.solver._peak_memory_reader()
     for n in (1, 1000, 10**5):
         M, _ = fake.solver._measure_call(
-            f, (), NODE.unsqueeze(0), n, reader.reset, reader.read, 0.9
+            f, (), NODE.unsqueeze(0), n, reader.reset, reader.read
         )
         assert 16 * n == M * GB
 
@@ -958,7 +958,7 @@ def test_real_linux_malloc_trim_recovers_reused_memory():
         return torch.zeros((t.shape[0], 1), dtype=t.dtype)
 
     def measure(r):
-        M, _ = solver._measure_call(f, (), NODE.unsqueeze(0), 1, r.reset, r.read, 0.9)
+        M, _ = solver._measure_call(f, (), NODE.unsqueeze(0), 1, r.reset, r.read)
         return M * GB
 
     first = measure(reader)

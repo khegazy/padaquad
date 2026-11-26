@@ -80,7 +80,13 @@ result, state = solver.integrate(f, state=state)
   `state=dataclasses.replace(state, max_batch_converged=False)`.
 - A batch size depends on the integrand, `take_gradient`, the dtype and the
   device. A state reused with another of these still works: an out-of-memory
-  error shrinks the batch until it fits, at the cost of the failed calls.
+  error shrinks the batch until it fits, at the cost of the failed calls. One
+  exception: with `take_gradient=True` a call of the integrand holds whole
+  subintervals, so a converged batch size below the points of one
+  subinterval (from a `take_gradient=False` call) raises `ValueError`; pass
+  `max_batch` (at least those points) with the state. PadaQuad does not raise
+  the batch size itself, since a larger batch than the one known to fit could
+  run out of memory.
 - `max_batch=` given with a state replaces its batch size, which is then
   fixed. `solver.get_max_batch(f=f, t=t, ...)` measures a batch size before
   any integral (it can be slow; measure once and pass the value as

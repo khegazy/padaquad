@@ -141,9 +141,10 @@ is now different, and what changed in this file:
   core) cost up to 60 % and give tails of up to 3.9 times; (b) the first call
   that keeps the record on the GPU pays about 190 ms of first-use cost, which
   one warm-up with the default `result_device="cpu"` does not remove; (c) on
-  the CPU, `sin(2e5 t)` takes 2,500 to 3,200 minor page faults per call,
-  which account for about 2 ms of its 22.5 ms and most of its spread with 8
-  bound threads.
+  the CPU, a process runs `sin(2e5 t)` either with about 6 minor page faults
+  per call or with 1,855 to 2,979, and its median is then 2 to 3 ms longer
+  (22.4 to 23.2 ms against 19.8 to 20.4 with 8 bound threads); the collector
+  does not decide which (adversarial review, 2.6).
 - **What does not contribute any more:** the collector (no full collection
   in 6,320 timed calls, at most 1.45 ms of collection in any call), the CUDA
   caching allocator (a device allocation in 3 timed calls, each the first with
@@ -358,11 +359,23 @@ Within each CPU series of `sin(2e5 t)` with page faults, the time rises with
 the faults (Spearman rank correlation +0.44 to +0.95 for the bound thread
 counts of block C). The collector itself costs nothing measurable: no full
 collection in any of the 6,320 timed calls, and at most 1.45 ms in
-collections in any call. Why `gc.disable()` also removes the page faults, and
-why either glibc setting alone adds faults, is not explained (unmeasured
-guess: which freed blocks sit at the top of the heap changes); `many_outputs`
-also had 2,500 to 3,900 faults and 6.9 to 7.4 ms (against 5.1) with only one
-of the two settings. On the GPU solver every setting had 0 faults.
+collections in any call. `many_outputs` also had 2,500 to 3,900 faults and
+6.9 to 7.4 ms (against 5.1) with only one of the two settings. On the GPU
+solver every setting had 0 faults.
+
+Each row of this table is one process, so it does not separate a setting from
+the state a process happens to be in. The adversarial review repeated it in
+14 processes (8 bound threads, gk21, `sin(2e5 t)`, 30 calls after a warm-up;
+`adv/faults.py`, `adv/logs/timings.log` and `adv/logs/faults2.log` under
+`$SCRATCH/padaquad_speedup_plans/timing-variation/`). A process had either a
+median of 5 to 6.5 faults per call and a median time of 19.8 to 20.4 ms, or
+a median of 1,855 to 2,979 faults and 22.4 to 23.2 ms. Many faults came in 1
+of 5 processes with the defaults (2,979), in 2 of 5 with `gc.disable()`
+(1,855 and 2,914) and in none of 4 with both glibc variables set; no
+collection ran during any of the 420 timed calls. So `gc.disable()` does not
+remove the faults, and the attribution to the collector in the first version
+of this section was wrong; whether both glibc variables prevent them is not
+settled by 4 processes.
 
 **Block E, NUMA placement** (GPU solver, 8 threads, `numactl
 --cpunodebind --membind`): GPU 0's domain, the farthest and unbound medians
@@ -411,9 +424,10 @@ thread-count effect is therefore the processor's boost with few busy cores
 8. **The random starting mesh.** **Excluded**: every call of a series
    evaluated the same points and subintervals.
 9. **glibc returning memory.** **Contributes on the CPU for many
-   subintervals**: about 2 ms of 22.5 ms and most of the spread of `sin(2e5
-   t)` with bound threads (blocks A, H, J); not understood well enough to
-   advise users (one setting alone made it worse).
+   subintervals**: a process has either about 6 or 1,855 to 2,979 faults per
+   call of `sin(2e5 t)`, 2 to 3 ms apart (2.6), not decided by the
+   collector; not understood well enough to advise users (one glibc
+   setting alone made it worse).
 
 ### 3.2 What follows for the library
 
@@ -586,8 +600,10 @@ Blocks A-H and F took about 10 minutes, I and J about 4.
   user-controllable source of time and spread on this node (two independent
   blocks, C/D and I, agree).
 - **Not explained:** the 18 % slower `many_outputs` in the allocation's first
-  GPU process; why `gc.disable()` removes the page faults of `sin(2e5 t)` and
-  either glibc setting alone adds faults; the rule behind torch's default
+  GPU process; what gives a CPU process the many page faults of
+  `sin(2e5 t)` (2.6: not the collector; with both glibc variables none of 4
+  processes had them) and why either glibc setting alone adds faults;
+  the rule behind torch's default
   thread count (inferred from counts, not read in torch's source).
 - **Not checked:** other node types; Python 3.13 and 3.14 (the test's
   counts do not use the collector, but were run only on 3.11 and 3.12);
@@ -635,11 +651,16 @@ worktree; the clean base comparison is from an archive of `3eb4507`
   `DistributedEnvironment.set_device` calls `torch.cuda.device_count()` even
   for a CPU solver, which loads `libnvidia-ml.so.1` through `ctypes` in a
   process that has not initialized CUDA and leaves 12 objects in reference
-  cycles per construction. Its time was not measured; it is a per-call, not a
-  per-subinterval, cost, and the fix (calling it only for a CUDA device) adds
+  cycles per construction. The adversarial review measured 60 µs per CPU-solver
+  construction with it and 15 µs with `self.local_rank and` before the
+  `device_count()` call (11 objects in cycles, then none; compute node, CUDA
+  not initialized); it is a per-call, not a per-subinterval, cost, and the
+  fix (calling it only for a CUDA device) adds
   a branch to the constructor, so it is left to the call-setup work.
-- **glibc page faults on the CPU** (3.1 item 9): about 2 ms of 22.5 ms on
-  `sin(2e5 t)`; why `gc.disable()` removes them and either glibc setting alone
-  adds them is not explained; no advice given.
+- **glibc page faults on the CPU** (3.1 item 9): a process runs `sin(2e5 t)`
+  with about 6 or 1,855 to 2,979 faults per call, 2 to 3 ms apart; the
+  collector does not decide it (many faults in 2 of 5 processes with
+  `gc.disable()`), and none of 4 processes with both glibc variables had them;
+  not explained, no advice given.
 - **The 18 % slower first GPU process** of the allocation (block I) has one
   instance and no explanation.

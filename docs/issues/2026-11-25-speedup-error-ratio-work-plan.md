@@ -566,3 +566,73 @@ on one GPU, base and branch alternating.
   mixes rows (the documentation now forbids it).
 - **My own reasoning:** that the re-check agreeing with the acceptance is the
   better behaviour; the choice of the `pair_errors` interface.
+
+## Implemented (branch `error_ratio_work`, 2026-11-26)
+
+Scripts and logs: `$SCRATCH/padaquad_speedup_plans/error-ratio-work/impl/`
+(`count_fns.py`, `timing.py`, `mem_ratios.py`, `stored_vs_recomputed.py`,
+`probe.py`, `probe2.py`, `bitgrid_er.py`, `bitcompare_er.py`, `logs/`).
+Nodes `nid008229` and `nid001149`, A100-SXM4-80GB, torch 2.8.0.
+
+| Step (5) | Commit | What |
+|---|---|---|
+| 1 | `2463fcc` | this review |
+| 2 (A) | `9109461` | running sums only in cumulative mode, one `cumsum` per turn; the final check uses the helper's own sum |
+| (simplification) | `72f2137` | the cumulative fallback and a missing floor handled once, in `_compute_error_ratios` (5 branches of the helpers go) |
+| 3 (B) | `ac940c9` | the pair ratio only with `pair_errors`, built by `_get_optimal_mesh`; `failure_fraction`'s `ones_like` products gone |
+| 4 (C) | `0fd195b` | Step 5b reads the size of `extra_split_idxs`; host-wait pin |
+| 5 (E) | `13d5bf4` | error control on detached values; CHANGELOG (Changed) |
+| 6 (D) | `592566a` | `_reduced_errors`, the record's `reduced_errors`; tests |
+| 7 | `eb0f6ad` and this commit | CLAUDE.md, CHANGELOG, user guide |
+
+**Numbers.** `bitgrid_er.py` (2,240 integrations, warm calls included, every
+re-check's positions and failing mask recorded) and `record-order`'s
+`bitgrid.py` (856 CPU, 864 CUDA): no difference from `c14d6ff` on the CPU or
+the A100 after E and after D, other than `error_ratios.requires_grad` (True to
+False in the 20 and 32 cases with a learnable integrand or a bound that
+requires grad and `take_gradient=False`). Two base runs on CUDA were equal.
+`stored_vs_recomputed.py` (48 integrations, `"2"`, `"rms"`, a 3-norm, 1,000
+and 10,000 outputs, both modes, gk21 and bosh3, CPU and CUDA): the stored
+reduction differs from a recomputation in the record in up to 56 of 462
+checked rows (CUDA, gk21, D = 1,000) and in 0 to 5 rows on the CPU (the
+3-norm), the ratio by at most 2.6e-16 relative; no decision differed.
+
+**Waits and launches** (`count_fns.py`, gk21, `atol=1e-8`, `rtol=0`,
+`max_batch=1e6`): `chirp` `"max"` 103 → 90 waits, 2,823 → 2,331 launches;
+`"2"` 2,935 → 2,387; cumulative 2,851 → 2,555; `"failure_fraction"` 3,019 →
+2,501; `many_outputs` 32 → 31 waits, 416 → 362 launches.
+
+**Wall time** (`timing.py`, median of 21, two rounds alternating base and
+branch on GPU 0 of `nid001149` alone, then the CPU with 16 threads; round 1
+shown, round 2 within 2 ms except where noted):
+
+| Case | A100 base | A100 branch | CPU base | CPU branch |
+|---|---|---|---|---|
+| chirp `"max"` | 40.0 | 32.5 | 13.5 | 11.6 |
+| chirp `"2"` | 41.3 | 33.2 | 14.0 | 11.9 |
+| chirp cumulative | 40.3 | 36.1 | 13.6 | 12.9 |
+| chirp `"failure_fraction"` | 42.0 | 33.8 | 14.3 | 12.0 |
+| 1,000 outputs `"2"` | 10.9 | 8.3 | 6.1 | 5.7 |
+| chirp × ones(10,000) `"2"` | 125.0 | 108.6 | 141.6 (130.6) | 108.1 (114.4) |
+| `sin(2e5 t)` `"max"` | 37.2 (34.7) | 31.5 | 26.2 | 23.6 |
+
+**Temporary GPU memory** (`mem_ratios.py`, in [N, D] arrays of the call;
+base → branch): the batch's `_compute_error_ratios` 4.0-5.1 → 0.1-0.6 in
+absolute mode (plus the batch's own reduction, `_reduced_errors`, about 2,
+outside it) and → 2.1-3.0 in cumulative mode; the re-check 4.0-5.0 → 0.1
+(absolute) and 3.0 (cumulative); `"failure_fraction"` 7.3-9.4 → 4.5-6.4;
+`_get_optimal_mesh` 5.0-7.8 → 4.0-7.1 (norm family; gk21 absolute stays 7.1,
+its peak is elsewhere) and 9.4-12.5 → 7.3-10.1. One re-check of 2,000 × 100,000
+(`"2"`): 24.8 ms and 5.96 GiB → 0.72 ms and 0.001 GiB. (Commit `592566a`'s
+message says "three [N, D] temporaries" for the base: it is four.)
+
+### Not done
+
+- Item C's lookup of failures only (review 4): `_splittable` over the whole
+  record, 11 launches per turn on `chirp`, stays; avoiding it needs a branch
+  or a second read.
+- The merge stage of `_get_optimal_mesh` still computes the per-subinterval
+  ratios it discards (once per call; skipping them needs a second return
+  shape or a branch).
+- Making cumulative mode reproducible on CUDA for more than about 40,000
+  subintervals (review 10) is a decision for the user.

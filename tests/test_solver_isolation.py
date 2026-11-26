@@ -237,7 +237,7 @@ def test_optimal_mesh_on_another_device_keeps_the_solvers_method():
     assert method is _get_method(
         steps.ADAPTIVE_UNIFORM, "gk21", solver.device, torch.float64
     )
-    assert method is UNIFORM_METHODS["gk21"].to("cuda", torch.float64)
+    assert method is UNIFORM_METHODS["gk21"].to(solver.device, torch.float64)
 
 
 @needs_cuda

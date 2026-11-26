@@ -230,10 +230,10 @@ class MethodClass(ABC):
         all of those solvers.
 
         The key is the object ``self``, not its name in a registry, so a
-        solver keeps its method when a registry entry is replaced. An index-less
-        ``"cuda"`` means the current CUDA device, as in ``Tensor.to``. Each
-        tensor is moved to ``device`` before its dtype is changed, so the cast
-        runs on ``device``.
+        solver keeps its method when a registry entry is replaced. Solvers pass
+        their indexed device (``_resolve_device``); ``"cuda"`` and ``"cuda:0"``
+        are two keys. Each tensor is moved to ``device`` before its dtype is
+        changed, so the cast runs on ``device``.
 
         Parameters
         ----------
@@ -248,8 +248,6 @@ class MethodClass(ABC):
             The converted method, of the same class as ``self``.
         """
         device = torch.device(device)
-        if device.type == "cuda" and device.index is None:
-            device = torch.device("cuda", torch.cuda.current_device())
         key = (self, device, dtype)
         if key not in _CONVERTED:
             # setdefault: when two threads build the same method, both return

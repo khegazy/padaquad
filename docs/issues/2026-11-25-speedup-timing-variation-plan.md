@@ -31,7 +31,7 @@ is now different, and what changed in this file:
    call allocates peaks at 18 to 30 KiB above its start for 11 to 13,036
    subintervals (`tracemalloc`), and `chirp` (76 subintervals, 11 passes) and
    `sin(2e5 t)` (13,036 subintervals, 13 passes) make the same number of
-   Python calls within 2 % (1,361 and 1,391 Python calls; `sys.setprofile`):
+   Python calls within 3 % (1,361 and 1,391 Python calls; `sys.setprofile`):
    nothing in the loop is done per subinterval in Python. Block G of the
    protocol (the `record-order` prototype) is dropped: that code is now the
    code measured.
@@ -589,3 +589,51 @@ Blocks A-H and F took about 10 minutes, I and J about 4.
 - **Not checked:** other node types; Python 3.13 and 3.14 (the test's
   counts do not use the collector, but were run only on 3.11 and 3.12);
   `take_gradient=True` timings (counted, not timed).
+
+## Implemented (branch `timing_variation`, 2026-11-26)
+
+Scripts, raw results and logs: `$SCRATCH/padaquad_speedup_plans/timing-variation/impl/`.
+
+| Step (5) | Commit | What |
+|---|---|---|
+| 1, 2 | `d5548b3` | this file, reviewed, with the protocol's measurements (2.6) |
+| 3 (D4) | `fad0628` | `TestPythonWork` in `tests/test_base_solver.py` |
+| 4 (D3) | `f8da744` | both benchmark scripts keep every run's time, collect garbage before each case, record threads; `docs/performance.md` |
+| 5 (D1, D2) | `c543780` | user guide "CPU threads", Troubleshooting pointer, CHANGELOG, CLAUDE.md |
+
+No change to `padaquad/`. The test suites of the base commit (`3eb4507`, on
+the node of 2.6, after the protocol): CUDA 4,622 passed, 25 skipped; CPU
+(`CUDA_VISIBLE_DEVICES=""`) 4,288 passed, 359 skipped; no failure
+(`impl/logs/suite_base_*.log`). The suites, docs build and checks at the
+final commit are in the implementing agent's final report
+(`impl/logs/suite_final_*.log`, `impl/logs/docs_final.log`).
+
+### Not done
+
+- **`performance_benchmark` (not this branch's work).** For
+  `examples/speed_test/library_comparison.py`: in `measure`, `gc.collect()`
+  before the warm-up and `times_s` (every run's time) in the result; make
+  the warm-up use the timed call's options, including `result_device` (3.1
+  item 3); in `main`, replace `torch.set_num_threads(len(os.sched_getaffinity(0)))`
+  (128 on a GPU node, two threads per core, the slowest setting of 2.6) by
+  one fixed count for every torch-based solver, at most one per physical
+  core (8 was within 2 to 8 % of the fastest for PadaQuad in every case of
+  2.6), from a command-line option; in `metadata`, the count, the CPU set,
+  `OMP_*` and `GOMP_SPINCOUNT`; in `render_markdown`, the range beside the
+  median in PadaQuad's own table. In `run_benchmark.sh`, start the Python
+  process with `srun --cpu-bind=cores` (with `-c` twice the number of cores
+  wanted, on a node with two hardware threads per core) when `SLURM_JOB_ID`
+  is set. A results file without `times_s` must still render (as on this
+  branch: only keys are added).
+- **The NVML library loaded at every solver construction** (review item 2):
+  `DistributedEnvironment.set_device` calls `torch.cuda.device_count()` even
+  for a CPU solver, which loads `libnvidia-ml.so.1` through `ctypes` in a
+  process that has not initialized CUDA and leaves 12 objects in reference
+  cycles per construction. Its time was not measured; it is a per-call, not a
+  per-subinterval, cost, and the fix (calling it only for a CUDA device) adds
+  a branch to the constructor, so it is left to the call-setup work.
+- **glibc page faults on the CPU** (3.1 item 9): about 2 ms of 22.5 ms on
+  `sin(2e5 t)`; why `gc.disable()` removes them and either glibc setting alone
+  adds them is not explained; no advice given.
+- **The 18 % slower first GPU process** of the allocation (block I) has one
+  instance and no explanation.

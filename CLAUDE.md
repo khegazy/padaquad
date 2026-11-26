@@ -390,11 +390,14 @@ is a boolean array where `True` means the panel still needs evaluation.
    a view for methods without end nodes when the field left the solver's
    device, since on it the field may be `f`'s own output) field by field in
    the record, before
-   the loop's fields move to `result_device`. The record's device peaks at
-   about 2 R (R = the recorded values) for several passes (the ordering), R
-   plus the per-subinterval arrays for one pass of gk21, and R + 4 arrays of
-   [N, D] in `_get_optimal_mesh` (3 R for adaptive_heun); user guide
-   `ug-end-of-call-memory`, plan `docs/issues/2026-11-26-record-final-peak-plan.md`.
+   the loop's fields move to `result_device`. With the record on another
+   device than the solver, that device peaks at about 2 R (R = the recorded
+   values) for several passes (the ordering), 1.2 R for one pass of gk21, R + 4
+   arrays of [N, D] in `_get_optimal_mesh` (3 R for adaptive_heun), and up to
+   5.5 MiB more for the merge prediction's blocks (3.2 R for a 2 MiB record);
+   with the record on the solver's device the integration's own arrays add to
+   it (2.4 to 2.8 R measured); user guide `ug-end-of-call-memory`, plan
+   `docs/issues/2026-11-26-record-final-peak-plan.md`.
 
 ### Error computation modes
 

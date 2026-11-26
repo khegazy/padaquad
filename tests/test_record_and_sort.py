@@ -396,7 +396,8 @@ class TestFlattenOutput:
     def test_no_shared_node_keeps_every_row(self, fractions):
         """Without a node at both ends neighbouring subintervals share no
         node (Gauss-Kronrod has none, a Radau-type rule one), so every row is
-        an evaluated point of its own: N * C rows, in order."""
+        an evaluated point of its own: N * C rows, in order, a view of the
+        array (no copy: a copy held the values twice at the end of a call)."""
         solver = make_solver_for_unit_test()
         c = torch.tensor(fractions, dtype=torch.float64)
         solver.method = UniformMethodClass(
@@ -407,6 +408,7 @@ class TestFlattenOutput:
         panel_array = torch.arange(3 * 2 * 4, dtype=torch.float64).reshape(3, 2, 4)
         out = solver._flatten_output(panel_array)
         assert torch.equal(out, panel_array.reshape(6, 4))
+        assert out.data_ptr() == panel_array.data_ptr()
 
     def test_gradient_equals_concatenation(self):
         """The gradient reaches every value as through the concatenation."""

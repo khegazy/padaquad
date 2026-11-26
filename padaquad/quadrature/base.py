@@ -1672,6 +1672,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 reference_pinned,
             )
 
+        # The error estimates as they are returned and as the merges below sum
+        # them: absolute values, taken in place, since the record's array is
+        # read by nothing else from here on (a copy held one more [N, D] array
+        # on the solver's device and on result_device).
+        record["mesh_quadrature_errors"].abs_()
+
         # Prune over-resolved steps and refine under-resolved ones. The merge
         # prediction applies the method's weights, so it must run with the
         # method's tables and device-bound allocations co-located with its
@@ -1697,16 +1703,23 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             with self._integration_on_device(optimal_device):
                 mesh_optimal = self._get_optimal_mesh(
                     mesh_quadratures=record["mesh_quadratures"].to(optimal_device),
-                    # Absolute values: the merge sums two subintervals' errors,
-                    # which signed values could cancel.
-                    mesh_quadrature_errors=torch.abs(
-                        record["mesh_quadrature_errors"]
-                    ).to(optimal_device),
+                    mesh_quadrature_errors=record["mesh_quadrature_errors"].to(
+                        optimal_device
+                    ),
                     integral=record["integral"].to(optimal_device),
                     mesh=mesh.to(optimal_device),
                     y=record.get("y"),
                 )
             mesh_optimal = mesh_optimal.to(self.device).detach()
+
+        # Join each subinterval's nodes, values and tracked variables into one
+        # sequence, field by field in the record, so that a field's
+        # per-subinterval array is freed as soon as it is joined: before the
+        # next field is joined and before the loop's fields come to
+        # result_device below.
+        for key in record:
+            if key in ("nodes", "y") or key.startswith(self._TRACKED_KEY_PREFIX):
+                record[key] = self._flatten_output(record[key])
 
         # Move the record fields still on the integration device (the loop's
         # fields and the loss; every one with record_evaluations=False) to
@@ -1735,16 +1748,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # whose ends they are.
             mesh_init=mesh_init,
             mesh_final=mesh_final,
-            nodes=self._flatten_output(record["nodes"]),
+            nodes=record["nodes"],
             h=record["h"],
-            y=self._flatten_output(record["y"]) if "y" in record else None,
-            # Flatten tracked variables the same way so they stay aligned with
-            # the flattened nodes/y.
-            tracked_variables=tuple(self._flatten_output(tv) for tv in record_tracked)
-            if record_tracked
-            else None,
+            y=record.get("y"),
+            tracked_variables=record_tracked or None,
             mesh_quadratures=record["mesh_quadratures"],
-            mesh_quadrature_errors=torch.abs(record["mesh_quadrature_errors"]),
+            mesh_quadrature_errors=record["mesh_quadrature_errors"],
             error_ratios=record["error_ratios"],
             loss=record["loss"],
             gradient_taken=take_gradient,
@@ -4681,9 +4690,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         When the method's node fractions start at 0 and end at 1, neighboring
         subintervals share a node, their mesh point: all C entries of the first
         subinterval are kept and the first entry of every later one, which
-        repeats the previous subinterval's last entry, is dropped. Otherwise
-        (for example Gauss-Kronrod, whose nodes are all interior) no node is
-        shared, and every entry is kept.
+        repeats the previous subinterval's last entry, is dropped, in a new
+        array. Otherwise (for example Gauss-Kronrod, whose nodes are all
+        interior) no node is shared, every entry is kept, and the sequence is
+        ``panel_array`` itself, viewed (not copied) when it is contiguous.
 
         Parameters
         ----------
@@ -4698,12 +4708,12 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         """
         n, c, *rest = panel_array.shape
         fractions = self.method.node_fractions()
-        # The number of entries a subinterval shares with its left neighbor.
-        k = int(float(fractions[0]) == 0.0 and float(fractions[-1]) == 1.0)
+        if not (float(fractions[0]) == 0.0 and float(fractions[-1]) == 1.0):
+            return panel_array.flatten(0, 1)
         # Written straight into the output: flattening the non-contiguous
-        # panel_array[1:, k:] and then concatenating made two full copies, 3
+        # panel_array[1:, 1:] and then concatenating made two full copies, 3
         # times the values on the host at the peak (measured 2026-11-26).
-        out = panel_array.new_empty((n * (c - k) + k, *rest))
+        out = panel_array.new_empty((n * (c - 1) + 1, *rest))
         out[:c] = panel_array[0]
-        out[c:].view(n - 1, c - k, *rest).copy_(panel_array[1:, k:])
+        out[c:].view(n - 1, c - 1, *rest).copy_(panel_array[1:, 1:])
         return out

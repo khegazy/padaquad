@@ -140,7 +140,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_solver_methods.py` | `adaptive_quadrature` factory, `method.weights` through both solvers, per-step node count `solver.C` |
 | `test_adaptive_steps.py` | `_adaptively_increase_mesh`: pass/fail/mixed error ratios, midpoint placement |
 | `test_record_and_sort.py` | `_record_results` and `_sort_record` (a record in order is not copied); `_flatten_output` equals the concatenation, values and gradient |
-| `test_evaluate_and_merge.py` | `_evaluate_adaptive_nodes` + `_merge_excess_nodes` for both uniform and variable solvers |
+| `test_evaluate_and_merge.py` | The variable solver's `_evaluate_adaptive_nodes` (split with reuse; not called by `integrate`) |
 | `test_prune_and_optimal.py` | `_prune_excess_mesh`, `_get_optimal_mesh`, pair ratio = merged step's ratio; end to end: the state's mesh re-evaluates with no failing step (every uniform method, cumulative mode), repeated warm starts prune to a fixed point; `mesh_optimal` ends at the bounds bit for bit and is increasing (every method, both dtypes, CPU and CUDA) |
 | `test_y0_and_f_args.py` | `y0` additive offset (`result.integral = y0 + ∫f`) and `f_args` forwarding to `f(t, *f_args)` |
 | `test_gradient.py` / `test_gradient_integration.py` | Per-batch backward, learnable integrand training loops |
@@ -214,9 +214,11 @@ MethodClass (ABC, methods/_base.py)        one quadrature rule
 The two concrete solvers (`UniformAdaptiveQuadrature` and
 `VariableAdaptiveQuadrature`) are what user code instantiates, either
 via `adaptive_quadrature(...)` factory or directly. They differ only in
-`sampling_type` (which selects the method registry) and in
-`_evaluate_adaptive_nodes` / `_merge_excess_nodes`. Node placement and
-`_calculate_integral` live once in `AdaptiveQuadrature` and reach the
+`sampling_type` (which selects the method registry); the variable solver also
+keeps `_evaluate_adaptive_nodes`, which `integrate` does not call. Node
+placement, `_calculate_integral` and the merging of the optimal mesh
+(`_prune_excess_mesh` drops a merged pair's shared mesh point) live once in
+`AdaptiveQuadrature` and reach the
 rule only through `MethodClass.node_fractions()` and
 `MethodClass.weights(nodes)` (both families return weights `[N, C, 1]`).
 Every registered rule is an instance of one of the two generic classes,
@@ -419,8 +421,9 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   are constants.
   - *Splitting*: discards old evaluations, places fresh quadrature
     points at standard `c` positions in the new sub-panels.
-  - *Merging*: re-interpolates C nodes at standard `c` positions
-    spanning `[A.start, B.end]`.
+  - *Merging* (optimal mesh): the pair's shared mesh point is removed and
+    the merged subinterval carries the pair's summed contribution and error;
+    no nodes are built for it (the same for both solvers).
 - **Variable** (`quadrature/variable.py`): weights computed from each
   panel's actual nodes by `method.weights(nodes)`
   (`VariableMethodClass.weight_function`; for `interpolatory3_variable`
@@ -434,10 +437,7 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
     `integrate()` (checked 2026-11-12: 0 calls on a run with 2495
     subintervals). It also allocates its node array with last dimension D
     instead of T (latent; wrong shape only when D != T).
-  - *Merging*: concatenates points from both panels (C + C-1 = 2C-1,
-    shared boundary not duplicated), then subsamples every other point
-    to get C. `method.weights(nodes)` recomputes the right weights for
-    the new layout.
+  - *Merging*: as for uniform sampling.
 
 ### Memory management
 

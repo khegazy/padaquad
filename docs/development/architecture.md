@@ -6,7 +6,7 @@
 |---|---|
 | `padaquad/_frontend.py` | `integrate()` and the `adaptive_quadrature()` factory |
 | `padaquad/quadrature/base.py` | `AdaptiveQuadrature`: the integration loop, node placement, error ratios, the optimal mesh |
-| `padaquad/quadrature/uniform.py`, `variable.py` | The two solvers; they differ in how a split or merged subinterval gets its nodes |
+| `padaquad/quadrature/uniform.py`, `variable.py` | The two solvers; they differ only in the method registry they select |
 | `padaquad/quadrature/memory.py` | The memory benchmark and the batch-size budget |
 | `padaquad/methods/` | `MethodClass` and the method registries, one module per family |
 | `padaquad/results.py` | `IntegrationResult` |

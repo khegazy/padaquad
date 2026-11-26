@@ -53,7 +53,9 @@ different, and what changed in this file:
    branch (task decision) and needs a synchronization before every read of the
    record on the host during the loop, which the plan missed: the re-check's
    removal (`_remove_failed_record_panels`) joins the record's chunks on the
-   host.
+   host. (Corrected by the section "D2: review and implementation" below: the
+   gain comes from pinned memory, not from not waiting, every reader already
+   follows a read of the device, and the first call of a size is slower.)
 4. **`torch.lerp` gives the same bits on the CPU and the A100.** The plan
    argued that the nodes of route (d) must be computed on the GPU because
    `lerp` "need not give the same last bit"; on 21 million gk21 nodes it did
@@ -83,6 +85,244 @@ different, and what changed in this file:
 The original analysis of quadax (2.7), of the PyTorch documentation (2.8) and
 of compiled bits (2.9), and the blockers of capture and compilation (3.1),
 are unchanged and kept.
+
+## D2: review and implementation (2026-11-26, against `c70f790`; branch `async_record_copy`)
+
+The user asked for D2 ("do the copying without waiting"). This section checks
+the prototype of 5.3 as a design, against the code at `c70f790`, PyTorch 2.8.0
+(its documentation and source) and new measurements on idle A100 nodes
+(`nid002409`, `nid001296`; scripts and logs in
+`/pscratch/sd/k/khegazy/padaquad_speedup_plans/async-record-copy/impl/`).
+**Result: D2 was not implemented.** The gain is real for repeated calls with
+many outputs, but it does not come from not waiting, and it brings two costs
+that 5.3 did not list: the first call of a size is up to 2.9 times slower,
+and the process keeps the pinned memory after the call. The options are at the
+end of this section. **Decided by the user on 2026-11-26: option (c), leave the
+copy as it is.**
+
+### What the review found
+
+1. **The gain comes from the pinned memory, not from not waiting.** Three
+   variants of `_record_results` (line 4498, `value.to(result_device)`) were
+   timed, alternated three times on one A100: the base; the values copied
+   into pinned memory with a blocking copy; and `value.to(result_device,
+   non_blocking=True)`. The blocking and the non-blocking pinned copies took
+   the same time within the spread (table below). The reason is the loop
+   itself: the next host wait after `_record_results` is the next turn's
+   condition, `torch.nonzero(mesh_trackers)` (line 1224), which PyTorch
+   implements with `at::cuda::memcpy_and_sync` (`aten/src/ATen/native/cuda/Nonzero.cu`,
+   v2.8.0, about line 214), that is `cudaMemcpyAsync` followed by
+   `cudaStreamSynchronize` of the current stream (`c10/cuda/CUDAFunctions.h`,
+   v2.8.0, about lines 96-97), and `cudaStreamSynchronize` "blocks until
+   stream has completed all operations" (CUDA Runtime API, stream management,
+   https://docs.nvidia.com/cuda/cuda-runtime-api/group__CUDART__STREAM.html),
+   the copy included. Between the copy and that read the host only deletes
+   the batch's names and tests Step 7's condition, so a copy that does not
+   wait waits a few microseconds later. What pinned memory saves is measured
+   by `impl/copy_micro.py` (218 MB, float64, median of 7): a copy into fresh
+   pageable memory, as `.to("cpu")` makes, 32.4 ms; into pageable memory
+   already touched, 13.0 ms; into pinned memory from PyTorch's cache, 9.5 ms.
+   So about 19 of the 23 ms come from not touching fresh pages (PyTorch's
+   pinned-memory cache gives back the blocks of the previous call), and about
+   3.5 ms from the faster transfer.
+2. **The first call of a size is much slower** (not measured by 5.3, which
+   timed medians after a warm-up). A pinned block that is not in the cache is
+   allocated with `cudaHostAlloc`, which took 148 ms for 218 MB and 556 ms for
+   685 MB (`copy_micro.py`, "pinned first"; a pageable copy of the same 685 MB
+   took 82 ms). The first call of a fresh process with 100,000 outputs (13
+   subintervals, 218 MB of values) took 285-300 ms in the base and 460-480 ms
+   with D2 (4 fresh processes each, `impl/first_call.py`); in a process that
+   had run the smaller cases of the table below, the first call with 685 MB
+   of values took 310-359 ms in the base and 853-908 ms with D2. With 1 and 1,000 outputs the first call of
+   a fresh process is unchanged (153-156 against 155-157 ms, 156-165 against
+   156-168 ms).
+3. **The process keeps the pinned memory after the call, about twice the
+   largest record.** PyTorch's caching host allocator rounds every block up to
+   a power of two ("Round up the allocation to the nearest power of two to
+   improve reuse", `ATen/core/CachingHostAllocator.h` of the installed torch
+   2.8.0, about line 200; measured: a 192 MiB request reserved 256 MiB) and
+   keeps freed blocks for reuse ("re-uses freed pinned (page-locked) memory
+   allocations", `ATen/cuda/CachingHostAllocator.h`, lines 13-15). The call
+   with 685 MB of values raised the pinned memory the process held from 119 MB
+   to 1,327 MB, and it stayed there; after the series of measured cases it was
+   1,595 MB. Pinned memory cannot be swapped; the PyTorch
+   tutorial warns that it "will consume RAM and may impact other tasks"
+   (https://docs.pytorch.org/tutorials/intermediate/pinmem_nonblock.html,
+   "Additional considerations"). Torch 2.8 has no public function to release
+   it (only `torch._C._host_emptyCache`, private), and releasing it after each
+   call would make every call pay item 2.
+4. **Readers.** Every place that reads the copied values on the host comes
+   after a host read of the solver's device on the same stream, made by the
+   loop for its own control flow, so with stream ordering (item 1) no reader
+   can see an unfinished copy in the code at `c70f790`:
+   - the removal of re-split subintervals in Step 5b
+     (`_remove_failed_record_panels`, line 1427) reads chunks recorded in
+     earlier turns, after this turn's condition (line 1224), the re-check's
+     read (`_failed_record_positions`, line 1865) and the mesh update's read
+     (line 2195); it also starts with a read of its own,
+     `torch.nonzero(~record_keep_mask)` (line 4625), before `torch.cat` of
+     the chunks (line 4636);
+   - the removal in Step 7 (line 1577) reads the chunk recorded in the same
+     turn, after Step 7's condition `torch.any(mesh_trackers)` (line 1528)
+     and `bool(fails.any())` (line 1541);
+   - the final ordering (`_sort_record`, line 1619) runs after the loop's last
+     condition, and reads `bool(torch.all(rows[1:] > rows[:-1]))` (line 4545)
+     before it writes any chunk; `_flatten_output`, `_get_optimal_mesh` and
+     the merge prediction read the sorted record after that;
+   - the per-batch result `loss_fxn` receives holds the values before the
+     copy (on the solver's device by default, line 1002), so no copy in flight
+     reaches the user; the removed rows passed to `loss_fxn` are joined on the
+     host after the reads above and sent to `values_device`;
+   - an exception in the loop (an out-of-memory retry, the restart after a
+     backward out-of-memory error, the finite check's `ValueError`, a
+     `KeyboardInterrupt`) drops the chunks: freeing a pinned block whose copy
+     is in flight is safe, because `copy_kernel_cuda` records an event on the
+     block for every non-blocking copy (`aten/src/ATen/native/cuda/Copy.cu`,
+     v2.8.0, about lines 401-420) and the allocator does not hand it out again
+     before the event completes (measured: the freed block was not returned
+     while the copy ran, and was returned after a synchronization); freeing or
+     overwriting the GPU source is safe because the CUDA caching allocator
+     reuses memory in the order of the stream ("Operations inside each stream
+     are serialized in the order they are created",
+     https://docs.pytorch.org/docs/2.8/notes/cuda.html; measured: a source
+     freed and its memory refilled right after the copy was started gave the
+     right values).
+
+   No reader synchronizes on purpose, though: each relies on a read it makes
+   for another reason. The PyTorch tutorial says only that "a device
+   synchronization" must run "before the data is accessed" (same page,
+   "Other copy directions"), and a read without one gives wrong numbers
+   silently (measured: a copy delayed by a GPU sleep read 0.0 instead of
+   7.0). There is no single function that every reader goes through: the two
+   that read the chunks (`_remove_failed_record_panels`, `_sort_record`) are
+   the only ones today, so safety "by construction" would mean either a
+   synchronization at the top of each (the prototype's two
+   `synchronize()` calls, two sites to remember) or keeping the copies in
+   flight outside `chunks` until one function synchronizes and moves them in
+   (new code). The test that would catch a missing wait was built and run:
+   `impl/bitgrid_arc.py ... delay` puts a GPU sleep of about 20 ms before
+   every `_record_results`, so every copy is still running when the host goes
+   on; the non-blocking variant gave the base's bits on it (see item 7).
+5. **The prototype's code had a device branch it does not need.** A
+   non-blocking copy from a GPU to the CPU already allocates its destination in
+   pinned memory (`Tensor.to(..., non_blocking=True)`; measured
+   `is_pinned()` True, storage exactly the tensor's bytes, so the clone test of
+   `_record_results` does not fire), and on the same device or on a CPU
+   solver `.to` does nothing. The whole change is one keyword,
+   `value.to(result_device, non_blocking=True)`, and the prototype's two
+   synchronizations are redundant with the reads of item 4.
+6. **The configurations.**
+   - `trade_speed_for_memory=True`: the values are on `result_device` before
+     `_record_results`, so its `.to` does nothing and D2 does not apply. Its
+     own copies (`_evaluate_f_on_split_nodes`, lines 2953, 2961) go into a
+     pageable array for the pass. A variant that makes that array pinned and
+     its copies non-blocking (`impl/pkg_tsm`, a condition on the devices)
+     made a call with `max_batch=2,100` and 685 MB of values 36 % faster (450
+     to 281-293 ms) but its first call 2.6 times slower (504-540 to
+     1,371-1,379 ms), and the process held 2.1 GB pinned afterwards: the same trade as D2, on the path whose
+     purpose is to save memory. Not recommended.
+   - `record_evaluations=False`: nothing is copied. Record on the solver's
+     device (`result_device=None`): `.to` does nothing. CPU solver: nothing.
+   - Record on another GPU (`result_device="cuda:1"`): a copy between GPUs
+     is already asynchronous with respect to the host, with a two-way event
+     barrier between the two devices' current streams
+     (`copy_device_to_device`, `Copy.cu`, about lines 230-290); `non_blocking`
+     changes nothing there. In the grids below, base and D2 gave the same
+     bits with the record on `cuda:1`.
+   - `take_gradient=True`: the values are detached before the copy; the copy
+     runs once per batch, as without it (times in the table).
+   - `take_gradient=False` with an output that requires grad: the
+     non-blocking copy is differentiable (`ToCopyBackward0`), and the
+     gradients of a learnable integrand were bit-identical (grid below).
+   - float32, int64 and bool tracked variables: pinned and copied like the
+     values (grid below).
+   - D = 1: no gain and no loss, also on the first call of a fresh process
+     (item 2 and the table).
+7. **Bit identity of the variant `value.to(result_device, non_blocking=True)`**
+   against `c70f790`, on CUDA (A100, with a second A100 for `cuda:1`): 0
+   differences in `compiled-turn/impl/bitgrid_ct.py` (2,396 integrations,
+   68,022 fields), in `record-order/impl/bitgrid.py` (864 integrations, 228
+   with removals; 18,400 fields), and in `impl/bitgrid_arc.py` (628
+   integrations: tracked float, int64 and bool variables, every memory option,
+   the record on the solver's device, the CPU and `cuda:1`, 10,000 and 100,000
+   outputs, Step 5b and Step 7 removals, float32, a learnable integrand with
+   both `take_gradient`, a `loss_fxn` whose every input, removed rows
+   included, is hashed; 20,904 fields), also with the 20 ms delay before every
+   recording.
+8. **Out of memory.** A refused pinned allocation raises
+   `torch.AcceleratorError("CUDA error: out of memory ...")`, which
+   `_is_out_of_memory` recognizes (measured with a 600 GB request; CUDA stays
+   usable after it). `_record_results` catches no allocation error, in the
+   base or with D2, so either error reaches the caller.
+9. **Host memory peak.** Unchanged by D2: about 2 times the recorded values
+   (1.79-2.71 in the base, 1.85-2.23 with either pinned variant, for the
+   cases with 12.9 MB or more of values; smaller values are below the
+   resolution of the reading). Not D2's, but found here: with removals by
+   the re-check the host's peak is about 3.3 times the values in the base too
+   (`removal_bosh3_D1e3`, 203 MB of values: 3.03-3.34), above the "about
+   twice" of the user guide (`_remove_failed_record_panels` joins the chunks
+   and then copies the kept rows while the record and the result are alive).
+   The returned `result.y` is never pinned: `_flatten_output` writes it with
+   `new_empty`, which does not pin (measured), so a user who keeps many
+   results keeps pageable memory, as before.
+
+### Measurements
+
+`impl/time_ab.py` (and `time_rm.py` for the removal case): gk21, float64,
+`atol=1e-8`, `rtol=0`, `error_norm="max"`, `max_batch=1_000_000`,
+`result_device="cpu"`, [0, 1], seed 0; median of 21 calls after a first call
+(timed separately, "first"); base, blocking pinned and non-blocking runs
+alternated three times on one A100 (`nid001296`, nothing else on the node).
+`sin(k t)` with k = D values from 1 to 100 ("few") or to 5,000 ("many");
+`chirp × cos(k t)`; `sin(2e5 t)`. `take_gradient=False`:
+
+| Case | Subintervals, passes | Values | Base (ms) | Pinned, blocking (ms) | Non-blocking (ms) | First call, base / non-blocking (ms) |
+|---|---|---|---|---|---|---|
+| D = 1, few | 11, 1 | 1.8 kB | 4.4-4.5 | 4.4-4.5 | 4.4-4.5 | 5-6 / 9-15 |
+| D = 1, `sin(2e5 t)` | 13,737, 13 | 2.3 MB | 29.9-31.7 | 30.4-31.4 | 29.7-30.1 | 48-74 / 48-58 |
+| `chirp`, D = 1 | 77, 14 | 13 kB | 32.5-34.2 | 33.0-33.5 | 32.5-33.2 | 37-44 / 36-37 |
+| D = 1,000, few | 13, 2 | 2.2 MB | 7.9-8.3 | 7.8-8.1 | 7.7-8.2 | 10-13 / 10 |
+| D = 1,000, many | 408, 7 | 68.5 MB | 49.8-51.7 | 39.9-46.4 | 41.5-44.4 | 52-69 / 89-92 |
+| `chirp × cos`, D = 1,000 | 77, 14 | 12.9 MB | 39.7-41.8 | 39.0-40.2 | 38.1-39.9 | 41-47 / 47-53 |
+| D = 10,000, few | 13, 2 | 21.8 MB | 16.4-17.4 | 13.3-16.2 | 14.5-16.0 | 19-24 / 25-28 |
+| D = 10,000, many | 408, 7 | 685 MB | 295.7-298.0 | 218.8-265.9 | 220.7-236.0 | 310-359 / 853-908 |
+| D = 100,000, few | 13, 2 | 218 MB | 89.6-100.3 | 68.9-73.8 | 67.9-69.7 | 97-112 / 214-223 |
+| removals: bosh3, `atol=1e-9`, `rtol=1e-6`, `"2"`, cancelling peak × 1,000 (3 removals) | 8,456, 15 | 203 MB | 319.4-327.0 | | 273.9-324.8 | 393-407 / 534-563 |
+| the same, D = 1 (3 removals) | 2,765, 14 | 0.1 MB | 38.0-39.7 | | 37.6-37.8 | 40-42 / 39-43 |
+
+(The ranges are the three alternated medians, of 21 calls each, 11 for the
+removal rows; the quartiles of all calls lie within about 10 % of them,
+`impl/logs/f_*.json`, `rm_*.json`.) With `take_gradient=True`
+(`impl/logs/t_*.json`) the gains were the same: D = 10,000 many 287-344 to
+246-270 ms, D = 100,000 few 93-97 to 68-77 ms, D = 1 unchanged.
+
+### Options for the user
+
+- **(a) Implement D2 as one keyword** (`value.to(result_device,
+  non_blocking=True)` in `_record_results`, a comment there stating that the
+  values are complete once the host has read the device, a test with a
+  delayed copy (`torch.cuda._sleep` before `_record_results`) through Step 5b,
+  Step 7 and the final ordering, the host-wait test of
+  `test_loop_reads_once_per_pass_and_record_only_values` changed from "two
+  per record" to none, and the user guide). Repeated calls with 20 MB or more
+  of values get 5-30 % faster, more with more values; the first call of each
+  size gets 1.2-2.9 times slower; the process keeps up to about twice its
+  largest record pinned.
+- **(b) (a), and tell users with many outputs to set
+  `PYTORCH_CUDA_ALLOC_CONF=pinned_use_cuda_host_register:True,pinned_num_register_threads:8`**
+  before CUDA starts: PyTorch then pins `malloc`'d memory with 8 threads, and
+  the first fresh-process call with 218 MB of values took 303-335 ms (with
+  `take_gradient=True`, where the base took 284-302 ms and (a) 466-503 ms), and pinning 218 MB took 37 instead of 148 ms
+  (`impl/logs/copy_micro_register.log`). Measured once; the retention of
+  item 3 stays.
+- **(c) Leave the copy as it is** (recommended by this review): no change for
+  one-off calls, no pinned memory held by the process; users with many
+  outputs already have `record_evaluations=False` (nothing copied) and
+  `result_device=None` (copied by the user when and where wanted), both
+  documented in the user guide.
+- A switch by size, or releasing the cache after each call, was not
+  considered further: the first is a second code path, the second makes every
+  call pay item 2.
 
 ## 1. Summary
 
@@ -361,7 +601,9 @@ convergence) and one subinterval per iteration. Rejected.
   on the branch (the task's instruction: `record-order` rejected it, it needs
   pinned host memory as large as the record's values and an ordering
   argument). Prototyped in scratch; the gain is large only for many outputs
-  (5.3). Left for the user.
+  (5.3). Asked for by the user on 2026-11-26, reviewed and measured, and not
+  implemented: see "D2: review and implementation" for the costs 5.3 missed
+  and the options.
 - **D2b. Fold the finite check of `f`'s output into the turn's read.** Not
   implemented (it would raise the located `ValueError` after the pass's other
   calls of `f`, which could spend evaluations of `f` after a NaN). What it
@@ -610,10 +852,12 @@ update alone (200 subintervals) 579 to 556 µs.
   `split_waste` follow-up. Item 8 was done in review (`bdbadd8`); the rest of
   the memory statistics (five builds per `take_gradient=True` batch, about
   0.3 ms) read different moments and stay.
-- **D2** (5.3): prototype only. Worth it for many outputs (25-35 % of a call at
-  10,000-100,000 outputs); needs pinned host memory as large as the recorded
-  values and a synchronization before every host read of the record during
-  the loop.
+- **D2** (5.3): reviewed on branch `async_record_copy` ("D2: review and
+  implementation") and not implemented: the gain (5-30 % of repeated calls
+  with 20 MB or more of values) comes from PyTorch's cache of pinned memory,
+  not from not waiting; the first call of each size gets up to 2.9 times
+  slower, and the process keeps up to about twice its largest record pinned.
+  Options (a)-(c) there, for the user.
 - **D2b**: not implemented (task decision); it would save about 15 µs per
   call of `f`.
 - **Route (d)** (5.4): proxy only. A turn of 0.8-1.0 ms instead of 2.0-2.2 ms

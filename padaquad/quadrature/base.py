@@ -1184,10 +1184,14 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             batch_size = len(nodes) * self.C
 
             # The running integral, and in cumulative mode the running sums.
+            # Error control only decides; it reads detached values (the error
+            # estimates are detached already), so the error ratios hold no
+            # autograd graph, nor the arrays its nodes would save.
             t0 = time.time()
+            quads = method_output.mesh_quadratures.detach()
             current_integral = method_output.integral.detach()
             if record:
-                current_integral = record["integral"] + current_integral
+                current_integral = record["integral"].detach() + current_integral
             # Absolute mode judges against the integral alone. Cumulative mode
             # judges each subinterval, evaluated or recorded, against the
             # running integral through it: the record and the batch merged in
@@ -1196,23 +1200,19 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # both.
             cum_mesh_quadratures = recorded_cum = None
             if not self.use_absolute_error_ratio:
-                quads = method_output.mesh_quadratures
                 idxs_keep, idxs_input = self._merge_positions(
                     record.get("mesh_index", step_idxs[:0]), step_idxs
                 )
                 cum = torch.cumsum(
                     self._insert_sorted_results(
-                        record.get("mesh_quadratures", quads[:0]),
+                        record.get("mesh_quadratures", quads[:0]).detach(),
                         idxs_keep,
                         quads,
                         idxs_input,
                     ),
                     0,
                 )
-                cum_mesh_quadratures, recorded_cum = (
-                    cum[idxs_input],
-                    cum.detach()[idxs_keep],
-                )
+                cum_mesh_quadratures, recorded_cum = cum[idxs_input], cum[idxs_keep]
             if self.speed_logger:
                 self.speed_logger.debug("merge with record: %s", time.time() - t0)
 
@@ -1244,7 +1244,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                 reference_integral = error_integral_reference
             error_ratios, _, error_ratios_per_dim = self._compute_error_ratios(
                 mesh_quadrature_errors=method_output.mesh_quadrature_errors,
-                mesh_quadratures=method_output.mesh_quadratures,
+                mesh_quadratures=quads,
                 cum_mesh_quadratures=cum_mesh_quadratures,
                 integral=reference_integral,
             )

@@ -2129,11 +2129,10 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # How many times each subinterval of the batch is halved: 0 (accepted),
         # 1, or, with error_ratios, 2 (four pieces) for a failing piece of a
         # failed subinterval whose error ratio is at least _FOUR_PIECES_RATIO
-        # and that can be halved twice.
-        # The update's one read of the device: how many are accepted and how
-        # many are split in four. Integer positions index every field below
-        # without another read (a boolean mask reads the device for the size
-        # of its result).
+        # and that can be halved twice. The update's one read of the device:
+        # how many are accepted and how many are split in four. Integer
+        # positions index every field below without another read (a boolean
+        # mask reads the device for the size of its result).
         halvings = (~keep_mask).to(torch.uint8)
         if error_ratios is None:
             n_keep, n_four = int(keep_mask.sum()), 0

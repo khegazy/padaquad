@@ -1275,6 +1275,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     record,
                     torch.cumsum(all_mesh_quadratures.detach(), 0)[idxs_keep],
                     reference_integral,
+                    mesh,
                     mesh_indices,
                     split_counts,
                     max_adaptive_splits,
@@ -1446,6 +1447,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                         record,
                         torch.cumsum(record["mesh_quadratures"].detach(), 0),
                         record["integral"].detach(),
+                        mesh,
                         mesh_indices,
                         split_counts,
                         max_adaptive_splits,
@@ -1680,6 +1682,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         record: dict[str, torch.Tensor],
         cum_mesh_quadratures: torch.Tensor,
         integral: torch.Tensor,
+        mesh: torch.Tensor,
         mesh_indices: dict[tuple[float, ...], int],
         split_counts: torch.Tensor | None,
         max_adaptive_splits: int | None,
@@ -1688,7 +1691,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         Find the recorded subintervals to split again, from their stored errors.
 
         Judges every recorded subinterval with ``_record_error_check`` (no call
-        of the integrand) and keeps the failing ones below the split cap. Used
+        of the integrand) and keeps the failing ones that can be split
+        (``_splittable``: below the split cap, and wide enough to halve). Used
         by the in-loop re-check (Step 4b of ``integrate``) and when a fixed
         ``error_integral_reference`` is dropped (Step 7).
 
@@ -1701,6 +1705,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             cumulative mode only).
         integral : torch.Tensor
             Reference integral [D] for the absolute-mode tolerance.
+        mesh : torch.Tensor
+            The current mesh [M, T].
         mesh_indices : dict[tuple[float, ...], int]
             ``{tuple(mesh point): index}`` for the current mesh.
         split_counts : torch.Tensor or None
@@ -1713,23 +1719,21 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         -------
         tuple[torch.Tensor, torch.Tensor, torch.Tensor]
             Tuple ``(split_positions, record_keep_mask, fails)``: the mesh
-            positions of the failing recorded subintervals below the cap, a
-            mask [N] that keeps every other recorded subinterval, and the mask
-            [N] of every failing one (including those at the cap).
+            positions of the failing recorded subintervals that can be split,
+            a mask [N] that keeps every other recorded subinterval, and the
+            mask [N] of every failing one (including those that cannot be
+            split).
         """
         _, rec_remove, _ = self._record_error_check(
             record, cum_mesh_quadratures, integral
         )
         rec_positions = self._mesh_order(record["mesh_left"], mesh_indices)
-        # Respect the split cap so the record stays consistent with the mesh: a
-        # failing subinterval already at the cap is not split, so it must stay
-        # recorded.
-        splittable = rec_remove
-        if max_adaptive_splits is not None:
-            assert split_counts is not None  # always kept in the loop
-            splittable = rec_remove & (
-                split_counts[rec_positions] < max_adaptive_splits
-            )
+        # A failing subinterval that cannot be split (at the split cap, or too
+        # narrow to halve) is not split, so it must stay recorded: the record
+        # stays consistent with the mesh.
+        splittable = rec_remove & self._splittable(
+            mesh, rec_positions, split_counts, max_adaptive_splits
+        )
         return rec_positions[splittable], ~splittable, rec_remove
 
     def _warn_not_converged(
@@ -1858,6 +1862,52 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
     #                             ADAPTIVE MESH REFINEMENT                             #
     # -------------------------------------------------------------------------------- #
 
+    def _splittable(
+        self,
+        mesh: torch.Tensor,
+        idxs: torch.Tensor,
+        split_counts: torch.Tensor | None,
+        max_adaptive_splits: int | None,
+    ) -> torch.Tensor:
+        """
+        Tell which subintervals can be split in half, on the device.
+
+        A subinterval cannot be split when its split count has reached
+        ``max_adaptive_splits`` (with ``split_counts`` given), or when its
+        midpoint ``0.5 * (left + right)``, the mesh point a split inserts
+        (``_adaptively_increase_mesh``), rounds onto one of its ends: its ends
+        are neighboring floating-point numbers, so one half would have width
+        zero and the other would be the subinterval again. Either way it is
+        accepted instead; the final check counts it as failing if its error
+        ratio is 1 or above. Every split goes through this test: the batch's
+        (``_adaptively_increase_mesh``, including the optimal mesh's) and the
+        re-check's (``_failed_record_positions``), so the mesh stays strictly
+        increasing.
+
+        Parameters
+        ----------
+        mesh : torch.Tensor
+            The mesh. Shape: [M, T].
+        idxs : torch.Tensor
+            Mesh index of the left end of each subinterval. Shape: [N].
+        split_counts : torch.Tensor | None
+            Split count of the subinterval starting at each mesh point [M], or
+            None (no cap).
+        max_adaptive_splits : int | None
+            The split cap, or None.
+
+        Returns
+        -------
+        torch.Tensor
+            True for the subintervals that can be split. Shape: [N].
+        """
+        left, right = mesh[idxs], mesh[idxs + 1]
+        mid = 0.5 * (left + right)
+        splittable = ~(torch.all(mid == left, dim=-1) | torch.all(mid == right, dim=-1))
+        if max_adaptive_splits is not None and split_counts is not None:
+            splittable &= split_counts[idxs] < max_adaptive_splits
+        return splittable
+
     def _adaptively_increase_mesh(
         self,
         method_output: MethodOutput | None,
@@ -1893,10 +1943,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         mesh point is inserted at the midpoint ``(mesh_left + mesh_right) / 2``,
         and both halves are evaluated in a later pass.
 
-        When ``split_counts`` and ``max_adaptive_splits`` are given, a
-        subinterval whose split count has reached ``max_adaptive_splits`` is
-        accepted even if ``keep_mask`` is False. Both halves of a subinterval
-        with split count n get split count n + 1.
+        A subinterval that cannot be split (``_splittable``: its split count
+        has reached ``max_adaptive_splits``, when both are given, or its
+        midpoint rounds onto one of its ends) is accepted even if
+        ``keep_mask`` is False. Both halves of a subinterval with split count
+        n get split count n + 1.
 
         The update reads the device once, for the number of accepted
         subintervals; every other step indexes with integer positions on the
@@ -1968,10 +2019,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
               of every split subinterval incremented (or None if
               ``split_counts`` is None).
         """
-        # Panels that have already been split the maximum number of times are
-        # accepted as-is rather than split further.
-        if max_adaptive_splits is not None and split_counts is not None:
-            keep_mask = keep_mask | (split_counts[mesh_idxs] >= max_adaptive_splits)
+        # Subintervals that cannot be split (at the split cap, or too narrow
+        # to halve) are accepted as they are.
+        keep_mask = keep_mask | ~self._splittable(
+            mesh, mesh_idxs, split_counts, max_adaptive_splits
+        )
         # The batch's positions, accepted ones first and then the split ones,
         # each ascending (a stable sort of 0 = accept, 1 = split), and the
         # update's one read of the device: how many are accepted. Integer

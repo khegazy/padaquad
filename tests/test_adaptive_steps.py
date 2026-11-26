@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import torch
 from _helpers import make_solver_for_unit_test
 
@@ -510,6 +511,40 @@ class TestSplitCounts:
         assert len(barriers_new) == 4  # split happened
         # Children of the depth-1 panel become depth 2.
         assert split_counts_new.tolist() == [2, 2, 0, 0]
+
+    @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+    @pytest.mark.parametrize("T", [1, 2])
+    def test_too_narrow_to_halve_accepted_not_split(self, dtype, T):
+        """A failing subinterval whose ends are neighboring floating-point
+        numbers (its midpoint rounds onto an end, in every coordinate) is
+        accepted, as at the cap, with no cap given; a failing wide sibling
+        still splits, and the mesh stays strictly increasing."""
+        one = torch.tensor(1.0, dtype=dtype)
+        after_one = torch.nextafter(one, torch.tensor(2.0, dtype=dtype))
+        points = torch.stack([torch.zeros((), dtype=dtype), one, after_one])
+        # T = 2: the second coordinate is twice the first, also neighbors.
+        barriers = points.unsqueeze(-1) * torch.arange(1, T + 1, dtype=dtype)
+        idxs = torch.tensor([0, 1])
+        assert self.solver._splittable(barriers, idxs, None, None).tolist() == [
+            True,
+            False,
+        ]
+
+        _, _, _, _, barriers_new, trackers_new, _, er_kept, _ = (
+            self.solver._adaptively_increase_mesh(
+                None,
+                torch.tensor([False, False]),
+                None,
+                None,
+                barriers,
+                idxs,
+                torch.tensor([True, True, False]),
+            )
+        )
+        assert er_kept.tolist() == [1]
+        assert len(barriers_new) == 4
+        _assert_columns_increasing(barriers_new)
+        assert trackers_new.tolist() == [True, True, False, False]
 
 
 class TestDataFiltering:

@@ -1470,8 +1470,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
                     logger.info(
                         "error_integral_reference dropped once every step was "
                         "accepted: %d of %d accepted steps fail against the "
-                        "integral; %d of them (those below max_adaptive_splits) "
-                        "are split.",
+                        "integral; %d of them (those below max_adaptive_splits "
+                        "whose midpoint differs from both ends) are split.",
                         int(fails.sum()),
                         len(fails),
                         split_positions.numel(),

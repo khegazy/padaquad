@@ -174,6 +174,29 @@ def _keep_rows(x: torch.Tensor, idx: torch.Tensor, in_place: bool) -> torch.Tens
     return x[: len(idx)]
 
 
+def _midpoint(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+    """
+    Return the mesh point that a split inserts between ``left`` and ``right``.
+
+    The one formula of the midpoint: ``_splittable`` refuses a split whose
+    midpoint rounds onto an end, which holds only if the mesh update inserts
+    the same bits.
+
+    Parameters
+    ----------
+    left : torch.Tensor
+        Left ends of the subintervals. Shape: [N, T].
+    right : torch.Tensor
+        Right ends of the subintervals. Shape: [N, T].
+
+    Returns
+    -------
+    torch.Tensor
+        ``0.5 * (left + right)``. Shape: [N, T].
+    """
+    return 0.5 * (left + right)
+
+
 # Multi-GPU keyword options the solver forwards to ``DistributedEnvironment``,
 # read from its signature so the names and defaults live only there.
 _DISTRIBUTED_OPTIONS = frozenset(
@@ -1863,8 +1886,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
 
         A subinterval cannot be split when its split count has reached
         ``max_adaptive_splits`` (with ``split_counts`` given), or when its
-        midpoint ``0.5 * (left + right)``, the mesh point a split inserts
-        (``_adaptively_increase_mesh``), rounds onto one of its ends: its ends
+        midpoint (``_midpoint``, the mesh point a split inserts in
+        ``_adaptively_increase_mesh``) rounds onto one of its ends: its ends
         are neighboring floating-point numbers, so one half would have width
         zero and the other would be the subinterval again. Either way it is
         accepted instead; the final check counts it as failing if its error
@@ -1891,7 +1914,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             True for the subintervals that can be split. Shape: [N].
         """
         left, right = mesh[idxs], mesh[idxs + 1]
-        mid = 0.5 * (left + right)
+        mid = _midpoint(left, right)
         splittable = ~(torch.all(mid == left, dim=-1) | torch.all(mid == right, dim=-1))
         if max_adaptive_splits is not None and split_counts is not None:
             splittable &= split_counts[idxs] < max_adaptive_splits
@@ -1929,8 +1952,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         (``_accept_reject_masks``: an error ratio below 1, or a non-finite
         one, which splitting cannot be relied on to remove): its tracker is
         set False and its contribution is kept. The others are split: a new
-        mesh point is inserted at the midpoint ``(mesh_left + mesh_right) / 2``,
-        and both halves are evaluated in a later pass.
+        mesh point is inserted at the midpoint (``_midpoint``), and both
+        halves are evaluated in a later pass.
 
         A subinterval that cannot be split (``_splittable``: its split count
         has reached ``max_adaptive_splits``, when both are given, or its
@@ -2058,7 +2081,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         idxs_new = split_idxs + torch.arange(N_t_add, device=mesh.device) + 1
         mesh_new = mesh.new_empty((N_t_add + len(mesh), mesh.shape[-1]))
         mesh_new[idxs_transfer] = mesh
-        mesh_new[idxs_new] = 0.5 * (mesh_new[idxs_new - 1] + mesh_new[idxs_new + 1])
+        mesh_new[idxs_new] = _midpoint(mesh_new[idxs_new - 1], mesh_new[idxs_new + 1])
         mesh_trackers_new = torch.ones(
             len(mesh_new), dtype=torch.bool, device=mesh.device
         )

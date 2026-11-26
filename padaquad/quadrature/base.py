@@ -1529,7 +1529,8 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             )
 
         # === Post-convergence: sort results and optimize the mesh ===
-        # The fields of chunks go where _get_optimal_mesh reads nodes with y.
+        # The fields of chunks go to the result's device, where
+        # _get_optimal_mesh also reads y (when build_state_mesh).
         record = self._sort_record(
             record, chunks, result_device if record_evaluations else self.device
         )
@@ -1590,9 +1591,9 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
         # inputs. It runs where the recorded nodes and values are
         # (result_device, or the integration device with
         # record_evaluations=False), with the method converted there for the
-        # duration rather than copying the values back. The
-        # device-resident fields (mesh_quadratures, mesh_quadrature_errors,
-        # integral; see _RECORD_LOOP_KEYS) are moved to join them. Without
+        # duration rather than copying the values back. The fields that stay
+        # on the integration device (mesh_quadratures and mesh_quadrature_errors,
+        # see _RECORD_LOOP_KEYS, and the integral) are moved to join them. Without
         # recorded values (record_evaluations=False) y is None, and
         # _merge_inputs uses merge_rule="power_law".
         # mesh_optimal is the mesh a later call starts from when the caller

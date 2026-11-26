@@ -120,6 +120,21 @@ def test_failed_first_call_shrinks_until_one_runs(take_gradient, first_calls, ba
     assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
 
 
+@pytest.mark.parametrize(("method", "limit"), [("gk21", 21), ("cc65", 70)])
+def test_integrand_that_holds_one_subinterval_runs_with_take_gradient(method, limit):
+    """With take_gradient=True an integrand that holds one subinterval (C
+    points) but not two integrates: the failed first pass shrinks in whole
+    subintervals down to one. The former test calls (10, 100, then 75, 56, ...
+    points) could converge below C (18 for gk21 at a limit of 21, 56 for cc65
+    at 70), and the first batch, of no whole subinterval, then raised
+    AssertionError."""
+    s = solver(method)
+    f = Recorder(limit=limit)
+    result, result_state = s.integrate(f, mesh_init=A, mesh_final=B, take_gradient=True)
+    assert (result_state.max_batch, result_state.max_batch_converged) == (s.C, True)
+    assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
+
+
 START_CASES = {
     "max_batch": {"mesh_init": A, "mesh_final": B, "max_batch": 10**6},
     "state": "state",

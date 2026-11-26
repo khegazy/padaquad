@@ -833,3 +833,89 @@ Not sure:
   `split-waste` carrier will already provide.
 - Whether `0.5 * (l + r)` and `torch.lerp(l, r, 0.5)` can differ in practice
   (never in the measured runs; my reasoning says only when `r − l` is inexact).
+
+## 11. Implemented (branch `endpoint_evaluations`, 2026-11-26)
+
+Scripts, logs and grid files: `$SCRATCH/padaquad_speedup_plans/endpoint-evaluations/impl/`
+(`bitgrid.py` is the `record-order` grid extended with dopri5, gk7, cc5, float32
+cells and a device argument: 656 integrations; `bitcompare.py` bit for bit;
+`scripts/numcompare.py`, `scripts/samemesh.py` for the steps that change numbers).
+Node `nid200297` (A100-SXM4-80GB), CPU runs there or on the login node.
+
+| Step (5') | Commit | What it does | Numbers |
+|---|---|---|---|
+| review | `d03ab9a` | section 0 and 5' | none |
+| 1 | `89eadbf` | width and left mesh point from the mesh (`_calculate_integral(t, y, mesh_left, mesh_right)`, `_RK_integral(h, ...)`, `MethodOutput.mesh_left`, record key `mesh_left`) | grid CPU and CUDA: every tensor equal except the gradient with respect to a bound, at most 1.8e-14 relative (CPU) and 1.5e-14 (CUDA) |
+| 2 | `6201cff` | optimal mesh from the final mesh; `_merge_excess_nodes` (both), the uniform `_evaluate_adaptive_nodes` and both abstract declarations deleted | grid CPU: 0 differences against step 1 |
+| 3 | `ec6e3ca` | fractions without end nodes allowed; `_flatten_output`; start-up probe | grid CUDA (steps 1-3 against `d11df47`): only the bound gradients differ |
+| lean | `28057af` | follow-up after the user's instruction on fewer code paths: one fraction check for every method (no variable override), one `_flatten_output` expression, variable weights rescale to the first and last fraction, the length check in `_get_optimal_mesh` removed | grid CPU and CUDA: 0 differences against steps 2 and 3 |
+| 4 | `4315f2d` | Gauss-Kronrod unpadded; merge prediction takes the mean of both neighbours at their shared mesh point; documents; new `tests/test_interior_nodes.py`; Gauss-Kronrod snapshot cells | see below |
+| 6 (D4) | `734f7f7` | dopri5 at 5 nodes, error weight 71/6300 | see below |
+| test fix | `3c54432` | `assert_step_continuity` checks the widths, not nodes at the bounds | none |
+
+Numbers changed by step 4, against the lean commit (cells whose accepted
+subintervals are the same): Gauss-Kronrod integrals at most 2.4e-16 (float64)
+and 6.7e-8 (float32) of the sum of |contributions|, error estimates at most
+2.4e-16 and 9.1e-9; CPU and CUDA alike. Subinterval counts changed only with
+`take_gradient=True` and `max_batch=200` or 300, where a batch now holds another
+number of whole subintervals (CPU: gk21 oscillatory 168 -> 171, gk7 2298 -> 2299
+and 353 -> 354; CUDA: gk21 125 -> 127, gk7 2286 -> 2283 and 357 -> 356). Methods
+with end nodes: bit-identical in all 656 cells on both devices, so the mean at
+the shared point changed nothing there. Snapshots: 42 of 120 Gauss-Kronrod
+integrals and all 120 error estimates differ, at most 2.4e-16 relative; no
+`n_optimal_mesh` changed. Without the mean at the shared point,
+`test_predicted_far_from_the_origin[f32]` failed: the merge prediction of gk21 on
+[1000, 1000.5] in float32 was 100 times larger (1.4e-7 against 1.5e-9; with the
+mean 1.5e-9), so the state's mesh kept 59 instead of fewer than 16 subintervals.
+
+Numbers changed by D4: dopri5 only; same-mesh cells at most 1.7e-16 (float64)
+and 1.7e-8 (float32); subinterval counts change in 2 to 3 cells with
+`take_gradient=True` and a small `max_batch` (batching) and the state's mesh in 4
+(CPU) and 1 (CUDA) cells by one or two subintervals. Snapshots: 10 of 30 dopri5
+integrals (at most 1.7e-16) and all 30 error estimates (at most 6.1e-18 of
+|I|); no `n_optimal_mesh` changed.
+
+Points of `f` and wall time (gk21, `atol=1e-8`, `rtol=0`, `error_norm="max"`,
+`max_batch=10**6`, float64; `scripts/timing.py`, median of 7):
+
+| Integrand | Points `d11df47` -> branch | GPU ms | CPU (8 threads) ms |
+|---|---|---|---|
+| damped_sine | 254 -> 232 | 5.91 -> 5.96 | 3.62 -> 3.32 |
+| chirp | 3,290 -> 3,004 (CPU 3,244 -> 2,962) | 59.7 -> 61.9 | 19.3 -> 17.9 |
+| oscillatory | 631,650 -> 576,724 (CPU 599,404 -> 547,282) | 130 -> 142 | 108.8 -> 107.8 |
+| sin(2e4 t) + MLP of width 2048 (`scripts/timing_mlp.py`, atol 1e-9) | 82,502 -> 75,328 | 130.8 -> 122.3 and 129.3 -> 121.7 (two runs) | not run |
+
+The point counts are those section 1 predicted. With an expensive integrand the
+GPU time falls by 6.5 %; with the cheap ones, where `f` is a small part of a
+pass, the GPU differences are within the run-to-run spread (chirp ranged from
+57.3 to 61.8 ms across the step-by-step runs, all on the same node).
+
+Tests: full suite on `nid200297` before the test fix: CUDA 4,196 passed, 25
+skipped, 56 failed; CPU 3,906 passed, 315 skipped, 56 failed; the 56 are the
+`test_step_continuity` cases of `test_integrals.py` and `test_data_types.py`
+(Gauss-Kronrod), fixed by `3c54432` (those two files then: 728 passed on CUDA
+and on CPU). `d11df47` on the same node: CUDA 4,249 passed, 25 skipped; CPU
+3,959 passed, 315 skipped; no failure.
+
+## 12. Not done
+
+- **D7 (a divergent integral at a bound).** Not implemented: every form needs a
+  new code path in the loop, which the user's instruction excludes. Measured
+  (gk21, CPU, `max_adaptive_splits=None`, `scripts/d7_depths.py`):
+  `t^-0.5` converges at depth 26 (`atol=1e-6`) and 52 (`1e-10`); `t^-0.9` at 193
+  and 326; `t^-0.99` (integrable) needs more halvings than float64 has and
+  raises `ValueError` at a subnormal t after 1,021 turns (4 s); `1/t` at 0
+  raises after 1,011 turns (3 s) naming t = 2.9e-309; `1/(1 - t)` at 1 raises
+  after 43 turns naming t = 1.0 (a node rounds onto the bound). So no depth
+  separates convergent from divergent integrands. Options for the user: (a) a
+  warning when a subinterval at a bound passes a depth, worded "may diverge"
+  (false positives for `t^-0.9`); (b) a finite default for `max_adaptive_splits`
+  (would stop `t^-0.9` short of its tolerance); (c) detect an error estimate
+  that does not fall when the subinterval at a bound is halved (state across
+  turns); (d) leave it, documented. The branch does (d): a paragraph on the
+  methods page.
+- Removing the de-duplication of repeated fractions in `_merged_pair_weights`
+  (`first`, the `None` cache key): possible once D4 is kept, since no registered
+  method then repeats a fraction, but repeated fractions are still allowed by
+  `_check_node_fractions` and tested (`test_repeated_node_fractions_accepted`).
+- Designs (b) and (c) (D5): out of scope.

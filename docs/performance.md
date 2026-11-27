@@ -21,9 +21,16 @@ integral:
 - **scipy `quad`** (QUADPACK; `quad_vec` for the integrand with many outputs)
   and **quadax `quadgk`** (21 nodes per subinterval, JAX) split $[0, 1]$
   adaptively, one subinterval at a time.
-- **PadaQuad `dopri5`** (the same Runge-Kutta weights used as a quadrature
-  method) and **PadaQuad `gk21`** (its default method) evaluate the nodes of
-  many subintervals in one call of the integrand.
+- **PadaQuad** evaluates the nodes of many subintervals in one call of the
+  integrand, in three settings:
+  - `dopri5`, the same Runge-Kutta weights used as a quadrature method;
+  - `gk21`, its default method, with the default options;
+  - `gk21 accelerate`, `gk21` as one would call it for a single integral
+    that needs many subintervals: `split_rule="accelerate"`, which splits a
+    subinterval in four where halving it would not be enough
+    ({ref}`ug-four-pieces`), and `build_state_mesh=False`, which skips
+    building the mesh a later call could start from (none of the other
+    libraries builds one).
 
 scipy evaluates NumPy versions of the integrands and always runs on the CPU,
 also in the GPU section, where its column compares PadaQuad on the GPU with
@@ -69,7 +76,10 @@ solver reported success (a † marks one that did not); and the error against
 the exact integral, absolute and relative to the largest exact value. It
 collects Python's garbage before each case, keeps every run's time in the
 results file, and records the number of PyTorch threads and of CPUs the
-process could use, which change the times ({ref}`ug-cpu-threads`).
+process could use, which change the times ({ref}`ug-cpu-threads`). PadaQuad
+and torchdiffeq run with 8 PyTorch threads (`--torch-threads`), a count close
+to the fastest for PadaQuad's many small operations; JAX and scipy choose their
+own.
 PadaQuad runs through `padaquad.integrate`, which builds a new solver on every
 call, with `take_gradient=False` and a fixed `max_batch` for each integrand
 and device: the value PadaQuad's memory benchmark (`get_max_batch(f=...)`)
@@ -226,9 +236,11 @@ PadaQuad `gk21`'s.
 
 ## Reproduce
 
-On a compute node with a GPU and nothing else running (an interactive
+On a compute node with an 80 GB A100 and nothing else running (an interactive
 allocation or a batch job, never a login node, whose other users change the
-timings):
+timings; on Perlmutter, `salloc -C "gpu&hbm80g"`). PadaQuad's `max_batch`
+values were measured on that hardware; on other hardware the script stops and
+asks for `--measure-max-batch`.
 
 ```bash
 examples/speed_test/run_benchmark.sh setup   # once: builds the environment

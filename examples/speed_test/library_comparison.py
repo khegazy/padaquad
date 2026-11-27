@@ -13,8 +13,9 @@ integrand measured by the largest component (the max norm) everywhere.
 - scipy ``quad`` (QUADPACK; ``quad_vec`` for a vector-valued integrand) and
   quadax ``quadgk`` (21 nodes) split [0, 1] adaptively, one subinterval at a
   time.
-- PadaQuad (``dopri5`` and ``gk21``) evaluates the nodes of many subintervals
-  in one call of the integrand.
+- PadaQuad (``PADAQUAD_SOLVERS``: ``dopri5`` and ``gk21`` with their defaults,
+  and ``gk21`` with four-way splits and no mesh built for a later call)
+  evaluates the nodes of many subintervals in one call of the integrand.
 
 scipy evaluates NumPy versions of the integrands, always on the CPU; diffrax
 and quadax evaluate JAX versions; torchdiffeq and PadaQuad evaluate torch
@@ -27,8 +28,10 @@ solvers), fewer when the warm-up run took long (``TIME_BUDGET_S``), the
 smallest and largest time and every run's time (``times_s``), the number of
 points at which the integrand was evaluated, whether the solver reported
 success, and the error against the exact answer. Python's garbage is collected
-before each case. PadaQuad runs with a fixed ``max_batch``, chosen
-before any timing, so no batch-size search is timed.
+before each case. PadaQuad runs with a fixed ``max_batch`` (``MAX_BATCH``,
+measured before any timing), so no batch-size search is timed. PadaQuad and
+torchdiffeq use ``--torch-threads`` CPU threads (default ``TORCH_THREADS``);
+JAX and scipy choose their own.
 
 Run on an otherwise idle compute node through ``run_benchmark.sh`` (it sets
 the JAX environment and writes ``docs/performance/results_<device>.json``)::
@@ -82,7 +85,24 @@ LIBRARIES = {
     "scipy": "scipy quad",
     "quadax": "quadax quadgk",
 }
-PADAQUAD_METHODS = ("dopri5", "gk21")
+# PadaQuad's rows: label -> (method, options of padaquad.integrate besides the
+# common ones). The defaults for dopri5 and gk21, and gk21 as one would call it
+# for a single integral that needs many subintervals: four-way splits
+# (split_rule="accelerate") and no mesh built for a later call
+# (build_state_mesh=False; the other libraries build none either).
+PADAQUAD_SOLVERS: dict[str, tuple[str, dict[str, Any]]] = {
+    "dopri5": ("dopri5", {}),
+    "gk21": ("gk21", {}),
+    "gk21 accelerate": (
+        "gk21",
+        {"split_rule": "accelerate", "build_state_mesh": False},
+    ),
+}
+# torch's CPU threads for PadaQuad and torchdiffeq (--torch-threads). Many small
+# operations make a large count slower; 8 was within 8 % of the fastest count
+# for PadaQuad in every case the 2.0.0 speed-up work measured (user guide,
+# "CPU threads").
+TORCH_THREADS = 8
 # The integrands, in the order of the tables: first those that need many
 # subintervals, then three that need few (a smooth one, one sharp peak, and an
 # expensive smooth network). Analytic ones come from hard_integrand_dict or
@@ -121,25 +141,25 @@ MAX_BATCH_HARDWARE = {
 MAX_BATCH = {
     "cuda": {
         "chirp": 1_000_000_000,
-        "spectrum": 11_864_617,
+        "spectrum": 11_864_291,
         "oscillatory": 1_000_000_000,
-        "many_outputs": 3_500_635,
-        "feature_network": 3_501_229,
-        "feature_network_wide": 1_737_867,
+        "many_outputs": 3_500_541,
+        "feature_network": 3_501_169,
+        "feature_network_wide": 2_310_296,
         "damped_sine": 1_000_000_000,
         "sharp_peak": 1_000_000_000,
-        "neural_network_wide": 2_881_643,
+        "neural_network_wide": 2_881_586,
     },
     "cpu": {
         "chirp": 1_000_000_000,
-        "spectrum": 71_992_844,
+        "spectrum": 70_385_316,
         "oscillatory": 1_000_000_000,
-        "many_outputs": 21_619_908,
-        "feature_network": 53_228_062,
-        "feature_network_wide": 13_806_404,
+        "many_outputs": 21_625_649,
+        "feature_network": 45_675_584,
+        "feature_network_wide": 3_360_534,
         "damped_sine": 1_000_000_000,
         "sharp_peak": 1_000_000_000,
-        "neural_network_wide": 23_917_426,
+        "neural_network_wide": 28_182_003,
     },
 }
 # Budgets large enough that no case stops on them: scipy's subintervals
@@ -355,7 +375,8 @@ def make_solver(
     Parameters
     ----------
     library : str
-        A key of ``LIBRARIES``, or ``"padaquad <method>"``.
+        A key of ``LIBRARIES``, or ``"padaquad <label>"`` for a label of
+        ``PADAQUAD_SOLVERS``.
     case : Case
         The integrand.
     device : str
@@ -433,7 +454,7 @@ def make_solver(
         return solve
 
     if library.startswith("padaquad"):
-        method = library.split()[1]
+        method, options = PADAQUAD_SOLVERS[library.removeprefix("padaquad ")]
         counted = CountingIntegrand(case.build(torch, device))
         lo = torch.tensor([0.0], dtype=torch.float64, device=device)
         hi = torch.tensor([1.0], dtype=torch.float64, device=device)
@@ -453,6 +474,7 @@ def make_solver(
                 device=device,
                 max_batch=max_batch,
                 take_gradient=False,
+                **options,
             )
             value = result.integral.reshape(-1).cpu().numpy()
             return Outcome(value, counted.points, bool(result.converged), {})
@@ -725,18 +747,20 @@ def metadata(device: str, repeats: int) -> dict[str, Any]:
         else cpu_model(),
         "cpu_model": cpu_model(),
         "cpu_count": os.cpu_count(),
-        # The CPUs the process may run on (Linux), the torch thread count main
-        # sets, and the environment's OMP_NUM_THREADS (overridden by main): the
-        # thread count changes the times (user guide, "CPU threads").
+        # The CPUs the process may run on (Linux) and the torch thread count
+        # main sets: the thread count changes the times (user guide, "CPU
+        # threads"); the thread variables are in env.
         "affinity_cpus": (
             len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None
         ),
         "torch_threads": torch.get_num_threads(),
-        "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
         "jax_devices": [str(d) for d in jax.devices()],
+        # JAX's settings, and the OpenMP variables that change thread behaviour.
         "env": {
-            k: os.environ.get(k)
-            for k in ("JAX_PLATFORMS", "XLA_PYTHON_CLIENT_PREALLOCATE", "XLA_FLAGS")
+            k: v
+            for k, v in os.environ.items()
+            if k in ("JAX_PLATFORMS", "XLA_PYTHON_CLIENT_PREALLOCATE", "XLA_FLAGS")
+            or k.startswith(("OMP_", "GOMP_", "KMP_"))
         },
         "platform": platform.platform(),
         "python": platform.python_version(),
@@ -776,7 +800,7 @@ def render_markdown(results: dict[str, Any]) -> str:
 
     For every integrand: a heading with its integral and the number of
     subintervals quadax needed, a table of the four libraries, then a table of
-    PadaQuad's methods with one speedup column per library (the library's
+    PadaQuad's rows (``PADAQUAD_SOLVERS``) with one speedup column per library (the library's
     median time over PadaQuad's). A range from fewer timed runs than the
     others says how many. A solver that did not report success is
     marked "†" (and so is every speedup against it); one that raised has no
@@ -838,18 +862,24 @@ def render_markdown(results: dict[str, Any]) -> str:
                 f"{_ms(r['time_min_s'])}-{_ms(r['time_max_s'])}{runs} | "
                 f"{r['evaluations']} | {r['abs_error']:.1e} | {r['rel_error']:.1e} |"
             )
-        header = "| PadaQuad | max_batch | Median time (ms) | Evaluations | Abs. error | Rel. error | "
+        header = (
+            "| PadaQuad | max_batch | Median time (ms) | Range (ms) | Evaluations "
+            "| Abs. error | Rel. error | "
+        )
         header += " | ".join(f"vs {library}" for library in LIBRARIES) + " |"
-        lines += ["", header, "|" + "---|" * (6 + len(LIBRARIES))]
-        for method in PADAQUAD_METHODS:
-            r = mine.get(f"padaquad {method}")
+        lines += ["", header, "|" + "---|" * (7 + len(LIBRARIES))]
+        for label in PADAQUAD_SOLVERS:
+            r = mine.get(f"padaquad {label}")
             if r is None:
                 continue
             mark = "" if r["converged"] else " †"
+            n = r["repeats"]
+            runs = "" if n == meta["repeats"] else f" ({n} run{'s' * (n > 1)})"
             cells = [
-                f"{method}{mark}",
+                f"{label}{mark}",
                 str(r["max_batch"]),
                 _ms(r["time_median_s"]),
+                f"{_ms(r['time_min_s'])}-{_ms(r['time_max_s'])}{runs}",
                 str(r["evaluations"]),
                 f"{r['abs_error']:.1e}",
                 f"{r['rel_error']:.1e}",
@@ -880,17 +910,17 @@ def _summary(results: dict[str, Any]) -> str:
     Returns
     -------
     str
-        One bullet per PadaQuad method and library.
+        One bullet per PadaQuad row (``PADAQUAD_SOLVERS``) and library.
     """
     rows = results["rows"]
     by_key = {(r["integrand"], r["solver"]): r for r in rows}
     lines = []
-    for method in PADAQUAD_METHODS:
+    for label in PADAQUAD_SOLVERS:
         for library, solver in LIBRARIES.items():
             speedups, worse = [], []
             for name in results["integrands"]:
                 mine, base = (
-                    by_key.get((name, f"padaquad {method}")),
+                    by_key.get((name, f"padaquad {label}")),
                     by_key.get((name, solver)),
                 )
                 if mine is None or base is None or base["error"] is not None:
@@ -906,7 +936,7 @@ def _summary(results: dict[str, Any]) -> str:
                 else "its error is larger on " + ", ".join(f"`{n}`" for n in worse)
             )
             lines.append(
-                f"- **PadaQuad {method} vs {library}:** speedup from "
+                f"- **PadaQuad {label} vs {library}:** speedup from "
                 f"{min(speedups):.2g}x to {max(speedups):.2g}x (below 1x, PadaQuad "
                 f"is slower); {accuracy}."
             )
@@ -920,21 +950,32 @@ def main() -> None:
     parser.add_argument("--repeats", type=int, default=7)
     parser.add_argument("--out", type=Path, required=True, help="output JSON file")
     parser.add_argument(
+        "--torch-threads",
+        type=int,
+        default=TORCH_THREADS,
+        help="torch's CPU threads for PadaQuad and torchdiffeq",
+    )
+    parser.add_argument(
         "--measure-max-batch",
         action="store_true",
         help="measure PadaQuad's max_batch per integrand (for MAX_BATCH) and "
         "write it to --out instead of running the benchmark",
     )
     args = parser.parse_args()
-    if args.repeats < 1:
-        parser.error("--repeats must be at least 1")
-    # Every core of the allocation for torch, as XLA uses them.
-    torch.set_num_threads(len(os.sched_getaffinity(0)))
+    if args.repeats < 1 or args.torch_threads < 1:
+        parser.error("--repeats and --torch-threads must be at least 1")
+    torch.set_num_threads(args.torch_threads)
 
     import jax
 
     jax.config.update("jax_enable_x64", True)
     platform_name = jax.devices()[0].platform
+    if args.device == "cuda":
+        # JAX's CUDA start-up leaves torch's current GPU at the last visible one
+        # (cuda:3 of four, measured on the A100 node), while PadaQuad's
+        # index-less "cuda" and JAX's first device are GPU 0: put torch back on
+        # GPU 0, so the integrands' tensors and every library share one GPU.
+        torch.cuda.set_device(0)
     if (platform_name == "gpu") != (args.device == "cuda"):
         raise RuntimeError(
             f"JAX runs on {platform_name} but --device is {args.device}: set "
@@ -962,7 +1003,7 @@ def main() -> None:
             "largest_abs": float(np.max(np.abs(case.exact))),
         }
         max_batch = MAX_BATCH[args.device][name]
-        solvers = [*LIBRARIES, *(f"padaquad {m}" for m in PADAQUAD_METHODS)]
+        solvers = [*LIBRARIES, *(f"padaquad {label}" for label in PADAQUAD_SOLVERS)]
         for library in solvers:
             solver_name = LIBRARIES.get(library, library)
             row: dict[str, Any] = {
@@ -981,14 +1022,14 @@ def main() -> None:
             rows.append(row)
             if row["error"] is None:
                 print(
-                    f"{name:20s} {solver_name:20s} {1e3 * row['time_median_s']:10.2f} ms "
+                    f"{name:20s} {solver_name:24s} {1e3 * row['time_median_s']:10.2f} ms "
                     f"{row['evaluations']:9d} evals  error {row['abs_error']:.1e}"
                     f"{'' if row['converged'] else '  (not converged)'}"
                     + (f"  ninter {row['ninter']}" if "ninter" in row else ""),
                     flush=True,
                 )
             else:
-                print(f"{name:20s} {solver_name:20s} FAILED {row['error']}", flush=True)
+                print(f"{name:20s} {solver_name:24s} FAILED {row['error']}", flush=True)
     results = {
         "metadata": metadata(args.device, args.repeats),
         "integrands": integrands,

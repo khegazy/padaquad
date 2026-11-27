@@ -26,6 +26,8 @@
 #   PADAQUAD_BENCH_PYTHON  Python >= 3.11 to build it with (default: python3)
 #   UV_CACHE_DIR         uv's download cache (default: next to the environment)
 #   REPEATS              timed runs per case (default 7)
+#   TORCH_THREADS        torch's CPU threads for PadaQuad and torchdiffeq
+#                        (default: the script's TORCH_THREADS, 8)
 #
 # After a run: read the new tables (sphinx-build, or render_markdown in the
 # script), rewrite "What the results show" in docs/performance.md from them,
@@ -70,13 +72,25 @@ check_node() {
 
 run_device() {  # run_device cuda|cpu OUTPUT REPEATS
   local device="$1" out="$2" repeats="$3"
+  # In a Slurm allocation, run as one task bound to whole cores, with every CPU
+  # and GPU of the node (a step of its own; --overlap lets it share the CPUs
+  # with the step this script runs in).
+  local launch=()
+  if [[ -n "${SLURM_JOB_ID:-}" ]]; then
+    launch=(srun --ntasks=1 --nodes=1 --overlap --cpu-bind=cores
+      --cpus-per-task="${SLURM_CPUS_ON_NODE:-$(nproc)}")
+  fi
+  local threads=()
+  [[ -n "${TORCH_THREADS:-}" ]] && threads=(--torch-threads "$TORCH_THREADS")
   if [[ "$device" == cpu ]]; then
     # JAX defaults to the GPU when its CUDA build is installed.
-    JAX_PLATFORMS=cpu "$PY" "$SCRIPT" --device cpu --repeats "$repeats" --out "$out"
+    JAX_PLATFORMS=cpu "${launch[@]}" "$PY" "$SCRIPT" --device cpu \
+      --repeats "$repeats" --out "$out" "${threads[@]}"
   else
     # The CPU platform must stay visible: diffrax's evaluations are counted
     # with jax.debug.callback, which runs there.
-    JAX_PLATFORMS=cuda,cpu "$PY" "$SCRIPT" --device cuda --repeats "$repeats" --out "$out"
+    JAX_PLATFORMS=cuda,cpu "${launch[@]}" "$PY" "$SCRIPT" --device cuda \
+      --repeats "$repeats" --out "$out" "${threads[@]}"
   fi
 }
 

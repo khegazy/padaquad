@@ -162,6 +162,9 @@ def test_one_benchmark_table_and_one_padaquad_table_per_integrand(
     assert gk21.endswith("| 4x | 8x † | 16x | — |")
     assert dopri5.endswith("| 2x | 4x † | 8x | — |")
     assert "| 7 |" in gk21  # the max_batch it ran with
+    # PadaQuad's table has the range beside the median, like the libraries'.
+    assert "| Median time (ms) | Range (ms) |" in padaquad.splitlines()[0]
+    assert "| 1 | 0-1e+03 |" in gk21
 
 
 def test_memory_options_render_every_setting_of_every_integrand() -> None:

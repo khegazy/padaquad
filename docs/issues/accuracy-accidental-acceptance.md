@@ -104,6 +104,28 @@ other rows change only `atol`, the method or the integrand):
    jump is accepted with an error of 1.9e-4. With the other seeds the jump is
    refined 14 to 22 levels deep.
 
+### A related case: 100 points of infinite derivative (2026-11-26)
+
+`f(t) = sum_j sqrt(|t - c_j|)` with 100 positions `c_j = frac(0.5 + j g)`,
+`g = (sqrt(5) - 1)/2`, on [0, 1]; exact integral from the antiderivative
+`(2/3) sign(t - c) |t - c|^1.5`. `gk21`, `atol=1e-8`, the common setup above
+(default `error_norm`), seeds 0 to 9, PadaQuad 2.0.0 (`f01df5c`), on a
+Perlmutter CPU node. Every call reports `converged=True`:
+
+| Seed | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Error | 1.3e-6 | 1.2e-6 | 1.7e-6 | 2.0e-6 | 1.5e-6 | 1.1e-6 | 1.3e-6 | 6.9e-6 | 7.0e-7 | 1.2e-6 |
+| Subintervals | 635 | 630 | 643 | 630 | 635 | 625 | 628 | 635 | 653 | 623 |
+
+The errors are 70 to 690 times `atol`. Unlike the cases above, most of this
+is not shown to be an accidental acceptance: each subinterval is tested on its
+own, so the total may reach the number of subintervals times `atol` (about
+6.3e-6 here), and nine of the ten errors are below that. Seed 7 (6.9e-6) is
+above it. Whether its excess comes from a subinterval accepted by chance was
+not checked (it would need each subinterval's actual error against its
+estimate). Before 2.0.0 (benchmark branch, 2026-11-24) the same integrand gave
+3e-5 with one seed.
+
 ## Why it happens
 
 The error estimate of every method is the difference between two rules of

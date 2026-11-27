@@ -95,7 +95,14 @@ the PadaQuad log for them.
   many subintervals (the user's choice: PadaQuad's intended case), listed in
   `MANY_SUBINTERVALS`, plus three in `FEW_SUBINTERVALS` for contrast; a solver
   whose warm-up run is slow is timed fewer times (`TIME_BUDGET_S`); garbage is
-  collected before each case and every run's time kept (`times_s`).
+  collected before each case and every run's time kept (`times_s`). PadaQuad's
+  rows are `PADAQUAD_SOLVERS` (`dopri5`, `gk21`, and `gk21 accelerate`:
+  `split_rule="accelerate"`, `build_state_mesh=False`); PadaQuad and
+  torchdiffeq use `--torch-threads` (default `TORCH_THREADS` = 8; the run
+  script passes `TORCH_THREADS` and runs each device as an `srun
+  --cpu-bind=cores` step inside an allocation). JAX's CUDA start-up moves
+  torch's current GPU to the last visible one, so `main` sets it back to GPU 0,
+  where PadaQuad's index-less `"cuda"` and JAX's first device are.
   PadaQuad's `max_batch` per device and integrand is the table `MAX_BATCH`,
   measured once on the 80 GB A100 node (`--measure-max-batch`, PadaQuad's
   `get_max_batch`); the script refuses other hardware (`MAX_BATCH_HARDWARE`),

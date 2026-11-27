@@ -1243,9 +1243,11 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             # out of memory is repeated smaller, at 0.5 times its size up to
             # 10 points and 0.75 above, until one runs; the batch size has then
             # converged. With take_gradient=True, where every batch holds whole
-            # subintervals, no retry is smaller than one subinterval: C points
-            # are tried before giving up, and _call_f raises if they do not
-            # fit. The point is the first node of the first subinterval, which
+            # subintervals, no retry is smaller than one subinterval (C points),
+            # and a failed call of C points or fewer is not retried: _call_f
+            # raises, since fewer points already did not fit, and one more
+            # failed call would only cost evaluations of f. The point is the
+            # first node of the first subinterval, which
             # the first pass evaluates: never a bound that a method without
             # end nodes leaves out (f may be singular there). Detached, so the
             # test calls build no graph of bounds that require grad.
@@ -1255,9 +1257,7 @@ class AdaptiveQuadrature(_MemoryManagement, SolverBase):
             while n <= min(n_start_steps * self.C, _LARGEST_TEST_CALL) and not (
                 self._batch_converged
             ):
-                while (
-                    self._call_f(f, f_args, point.repeat(n, 1), n != smallest) is None
-                ):
+                while self._call_f(f, f_args, point.repeat(n, 1), n > smallest) is None:
                     factor = 0.5 if n <= _GROWTH else _OOM_BACKOFF
                     n = max(smallest, _shrink_batch(n, factor))
                     self._batch_converged = True

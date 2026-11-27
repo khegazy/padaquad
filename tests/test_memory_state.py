@@ -162,13 +162,14 @@ def test_integrand_that_holds_one_subinterval_runs_with_take_gradient(
 
 @pytest.mark.parametrize(
     ("limit", "test_calls"),
-    [(20, [10, 100, 75, 56, 42, 32, 24, 21]), (9, [10, 21])],
+    [(20, [10, 100, 75, 56, 42, 32, 24, 21]), (9, [10])],
 )
 def test_test_calls_raise_when_one_subinterval_does_not_fit(limit, test_calls):
     """With take_gradient=True, when C points do not fit (gk21: 21), the test
-    calls try C points before giving up, also after a failed call of 10
-    points, and then raise torch.OutOfMemoryError saying that a call holds at
-    least one subinterval; f is not called again."""
+    calls raise torch.OutOfMemoryError saying that a call holds at least one
+    subinterval, and f is not called again: after a failed call shrunk to C
+    points, and at once after a failed call of fewer than C points (10), where
+    C points would only fail again at the cost of more evaluations of f."""
     f = Recorder(limit=limit)
     with pytest.raises(torch.OutOfMemoryError, match=r"one subinterval \(21 points\)"):
         solver().integrate(f, mesh_init=A, mesh_final=B, take_gradient=True)

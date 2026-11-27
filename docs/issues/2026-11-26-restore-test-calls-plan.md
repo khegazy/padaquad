@@ -62,7 +62,11 @@ test call follows. Out-of-memory retries inside the integration loop keep 0.75.
    size is made with `can_shrink=False`, so if it runs out of memory
    `_call_f` raises `torch.OutOfMemoryError`, as the loop does today when one
    subinterval does not fit. So the chain never settles below C when C points
-   fit, and C points are tried before it is concluded that they do not (also
+   fit (changed on 2026-11-26 by the user's decision, option B of the review:
+   a failed test call of C points or fewer is not retried, `can_shrink = n >
+   smallest`, so a failed 10-point call with C > 10 raises at once; the text
+   that follows describes the design before that change), and C points are
+   tried before it is concluded that they do not (also
    after a 10-point test call fails for a method with C > 10). `_call_f`'s
    message gets one clause saying that a call holds at least one point, and
    with `take_gradient=True` one subinterval of C points. The existing

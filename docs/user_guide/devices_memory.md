@@ -177,9 +177,10 @@ the call raises `ValueError` before the integrand is called. (With
 `take_gradient=False` a call may end inside a subinterval, so any batch size
 works, and the state of such a call can hold a converged batch size below
 it; pass `max_batch` to a `take_gradient=True` call started from that state.)
-The test calls then shrink no further than one subinterval: after a failed test
-call, the points of one subinterval are tried before giving up, and if they do
-not fit either, the call raises `torch.OutOfMemoryError`.
+The test calls then shrink no further than one subinterval: when a test call of
+one subinterval's points or fewer runs out of memory (the 10-point call, for a
+method with more than 10 points per subinterval), the call raises
+`torch.OutOfMemoryError` at once, without a larger call that could only fail too.
 On a GPU, before each backward pass it compares the memory
 still usable (keeping `1 - total_mem_usage` of the total free) with what the
 backward pass is predicted to need: the batch's forward peak memory, times the

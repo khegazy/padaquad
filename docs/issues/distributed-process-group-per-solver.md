@@ -171,7 +171,8 @@ initialized; `asis` is the code, `fix` skips the call when `local_rank` is 0):
   `python construct_cost.py asis cpu` and `... fix cpu`, at commit `40bcfa4`);
 - 60 µs per construction as the code is and 15 µs with the call skipped (the
   reviewer's measurement on a compute node, recorded in
-  `docs/issues/2026-11-25-speedup-timing-variation-plan.md`, section "Not
+  `docs/issues/2026-11-25-speedup-timing-variation-plan.md`, deleted once
+  done and in commit `3033e24`, section "Not
   done"; login-node times are not reliable and are not quoted here).
 
 Since `padaquad.integrate` builds one solver per call, every call pays this.

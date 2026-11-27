@@ -25,7 +25,8 @@ have been reconnected as it was:
 - It assumed that a subinterval's first and last nodes are its ends (it
   duplicated the middle node as the halves' shared end). The Gauss-Kronrod
   methods have no nodes at the ends since the `endpoint-evaluations` plan
-  (`docs/issues/2026-11-25-speedup-endpoint-evaluations-plan.md`), and a
+  (`docs/issues/2026-11-25-speedup-endpoint-evaluations-plan.md`, deleted
+  once done, in commit `3033e24`), and a
   `MethodClass` may now put its node fractions anywhere in [0, 1].
 - It overrode nothing: that plan deleted the uniform solver's version and the
   abstract declaration in `AdaptiveQuadrature` (commit `6201cff`).
@@ -46,7 +47,8 @@ For both registered variable methods the parent's nodes are at fractions 0,
 of the halves at their standard fractions anyway. So reuse for them is the same
 as for any method: hand the parent's values at the fractions that coincide with
 a node of a piece down to that piece (the "carrier" of
-`docs/issues/2026-11-25-speedup-split-waste-plan.md`, section 3.2). Counted on
+`docs/issues/2026-11-25-speedup-split-waste-plan.md`, section 3.2; deleted
+once done, in commit `3033e24`). Counted on
 `b43da3d` by wrapping `f` (the points of `f` within 2 ULP of a node of a
 subinterval rejected in the previous pass; the plan's 9 integrands on [0, 1],
 seed 0, `atol=1e-8`, `rtol=0`, halving; script

@@ -687,7 +687,8 @@ class TestPythonWork:
 
     A Python object per mesh point made the garbage collector run about 100
     times per call on 13,000 subintervals, a two-speed run time
-    (docs/issues/2026-11-25-speedup-timing-variation-plan.md)."""
+    (docs/issues/2026-11-25-speedup-timing-variation-plan.md, in commit
+    3033e24)."""
 
     @pytest.mark.parametrize("take_gradient", [False, True])
     @pytest.mark.parametrize(

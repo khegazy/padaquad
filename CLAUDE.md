@@ -404,8 +404,9 @@ is a boolean array where `True` means the panel still needs evaluation.
    arrays of [N, D] in `_get_optimal_mesh` (3 R for adaptive_heun), and up to
    5.5 MiB more for the merge prediction's blocks (3.2 R for a 2 MiB record);
    with the record on the solver's device the integration's own arrays add to
-   it (2.4 to 2.8 R measured); user guide `ug-end-of-call-memory`, plan
-   `docs/issues/2026-11-26-record-final-peak-plan.md`.
+   it (2.4 to 2.8 R measured); user guide `ug-end-of-call-memory`; the plan
+   was deleted once done and is in commit `3033e24`
+   (`docs/issues/2026-11-26-record-final-peak-plan.md`).
 
 ### Error computation modes
 
@@ -532,7 +533,8 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
   converged; from `state=` (`IntegrationState`, `results.py`); else the test
   calls, inline in `integrate` after the starting mesh is drawn (restored on
   2026-11-26 by the user's decision after `2d969f1` removed them; design note
-  `docs/issues/2026-11-26-restore-test-calls-plan.md`): `_call_f` on 10, 100
+  `docs/issues/2026-11-26-restore-test-calls-plan.md`, deleted once done, in
+  commit `3033e24`): `_call_f` on 10, 100
   and 1,000 (`_LARGEST_TEST_CALL`) copies of the first node of the first
   subinterval (detached; never a bound a Gauss-Kronrod method leaves out),
   stopping at the order of the first pass (`n_start_steps * C`), values

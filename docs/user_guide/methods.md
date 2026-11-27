@@ -74,9 +74,7 @@ script shows this for every method.
 ## How to choose
 
 - **Smooth integrands, any accuracy: `gk21`** (the default) or `cc33`. A
-  high-degree method needs few subintervals; on the benchmark integrands `gk21`
-  meets tolerances down to $10^{-9}$ without splitting any subinterval of the
-  starting mesh ({doc}`../performance`).
+  high-degree method needs few subintervals.
 - **Rough or localized features: a low-degree method** (`gk7`, `cc5`, `cc9`)
   wastes fewer evaluations where the integrand is smooth while the mesh is
   refined around the feature.

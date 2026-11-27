@@ -6,7 +6,7 @@ Many oscillations
 them needs subintervals short enough to resolve it. The positive and negative
 halves of each period nearly cancel: the integral is about 1e-3, while the
 integrand reaches 1. An ODE solver must take its steps through the periods one
-after another; padaquad evaluates the subintervals of all of them in one call
+after another; PadaQuad evaluates the subintervals of all of them in one call
 of the integrand.
 
 Run with::

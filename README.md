@@ -29,8 +29,8 @@ loop, it is suitable for:
 - one-shot definite integrals where you want batched parallel evaluation
   of a smooth integrand; the
   [Performance page](https://khegazy.github.io/padaquad/performance.html)
-  compares it with torchdiffeq, with the measurements and how to reproduce
-  them.
+  compares it with torchdiffeq, diffrax, scipy and quadax, with the
+  measurements and how to reproduce them.
 
 <!-- include-start: what-for -->
 ## What this is for

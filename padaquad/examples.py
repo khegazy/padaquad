@@ -15,7 +15,7 @@ infinite derivative, and 1,000 outputs at once.
 
 The integrands in both dictionaries take the array module as the keyword
 argument ``xp`` (``torch`` by default; also ``numpy`` or ``jax.numpy``), so
-one definition serves padaquad and libraries that use NumPy or JAX arrays.
+one definition serves PadaQuad and libraries that use NumPy or JAX arrays.
 The ``*_solution`` functions take torch tensors.
 """
 

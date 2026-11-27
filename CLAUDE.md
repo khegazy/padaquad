@@ -270,9 +270,12 @@ from padaquad import (
     UniformAdaptiveQuadrature,  # concrete uniform-sampling solver
     VariableAdaptiveQuadrature,  # concrete variable-sampling solver
     IntegrationResult,  # return-type dataclass
+    IntegrationState,  # second value of integrate(): mesh and batch size to reuse
+    BackwardOutOfMemoryError,  # a backward pass that cannot be retried smaller
     UNIFORM_METHODS,  # registry of uniform method names
     VARIABLE_METHODS,  # registry of variable method names
     integrand_dict,
+    hard_integrand_dict,  # harder test integrands (many subintervals)
     wolf_schlegel,  # test integrands with analytical solutions
     steps,  # sampling-mode enum
 )

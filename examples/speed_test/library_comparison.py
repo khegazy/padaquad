@@ -1,9 +1,9 @@
 """
-Benchmark padaquad against torchdiffeq, diffrax, scipy and quadax.
+Benchmark PadaQuad against torchdiffeq, diffrax, scipy and quadax.
 
 Every library integrates the same integrands over [0, 1], each with a known
 integral; most of them need hundreds to thousands of subintervals (the case
-padaquad is built for), and three need only a few, for contrast. All run at
+PadaQuad is built for), and three need only a few, for contrast. All run at
 one tolerance: ``atol = 1e-8`` and ``rtol = 0`` (the
 Performance page explains the choice), with the error of a vector-valued
 integrand measured by the largest component (the max norm) everywhere.
@@ -13,20 +13,21 @@ integrand measured by the largest component (the max norm) everywhere.
 - scipy ``quad`` (QUADPACK; ``quad_vec`` for a vector-valued integrand) and
   quadax ``quadgk`` (21 nodes) split [0, 1] adaptively, one subinterval at a
   time.
-- padaquad (``dopri5`` and ``gk21``) evaluates the nodes of many subintervals
+- PadaQuad (``dopri5`` and ``gk21``) evaluates the nodes of many subintervals
   in one call of the integrand.
 
 scipy evaluates NumPy versions of the integrands, always on the CPU; diffrax
-and quadax evaluate JAX versions; torchdiffeq and padaquad evaluate torch
+and quadax evaluate JAX versions; torchdiffeq and PadaQuad evaluate torch
 versions. All come from one definition per integrand (``padaquad.examples``,
 whose integrands take the array module ``xp``).
 
 For every (integrand, solver) the script records the median wall time of
 ``--repeats`` runs after one untimed warm-up run (which also compiles the JAX
 solvers), fewer when the warm-up run took long (``TIME_BUDGET_S``), the
-smallest and largest time, the number of points at which the
-integrand was evaluated, whether the solver reported success, and the error
-against the exact answer. padaquad runs with a fixed ``max_batch``, chosen
+smallest and largest time and every run's time (``times_s``), the number of
+points at which the integrand was evaluated, whether the solver reported
+success, and the error against the exact answer. Python's garbage is collected
+before each case. PadaQuad runs with a fixed ``max_batch``, chosen
 before any timing, so no batch-size search is timed.
 
 Run on an otherwise idle compute node through ``run_benchmark.sh`` (it sets
@@ -107,7 +108,7 @@ FEATURE_FREQUENCIES = 2.0 ** np.arange(10)  # 1, 2, 4, ..., 512 periods on [0, 1
 # after a warm-up run of w seconds, min(--repeats, max(1, TIME_BUDGET_S // w))
 # runs, so a slow solver (torchdiffeq on thousands of steps) is timed once.
 TIME_BUDGET_S = 60.0
-# padaquad's max_batch per device and integrand: what padaquad's memory
+# PadaQuad's max_batch per device and integrand: what PadaQuad's memory
 # benchmark (solver.get_max_batch(f=...)) measured on MAX_BATCH_HARDWARE, run
 # once with --measure-max-batch and never during a timed run. 1_000_000_000 is
 # that benchmark's ceiling (memory never limits those integrands). A timed run
@@ -360,7 +361,7 @@ def make_solver(
     device : str
         ``"cpu"`` or ``"cuda"`` (scipy always runs on the CPU).
     max_batch : int
-        padaquad's fixed batch size.
+        PadaQuad's fixed batch size.
     max_ninter : int
         quadax's subinterval budget.
 
@@ -438,9 +439,9 @@ def make_solver(
         hi = torch.tensor([1.0], dtype=torch.float64, device=device)
 
         def solve() -> Outcome:
-            """Integrate with padaquad at a fixed batch size."""
+            """Integrate with PadaQuad at a fixed batch size."""
             counted.points = 0
-            torch.manual_seed(0)  # padaquad's random starting mesh
+            torch.manual_seed(0)  # PadaQuad's random starting mesh
             result, _ = padaquad.integrate(
                 counted,
                 method,
@@ -585,8 +586,8 @@ def measure(
     -------
     dict
         Median, smallest and largest time (s), every run's time, number of
-        timed runs,
-        evaluations, absolute and relative error (max norm over the outputs),
+        timed runs, evaluations, absolute and relative error (max norm over the
+        outputs),
         convergence, extras.
     """
     gc.collect()  # every case starts with the garbage of the previous ones collected
@@ -622,7 +623,7 @@ def measure(
 
 def padaquad_max_batch(case: Case, device: str) -> int:
     """
-    Measure padaquad's batch size for an integrand (``--measure-max-batch``).
+    Measure PadaQuad's batch size for an integrand (``--measure-max-batch``).
 
     Parameters
     ----------
@@ -634,7 +635,7 @@ def padaquad_max_batch(case: Case, device: str) -> int:
     Returns
     -------
     int
-        The batch size padaquad's memory benchmark gives
+        The batch size PadaQuad's memory benchmark gives
         (``get_max_batch(f=...)``), for ``MAX_BATCH``.
     """
     solver = padaquad.adaptive_quadrature(
@@ -724,10 +725,13 @@ def metadata(device: str, repeats: int) -> dict[str, Any]:
         else cpu_model(),
         "cpu_model": cpu_model(),
         "cpu_count": os.cpu_count(),
-        "affinity_cpus": len(os.sched_getaffinity(0)),
+        # The CPUs the process may run on (Linux), the torch thread count main
+        # sets, and the environment's OMP_NUM_THREADS (overridden by main): the
+        # thread count changes the times (user guide, "CPU threads").
+        "affinity_cpus": (
+            len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None
+        ),
         "torch_threads": torch.get_num_threads(),
-        # The thread variable that set torch_threads, if any: the thread count
-        # changes the times (user guide, "CPU threads").
         "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
         "jax_devices": [str(d) for d in jax.devices()],
         "env": {
@@ -772,8 +776,8 @@ def render_markdown(results: dict[str, Any]) -> str:
 
     For every integrand: a heading with its integral and the number of
     subintervals quadax needed, a table of the four libraries, then a table of
-    padaquad's methods with one speedup column per library (the library's
-    median time over padaquad's). A range from fewer timed runs than the
+    PadaQuad's methods with one speedup column per library (the library's
+    median time over PadaQuad's). A range from fewer timed runs than the
     others says how many. A solver that did not report success is
     marked "†" (and so is every speedup against it); one that raised has no
     time, and every speedup against it is "—".
@@ -792,7 +796,7 @@ def render_markdown(results: dict[str, Any]) -> str:
     versions = ", ".join(f"{k} {v}" for k, v in meta["versions"].items())
     caption = (
         f"Measured on {meta['device_name']} ({meta['device']}; CPU {meta['cpu_model']}, "
-        f"{meta['torch_threads']} torch threads), {meta['date_utc']}, padaquad commit "
+        f"{meta['torch_threads']} torch threads), {meta['date_utc']}, PadaQuad commit "
         f"`{meta['git_commit'][:7]}`{' (uncommitted changes)' if meta['git_dirty'] else ''}. "
         f"atol = {meta['atol']:g}, rtol = {meta['rtol']:g}. Times are medians of "
         f"{meta['repeats']} runs after one untimed warm-up run, or of fewer runs "
@@ -834,7 +838,7 @@ def render_markdown(results: dict[str, Any]) -> str:
                 f"{_ms(r['time_min_s'])}-{_ms(r['time_max_s'])}{runs} | "
                 f"{r['evaluations']} | {r['abs_error']:.1e} | {r['rel_error']:.1e} |"
             )
-        header = "| padaquad | max_batch | Median time (ms) | Evaluations | Abs. error | Rel. error | "
+        header = "| PadaQuad | max_batch | Median time (ms) | Evaluations | Abs. error | Rel. error | "
         header += " | ".join(f"vs {library}" for library in LIBRARIES) + " |"
         lines += ["", header, "|" + "---|" * (6 + len(LIBRARIES))]
         for method in PADAQUAD_METHODS:
@@ -876,7 +880,7 @@ def _summary(results: dict[str, Any]) -> str:
     Returns
     -------
     str
-        One bullet per padaquad method and library.
+        One bullet per PadaQuad method and library.
     """
     rows = results["rows"]
     by_key = {(r["integrand"], r["solver"]): r for r in rows}
@@ -902,8 +906,8 @@ def _summary(results: dict[str, Any]) -> str:
                 else "its error is larger on " + ", ".join(f"`{n}`" for n in worse)
             )
             lines.append(
-                f"- **padaquad {method} vs {library}:** speedup from "
-                f"{min(speedups):.2g}x to {max(speedups):.2g}x (below 1x, padaquad "
+                f"- **PadaQuad {method} vs {library}:** speedup from "
+                f"{min(speedups):.2g}x to {max(speedups):.2g}x (below 1x, PadaQuad "
                 f"is slower); {accuracy}."
             )
     return "\n".join(lines) + "\n"
@@ -918,7 +922,7 @@ def main() -> None:
     parser.add_argument(
         "--measure-max-batch",
         action="store_true",
-        help="measure padaquad's max_batch per integrand (for MAX_BATCH) and "
+        help="measure PadaQuad's max_batch per integrand (for MAX_BATCH) and "
         "write it to --out instead of running the benchmark",
     )
     args = parser.parse_args()

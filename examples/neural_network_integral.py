@@ -3,7 +3,7 @@ Integrating a neural network
 ============================
 
 A neural network that maps the integration variable t to several outputs is
-an integrand like any other: padaquad calls it on a batch of points of shape
+an integrand like any other: PadaQuad calls it on a batch of points of shape
 [N, 1] and it returns values of shape [N, D]. A ``torch.nn.Module`` does
 exactly that, so it can be passed to ``integrate`` as it is.
 
@@ -25,7 +25,7 @@ import torch
 
 from padaquad import integrate
 
-torch.manual_seed(0)  # the network's weights and padaquad's starting mesh
+torch.manual_seed(0)  # the network's weights and PadaQuad's starting mesh
 net = torch.nn.Sequential(
     torch.nn.Linear(1, 64),
     torch.nn.Tanh(),
@@ -64,14 +64,14 @@ with torch.no_grad():
         )
         error = abs(float(result.integral[d]) - reference)
         print(
-            f"output {d}: padaquad {float(result.integral[d]):.12f}, scipy {reference:.12f}, difference {error:.1e}"
+            f"output {d}: PadaQuad {float(result.integral[d]):.12f}, scipy {reference:.12f}, difference {error:.1e}"
         )
         assert error < 1e-9
 
 # %%
 # The gradient of the integral
 # ----------------------------
-# With ``take_gradient=True`` padaquad backpropagates each batch's integral
+# With ``take_gradient=True`` PadaQuad backpropagates each batch's integral
 # as soon as it is computed, so the gradient of the integral with respect to
 # every weight accumulates in ``.grad`` without the whole computation graph
 # being held at once. The loss here is the sum of the three integrals (a

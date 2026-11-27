@@ -5,7 +5,7 @@ An infinite derivative
 ``f(t) = sqrt(|t - 1/3|)`` on [0, 1] is finite everywhere, but its derivative
 is infinite at t = 1/3, so no polynomial approximates it well there, and a
 quadrature method's error falls only slowly as its subintervals near 1/3
-shrink. padaquad keeps halving the subintervals that contain or touch 1/3
+shrink. PadaQuad keeps halving the subintervals that contain or touch 1/3
 until their error is below the tolerance.
 
 Run with::

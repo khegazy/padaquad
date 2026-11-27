@@ -47,18 +47,19 @@ to 11.7 and 106 to 21 ms.
    page, and the Evidence tables of the original audit, predate the changes
    above.
 2. **Benchmark script changes** (`timing-variation` plan, "Not done"): in
-   `examples/speed_test/library_comparison.py`, `gc.collect()` before the
-   warm-up, every run's time in the result (`times_s`), a warm-up with the
+   `examples/speed_test/library_comparison.py` (done in the merge of 2.0.0,
+   `569484c`: `gc.collect()` before the warm-up, every run's time in the
+   result (`times_s`), `OMP_NUM_THREADS` in the metadata; left:) a warm-up with the
    timed call's options (including `result_device`), one fixed thread count for
    every torch-based solver (at most one per physical core; 8 was within 8 % of
    the fastest for PadaQuad in every case measured) from a command-line option
    instead of `torch.set_num_threads(len(os.sched_getaffinity(0)))`, the count,
    CPU set, `OMP_*` and `GOMP_SPINCOUNT` in the metadata, and the range beside
    the median in PadaQuad's table; in `run_benchmark.sh`, `srun
-   --cpu-bind=cores` when `SLURM_JOB_ID` is set. A results file without
-   `times_s` must still render. (2.0.0 made part of this in
-   `torchdiffeq_comparison.py` and `trade_speed_for_memory.py`: every run's
-   time, `gc.collect()` before each case, the thread count recorded.)
+   --cpu-bind=cores` when `SLURM_JOB_ID` is set. Both results files are
+   re-measured, so a file without `times_s` need not render. (2.0.0 made the
+   first part in `trade_speed_for_memory.py` and in `torchdiffeq_comparison.py`,
+   since replaced by `library_comparison.py`.)
 3. **A turn without waits (item 12)**, not attempted. The `compiled-turn`
    review found that capture needs fixed shapes and no host reads, while a
    turn's sizes come from its one read and change every turn, so only the

@@ -31,7 +31,7 @@ loss therefore lowers the highest point of the path, until it crosses the
 ridge at its lowest pass. (This derivation is ours, not popcornn's.)
 
 Two settings differ from popcornn's configuration: everything runs in float64
-on the CPU, and padaquad integrates the loss (``take_gradient=True``) to the
+on the CPU, and PadaQuad integrates the loss (``take_gradient=True``) to the
 tolerance popcornn uses when it integrates the loss itself, ``atol = 1e-4``,
 ``rtol = 0`` (popcornn integrates the gradient directly, to its own
 tolerance).
@@ -135,7 +135,7 @@ def pvre(t: torch.Tensor) -> torch.Tensor:
     """
     global evaluations  # noqa: PLW0603
     evaluations += len(t)
-    t = t.detach().requires_grad_()  # keeps padaquad's node placement out of the graph
+    t = t.detach().requires_grad_()  # keeps PadaQuad's node placement out of the graph
     x = path(t)
     v = torch.cat(
         [torch.autograd.grad(x[:, i].sum(), t, create_graph=True)[0] for i in range(2)],

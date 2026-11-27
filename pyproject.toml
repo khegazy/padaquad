@@ -35,7 +35,7 @@ requires-python = ">=3.11"
 # torch>=2.4: first release with the top-level torch.OutOfMemoryError used by
 # the out-of-memory handling (PyTorch v2.4.0 release notes, #121702). Only
 # torch 2.8 has been tested; CI installs the latest torch.
-dependencies = ["numpy", "torch>=2.4", "scipy", "einops", "psutil"]
+dependencies = ["numpy", "torch>=2.4", "scipy", "psutil"]
 
 [project.optional-dependencies]
 dev = [

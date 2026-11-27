@@ -6,7 +6,7 @@
 |---|---|
 | `padaquad/_frontend.py` | `integrate()` and the `adaptive_quadrature()` factory |
 | `padaquad/quadrature/base.py` | `AdaptiveQuadrature`: the integration loop, node placement, error ratios, the optimal mesh |
-| `padaquad/quadrature/uniform.py`, `variable.py` | The two solvers; they differ in how a split or merged subinterval gets its nodes |
+| `padaquad/quadrature/uniform.py`, `variable.py` | The two solvers; they differ only in the method registry they select |
 | `padaquad/quadrature/memory.py` | The memory benchmark and the batch-size budget |
 | `padaquad/methods/` | `MethodClass` and the method registries, one module per family |
 | `padaquad/results.py` | `IntegrationResult` |
@@ -22,9 +22,12 @@ Every method is an instance of one of two classes built from data:
 from the node positions). Both implement the interface of the abstract
 `MethodClass`: `node_fractions()`, `weights(nodes)`, `degree`, `order` and
 `error_exponent`. The solver reaches a method only through this interface, so a
-new method needs no solver change. Each solver works on its own copy of its
-method (`MethodClass.clone()`), so changing one solver's precision never
-changes the registries.
+new method needs no solver change. A solver uses its method converted to its
+device and dtype (`MethodClass.to`): a copy built once per process and shared
+by every solver of that method, device and dtype, so the registries never
+change. Never write into a method's tensors in place (for example
+`method.tableau.b.mul_(2)`): the change would reach every solver that shares
+the method.
 
 ## The integration loop
 
@@ -36,7 +39,8 @@ changes the registries.
    integrand is called once per batch.
 3. **Accept or split.** Each subinterval's error estimate is compared with its
    tolerance ({ref}`ug-error-control`). Accepted subintervals are recorded;
-   the others are split in half and go back into the queue.
+   the others are split in half (or in four, {ref}`ug-four-pieces`) and go
+   back into the queue.
 4. **Gradients.** With `take_gradient=True`, each batch's contribution is
    back-propagated as soon as it is accepted, so the autograd graph of the
    whole integral is never held at once ({ref}`ug-autodiff`).

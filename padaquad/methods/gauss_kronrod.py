@@ -7,7 +7,7 @@ and adds n + 1 more. The (2n + 1)-point method gives the integral, and the
 error estimate is the difference between the (2n + 1)-point and the n-point
 results (Gonnet 2012, Eq. (24), Sec. 2.4 :cite:p:`gonnet2012`). QUADPACK
 starts from the same difference and then rescales it (dqk21.f, lines 176-180
-:cite:p:`quadpack_netlib`); padaquad does not rescale. ``gkN`` is the pair with
+:cite:p:`quadpack_netlib`); PadaQuad does not rescale. ``gkN`` is the pair with
 2n + 1 = N points.
 
 Degrees: the (2n + 1)-point method has degree 3n + 1 (Gonnet 2012, Sec. 2.4,
@@ -19,9 +19,12 @@ gk31: 11, 23, 31, 47, and the n-point Gauss methods have degree 2n - 1 (5, 13,
 tables. Gonnet 2012, Sec. 2.4, p. 10, lists degree 11 for the 7-point
 extension of the 3-point Gauss method (gk7's method).
 
-Gauss-Kronrod nodes lie inside the subinterval. padaquad adds two nodes of
-weight zero at its ends (so gk21 evaluates 23 nodes per subinterval), because
-the solver measures a subinterval's width from its first and last node.
+Gauss-Kronrod nodes lie inside the subinterval, so the integrand is never
+evaluated at a mesh point (gk21 evaluates 21 nodes per subinterval), and an
+integrable singularity at a bound needs no special treatment. QUADPACK's
+dqk21.f evaluates the integrand only at the center and at the 10 Kronrod
+abscissae on either side, all inside the interval (lines 134-166
+:cite:p:`quadpack_netlib`).
 
 References
 ----------
@@ -87,7 +90,7 @@ def _build_gauss_kronrod_tableau(
     Returns
     -------
     _Tableau
-        _Tableau with c (K nodes mapped to [0, 1], padded with 0 and 1), b
+        _Tableau with c (the 2n + 1 K nodes mapped to [0, 1], all interior), b
         (K weights) and b_error (K weights minus G weights, with G weight 0
         at the nodes only K has), so the error estimate is K - G.
     """
@@ -98,7 +101,6 @@ def _build_gauss_kronrod_tableau(
     wgk_half = torch.tensor(wgk_half_with_zero, dtype=f64)  # [n+1]
     wg_g = torch.tensor(wg_at_g_pos, dtype=f64)
     zero = torch.zeros(1, dtype=f64)
-    one = torch.ones(1, dtype=f64)
 
     # Build full K_{2n+1} arrays in (-1, 1), ascending order:
     #   [-x_n, ..., -x_1, 0, x_1, ..., x_n]
@@ -128,22 +130,13 @@ def _build_gauss_kronrod_tableau(
         ]
     )
 
-    # Map (-1, 1) -> [0, 1]: c = (x + 1) / 2, w = w / 2 (Jacobian).
+    # Map (-1, 1) -> (0, 1): c = (x + 1) / 2, w = w / 2 (Jacobian). The nodes
+    # stay interior: the solver takes a subinterval's width from its mesh
+    # points, so no node is needed at the ends.
     c_unit = (xgk_full + 1.0) / 2.0
     b_unit = wgk_full / 2.0
     b_g_unit = wg_extended_full / 2.0
-
-    # The solver's _RK_integral computes a subinterval's width as
-    # ``h = t[:, -1] - t[:, 0]`` and node fractions must start at 0 and end
-    # at 1. Gauss-Kronrod nodes are interior, so without padding gk21's ``h``
-    # would be 0.99566... of the width and the integral off by that factor.
-    # padaquad pads with two zero-weight nodes at 0 and 1: they are evaluated
-    # but contribute nothing to the integral or the error estimate, at the cost
-    # of 2 extra integrand evaluations per subinterval (23 instead of 21).
-    c_padded = torch.cat([zero, c_unit, one])
-    b_padded = torch.cat([zero, b_unit, zero])
-    b_g_padded = torch.cat([zero, b_g_unit, zero])
-    return _Tableau(c=c_padded, b=b_padded, b_error=b_padded - b_g_padded)
+    return _Tableau(c=c_unit, b=b_unit, b_error=b_unit - b_g_unit)
 
 
 # G10-K21 (Gauss-Kronrod 21-point). K21 degree = 3n+1 = 31 (n = 10, even).

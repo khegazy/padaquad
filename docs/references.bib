@@ -1,4 +1,4 @@
-% The one bibliography of padaquad: the documentation site, the docstrings and
+% The one bibliography of PadaQuad: the documentation site, the docstrings and
 % the README reference list all take their references from this file.
 %
 % Rule: an entry is added only after the source has been opened and the cited
@@ -24,7 +24,7 @@
   year        = {1969},
   month       = jul,
   url         = {https://ntrs.nasa.gov/citations/19690021375},
-  checked     = {NTRS document ID 19690021375; PDF opened. Checked Table XIV "Coefficients for RK1(2)" (report p. 29): alpha = 0, 1/2, 1; first-order weights c = 1/256, 255/256, 0; second-order weights c-hat = 1/512, 255/256, 1/512; Eq. (63) TE = (1/512)(f0 - f2) h. Matches padaquad fehlberg2 c, b, b_error exactly.}
+  checked     = {NTRS document ID 19690021375; PDF opened. Checked Table XIV "Coefficients for RK1(2)" (report p. 29): alpha = 0, 1/2, 1; first-order weights c = 1/256, 255/256, 0; second-order weights c-hat = 1/512, 255/256, 1/512; Eq. (63) TE = (1/512)(f0 - f2) h. Matches PadaQuad fehlberg2 c, b, b_error exactly.}
 }
 
 @article{trefethen2008,
@@ -63,7 +63,7 @@
   doi     = {10.1016/j.jcp.2019.02.001},
   eprint  = {1809.06114},
   archiveprefix = {arXiv},
-  checked = {arXiv v2 (15 Feb 2019) opened; journal version not opened. Checked Eq. (119), Sec. 5.2, p. 21: one-parameter RK3 family with nodes 0, c2, 1 and weights b = (1/2 - 1/(6 c2), 1/(6 c2 (1 - c2)), (2 - 3 c2)/(6 (1 - c2))). Matches padaquad _interpolatory3_weights with a = c2.}
+  checked = {arXiv v2 (15 Feb 2019) opened; journal version not opened. Checked Eq. (119), Sec. 5.2, p. 21: one-parameter RK3 family with nodes 0, c2, 1 and weights b = (1/2 - 1/(6 c2), 1/(6 c2 (1 - c2)), (2 - 3 c2)/(6 (1 - c2))). Matches PadaQuad _interpolatory3_weights with a = c2.}
 }
 
 @misc{quadpack_netlib,
@@ -72,7 +72,7 @@
   howpublished = {Netlib},
   year         = {1983},
   url          = {https://netlib.org/quadpack/},
-  checked      = {Files dqk15.f, dqk21.f, dqk31.f downloaded 2026-11-12 (revision date 830518). Header: nodes and weights "evaluated with 80 decimal digit arithmetic by L. W. Fullerton, Bell Labs, Nov. 1981". Every xgk/wgk/wg data value compared digit-by-digit with padaquad _GK15_*, _GK21_*, _GK31_*: 86 of 87 identical to all 33 digits; dqk21 wgk(3) differs in the 33rd digit (padaquad ...244582, Netlib ...244580; Netlib is correctly rounded). Also checked the error logic (dqk21.f lines 176-180: |resk - resg| * hlgth, (200*abserr/resasc)^1.5 rescaling, max(50*epmach*resabs, abserr)). Companion book: Piessens, de Doncker-Kapenga, Ueberhuber, Kahaner, QUADPACK, Springer 1983, doi:10.1007/978-3-642-61786-7 (book not opened).}
+  checked      = {Files dqk15.f, dqk21.f, dqk31.f downloaded 2026-11-12 (revision date 830518). Header: nodes and weights "evaluated with 80 decimal digit arithmetic by L. W. Fullerton, Bell Labs, Nov. 1981". Every xgk/wgk/wg data value compared digit-by-digit with PadaQuad _GK15_*, _GK21_*, _GK31_*: 86 of 87 identical to all 33 digits; dqk21 wgk(3) differs in the 33rd digit (PadaQuad ...244582, Netlib ...244580; Netlib is correctly rounded). Also checked the error logic (dqk21.f lines 176-180: |resk - resg| * hlgth, (200*abserr/resasc)^1.5 rescaling, max(50*epmach*resabs, abserr)). dqk21.f downloaded again 2026-11-25: lines 134-166 evaluate f only at centr = (a+b)/2 and at centr -+ hlgth*xgk(j), j = 1..10, every xgk(j) < 1 (xgk(1) = 0.995657...), never at a or b. Companion book: Piessens, de Doncker-Kapenga, Ueberhuber, Kahaner, QUADPACK, Springer 1983, doi:10.1007/978-3-642-61786-7 (book not opened).}
 }
 
 @misc{scipy_quadvec,
@@ -98,7 +98,7 @@
   title        = {torchdiffeq},
   year         = {2018},
   url          = {https://github.com/rtqichen/torchdiffeq},
-  checked      = {Opened README and _impl/{adaptive_heun,fehlberg2,bosh3,dopri5}.py at master commit 657943acefa826ef04c025ebeb1ff5e9d60dc268 (2025-04-04). README lines 160-165 give this @misc entry. Tableaus match padaquad's RK tables exactly, including dopri5 c_error built from the 1951/21600 embedded set (earlier check on release 0.2.5, 2026-11-11).}
+  checked      = {Opened README and _impl/{adaptive_heun,fehlberg2,bosh3,dopri5}.py at master commit 657943acefa826ef04c025ebeb1ff5e9d60dc268 (2025-04-04). README lines 160-165 give this @misc entry. Tableaus match PadaQuad's RK tables exactly, including dopri5 c_error built from the 1951/21600 embedded set (earlier check on release 0.2.5, 2026-11-11).}
 }
 
 @misc{torchquad,

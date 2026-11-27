@@ -28,6 +28,7 @@ import gc
 import inspect
 import logging
 import math
+import operator
 import os
 import time
 import weakref
@@ -67,28 +68,54 @@ _GROWTH = 10
 
 # The largest test call of integrate() given no max_batch and no state (the
 # test calls are 10, 100 and 1,000 points; larger sizes are reached by growth,
-# whose calls of f do useful work).
+# whose calls of f do useful work, so no call is more than 10 times one that
+# ran).
 _LARGEST_TEST_CALL = 1000
 
 
-def _shrink_batch(n: int) -> int:
+def _shrink_batch(n: int, factor: float = _OOM_BACKOFF) -> int:
     """
     Return the batch size to retry with after a batch of n points ran out of memory.
 
-    ``_OOM_BACKOFF * n``, rounded, but always below n (``round(0.75 * 2)`` is 2)
-    and at least 1.
+    ``factor * n``, rounded (half to even), but always below n
+    (``round(0.75 * 2)`` is 2) and at least 1.
 
     Parameters
     ----------
     n : int
         The batch size that ran out of memory, at least 1.
+    factor : float
+        The fraction of n to retry with, in (0, 1). Default ``_OOM_BACKOFF``;
+        the test calls of ``integrate`` use 0.5 up to 10 points.
 
     Returns
     -------
     int
         The smaller batch size.
     """
-    return max(1, int(min(round(_OOM_BACKOFF * n), n - 1)))
+    return max(1, int(min(round(factor * n), n - 1)))
+
+
+def _check_evaluation_buffer(evaluation_buffer: Any) -> None:
+    """
+    Check that ``evaluation_buffer`` is an int >= 1 (bytes).
+
+    Parameters
+    ----------
+    evaluation_buffer : Any
+        The value given to ``integrate`` or ``get_max_batch``, not None.
+
+    Raises
+    ------
+    ValueError
+        If it is a bool, or an int below 1.
+    TypeError
+        If it is not an int.
+    """
+    if isinstance(evaluation_buffer, bool) or operator.index(evaluation_buffer) < 1:
+        raise ValueError(
+            f"evaluation_buffer must be an int >= 1 (bytes); got {evaluation_buffer!r}."
+        )
 
 
 # Saved gradients, by id of the tensor: a weak reference to it (so that a
@@ -208,14 +235,17 @@ class BackwardOutOfMemoryError(torch.OutOfMemoryError):
     """
     Raised when a backward pass of ``integrate(take_gradient=True)`` ran out of memory.
 
-    padaquad restarts the integral by itself after such an error when it can
+    PadaQuad restarts the integral by itself after such an error when it can
     put back the gradients the failed attempt added. It raises this error
     instead when it cannot: the integrand uses a custom autograd function and
     ``parameters=`` was not given, a parameter has a hook that runs after its
     gradient is added, or ``torch.distributed`` runs more than one process.
     The parameters' ``.grad`` then hold part of the integral's gradient: reset
     them (for example with ``optimizer.zero_grad()``) and call again with
-    ``state=error.state`` (see :ref:`ug-memory`).
+    ``state=error.state`` (see :ref:`ug-memory`). It is also raised when the
+    backward pass of one subinterval ran out of memory, as no smaller batch
+    exists; the gradients are then put back, and the state's batch size,
+    below one subinterval, serves only a ``take_gradient=False`` call.
 
     Attributes
     ----------
@@ -509,6 +539,7 @@ class _MemoryManagement:
         t: torch.Tensor | None = None,
         take_gradient: bool = True,
         f_args: tuple[Any, ...] = (),
+        evaluation_buffer: int | None = None,
     ) -> int | None:
         """
         Return the largest number of integrand evaluations per batch.
@@ -552,6 +583,13 @@ class _MemoryManagement:
         f_args : tuple
             Extra positional arguments of ``f``; tensors are moved to the
             solver's device. Default ``()``.
+        evaluation_buffer : int or None
+            The ``evaluation_buffer`` (bytes) of the calls that will use the
+            result, with ``trade_speed_for_memory=True``. Twice this many
+            bytes are kept free: the values waiting to be integrated, and
+            their copy when they are joined into one array to be integrated.
+            None (default) keeps nothing free for it. The constructor's
+            ``max_batch``, when given, is returned unchanged.
 
         Returns
         -------
@@ -563,8 +601,11 @@ class _MemoryManagement:
         ------
         ValueError
             If ``total_mem_usage`` is outside (0, 1], if ``f`` is given without
-            a float32 or float64 point ``t`` of shape [T], or if ``f`` does not
-            return values of shape [N, D].
+            a float32 or float64 point ``t`` of shape [T], if ``f`` does not
+            return values of shape [N, D], or if ``evaluation_buffer`` is not
+            None or an int >= 1.
+        torch.OutOfMemoryError
+            If one evaluation of ``f`` does not fit in memory.
 
         Examples
         --------
@@ -583,6 +624,10 @@ class _MemoryManagement:
         if total_mem_usage is None:
             total_mem_usage = self.init_total_mem_usage
         self._check_total_mem_usage(total_mem_usage)
+        reserved = 0.0
+        if evaluation_buffer is not None:
+            _check_evaluation_buffer(evaluation_buffer)
+            reserved = 2 * evaluation_buffer / _GB
         if f is not None:
             if (
                 not isinstance(t, torch.Tensor)
@@ -603,25 +648,21 @@ class _MemoryManagement:
             # A cap from an earlier call or measurement would lower this one.
             self._oom_max_batch = None
             # One point, shaped [1, T] like every batch f receives: checks the
-            # output and keeps one-time costs (CUDA start-up, lazy loading) out
-            # of the benchmark, as integrate() does.
-            integrand, _ = self._split_f_output(f(t.reshape(1, -1), *f_args))
-            if integrand.dim() < 2:
-                raise ValueError(
-                    "f must return values of shape [N, D] for points of shape "
-                    f"[N, T]; got shape {list(integrand.shape)}."
-                )
+            # output (_call_f) and keeps one-time costs (CUDA start-up, lazy
+            # loading) out of the benchmark's readings.
+            self._call_f(f, f_args, t.reshape(1, -1), False)
             return self._setup_memory_checks(
                 f,
                 t,
                 take_gradient=take_gradient,
                 total_mem_usage=total_mem_usage,
                 f_args=f_args,
+                reserved=reserved,
             )
         if self.init_max_batch is not None:
             return self._cap_max_batch(self.init_max_batch)
         if self.f_mem_coeffs is not None:
-            return self._cap_max_batch(self._get_max_f_evals(total_mem_usage))
+            return self._cap_max_batch(self._get_max_f_evals(total_mem_usage, reserved))
         return None
 
     def _get_cpu_memory(self) -> tuple[float, float]:
@@ -656,10 +697,14 @@ class _MemoryManagement:
         total_gpu = mem_info[1] / _GB
         # Memory that is free outside of the PyTorch cache
         free_gpu = mem_info[0] / _GB
+        # One build of PyTorch's statistics dictionary (about 60 µs each on an
+        # A100, once per batch with take_gradient=True), read under the keys
+        # torch.cuda.memory_reserved and memory_allocated read.
+        stats = torch.cuda.memory_stats(self.device)
         # Memory reserved for the PyTorch cache
-        torch_cache = torch.cuda.memory_reserved(self.device) / _GB
+        torch_cache = stats.get("reserved_bytes.all.current", 0) / _GB
         # Cache memory being used by tensors
-        torch_cache_used = torch.cuda.memory_allocated(self.device) / _GB
+        torch_cache_used = stats.get("allocated_bytes.all.current", 0) / _GB
         # Total free amount of memory that can be used
         total_free = free_gpu + (torch_cache - torch_cache_used)
 
@@ -715,11 +760,13 @@ class _MemoryManagement:
         can_shrink: bool,
     ) -> tuple[torch.Tensor, tuple[torch.Tensor, ...] | None] | None:
         """
-        Call f on points, or return None when it runs out of memory.
+        Call f on points and check its output, or return None when it runs out of memory.
 
-        The one place where the integration loop catches an out-of-memory
-        error of f (``_is_out_of_memory``). After one, the memory f held is
-        released, so the caller can try again with fewer points.
+        Every call of f in ``integrate`` (the test calls and the integration
+        loop) goes through it, so it is the one place that checks the shape
+        of f's output and that catches an out-of-memory error of f
+        (``_is_out_of_memory``). After one, the memory f held is released, so
+        the caller can try again with fewer points.
 
         Parameters
         ----------
@@ -741,23 +788,38 @@ class _MemoryManagement:
 
         Raises
         ------
+        ValueError
+            If ``f``'s values are not one row per point, shape [N, D].
         torch.OutOfMemoryError
             If ``f`` ran out of memory and ``can_shrink`` is False.
         """
         outside = False
         try:
-            return self._split_f_output(f(points, *f_args))
+            integrand, tracked = self._split_f_output(f(points, *f_args))
         except (RuntimeError, MemoryError) as e:
             if not _is_out_of_memory(e):
                 raise
             if not can_shrink:
                 raise torch.OutOfMemoryError(
                     f"{e}\n\nA call of the integrand f on {len(points)} points ran "
-                    "out of memory, and the batch size cannot be reduced."
+                    "out of memory, and the batch size cannot be reduced: a call "
+                    "holds at least one point, and with take_gradient=True at "
+                    f"least one subinterval ({self.C} points)."
                 ) from e
             # An error from outside PyTorch's allocator (a CUDA library's, or
             # the CPU's) is helped by emptying PyTorch's GPU cache too.
             outside = not isinstance(e, torch.OutOfMemoryError)
+        else:
+            # Checked outside the try, so this error is never taken for an
+            # out-of-memory error. A [N] output, or one with another number
+            # of rows, would otherwise be reshaped into wrong subintervals.
+            if integrand.dim() < 2 or len(integrand) != len(points):
+                raise ValueError(
+                    "f must return values of shape [N, D] for points of shape "
+                    f"[N, T], one row per point; got shape "
+                    f"{list(integrand.shape)} for {len(points)} points."
+                )
+            return integrand, tracked
         # Released here, after the except block: inside it the error's
         # traceback still holds f's tensors, so they cannot be freed.
         self._release_memory(empty_cache=outside)
@@ -770,12 +832,15 @@ class _MemoryManagement:
         take_gradient: bool,
         total_mem_usage: float,
         f_args: tuple[Any, ...] = (),
+        reserved: float = 0.0,
     ) -> int:
         """
         Fit the memory of one call of f on N points (``f_mem_coeffs``, GB).
 
         Returns the batch size the fit gives for the memory free at the end of
-        the measurement (lowered to the out-of-memory cap, ``_cap_max_batch``).
+        the measurement less ``reserved`` (GB; the evaluation buffer's, from
+        ``get_max_batch``), lowered to the out-of-memory cap
+        (``_cap_max_batch``). The test calls are not limited by ``reserved``.
         During an integration the batch size is recomputed at every evaluation
         from the memory free at that moment (``_get_max_f_evals``).
 
@@ -879,6 +944,9 @@ class _MemoryManagement:
             Fraction of total memory allowed (0 < value <= 1).
         f_args : tuple[Any, ...]
             Extra arguments passed to f.
+        reserved : float
+            Memory (GB) kept free for the evaluation buffer when the returned
+            batch size is computed. Default 0.
 
         Returns
         -------
@@ -1020,7 +1088,7 @@ class _MemoryManagement:
                 # this call: what the next call must fit in.
                 usable = self._get_usable_memory(total_mem_usage)
                 measured = self._measure_call(
-                    f, f_args, node_test, N, reader.reset, reader.read, total_mem_usage
+                    f, f_args, node_test, N, reader.reset, reader.read
                 )
 
                 if measured is None:
@@ -1214,8 +1282,10 @@ class _MemoryManagement:
         # The estimate depends on take_gradient: the fit includes the factor s
         # only when it is True. _cap_max_batch applies the cap an out-of-memory
         # error above set, so the message reports the batch actually used.
-        usable = self._get_usable_memory(total_mem_usage)
-        max_batch = self._cap_max_batch(self._get_max_f_evals(total_mem_usage))
+        usable = max(0.0, self._get_usable_memory(total_mem_usage) - reserved)
+        max_batch = self._cap_max_batch(
+            self._get_max_f_evals(total_mem_usage, reserved)
+        )
         a, b, d = self.f_mem_coeffs
         note = ""
         if not ready:
@@ -1394,7 +1464,6 @@ class _MemoryManagement:
         N: int,
         reset_peak: Callable[[], None],
         read_memory: Callable[[], int],
-        total_mem_usage: float,
     ) -> tuple[float, float] | None:
         """
         Call f once on N copies of node_test; return the memory and time it took.
@@ -1416,8 +1485,6 @@ class _MemoryManagement:
         reset_peak, read_memory : Callable[[], None], Callable[[], int]
             The measurement method from
             ``_peak_memory_reader``.
-        total_mem_usage : float
-            Only quoted in the single-evaluation error.
 
         Returns
         -------
@@ -1449,8 +1516,8 @@ class _MemoryManagement:
                 raise
             if N == 1:
                 raise torch.OutOfMemoryError(
-                    f"{e}\n\nA single evaluation of f does not fit in memory on "
-                    f"{self.device} with total_mem_usage={total_mem_usage}."
+                    f"{e}\n\nA single evaluation of f does not fit in the memory "
+                    f"of {self.device}."
                 ) from e
             out_of_memory = True
             outside = not isinstance(e, torch.OutOfMemoryError)
@@ -1493,7 +1560,7 @@ class _MemoryManagement:
         buffer = (1 - total_mem_usage) * total
         return max(0, free - buffer)
 
-    def _get_max_f_evals(self, total_mem_usage: float) -> int:
+    def _get_max_f_evals(self, total_mem_usage: float, reserved: float = 0.0) -> int:
         """
         Compute the maximum number of integrand evaluations that fit in memory.
 
@@ -1506,6 +1573,9 @@ class _MemoryManagement:
         ----------
         total_mem_usage : float
             Fraction of total memory allowed.
+        reserved : float
+            Memory (GB) kept free for other uses, subtracted from the usable
+            memory first. Default 0.
 
         Returns
         -------
@@ -1522,7 +1592,7 @@ class _MemoryManagement:
                 "The memory of f is unknown; run the memory benchmark "
                 "(_setup_memory_checks) before sizing a batch."
             )
-        usable = self._get_usable_memory(total_mem_usage)
+        usable = max(0.0, self._get_usable_memory(total_mem_usage) - reserved)
         return _largest_n(self.f_mem_coeffs, _MEMORY_BUDGET * usable)
 
     def _batch_for(self, n_waiting: int) -> int:
@@ -1547,58 +1617,6 @@ class _MemoryManagement:
         """
         growth = 1 if self._batch_converged else _GROWTH
         return min(n_waiting, growth * self._batch)
-
-    def _initialize_max_batch(
-        self,
-        f: Callable[..., Any],
-        f_args: tuple[Any, ...],
-        node: torch.Tensor,
-        n_first: int,
-        total_mem_usage: float,
-    ) -> tuple[int, bool]:
-        """
-        Find the starting batch size of a call given no max_batch and no state.
-
-        Calls f, forward only, on 10, 100 and 1,000 (``_LARGEST_TEST_CALL``)
-        copies of ``node``, stopping at the order of the first pass (the
-        largest power of 10 not above n_first), only to see whether f runs at
-        these sizes; no memory is read. A call
-        that runs out of memory is repeated at ``_shrink_batch`` of its size
-        until one runs, and no larger call follows.
-
-        Parameters
-        ----------
-        f, f_args : Callable[..., Any], tuple[Any, ...]
-            The integrand and its extra arguments.
-        node : torch.Tensor
-            One point as a [1, T] row on ``self.device``.
-        n_first : int
-            Number of points of the first pass.
-        total_mem_usage : float
-            Only quoted in the error for a single point that does not fit.
-
-        Returns
-        -------
-        tuple[int, bool]
-            The largest test call that ran (1 when n_first < 10), and whether
-            a test call ran out of memory (the batch size is then converged).
-
-        Raises
-        ------
-        torch.OutOfMemoryError
-            If f does not fit on a single point.
-        """
-        batch, converged, n = 1, False, _GROWTH
-        while n <= min(n_first, _LARGEST_TEST_CALL) and not converged:
-            while (
-                self._measure_call(
-                    f, f_args, node, n, lambda: None, lambda: 0, total_mem_usage
-                )
-                is None
-            ):
-                n, converged = _shrink_batch(n), True
-            batch, n = n, n * _GROWTH
-        return batch, converged
 
     def _save_grads(
         self, loss: torch.Tensor, saved: _SavedGrads, listed: bool
@@ -1766,19 +1784,26 @@ class _MemoryManagement:
                 if (leaf := ref()) is not None:
                     leaf.grad = grad
         if unsafe is not None or restart.max_batch < self.C:
+            # A batch below one subinterval is the failed batch of one
+            # subinterval shrunk; a take_gradient=True call refuses its state.
+            again = (
+                f"call again with state=error.state (batch size {restart.max_batch})."
+                if restart.max_batch >= self.C
+                else f"free memory on {self.device}, or use a method with fewer "
+                "points per subinterval: the backward pass of one subinterval "
+                f"({self.C} points) does not fit."
+            )
             error = BackwardOutOfMemoryError(
                 f"The backward pass of a batch of {failed_batch} points ran out "
                 "of memory, and padaquad cannot restart the integral ("
                 f"{unsafe or 'a smaller batch cannot hold one subinterval'}). "
                 + (
                     "The gradients now hold part of the integral's gradient: "
-                    "reset them (for example optimizer.zero_grad()) and call "
-                    "again with "
+                    "reset them (for example optimizer.zero_grad()), then "
                     if unsafe is not None
-                    else "The gradients were put back to their values before "
-                    "the call. Call again with "
+                    else "The gradients were put back to their values before the call; "
                 )
-                + f"state=error.state (batch size {restart.max_batch}).",
+                + again,
             )
             error.state = restart
             raise error

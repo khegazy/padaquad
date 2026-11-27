@@ -7,7 +7,7 @@ Run with::
     python examples/quadrature_basics.py
 
 Each example computes a definite integral with ``integrate(f, ...)`` and
-compares it with the exact value. Every call passes float64 bounds (padaquad
+compares it with the exact value. Every call passes float64 bounds (PadaQuad
 computes in the dtype of the bounds), ``device="cpu"`` and a fixed
 ``max_batch``, so every batch has the same size.
 """
@@ -143,7 +143,8 @@ def example_method_comparison() -> None:
             **OPTIONS,
         )
         error = abs(float(result.integral) - expected)
-        # result.y holds one integrand value per evaluated node.
+        # result.y holds the value at every evaluated point once (a mesh
+        # point shared by two subintervals once, though both evaluated it).
         print(
             f"  {method:>14}: error {error:.1e}   "
             f"integrand evaluations {result.y.shape[0]:>5}"

@@ -15,11 +15,15 @@ serves as the "re-check disabled" baseline. With a fixed
 ``error_integral_reference`` the re-check is off until every panel is accepted;
 the reference is then dropped (section E).
 
-A strongly *cancelling* integrand drives the effect: its partial integral peaks
-mid-domain and the total is ~0, so the absolute denominator is large mid-run and
-collapses toward ``atol`` at the end. ``conserve_memory=True`` + a small
-``max_batch`` make the running integral accumulate batch by batch (the regime
-where the denominator genuinely drifts within a single solve).
+A strongly *cancelling* integrand drives the effect: the total is ~0, so the
+absolute denominator collapses toward ``atol`` once the cancellation is
+resolved. With ``take_gradient=False`` every pass judges all its subintervals
+against the running integral of the whole interval, so the drift must come
+from one pass to the next: ``_cancelling_peak`` hides its cancelling part in a
+narrow peak that the first, coarse passes miss, so their running integral (about
+1) sets a loose tolerance that the final integral (0) no longer allows.
+``take_gradient=True`` judges one small batch at a time (``max_batch``), so
+there the running integral also drifts within a pass.
 """
 
 from __future__ import annotations
@@ -70,12 +74,29 @@ def _cancelling(t, *args):
     return torch.sin(2.0 * math.pi * t)
 
 
+def _cancelling_peak(t, *args):
+    """f(t) = 1 + 0.5 sin(4 pi t) minus a Gaussian of unit area at t = 0.37.
+
+    The Gaussian, sqrt(a/pi) exp(-a (t - 0.37)^2) with a = 1e4 (width about
+    0.007), cancels the smooth part: the integral over [0, 1] is 0 (to rounding).
+    The coarse first passes do not resolve the peak, so their running integral
+    is about 1 and their tolerance rtol * 1; once the peak is resolved the
+    tolerance falls to atol, and subintervals accepted early fail it.
+    """
+    a = 1e4
+    return (
+        1.0
+        + 0.5 * torch.sin(4.0 * math.pi * t)
+        - math.sqrt(a / math.pi) * torch.exp(-a * (t - 0.37) ** 2)
+    )
+
+
 def _run(
     solver,
     f,
     take_gradient,
     mesh_final=T_FINAL,
-    conserve_memory=True,
+    trade_speed_for_memory=False,
     max_batch=MAX_BATCH,
     **kwargs,
 ):
@@ -85,7 +106,7 @@ def _run(
         mesh_final=mesh_final,
         take_gradient=take_gradient,
         max_batch=max_batch,
-        conserve_memory=conserve_memory,
+        trade_speed_for_memory=trade_speed_for_memory,
         **kwargs,
     )
 
@@ -240,6 +261,60 @@ def test_recheck_error_norm_max_rms(error_norm):
     assert torch.allclose(result.integral.cpu(), _vector_truth(), atol=1e-4, rtol=1e-3)
 
 
+@pytest.mark.parametrize("error_norm", ["2", "max", "rms", "failure_fraction"], ids=str)
+@pytest.mark.parametrize("absolute", [True, False], ids=["absolute", "cumulative"])
+def test_recorded_subintervals_keep_their_reduced_errors(error_norm, absolute):
+    """For the norm family every judgement of the record (each re-check and
+    the final check) receives each subinterval's reduced error and rounding
+    floor as its batch computed them, in the record's row order (equal here
+    to a recomputation from the record's arrays: D = 2, whose reductions do
+    not depend on the other rows), and reduces only its tolerance, not the
+    record's errors again; "failure_fraction" records none and reduces
+    nothing. Only cumulative mode builds running sums (merges the batch into
+    the record's order). The returned result carries no such field."""
+    solver = _solver(error_norm=error_norm, use_absolute_error_ratio=absolute)
+    check, reduce, merge = (
+        solver._record_error_check,
+        solver._reduce_norm,
+        solver._merge_positions,
+    )
+    seen, reductions, calls = [], [], {"reduce": 0, "merge": 0}
+
+    def count(name, method):
+        def counted(*args, **kwargs):
+            calls[name] += 1
+            return method(*args, **kwargs)
+
+        return counted
+
+    def spy(record, *args, **kwargs):
+        kept = record.get("reduced_errors")
+        seen.append(
+            kept is None
+            or torch.equal(
+                kept,
+                solver._reduced_errors(
+                    record["mesh_quadrature_errors"], record["mesh_quadratures"]
+                ),
+            )
+        )
+        assert (kept is None) == (error_norm == "failure_fraction")
+        before = calls["reduce"]
+        out = check(record, *args, **kwargs)
+        reductions.append(calls["reduce"] - before)
+        return out
+
+    solver._record_error_check = spy
+    solver._reduce_norm = count("reduce", reduce)
+    solver._merge_positions = count("merge", merge)
+    torch.manual_seed(0)
+    result, _ = _run(solver, _vector_cancelling, take_gradient=False)
+    assert len(seen) > 2 and all(seen)
+    assert set(reductions) == {0 if error_norm == "failure_fraction" else 1}
+    assert (calls["merge"] > 0) == (not absolute)
+    assert not hasattr(result, "reduced_errors")
+
+
 # ---------------------------------------------------------------------------
 # B. Gradient correctness through the re-check
 # ---------------------------------------------------------------------------
@@ -367,7 +442,7 @@ def test_recheck_actually_resplits_accepted_panels():
 
     solver._remove_failed_record_panels = counting_remove
     torch.manual_seed(0)
-    result, _ = _run(solver, _cancelling, take_gradient=False)
+    result, _ = _run(solver, _cancelling_peak, take_gradient=False)
 
     assert removed_total > 0, (
         "the re-check never removed/re-split an accepted panel; the feature did "
@@ -375,6 +450,47 @@ def test_recheck_actually_resplits_accepted_panels():
     )
     # The mechanism fired AND the end state is still within tolerance.
     assert result.converged is True
+
+
+@pytest.mark.parametrize("max_batch", [MAX_BATCH, 7])
+def test_recheck_with_four_way_splits(max_batch):
+    """With ``split_rule="accelerate"`` the recorded subintervals that fail
+    the re-check are halved in the same mesh update as the batch's four-way
+    splits: the call converges in fewer passes than halving, every subinterval
+    is evaluated once, and every point of f belongs to one of them."""
+    passes = {}
+    for split_rule in ("halve", "accelerate"):
+        solver = _solver(split_rule=split_rule)
+        removed = []
+        orig_remove = solver._remove_failed_record_panels
+
+        def counting_remove(record, record_keep_mask, *args, removed=removed):
+            removed.append(int((~record_keep_mask).sum()))
+            return orig_remove(record, record_keep_mask, *args)
+
+        solver._remove_failed_record_panels = counting_remove
+        seen = _spy_evaluated(solver)
+        evaluate = solver._evaluate_f_on_mesh
+        passes[split_rule] = 0
+
+        def count_passes(*args, rule=split_rule, **kwargs):
+            passes[rule] += 1
+            return evaluate(*args, **kwargs)
+
+        solver._evaluate_f_on_mesh = count_passes
+        n_points = [0]
+
+        def f(t, *args, n_points=n_points):
+            n_points[0] += t.shape[0]
+            return _cancelling_peak(t)
+
+        torch.manual_seed(0)
+        result, _ = _run(solver, f, take_gradient=False, max_batch=max_batch)
+        assert sum(removed) > 0
+        assert max(seen.values()) == 1
+        assert n_points[0] == solver.C * len(seen)
+        assert result.converged is True
+    assert passes["accelerate"] < passes["halve"]
 
 
 def test_recheck_determinism():
@@ -394,9 +510,11 @@ def test_recheck_determinism():
 # ---------------------------------------------------------------------------
 
 
-def _make_record(solver, n_panels=4, result_device=None):
-    """Build an initialized record (via _record_results) with known per-step
-    quadratures/errors and integral == sum(quadratures)."""
+def _make_record(solver, n_panels=4, result_device=None, order=None):
+    """Build a record (via _record_results) with known per-step
+    quadratures/errors and integral == sum(quadratures); its rows, one batch
+    each, are recorded in ``order`` (mesh positions; default ascending)."""
+    order = list(range(n_panels)) if order is None else order
     boundaries = torch.linspace(0.0, 1.0, n_panels + 1, dtype=torch.float64)
     t_left, t_right = boundaries[:-1], boundaries[1:]
     C = 4
@@ -405,53 +523,62 @@ def _make_record(solver, n_panels=4, result_device=None):
     h = (t_right - t_left).unsqueeze(-1)
     quad_vals = torch.arange(1, n_panels + 1, dtype=torch.float64).unsqueeze(-1) * 0.1
     err_vals = torch.arange(1, n_panels + 1, dtype=torch.float64).unsqueeze(-1) * 0.01
-    results = IntegrationResult(
-        integral=quad_vals.sum(0),
-        integral_error=err_vals.sum(0),
-        nodes=nodes,
-        h=h,
-        y=torch.ones(n_panels, C, 1, dtype=torch.float64),
-        mesh_quadratures=quad_vals,
-        mesh_quadrature_errors=err_vals,
-        error_ratios=torch.full((n_panels,), 0.5, dtype=torch.float64),
-        loss=quad_vals.sum(0),
-        mesh_init=torch.tensor([0.0], dtype=torch.float64),
-        mesh_final=torch.tensor([1.0], dtype=torch.float64),
-        gradient_taken=False,
-        y0=torch.zeros(1, dtype=torch.float64),
-    )
-    mesh = torch.cat(
-        [nodes[:, 0, :], torch.tensor([[1.0]], dtype=torch.float64)], dim=0
-    )
-    mi = solver._get_mesh_indices(mesh)
-    record = solver._record_results({}, False, results, mi, result_device)
-    return record, quad_vals, err_vals
+    record, chunks = {}, {}
+    for i in order:
+        rows = slice(i, i + 1)
+        results = IntegrationResult(
+            integral=quad_vals[rows].sum(0),
+            integral_error=err_vals[rows].sum(0),
+            nodes=nodes[rows],
+            h=h[rows],
+            y=torch.ones(1, C, 1, dtype=torch.float64),
+            mesh_quadratures=quad_vals[rows],
+            mesh_quadrature_errors=err_vals[rows],
+            error_ratios=torch.full((1,), 0.5, dtype=torch.float64),
+            loss=quad_vals[rows].sum(0),
+            mesh_init=torch.tensor([0.0], dtype=torch.float64),
+            mesh_final=torch.tensor([1.0], dtype=torch.float64),
+            gradient_taken=False,
+            y0=torch.zeros(1, dtype=torch.float64),
+        )
+        record = solver._record_results(
+            record, chunks, False, results, torch.tensor([i]), result_device
+        )
+    return record, chunks, quad_vals, err_vals, nodes
 
 
 def test_remove_failed_record_panels_subset():
-    """Subset removal: exact integral rebuild, signed-error subtraction, loss,
-    and per-step filtering."""
+    """Subset removal from a record not in mesh order: exact integral rebuild,
+    signed-error subtraction, loss, per-step filtering in the record's row
+    order, and loss_fxn receives the removed subintervals in mesh order."""
     solver = make_solver_for_unit_test()
-    record, quad_vals, err_vals = _make_record(solver)
-    orig_nodes = record["nodes"].clone()
+    order = [3, 0, 2, 1]
+    record, chunks, quad_vals, err_vals, nodes = _make_record(solver, order=order)
     orig_err_total = record["integral_error"].clone()
-    keep = torch.tensor([True, False, True, False])
+    keep = torch.tensor([False, True, True, False])  # removes mesh positions 3, 1
+    seen = []
+
+    def loss_fxn(result):
+        seen.append(result.nodes[:, 0, 0])
+        return result.integral
 
     record = solver._remove_failed_record_panels(
-        record, keep, solver._integral_loss, T_INIT, T_FINAL
+        record, keep, chunks, loss_fxn, T_INIT, T_FINAL, solver.device
     )
 
-    assert record["mesh_quadratures"].shape[0] == 2
-    assert torch.allclose(record["integral"], quad_vals[keep].sum(0))
+    assert torch.equal(seen[0], nodes[[1, 3], 0, 0])
+    assert record["mesh_index"].tolist() == [0, 2]
+    assert torch.allclose(record["integral"], quad_vals[[0, 2]].sum(0))
     # integral_error subtracts the removed panels' signed errors.
     assert torch.allclose(
-        record["integral_error"], orig_err_total - err_vals[~keep].sum(0)
+        record["integral_error"], orig_err_total - err_vals[[1, 3]].sum(0)
     )
-    # The default loss loses the removed panels' integral, so it tracks the
-    # rebuilt integral.
+    # The default-like loss loses the removed panels' integral, so it tracks
+    # the rebuilt integral.
     assert torch.allclose(record["loss"], record["integral"])
-    assert torch.allclose(record["nodes"], orig_nodes[keep])
-    assert record["error_ratios"].shape[0] == 2
+    assert len(chunks["nodes"]) == 1
+    assert torch.equal(chunks["nodes"][0], nodes[[0, 2]])
+    assert chunks["error_ratios"][0].shape[0] == 2
 
 
 @pytest.mark.parametrize(
@@ -459,18 +586,18 @@ def test_remove_failed_record_panels_subset():
 )
 def test_remove_all_then_record_does_not_crash(result_device):
     """Removing every recorded panel empties the per-step fields; the next
-    _record_results must still merge a fresh batch without crashing (the
+    _record_results must still append a fresh batch without crashing (the
     record-emptying regression), including when the record's loss lives on a
     result_device other than the solver's (the cross-device loss regression)."""
     solver = make_solver_for_unit_test()
-    record, _, _ = _make_record(solver, result_device=result_device)
+    record, chunks, _, _, _ = _make_record(solver, result_device=result_device)
     keep = torch.zeros(4, dtype=torch.bool)
 
     record = solver._remove_failed_record_panels(
-        record, keep, solver._integral_loss, T_INIT, T_FINAL
+        record, keep, chunks, solver._integral_loss, T_INIT, T_FINAL, solver.device
     )
     assert record["mesh_quadratures"].shape[0] == 0
-    assert record["nodes"].shape[0] == 0
+    assert torch.cat(chunks["nodes"]).shape[0] == 0
     assert torch.allclose(record["integral"], torch.zeros_like(record["integral"]))
 
     # Fresh single-panel batch spanning [0, 1].
@@ -492,11 +619,10 @@ def test_remove_all_then_record_does_not_crash(result_device):
         gradient_taken=False,
         y0=torch.zeros(1, dtype=torch.float64),
     )
-    mi_fresh = solver._get_mesh_indices(
-        torch.tensor([[0.0], [1.0]], dtype=torch.float64)
+    record = solver._record_results(
+        record, chunks, False, fresh, torch.tensor([0]), result_device
     )
-    record = solver._record_results(record, False, fresh, mi_fresh, result_device)
-    assert record["nodes"].shape[0] == 1
+    assert torch.cat(chunks["nodes"]).shape[0] == 1
     assert torch.allclose(record["mesh_quadratures"], fresh.mesh_quadratures)
 
 
@@ -509,7 +635,7 @@ def test_enforce_convergence_false_turns_the_recheck_off():
     """enforce_convergence=False turns the re-check off with take_gradient=False."""
     torch.manual_seed(0)
     result, _ = _run(
-        _solver(), _cancelling, take_gradient=False, enforce_convergence=False
+        _solver(), _cancelling_peak, take_gradient=False, enforce_convergence=False
     )
     assert result.converged is False
 
@@ -540,7 +666,7 @@ def test_enforce_convergence_with_take_gradient_raises():
 @pytest.mark.parametrize("value", [1, "yes"])
 def test_enforce_convergence_rejects_non_bool(value):
     """A value that is neither None nor a bool raises TypeError."""
-    with pytest.raises(TypeError, match="enforce_convergence must be None or a bool"):
+    with pytest.raises(TypeError, match="enforce_convergence must be True or False"):
         _run(_solver(), _cancelling, take_gradient=False, enforce_convergence=value)
 
 
@@ -548,7 +674,12 @@ def test_warning_suggests_enforce_convergence(caplog):
     """With the re-check turned off, the warning names the argument."""
     torch.manual_seed(0)
     with caplog.at_level(logging.WARNING, logger="padaquad"):
-        _run(_solver(), _cancelling, take_gradient=False, enforce_convergence=False)
+        _run(
+            _solver(),
+            _cancelling_peak,
+            take_gradient=False,
+            enforce_convergence=False,
+        )
     assert "enforce_convergence=True" in caplog.text
 
 
@@ -576,18 +707,18 @@ def _spy_evaluated(solver):
 
 
 @pytest.mark.parametrize("max_batch", [MAX_BATCH, 7, 3])
-@pytest.mark.parametrize("conserve_memory", [True, False])
+@pytest.mark.parametrize("trade_speed_for_memory", [True, False])
 @pytest.mark.parametrize("max_adaptive_splits", [None, 4])
 def test_switch_never_evaluates_a_subinterval_twice(
-    conserve_memory, max_adaptive_splits, max_batch
+    trade_speed_for_memory, max_adaptive_splits, max_batch
 ):
     """The panels that fail when the reference is dropped are split from their
     stored errors, never evaluated again (f can be expensive).
 
-    Batch sizes that are not multiples of C (7) or below it (3) make the
-    conserve_memory path evaluate part of a panel in one call of f and the rest
-    in the next; counting the points passed to f checks that no partly
-    evaluated panel is evaluated again either.
+    Batch sizes that are not multiples of C (7) or below it (3) make a call of
+    f end inside a panel and the next call finish it; counting the points
+    passed to f checks that no partly evaluated panel is evaluated again
+    either, with the values on or off the solver's device.
     """
     solver = _solver()
     seen = _spy_evaluated(solver)
@@ -602,20 +733,20 @@ def test_switch_never_evaluates_a_subinterval_twice(
         solver,
         f,
         take_gradient=False,
-        conserve_memory=conserve_memory,
+        trade_speed_for_memory=trade_speed_for_memory,
         max_batch=max_batch,
         error_integral_reference=1.0,
         max_adaptive_splits=max_adaptive_splits,
     )
     assert len(seen) > 0
     assert max(seen.values()) == 1
-    # One point for the integrand's shape check, then C points per panel.
-    assert n_points[0] == 1 + solver.C * len(seen)
+    # C points per panel, and no other call of f.
+    assert n_points[0] == solver.C * len(seen)
 
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
-@pytest.mark.parametrize("conserve_memory", [True, False])
-def test_too_large_fixed_reference_converges(device, conserve_memory):
+@pytest.mark.parametrize("trade_speed_for_memory", [True, False])
+def test_too_large_fixed_reference_converges(device, trade_speed_for_memory):
     """Once the reference is dropped, the failing panels are refined until
     every panel meets the final integral's tolerance. On CUDA the record's
     nodes stay on the CPU (result_device) while the masks and the mesh are on
@@ -628,7 +759,7 @@ def test_too_large_fixed_reference_converges(device, conserve_memory):
             _solver(device),
             _cancelling,
             take_gradient=False,
-            conserve_memory=conserve_memory,
+            trade_speed_for_memory=trade_speed_for_memory,
             error_integral_reference=1.0,
             enforce_convergence=enforce,
         )
@@ -695,7 +826,7 @@ def test_switch_with_nonfinite_terminates():
     def f(t, *args):
         return torch.where(t > 0.9, torch.nan, _cancelling(t))
 
-    solver = _solver(error_on_nonfinite=False)
+    solver = _solver(runtime_checks=False)
     n_split = []  # one entry per call: how many recorded panels it splits
     find = solver._failed_record_positions
 
@@ -792,7 +923,7 @@ def _signed_error_sum(solver, result, f):
     nodes = left[:, None, :] + c[None, :, None] * h[:, None, :]
     y = f(nodes.reshape(-1, 1)).reshape(nodes.shape[0], nodes.shape[1], -1)
     zero = torch.zeros(1, dtype=torch.float64, device=solver.device)
-    return solver._calculate_integral(nodes, y, y0=zero).integral_error
+    return solver._calculate_integral(nodes, y, left, left + h, y0=zero).integral_error
 
 
 @pytest.mark.parametrize("reference", [None, 1.0])
@@ -812,10 +943,13 @@ def test_integral_error_exact_after_removals(reference):
     solver._remove_failed_record_panels = spy
     torch.manual_seed(0)
     result, _ = _run(
-        solver, _cancelling, take_gradient=False, error_integral_reference=reference
+        solver,
+        _cancelling_peak,
+        take_gradient=False,
+        error_integral_reference=reference,
     )
     assert sum(n_removed) > 0
-    expected = _signed_error_sum(solver, result, _cancelling)
+    expected = _signed_error_sum(solver, result, _cancelling_peak)
     scale = float(result.mesh_quadrature_errors.abs().sum())
     assert abs(float(result.integral_error[0]) - float(expected[0])) < 1e-9 * scale
 
@@ -849,17 +983,17 @@ def test_custom_loss_exact_after_removals(reference):
     assert abs(float(theta.grad[0]) - 0.6) < 1e-6
 
 
-def test_nonfinite_warning_names_error_on_nonfinite(caplog):
+def test_nonfinite_warning_names_runtime_checks(caplog):
     """When NaN/Inf values make the run fail, calling again cannot help: the
-    warning points at the integrand (error_on_nonfinite=True) instead."""
+    warning points at the integrand (runtime_checks=True) instead."""
 
     def f(t, *args):
         return torch.where(t > 0.9, torch.nan, _cancelling(t))
 
     torch.manual_seed(0)
     with caplog.at_level(logging.WARNING, logger="padaquad"):
-        _run(_solver(error_on_nonfinite=False), f, take_gradient=False)
-    assert "error_on_nonfinite=True" in caplog.text
+        _run(_solver(runtime_checks=False), f, take_gradient=False)
+    assert "runtime_checks=True" in caplog.text
     assert "call again" not in caplog.text
 
 
@@ -871,13 +1005,27 @@ def test_nonfinite_warning_names_error_on_nonfinite(caplog):
     ],
     ids=["two-values-for-D=1", "2-d"],
 )
-def test_reference_shape_is_validated(reference):
+@pytest.mark.parametrize("take_gradient", [False, True])
+def test_reference_shape_is_validated(reference, take_gradient):
     """A reference must be a number, or a tensor of shape [] , [1] or [D];
-    another shape used to broadcast silently and change the mesh."""
-    with pytest.raises(ValueError, match="error_integral_reference"):
+    another shape used to broadcast silently and change the mesh. D is known
+    once f has run, so the error comes in the first batch, before any
+    subinterval is judged or a gradient is written, and f is called on no
+    other batch."""
+    w = torch.tensor(1.0, dtype=torch.float64, requires_grad=True)
+    sizes = []
+
+    def f(t, *args):
+        sizes.append(len(t))
+        return w * _cancelling(t)
+
+    solver = _solver()
+    with pytest.raises(ValueError, match=r"error_integral_reference.*\[D\] = \[1\]"):
         _run(
-            _solver(),
-            _cancelling,
-            take_gradient=False,
+            solver,
+            f,
+            take_gradient=take_gradient,
             error_integral_reference=reference,
         )
+    assert sum(sizes) <= 11 * solver.C  # at most the first pass, 11 subintervals
+    assert w.grad is None

@@ -1,9 +1,10 @@
 """
 Result dataclasses of an integration.
 
-``IntegrationResult`` is what ``integrate()`` and a solver's ``integrate``
-method return: the integral, its error estimate, the mesh to warm-start the
-next call from, and per-subinterval diagnostics.
+``IntegrationResult`` is the first value that ``integrate()`` and a solver's
+``integrate`` method return: the integral, its error estimate and
+per-subinterval diagnostics. ``IntegrationState`` is the second: the mesh and
+the batch size to start the next call from.
 
 ``MethodOutput`` is internal. It holds the integral and the error estimate of
 one batch of subintervals, as computed by the solver's
@@ -36,15 +37,20 @@ class IntegrationState:
         The mesh to start from, shape [M, T]: the optimal mesh of the call
         that returned the state (low-error subintervals merged, failing ones
         split), detached from autograd, on the solver's device, its ends equal
-        to the bounds. None makes a fresh mesh on the bounds, which must then
-        be given.
+        to the bounds; None when that call passed ``build_state_mesh=False``.
+        None makes a fresh mesh on the bounds, which must then be given.
     max_batch : int
         The batch size to start with: the largest number of points per call of
         the integrand known to fit.
     max_batch_converged : bool
         True when the batch size will not grow again: it was given by the user,
-        or a call ran out of memory. While False, a call that needs larger
-        batches tries 10 times the batch size (see :ref:`ug-memory`).
+        or a call of the integrand (a test call included) ran out of memory.
+        While False, a call that needs larger batches tries 10 times the batch
+        size (see :ref:`ug-memory`). A converged batch size below the points
+        of one subinterval (possible after a ``take_gradient=False`` call)
+        makes a ``take_gradient=True`` call raise ``ValueError`` unless it is
+        given a ``max_batch``: that call's batches hold whole subintervals,
+        and a larger batch than the one known to fit could run out of memory.
 
     Raises
     ------
@@ -82,10 +88,15 @@ class IntegrationResult:
     Every field is required and passed by keyword (``kw_only=True``), except
     ``tracked_variables``, ``loss``, ``converged``, ``n_start_steps``,
     ``n_start_steps_split`` and ``max_split_depth``, which default to
-    ``None``. Below, ``N`` is the number of accepted subintervals,
-    ``C`` the number of nodes per subinterval, ``P = C + (N - 1)(C - 1)`` the
-    number of distinct nodes, and ``M`` the number of mesh points (see
-    :ref:`ug-shapes`).
+    ``None``. Below, ``N`` is the number of accepted subintervals, ``C`` the
+    number of nodes per subinterval, ``P`` the number of points the integrand
+    was evaluated at, each listed once, and ``M`` the number of mesh points
+    (see :ref:`ug-shapes`). For a method with a node at both ends of its
+    subintervals (the Runge-Kutta and Clenshaw-Curtis methods and the
+    variable methods), neighbouring subintervals share their mesh point, so
+    ``P = N (C - 1) + 1``; for one without (the Gauss-Kronrod methods, whose
+    nodes are all interior), ``P = N C``, and no mesh point, not even
+    ``mesh_init`` or ``mesh_final``, is among the nodes.
 
     ``integral``, ``integral_error``, ``y0``, ``mesh_init`` and
     ``mesh_final`` are on the solver's device; the other tensors are on
@@ -97,6 +108,11 @@ class IntegrationResult:
     the split counts are ``None``, and ``nodes``, ``y`` and
     ``tracked_variables`` keep one row per subinterval (shapes ``[N, C, T]``,
     ``[N, C, D]`` and ``[N, C, ...]``) instead of the flattened shapes below.
+    Its tensors are on the solver's device, except ``y`` and
+    ``tracked_variables`` with ``integrate(trade_speed_for_memory=True)``,
+    which are on ``result_device`` (see :ref:`ug-trade-speed-for-memory`).
+    With ``integrate(record_evaluations=False)``, ``y`` and
+    ``tracked_variables`` are ``None`` in both results.
 
     Attributes
     ----------
@@ -112,13 +128,14 @@ class IntegrationResult:
     mesh_final : torch.Tensor
         Upper integration bound. Shape ``[T]``.
     nodes : torch.Tensor
-        Nodes of all accepted subintervals in one non-decreasing sequence; the
-        node shared by two neighbouring subintervals appears once. Shape
-        ``[P, T]``.
+        Nodes of all accepted subintervals in one non-decreasing sequence; a
+        node shared by two neighbouring subintervals (their mesh point)
+        appears once. Shape ``[P, T]``.
     h : torch.Tensor
         Width of each accepted subinterval. Shape ``[N, T]``.
-    y : torch.Tensor
-        Integrand values at ``nodes``. Shape ``[P, D]``.
+    y : torch.Tensor or None
+        Integrand values at ``nodes``. Shape ``[P, D]``. ``None`` with
+        ``integrate(record_evaluations=False)``.
     tracked_variables : tuple of torch.Tensor or None
         Extra values the integrand returned beside its values, at ``nodes``
         and not integrated; ``None`` if it returned none. Each tensor is
@@ -157,7 +174,8 @@ class IntegrationResult:
         the integration (splits made to build the state's mesh do not count).
     max_split_depth : int or None
         Largest number of times one starting subinterval was halved: 0 if
-        none was split, at most ``max_adaptive_splits``.
+        none was split, at most ``max_adaptive_splits``. A split into four
+        pieces (``split_rule="accelerate"``) counts as two halvings.
 
     Examples
     --------
@@ -188,7 +206,7 @@ class IntegrationResult:
     mesh_final: torch.Tensor
     nodes: torch.Tensor
     h: torch.Tensor
-    y: torch.Tensor
+    y: torch.Tensor | None
     mesh_quadratures: torch.Tensor
     mesh_quadrature_errors: torch.Tensor
     error_ratios: torch.Tensor
@@ -241,7 +259,8 @@ class MethodOutput:
         Each subinterval's signed error estimate, h_i * sum_j(b_error_j * y_ij):
         the method's result minus the embedded method's. Shape: [N, D].
     h : torch.Tensor
-        Width of each subinterval (last node minus first node). Shape: [N, T].
+        Width of each subinterval (its right mesh point minus its left one).
+        Shape: [N, T].
     """
 
     integral: torch.Tensor

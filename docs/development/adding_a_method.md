@@ -1,6 +1,6 @@
 # Adding a method
 
-A quadrature method in padaquad is an object, not a subclass: an instance of
+A quadrature method in PadaQuad is an object, not a subclass: an instance of
 `UniformMethodClass` (fixed node fractions and weights) or `VariableMethodClass`
 (node fractions and a function that computes the weights from the actual node
 positions). The solvers reach a method only through the interface of the
@@ -11,7 +11,7 @@ abstract `MethodClass` (`node_fractions()`, `weights(nodes)`, `degree`, `order`,
 
 | Item | Meaning |
 |---|---|
-| node fractions `c` | Positions of the nodes in a subinterval scaled to $[0, 1]$: a 1-D float64 tensor starting at 0, ending at 1, never decreasing. Methods whose nodes do not include the ends add them with weight 0 (as the Gauss-Kronrod methods do). |
+| node fractions `c` | Positions of the nodes in a subinterval scaled to $[0, 1]$: a 1-D float64 tensor of values in $[0, 1]$, never decreasing. The ends 0 and 1 need not be nodes (the Gauss-Kronrod nodes are all interior): the solver takes a subinterval's width from its mesh points. |
 | weights `b` | The method's weights; the subinterval's integral is $h \sum_i b_i f(t_i)$. They sum to 1. |
 | error weights `b_error` | `b` minus the weights of a lower-degree method on the same nodes; the error estimate is $h \sum_i b^\text{error}_i f(t_i)$. |
 | `degree` | The highest polynomial degree `b` integrates exactly. `order` is computed as `degree + 1`. |
@@ -67,20 +67,26 @@ This block runs in the test suite (`tests/test_examples_run.py`), so the
 assertions above are checked.
 
 Registering the method in `UNIFORM_METHODS` at run time makes it available to
-every solver created afterwards; each solver works on its own copy.
+every solver created afterwards. A solver uses a copy of it converted to its
+device and dtype, shared with the other solvers of the same method, device and
+dtype; a solver built before the entry is replaced keeps its own. Do not modify
+a method's tensors in place after it is registered: build a new method
+instead.
 
 ## A method whose weights depend on the node positions
 
 `VariableMethodClass(degree, error_exponent, c, weight_function, references)`
 takes a `weight_function` instead of fixed weights. It receives the nodes of
-every subinterval scaled to $[0, 1]$, a tensor of shape `[N, C, T]`, and returns
+every subinterval as fractions of the subinterval, a tensor of shape
+`[N, C, T]` (the first and last node rescaled to the first and last of `c`, so
+from 0 to 1 when the ends are nodes), and returns
 `(b, b_error)`, two tensors of shape `[N, C]` in the same dtype and on the same
 device. It must be a function defined at module level, not a lambda or a nested
 function, so that solvers can be copied and pickled.
 `_interpolatory3_weights` in `padaquad/methods/interpolatory.py` is the
 pattern to follow; register the method in `VARIABLE_METHODS`.
 
-## Adding a method to padaquad itself
+## Adding a method to PadaQuad itself
 
 1. Define it in the module of its family (`padaquad/methods/runge_kutta.py`,
    `gauss_kronrod.py`, `clenshaw_curtis.py` or `interpolatory.py`) and add it to

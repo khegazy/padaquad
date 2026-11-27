@@ -49,6 +49,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import functools
+import gc
 import itertools
 import json
 import os
@@ -583,10 +584,12 @@ def measure(
     Returns
     -------
     dict
-        Median, smallest and largest time (s), number of timed runs,
+        Median, smallest and largest time (s), every run's time, number of
+        timed runs,
         evaluations, absolute and relative error (max norm over the outputs),
         convergence, extras.
     """
+    gc.collect()  # every case starts with the garbage of the previous ones collected
     synchronize(device)
     start = time.perf_counter()
     solve()  # warm-up, not timed
@@ -606,6 +609,7 @@ def measure(
         "time_median_s": statistics.median(times),
         "time_min_s": min(times),
         "time_max_s": max(times),
+        "times_s": times,
         "repeats": runs,
         "evaluations": int(outcome.evaluations),
         "abs_error": abs_error,
@@ -722,6 +726,9 @@ def metadata(device: str, repeats: int) -> dict[str, Any]:
         "cpu_count": os.cpu_count(),
         "affinity_cpus": len(os.sched_getaffinity(0)),
         "torch_threads": torch.get_num_threads(),
+        # The thread variable that set torch_threads, if any: the thread count
+        # changes the times (user guide, "CPU threads").
+        "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
         "jax_devices": [str(d) for d in jax.devices()],
         "env": {
             k: os.environ.get(k)

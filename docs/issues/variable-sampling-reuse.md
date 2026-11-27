@@ -1,208 +1,153 @@
-# Variable-sampling solver does not reuse integrand evaluations when it splits
+# No solver reuses integrand values when it splits a subinterval
 
 Status: open. Found 2026-11-12 on branch `website_docs_update` (base `main` at
-95936ce). Written so that another agent can pick it up without the original
-session.
+95936ce); rewritten 2026-11-26 on branch `split_waste`, when the unused reuse
+method was deleted. Written so that another agent can pick it up without the
+original sessions.
 
 ## Summary
 
-The variable-sampling solver (`VariableAdaptiveQuadrature`) exists to save
-integrand evaluations when evaluating `f` is expensive: when a subinterval fails
-its tolerance and is split in half, the halves should reuse the integrand values
-already computed at the parent's nodes and evaluate `f` only at the new nodes.
+The variable-sampling solver (`VariableAdaptiveQuadrature`) computes each
+subinterval's weights from where its nodes are, so that a split could keep the
+parent's integrand values in its halves and evaluate `f` only at new nodes. This
+reuse does not exist, for either solver: when a subinterval fails its
+tolerance, `_adaptively_increase_mesh` inserts its midpoint into the mesh (and
+the midpoints of both halves for a split in four, `split_rule="accelerate"`)
+and drops its values, and the next pass evaluates `f` at fresh nodes in every
+piece, placed by `_compute_nodes` at the method's node fractions.
 
-`integrate()` does not do this. Since commit `da752ea` (2025-02-22,
-"Integration sets (#11)"), both solvers split a failing subinterval by inserting
-its midpoint into the mesh and then evaluating `f` at fresh nodes in both
-halves, discarding the parent's values. The method that implements reuse,
-`VariableAdaptiveQuadrature._evaluate_adaptive_nodes`, still exists and is
-unit-tested, but nothing in the integration loop calls it.
+The method that implemented reuse for the variable solver,
+`VariableAdaptiveQuadrature._evaluate_adaptive_nodes`, had no caller since
+commit `da752ea` (2025-02-22) and was deleted on branch `split_waste` with its
+tests (`tests/test_evaluate_and_merge.py`). Nothing replaced it. It could not
+have been reconnected as it was:
 
-Consequence: the variable solver costs as many evaluations as the uniform
-solver; the feature it exists for is missing.
+- It assumed that a subinterval's first and last nodes are its ends (it
+  duplicated the middle node as the halves' shared end). The Gauss-Kronrod
+  methods have no nodes at the ends since the `endpoint-evaluations` plan
+  (`docs/issues/2026-11-25-speedup-endpoint-evaluations-plan.md`, deleted
+  once done, in commit `3033e24`), and a
+  `MethodClass` may now put its node fractions anywhere in [0, 1].
+- It overrode nothing: that plan deleted the uniform solver's version and the
+  abstract declaration in `AdaptiveQuadrature` (commit `6201cff`).
+- It allocated its nodes with last dimension `D` (outputs of `f`) instead of
+  `T` (coordinates of `t`), returned no tracked variables, and called `f`
+  outside the batching and out-of-memory handling of `_evaluate_f_in_batches`.
 
-A separate observation, not caused by the missing reuse: every subinterval's
-nodes sit at the method's node fractions, so `interpolatory3_variable` always
-has its middle node at the center, where its weights are Simpson's rule. Its
-general position-dependent weights (`sanderse2019` in `docs/references.bib`,
-Eq. (119)) are never used in a real integration. Reconnecting reuse does not
-change this: bisecting a subinterval whose nodes are at 0, 1/2, 1 gives halves
-with nodes at 0, 1/2, 1 again (see point 3 of "What has to change").
+A separate observation, unchanged: every subinterval's nodes sit at the
+method's node fractions, so `interpolatory3_variable` always has its middle
+node at the center, where its weights are Simpson's rule. Its general
+position-dependent weights (`sanderse2019` in `docs/references.bib`,
+Eq. (119)) are never used in a real integration.
 
-## Evidence
+## What reuse would save (measured)
 
-1. No caller. `git grep -n "_evaluate_adaptive_nodes(" -- padaquad` finds only
-   the two definitions (`padaquad/quadrature/uniform.py`,
-   `padaquad/quadrature/variable.py`) and the abstract declaration in
-   `padaquad/quadrature/base.py`. The only calls are in
-   `tests/test_evaluate_and_merge.py`.
-2. Runtime check (2026-11-12): wrapping
-   `VariableAdaptiveQuadrature._evaluate_adaptive_nodes` with a counter and
+For both registered variable methods the parent's nodes are at fractions 0,
+1/2, 1 (`interpolatory3_variable`) or 0, 1 (`adaptive_heun`), which are nodes
+of the halves at their standard fractions anyway. So reuse for them is the same
+as for any method: hand the parent's values at the fractions that coincide with
+a node of a piece down to that piece (the "carrier" of
+`docs/issues/2026-11-25-speedup-split-waste-plan.md`, section 3.2; deleted
+once done, in commit `3033e24`). Counted on
+`b43da3d` by wrapping `f` (the points of `f` within 2 ULP of a node of a
+subinterval rejected in the previous pass; the plan's 9 integrands on [0, 1],
+seed 0, `atol=1e-8`, `rtol=0`, halving; the script, `carrier.py`, was in a
+scratch directory deleted on 2026-11-26):
+
+| Method | Share of the points of f a carrier would fill |
+|---|---|
+| `interpolatory3_variable` | 66.7 % |
+| `adaptive_heun` | 50.0 % |
+| `fehlberg2`, `bosh3`, `dopri5` | 66.6 %, 62.5 %, 20.0 % |
+| `cc5`, `cc9`, `cc17`, `cc33`, `cc65` | 40.0 %, 22.2 %, 11.7 %, 6.0 %, 3.0 % |
+| `gk7`, `gk15`, `gk21` (default), `gk31` | 0 |
+
+The Gauss-Kronrod methods gain nothing: the parent's centre node is an end of
+both halves, where they have no node. The shares count both halves' copies of
+the parent's centre value; with the `endpoint-evaluations` design (b) (one
+evaluation per mesh point shared by two waiting subintervals) the two savings
+overlap.
+
+## History
+
+1. Runtime check (2026-11-12): wrapping the reuse method with a counter and
    integrating `exp(-200 (t - 0.5)^2)` on [0, 1] with
    `integrate(f, "interpolatory3_variable", sampling="variable", ...)`,
    `atol = rtol = 1e-10`, `device="cpu"`, `max_batch=100_000`,
-   `take_gradient=False`, `torch.manual_seed(0)`: the result had 2495
-   subintervals, `f` was evaluated at 14938 points (about 6 per subinterval, not
-   3), and the wrapped method was called 0 times.
-3. History (checked with `git log -G` and by parsing old versions):
-   - Before `da752ea`, `integrate()` called `_adaptively_add_y`, which called
-     `_evaluate_adaptive_y` (the method later renamed `_evaluate_adaptive_nodes`)
-     in `torchpathdiffeq/parallel_solver.py`; reuse was live.
-   - `da752ea` (2025-02-22, "Integration sets (#11)") introduced the mesh-based
-     `_adaptively_add_steps`, which splits by adding mesh points, and kept the
-     reuse path only in functions nothing called (`_adaptively_add_steps_orig`,
-     `__depricated_adaptively_add_steps`).
-   - The reuse method itself was never removed: `git log -G'def
-     _evaluate_adaptive_(y|nodes)'` shows `_evaluate_adaptive_y` defined
-     continuously from `342ff6a` (2024-09-24) onward, uncalled after `da752ea`.
-   - `3063c37` (2025-03-07, "Cleaning code (#13)") deleted the dead callers
-     (`_adaptively_add_steps_orig`, `__depricated_adaptively_add_steps`); the
-     three `_evaluate_adaptive_y` definitions in `parallel_solver.py` stayed.
-   - `a7365ae` (2026-03-18, "Improve tests and interpretability (#25)") added
-     its unit tests (`tests/test_evaluate_and_merge.py`).
-   - `bde5e72` (2026-05-12, "Quadrature alignment (#27)") renamed it to
-     `_evaluate_adaptive_nodes` and moved it into `padaquad/quadrature/`, and
-     CLAUDE.md described split-reuse as working ("Splitting: reuses existing
-     evaluations"), but the loop was never reconnected.
+   `take_gradient=False`, `torch.manual_seed(0)`: 2495 subintervals, about 6
+   points of `f` per subinterval (not 3), and 0 calls of the method.
+2. Before `da752ea`, `integrate()` called `_adaptively_add_y`, which called
+   `_evaluate_adaptive_y` (later renamed `_evaluate_adaptive_nodes`) in
+   `torchpathdiffeq/parallel_solver.py`; reuse was live. `da752ea`
+   (2025-02-22, "Integration sets (#11)") introduced the mesh-based
+   `_adaptively_add_steps`, which splits by adding mesh points, and kept the
+   reuse path only in functions nothing called. `3063c37` (2025-03-07)
+   deleted those callers; `a7365ae` (2026-03-18) added the method's unit
+   tests; `bde5e72` (2026-05-12) renamed it and moved it into
+   `padaquad/quadrature/`, and CLAUDE.md described split-reuse as working,
+   but the loop was never reconnected.
 
-## The existing reuse method
+## What would be needed
 
-`VariableAdaptiveQuadrature._evaluate_adaptive_nodes(f, idxs_add, y, nodes,
-f_args)` (`padaquad/quadrature/variable.py`):
+A design, not a prescription; confirm each point against the code.
 
-- For each subinterval to split (`idxs_add`, shape `[R]`), it computes the
-  midpoints between consecutive nodes, `(nodes[:, 1:] + nodes[:, :-1]) / 2`
-  (shape `[R, C-1, T]`), evaluates `f` only there, and interleaves old and new
-  values into `2C` slots, duplicating the middle slot as the shared endpoint.
-- For `C = 3`, nodes `[p0, p1, p2]` give `[p0, m01, p1, p1, m12, p2]`, reshaped
-  into the halves `[p0, m01, p1]` and `[p1, m12, p2]`. For `C = 2`
-  (`adaptive_heun`), `[p0, p1]` gives the halves `[p0, m]` and `[m, p1]`.
-- The split point is the parent's middle node, which is the midpoint only when
-  the node fractions are symmetric about 1/2 (true for both variable methods).
-- Cost per split: `C - 1` new evaluations (2 for `interpolatory3_variable`)
-  instead of `2C` (6), or `2C - 1` if a shared endpoint were reused.
-
-Known defects of the method as it stands (fix them when reconnecting it):
-
-- `nodes_new` is allocated with last dimension `D` (the integrand's number of
-  outputs) instead of `T`. With `D = 2`, `T = 1` it returns nodes of shape
-  `(2R, 3, 2)`. The unit tests use `D = T = 1`, so they miss it.
-- It returns `nodes` and `y` per half, but not the tracked variables the
-  integrand may return (see "Tracked variables" below).
-- The split point is the parent's node `(C - 1) / 2` for odd `C`, and the
-  midpoint between the two central nodes for even `C` (for `C = 4`, nodes
-  `[p0, p1, p2, p3]` give the halves `[p0, m01, p1, m12]` and
-  `[m12, p2, m23, p3]`). It is the subinterval's midpoint only when the node
-  fractions are symmetric about 1/2; a method with asymmetric node fractions
-  would be split off-center without notice. Validate that or document it.
-
-`UniformAdaptiveQuadrature._evaluate_adaptive_nodes` re-evaluates both halves at
-the fixed node fractions; it is also unused and can stay as the uniform path or
-be removed.
-
-## Where the loop splits today
-
-All in `padaquad/quadrature/base.py`:
-
-- `AdaptiveQuadrature.integrate()` runs the loop.
-- `_adaptively_increase_mesh(...)` turns failing subintervals into two by
-  inserting midpoints into `mesh` and setting `mesh_trackers` (True = still to
-  evaluate); it also maintains `split_counts` (for `max_adaptive_splits` and
-  the split statistics). The failed subintervals' `y` values are dropped here.
-- `_evaluate_f_on_mesh(...)` evaluates the tracked subintervals. It dispatches
-  to `_evaluate_f_on_full_nodes` (`take_gradient=True`),
-  `_evaluate_f_on_split_nodes` (default with `take_gradient=False`) and
-  `_evaluate_f_on_split_residual_nodes` (`conserve_memory=True`), and places
-  nodes with `_compute_nodes(...)` at the node fractions.
-- `_record_results(...)` records accepted subintervals in mesh order.
-- With `take_gradient=False`, accepted subintervals are re-checked as the
-  running integral changes (`_remove_failed_record_panels`) and split again;
-  their recorded `y` values are dropped too.
-
-## What has to change
-
-A design, not a prescription; the next agent should confirm each point against
-the code.
-
-1. **Keep the values of subintervals that will be split.** When
-   `_adaptively_increase_mesh` (or the re-check) splits a subinterval of the
-   variable solver, keep its `nodes` `[C, T]` and `y` `[C, D]` (and tracked
-   variables) with the two halves, instead of discarding them. A natural place
-   is a pending store keyed by mesh position that `_evaluate_f_on_mesh` reads.
-2. **Evaluate only the new nodes.** For a half that comes from a split, the
-   nodes are the parent's nodes plus midpoints (the layout above); call `f` only
-   at the midpoints, inside the existing batching (`_evaluate_f_in_batches`,
-   which handles `max_batch` and out-of-memory retries). Fresh subintervals
-   (starting mesh, `same_f` warm start) keep using `_compute_nodes`.
-3. **Weights from positions.** `VariableMethodClass.weights(nodes)` already
-   computes weights from each subinterval's actual nodes, so no method change is
-   needed. With bisection of symmetric node fractions the halves' nodes stay
-   symmetric (for `interpolatory3_variable`, at 0, 1/2, 1 again); non-central
-   positions appear only after merges or non-midpoint splits.
-4. **Gradients (`take_gradient=True`).** Today each batch is back-propagated and
-   its results detached before the next batch. A value from a subinterval rejected in
-   an earlier batch contributed nothing to that batch's loss, but its graph was
-   part of the batched call of `f`, and that batch's `backward()` frees it.
-   Reusing it in a later accepted subinterval needs its autograd graph to stay
-   alive until that subinterval is accepted, or the gradient of the reused
-   values is lost. Decide whether to (a) keep the graph of pending values (more
-   memory, correct gradient), (b) disable reuse with `take_gradient=True`, or
-   (c) re-evaluate only the reused values' gradient. Test
-   `∇θ ∫ f_θ` against the closed form (as `tests/test_autodiff_consistency.py`
-   does) with reuse on.
-5. **Memory.** Pending values add `R * C * D` stored values for `R` pending
-   splits; account for them in the batch budget (`get_max_batch`,
-   `_get_max_f_evals`) or document the bound.
-6. **Tracked variables.** If `f` returns `(values, tracked_variables)`, the
-   reused nodes must carry their tracked variables too, so
-   `result.tracked_variables` stays aligned with `result.nodes`.
-7. **Split statistics and caps.** `split_counts`, `max_adaptive_splits`,
-   `n_start_steps_split` and `max_split_depth` must count reused splits the same
-   way.
-8. **Re-check path.** Subintervals removed by the re-check
-   (`_remove_failed_record_panels`) should also hand their values to their
-   halves.
-9. **Optimal mesh.** `_merge_excess_nodes` (variable) merges two subintervals
-   by keeping every other node of the `2C - 1` combined nodes; it already works
-   on recorded nodes and needs no change, but check that `mesh_optimal` and
-   `same_f=True` warm starts still start from fresh nodes.
-10. **Uniform solver.** Unaffected: its methods have fixed node fractions. (Methods
-    with nodes at both ends could reuse the two endpoint values; that is a
-    separate, smaller optimization.)
+1. **Which values.** For each method, the node fractions of a parent that
+   equal a node fraction of a piece (0, 1/2, 1 for most; 3/4 too for `bosh3`;
+   none for Gauss-Kronrod), computed once.
+2. **Keep them past the pass.** Today a pass's values live in one [K, C, D]
+   array, and the rejected rows are dropped in `_adaptively_increase_mesh`
+   (`_keep_rows`) and deleted after recording. The kept values must stay on the
+   solver's device, also with `trade_speed_for_memory=True` (values move to
+   `result_device` as they are integrated) and `record_evaluations=False`
+   (values dropped once integrated), in a store keyed by the pieces' mesh
+   positions and remapped through `idxs_transfer` like the record's mesh
+   indices. Recorded subintervals that fail the re-check
+   (`_remove_failed_record_panels`, Step 5b and Step 7) hand theirs from the
+   record, which is on `result_device` unless `result_device` is the solver's
+   device.
+3. **Evaluate only the rest.** `_evaluate_f_on_split_nodes` passes the flat
+   list of every waiting subinterval's nodes to `_evaluate_f_in_batches`; it
+   would skip the carried nodes and scatter the carried values into the pass's
+   array, so a row is no longer C consecutive points of `f`'s output (the
+   one-call path with no copy is lost for such passes).
+4. **Bit equality.** A parent's node at fraction 1/2 is `torch.lerp(left,
+   right, 0.5)` (`_compute_nodes`), the halves' end is `_midpoint` =
+   `0.5 * (left + right)`; they can differ in the last bit. In the count above
+   every match was exact except 45 to 64 of `bosh3`'s. Decide whether a value
+   one ULP away is acceptable or compute the shared nodes from the mesh points.
+5. **Gradients (`take_gradient=True`).** Each batch's backward frees its
+   graph, so a carried value would lose its gradient path unless the parent's
+   graph is kept until the piece is accepted (more memory). The simplest
+   choice: carry only with `take_gradient=False`.
+6. **Tracked variables** travel with the values, so `result.tracked_variables`
+   stays aligned with `result.nodes`.
+7. **Memory.** Carried values add at most a few D values per split; with
+   `trade_speed_for_memory` they are on the solver's device, which the batch
+   sizing does not count.
 
 ## Tests to add
 
-- Evaluation count: integrate a peaked integrand with the variable solver and
-  count points; each split should cost `C - 1` evaluations. For
-  `interpolatory3_variable`, total evaluations ≈ 3 × (starting subintervals) +
-  2 × (number of splits). Compare with the uniform solver on the same mesh.
-- Accuracy unchanged: `tests/test_variable_integration.py`,
-  `examples/verification/integral_accuracy.py`, and the variable cells of
-  `tests/test_snapshots.py` (their `integral` should agree to the tolerance;
-  `n_optimal_mesh` may change, so regenerate snapshots only for that reason
-  and say so).
-- Gradients with `take_gradient=True` and `False`, against the closed form.
-- `D > 1` integrands (catches the `D`/`T` allocation bug) and tracked
-  variables.
-- `max_batch` smaller than one subinterval's new nodes, and the
-  out-of-memory retry path (`tests/test_oom_recovery.py` has a simulated
-  out-of-memory integrand).
-- `conserve_memory=True` and `max_adaptive_splits`.
+- Evaluation count per method against the table above, and the same integral
+  (to the tolerance) and mesh as without the carrier.
+- `take_gradient=True` (no carrier, or exact gradients against the closed form
+  as in `tests/test_autodiff_consistency.py`); tracked variables; `D > 1`;
+  `max_batch` below one subinterval's nodes and the out-of-memory retry
+  (`tests/test_oom_recovery.py`); `trade_speed_for_memory=True`,
+  `record_evaluations=False`; the re-check and Step 7.
 
 ## Documentation to update when fixed
 
-These now say that reuse does not happen; change them back:
+These say that reuse does not happen; change them:
 
-- `README.md`, "Available methods" section ("The integration loop currently
-  places every subinterval's nodes…").
-- `docs/glossary.md`, "variable sampling".
-- `docs/user_guide/methods.md`, "How to choose" and "The variable-node method".
+- `README.md`, "Available methods" ("The integration loop currently places
+  every subinterval's nodes…").
+- `docs/glossary.md`, "uniform sampling" and "variable sampling".
+- `docs/user_guide/methods.md`, "How to choose".
 - `CLAUDE.md`, "Uniform vs variable sampling".
-- The module docstring of `padaquad/quadrature/variable.py`, and the
-  docstrings of `VariableAdaptiveQuadrature` and its
-  `_evaluate_adaptive_nodes` in that file.
+- The module docstring of `padaquad/quadrature/variable.py` and the docstring
+  of `VariableAdaptiveQuadrature`.
 - `tests/test_variable_integration.py` module docstring.
-- `CHANGELOG.md`: a "Fixed" entry.
+- `CHANGELOG.md`: a "Changed" entry with the counts.
 
 ## References
 

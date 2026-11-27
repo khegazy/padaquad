@@ -221,11 +221,50 @@ def test_backward_that_never_fits_ends_in_an_error_after_few_restarts(caplog):
         y.register_hook(fail)
         return y
 
-    with pytest.raises(BackwardOutOfMemoryError, match="cannot hold one subinterval"):
+    with pytest.raises(
+        BackwardOutOfMemoryError, match="cannot hold one subinterval"
+    ) as info:
         solver().integrate(f, mesh=even_mesh(100), max_batch=2300)
-    # 2,300 -> 1,725 -> ... -> 23 points: about 15 attempts, each failing once.
+    # Not "call again with state=error.state": its batch size is below 21, which
+    # a take_gradient=True call refuses.
+    assert "backward pass of one subinterval (21 points) does not fit" in str(
+        info.value
+    )
+    assert "state=error.state" not in str(info.value)
+    # 2,289 -> 1,701 -> ... -> 21 points: about 15 attempts, each failing once.
     assert attempts[0] <= 20
     assert float(w.grad) == 5.0
+
+
+def test_backward_of_one_subinterval_that_cannot_restart_says_what_to_do():
+    """Both reasons not to restart at once: the gradients cannot be put back
+    (a post-accumulate-grad hook) and the batch that failed is one
+    subinterval (max_batch=21), so no smaller batch exists. The message names
+    the hook in the parenthesis and then says, in order, to reset the
+    gradients and to free memory or use a method with fewer points, because
+    one subinterval's backward pass does not fit (it read "reset them ...,
+    then the backward pass of one subinterval (21 points) does not fit")."""
+    w = torch.tensor([1.3], dtype=torch.float64, requires_grad=True)
+    w.register_post_accumulate_grad_hook(lambda p: None)
+
+    def fail(grad):
+        raise torch.OutOfMemoryError("simulated backward")
+
+    def f(t):
+        y = w * torch.sin(40 * t)
+        y.register_hook(fail)
+        return y
+
+    with pytest.raises(BackwardOutOfMemoryError) as info:
+        solver().integrate(f, mesh=even_mesh(4), max_batch=21)
+    message = str(info.value)
+    assert "cannot restart the integral (a parameter has a post-accumulate" in message
+    assert message.endswith(
+        "reset them (for example optimizer.zero_grad()), then free memory on "
+        "cpu, or use a method with fewer points per subinterval: the backward "
+        "pass of one subinterval (21 points) does not fit."
+    )
+    assert info.value.state.max_batch < 21
 
 
 def test_restart_of_a_compiled_integrand_with_parameters():
@@ -262,7 +301,7 @@ def capped_cuda():
 @pytest.mark.usefixtures("capped_cuda")
 def test_real_backward_out_of_memory_restarts_to_the_reference_gradient():
     """A real CUDA out-of-memory error inside ``loss.backward()`` (a hook that
-    needs 200 kB per point): padaquad puts back the gradients, restarts with a
+    needs 200 kB per point): PadaQuad puts back the gradients, restarts with a
     smaller batch, and the integral and gradient are bit for bit those of an
     uninterrupted run with the final batch size. The process can go on using
     the GPU afterwards."""
@@ -333,8 +372,9 @@ def test_real_out_of_memory_in_f_is_retried(take_gradient):
 def test_real_out_of_memory_in_loss_fxn_puts_back_the_gradients():
     """The GPU version of ``test_out_of_memory_in_loss_fxn_puts_back_the_gradients``:
     f is cheap, and ``loss_fxn`` penalizes every integrand value through a
-    [points, 4096] temporary. The batch grows from 2,300 to 23,000 points, and
-    the loss of the 23,000-point batch (a 720 MiB temporary) does not fit; the
+    [points, 4096] temporary. The batch grows from 2,289 to 22,890 points (whole
+    gk21 subintervals of 21 points), and the loss of the 22,890-point batch (a
+    715 MiB temporary) does not fit; the
     CUDA error propagates with the first batch's gradient in ``w.grad``."""
     w = torch.tensor([1.3], dtype=torch.float64, device="cuda", requires_grad=True)
 

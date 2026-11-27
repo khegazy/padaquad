@@ -197,7 +197,7 @@ class TestRecRemove:
 
     @staticmethod
     def _loop_reference(mask: torch.Tensor) -> torch.Tensor:
-        """The loop _rec_remove used up to padaquad 1.4.0, kept as the reference.
+        """The loop _rec_remove used up to PadaQuad 1.4.0, kept as the reference.
 
         Each pass un-flags about two entries, so a mostly-True mask needs about
         N/2 passes; the one-pass version must give the same output.
@@ -301,7 +301,9 @@ class TestComputeErrorRatiosAbsolute:
         integral = torch.tensor([1.0])
 
         error_ratio, error_ratio_2steps, _ = solver._compute_error_ratios(
-            mesh_quadrature_errors=mesh_quadrature_errors, integral=integral
+            mesh_quadrature_errors=mesh_quadrature_errors,
+            integral=integral,
+            pair_errors=mesh_quadrature_errors[:-1] + mesh_quadrature_errors[1:],
         )
 
         assert len(error_ratio) == 3
@@ -314,7 +316,9 @@ class TestComputeErrorRatiosAbsolute:
         integral = torch.tensor([1.0])
 
         error_ratio, error_ratio_2steps, _ = solver._compute_error_ratios(
-            mesh_quadrature_errors=mesh_quadrature_errors, integral=integral
+            mesh_quadrature_errors=mesh_quadrature_errors,
+            integral=integral,
+            pair_errors=mesh_quadrature_errors[:-1] + mesh_quadrature_errors[1:],
         )
 
         assert len(error_ratio) == 1
@@ -373,6 +377,7 @@ class TestComputeErrorRatiosCumulative:
         error_ratio, error_ratio_2steps, _ = solver._compute_error_ratios(
             mesh_quadrature_errors=mesh_quadrature_errors,
             mesh_quadratures=mesh_quadratures,
+            pair_errors=mesh_quadrature_errors[:-1] + mesh_quadrature_errors[1:],
         )
 
         assert len(error_ratio) == 2
@@ -385,14 +390,17 @@ class TestComputeErrorRatiosCumulative:
         mesh_quadrature_errors = torch.tensor([[0.001], [0.002]])
         mesh_quadratures = torch.tensor([[1.0], [2.0]])
         cum_mesh_quadratures = torch.cumsum(mesh_quadratures, dim=0)
+        pair_errors = mesh_quadrature_errors[:-1] + mesh_quadrature_errors[1:]
 
         r1, r2_1, _ = solver._compute_error_ratios(
             mesh_quadrature_errors=mesh_quadrature_errors,
             mesh_quadratures=mesh_quadratures,
+            pair_errors=pair_errors,
         )
         r3, r2_2, _ = solver._compute_error_ratios(
             mesh_quadrature_errors=mesh_quadrature_errors,
             cum_mesh_quadratures=cum_mesh_quadratures,
+            pair_errors=pair_errors,
         )
 
         assert torch.allclose(r1, r3)
@@ -432,7 +440,9 @@ class TestFailureFraction:
         integral = torch.tensor([1.0, 1.0])
 
         failure_fraction, two_step, per_dim = solver._compute_error_ratios(
-            mesh_quadrature_errors=mesh_quadrature_errors, integral=integral
+            mesh_quadrature_errors=mesh_quadrature_errors,
+            integral=integral,
+            pair_errors=mesh_quadrature_errors[:-1] + mesh_quadrature_errors[1:],
         )
 
         assert per_dim.shape == (2, 2)

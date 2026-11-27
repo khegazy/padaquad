@@ -20,7 +20,7 @@ from padaquad import (
 # Default test device
 # ---------------------------------------------------------------------------
 #
-# padaquad is normally run on GPU, so the suite runs on CUDA when one is present
+# PadaQuad is normally run on GPU, so the suite runs on CUDA when one is present
 # and falls back to CPU otherwise (e.g. GitHub CI, where ``torch.cuda`` is
 # unavailable). Set ``PADAQUAD_TEST_DEVICE`` to force a specific device -- e.g.
 # ``PADAQUAD_TEST_DEVICE=cpu`` to reproduce the CI / CPU path on a GPU box, or
@@ -281,31 +281,31 @@ def assert_optimal_mesh_ordering(mesh):
 
 
 def assert_step_continuity(integral_output):
-    """Assert consecutive panels join continuously in the flattened output.
+    """Assert the accepted subintervals tile [mesh_init, mesh_final] in order.
 
-    Flattening drops the duplicated end-of-panel-i / start-of-panel-(i+1)
-    boundary, so the panels form one continuous traversal. We verify the node
-    sequence runs in order (non-decreasing) and spans the full integration
-    domain end to end (mesh_init .. mesh_final), so no leading/trailing panel is
-    missing and panels join without a backward jump. Equal adjacent nodes are
-    allowed: methods like dopri5 repeat a node within a panel (c = 1 twice).
+    The flattened nodes run in order (non-decreasing; equal adjacent nodes are
+    allowed, as a method may repeat a fraction) and lie inside the bounds, and
+    the widths add up to the whole interval, so no leading or trailing
+    subinterval is missing. The nodes need not reach the bounds: a method
+    without end nodes (Gauss-Kronrod) never evaluates a mesh point.
     """
-    nodes = integral_output.nodes  # flattened across panels: [P, T]
+    nodes = integral_output.nodes  # flattened across subintervals: [P, T]
     eps = torch.finfo(nodes.dtype).eps
     tol = 8 * eps * float(nodes.abs().max().clamp_min(1.0))
     assert torch.all(nodes[1:] - nodes[:-1] >= -tol), (
-        "Flattened nodes are not ordered across panel boundaries"
+        "Flattened nodes are not ordered across subinterval boundaries"
     )
     # mesh_init/mesh_final stay on the integration device while nodes may be
     # offloaded to result_device, so compare on the nodes' device.
     mesh_init = integral_output.mesh_init.to(nodes.device)
     mesh_final = integral_output.mesh_final.to(nodes.device)
-    assert torch.allclose(nodes[0], mesh_init, atol=tol, rtol=0), (
-        "Flattened nodes do not start at mesh_init"
-    )
-    assert torch.allclose(nodes[-1], mesh_final, atol=tol, rtol=0), (
-        "Flattened nodes do not end at mesh_final"
-    )
+    assert torch.all(nodes >= mesh_init - tol) and torch.all(
+        nodes <= mesh_final + tol
+    ), "Flattened nodes leave [mesh_init, mesh_final]"
+    widths = integral_output.h.to(nodes.device).sum(0)
+    assert torch.allclose(
+        widths, mesh_final - mesh_init, atol=len(integral_output.h) * tol, rtol=0
+    ), "The widths do not add up to mesh_final - mesh_init"
 
 
 # ---------------------------------------------------------------------------

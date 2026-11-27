@@ -1,7 +1,7 @@
 """
 Adaptive numerical quadrature in PyTorch.
 
-padaquad computes definite integrals of a known integrand over the integration
+PadaQuad computes definite integrals of a known integrand over the integration
 variable t by evaluating many subintervals in parallel batches, with autograd
 through the integration.
 

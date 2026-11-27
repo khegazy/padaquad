@@ -14,6 +14,8 @@ The examples are also useful as integration smoke tests that exercise:
   - ``take_gradient=True`` autograd flow
   - warm starts across iterations (``state=state``)
   - the analytic-vs-autodiff consistency check (path A vs path B)
+  - the gradient as extra outputs of f, without an autograd graph
+    (``gradient_as_output.py``, which checks itself with assert statements)
 """
 
 from __future__ import annotations
@@ -107,8 +109,9 @@ def test_gradient_of_integral_runs_and_assertions_pass():
 
 
 # Gallery scripts that check their own results with assert statements and
-# draw figures: the two tutorials and every harder-integral example.
+# draw figures: the tutorials and every harder-integral example.
 SELF_CHECKING_EXAMPLES = [
+    EXAMPLES_DIR / "gradient_as_output.py",
     EXAMPLES_DIR / "neural_network_integral.py",
     EXAMPLES_DIR / "path_optimization_muller_brown.py",
     *sorted((EXAMPLES_DIR / "hard_integrals").glob("[!_]*.py")),
@@ -180,7 +183,7 @@ def test_document_python_block_runs(where_and_code: tuple[str, str]) -> None:
     """Each tested Python block of ``DOCUMENTS`` runs without error on the CPU.
 
     The block runs after ``torch.manual_seed(SEED)`` (one line prepended, so a
-    traceback's line numbers are one higher than the block's): padaquad's
+    traceback's line numbers are one higher than the block's): PadaQuad's
     starting mesh is random, and an unseeded block would run on a different mesh
     in every run, so a failure could not be reproduced."""
     where, code = where_and_code

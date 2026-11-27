@@ -65,33 +65,30 @@ class TestGetSamplingType:
 
 
 # ---------------------------------------------------------------------------
-# _Tableau dtype/device conversion
+# MethodClass.to: dtype conversion
 # ---------------------------------------------------------------------------
 
 
 class TestTableau:
-    """Tests for _Tableau dtype and device conversion."""
+    """Tests for the dtype conversion of a uniform method's tableau (``MethodClass.to``)."""
 
-    def test_to_dtype_converts(self):
-        """Converting float64 -> float32 changes all tensor dtypes."""
-        # Clone the singleton so this test cannot pollute it for
-        # downstream tests (float32 round-trip is precision-lossy).
-        method = UNIFORM_METHODS["bosh3"].clone()
-        original_b = method.tableau.b.clone()
-        method.to_dtype(torch.float32)
+    def test_to_converts_every_table(self):
+        """Converting float64 -> float32 changes all tensor dtypes; the registry
+        entry stays float64."""
+        method = UNIFORM_METHODS["bosh3"].to("cpu", torch.float32)
         assert method.tableau.b.dtype == torch.float32
         assert method.tableau.c.dtype == torch.float32
         assert method.tableau.b_error.dtype == torch.float32
-        method.to_dtype(torch.float64)
-        assert torch.allclose(method.tableau.b, original_b)
+        assert UNIFORM_METHODS["bosh3"].tableau.b.dtype == torch.float64
 
-    def test_to_dtype_preserves_values(self):
-        """Round-tripping float64 -> float32 -> float64 preserves values within float32 precision."""
-        method = UNIFORM_METHODS["dopri5"].clone()
-        original_b = method.tableau.b.clone()
-        method.to_dtype(torch.float32)
-        method.to_dtype(torch.float64)
-        assert torch.allclose(method.tableau.b, original_b, atol=1e-7)
+    def test_round_trip_within_float32_rounding(self):
+        """float64 -> float32 -> float64 keeps the values within float32 rounding."""
+        original_b = UNIFORM_METHODS["dopri5"].tableau.b
+        round_trip = (
+            UNIFORM_METHODS["dopri5"].to("cpu", torch.float32).to("cpu", torch.float64)
+        )
+        assert round_trip.tableau.b.dtype == torch.float64
+        assert torch.allclose(round_trip.tableau.b, original_b, atol=1e-7)
 
 
 # ---------------------------------------------------------------------------

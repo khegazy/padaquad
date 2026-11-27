@@ -46,55 +46,29 @@ class TestVariableHeunWeights:
 
 
 # ---------------------------------------------------------------------------
-# _Tableau.to_device / UniformMethodClass.to_device
+# MethodClass.to: device and dtype
 # ---------------------------------------------------------------------------
 
 
-class TestTableauToDevice:
-    """Tests for device movement (CPU-only)."""
+class TestTo:
+    """Tests for ``MethodClass.to`` on both method classes (CPU-only)."""
 
-    def test_tableau_to_device_cpu(self):
-        """_Tableau.to_device('cpu') keeps all tensors on CPU."""
-        tableau = _Tableau(
-            c=torch.tensor([0.0, 1.0]),
-            b=torch.tensor([0.5, 0.5]),
-            b_error=torch.tensor([1.0, -1.0]),
-        )
-        tableau.to_device("cpu")
-        assert tableau.c.device.type == "cpu"
-        assert tableau.b.device.type == "cpu"
-        assert tableau.b_error.device.type == "cpu"
-
-    def test_method_class_to_device_cpu(self):
-        """UniformMethodClass.to_device('cpu') moves tableau to CPU."""
-        # Clone to avoid mutating the singleton (cpu->cpu is a no-op
-        # in terms of values, but keeping the test isolated is good
-        # practice now that singletons are no longer self-protecting).
-        method = UNIFORM_METHODS["bosh3"].clone()
-        method.to_device("cpu")
+    def test_uniform_method_to_cpu(self):
+        """UniformMethodClass.to('cpu', ...) puts every tableau tensor on the CPU."""
+        method = UNIFORM_METHODS["bosh3"].to("cpu", torch.float64)
         assert method.tableau.c.device.type == "cpu"
         assert method.tableau.b.device.type == "cpu"
+        assert method.tableau.b_error.device.type == "cpu"
 
-    def test_variable_method_to_device(self):
-        """VariableMethodClass.to_device('cpu') moves the node fractions to CPU."""
-        method = VARIABLE_METHODS["interpolatory3_variable"].clone()
-        method.to_device("cpu")
+    def test_variable_method_to_cpu(self):
+        """VariableMethodClass.to('cpu', ...) puts the node fractions on the CPU."""
+        method = VARIABLE_METHODS["interpolatory3_variable"].to("cpu", torch.float64)
         assert method.c.device.type == "cpu"
 
-
-# ---------------------------------------------------------------------------
-# VariableMethodClass dtype conversion
-# ---------------------------------------------------------------------------
-
-
-class TestVariableMethodDtype:
-    """Tests for variable method dtype conversion."""
-
-    def test_to_dtype_float32(self):
-        """VariableMethodClass.to_dtype converts the node fractions; the weights
+    def test_variable_method_to_float32(self):
+        """VariableMethodClass.to converts the node fractions; the weights
         follow the dtype of the nodes they are computed from."""
-        method = VARIABLE_METHODS["interpolatory3_variable"].clone()
-        method.to_dtype(torch.float32)
+        method = VARIABLE_METHODS["interpolatory3_variable"].to("cpu", torch.float32)
         assert method.c.dtype == torch.float32
         b, b_error = method.weights(method.c.view(1, 3, 1))
         assert b.dtype == b_error.dtype == torch.float32
@@ -158,12 +132,22 @@ class TestVariableMethodClass:
         "c",
         [
             torch.tensor([[0.0, 1.0]], dtype=torch.float64),  # not 1-D
-            torch.tensor([0.0], dtype=torch.float64),  # one node
-            torch.tensor([0.1, 0.5, 1.0], dtype=torch.float64),  # does not start at 0
-            torch.tensor([0.0, 0.5, 0.9], dtype=torch.float64),  # does not end at 1
+            torch.tensor([0.5], dtype=torch.float64),  # one node
+            torch.tensor([0.5, 0.5], dtype=torch.float64),  # all equal
+            torch.tensor([-0.1, 0.5, 1.0], dtype=torch.float64),  # below 0
+            torch.tensor([0.0, 0.5, 1.2], dtype=torch.float64),  # above 1
+            torch.tensor([0.0, float("nan"), 1.0], dtype=torch.float64),  # NaN
             torch.tensor([0.0, 0.7, 0.5, 1.0], dtype=torch.float64),  # decreases
         ],
-        ids=["not-1d", "one-node", "start", "end", "decreasing"],
+        ids=[
+            "not-1d",
+            "one-node",
+            "all-equal",
+            "below-0",
+            "above-1",
+            "nan",
+            "decreasing",
+        ],
     )
     def test_malformed_node_fractions_raise(self, c):
         """Both generic rule classes reject malformed node fractions."""
@@ -179,6 +163,29 @@ class TestVariableMethodClass:
                     c=c, b=torch.ones_like(c), b_error=torch.zeros_like(c)
                 ),
             )
+
+    def test_fractions_without_end_nodes(self):
+        """Neither class needs nodes at the ends of a subinterval (the solver
+        takes its width from the mesh; the Gauss-Kronrod nodes are all
+        interior). A variable rule's weight function sees the nodes as
+        fractions of their subinterval: the first and last node at the first
+        and last fraction."""
+        c = torch.tensor([0.25, 0.5, 0.75], dtype=torch.float64)
+        UniformMethodClass(
+            degree=0,
+            error_exponent=2,
+            tableau=_Tableau(c=c, b=torch.ones_like(c) / 3, b_error=0 * c),
+        )
+        seen = []
+
+        def spy(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+            seen.append(x.clone())
+            return _equal_weights(x)
+
+        rule = VariableMethodClass(degree=0, error_exponent=2, c=c, weight_function=spy)
+        # Subinterval [2, 6]: nodes at 3, 4, 5
+        rule.weights(torch.tensor([[[3.0], [4.0], [5.0]]], dtype=torch.float64))
+        assert torch.equal(seen[0], c.view(1, 3, 1))
 
     @pytest.mark.parametrize(
         ("degree", "error_exponent", "bad"),

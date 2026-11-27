@@ -21,6 +21,7 @@ from __future__ import annotations
 import math
 import threading
 
+import numpy as np
 import pytest
 import torch
 from tests._helpers import (
@@ -74,10 +75,10 @@ def test_no_warm_start_path_correctness(take_gradient):
 
 
 @pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
-def test_reuse_mesh_and_max_batch(device, monkeypatch):
-    """The first call finds a batch size (test calls, then growth) and returns
-    it with its optimal mesh in result.state; passing the state to the next
-    call makes no test call and starts from every point of that mesh."""
+def test_reuse_mesh_and_max_batch(device):
+    """The first call finds a batch size (test calls, then growth) and
+    returns it with its optimal mesh in the state; passing the state to the
+    next call starts from every point of that mesh."""
     solver = adaptive_quadrature("uniform", "gk21", device=device)
     first, first_state = solver.integrate(
         f=torch.exp, mesh_init=_bound(2.0), mesh_final=_bound(3.0), take_gradient=False
@@ -85,7 +86,6 @@ def test_reuse_mesh_and_max_batch(device, monkeypatch):
     assert first_state.max_batch >= solver.C
     assert not first_state.max_batch_converged
 
-    monkeypatch.setattr(solver, "_measure_call", lambda *a: pytest.fail("test call"))
     second, _ = solver.integrate(f=torch.exp, state=first_state, take_gradient=False)
     assert second.n_start_steps == len(first_state.mesh) - 1
     exact = math.exp(3.0) - math.exp(2.0)
@@ -126,11 +126,87 @@ def test_same_f_is_gone():
         )
 
 
+def test_conserve_memory_is_gone():
+    """conserve_memory was removed (trade_speed_for_memory replaces it); the old
+    name raises TypeError from both entry points (padaquad.integrate routes it
+    to the constructor)."""
+    with pytest.raises(TypeError, match="conserve_memory"):
+        _solver().integrate(
+            f=torch.exp,
+            conserve_memory=True,
+            mesh_init=_bound(0.0),
+            mesh_final=_bound(1.0),
+        )
+    with pytest.raises(TypeError, match="conserve_memory"):
+        integrate(
+            torch.exp,
+            "gk21",
+            device="cpu",
+            max_batch=10_000,
+            conserve_memory=True,
+            mesh_init=_bound(0.0),
+            mesh_final=_bound(1.0),
+        )
+
+
 # -----------------------------------------------------------------------------
 # Interval rules: a call needs a mesh or both bounds; bounds inside a given mesh
 # cut it; a bound outside it extends it; a bound within rounding of a mesh end is
 # that end. There are no constructor bounds and no stored warm-start mesh.
 # -----------------------------------------------------------------------------
+
+
+def test_error_on_nonfinite_is_gone():
+    """error_on_nonfinite was merged into runtime_checks; the old name raises
+    TypeError from the constructor and from integrate."""
+    with pytest.raises(TypeError, match="error_on_nonfinite"):
+        adaptive_quadrature("uniform", "gk21", device="cpu", error_on_nonfinite=False)
+    with pytest.raises(TypeError, match="error_on_nonfinite"):
+        _solver().integrate(
+            f=torch.exp,
+            error_on_nonfinite=False,
+            mesh_init=_bound(0.0),
+            mesh_final=_bound(1.0),
+        )
+
+
+@pytest.mark.parametrize("sampling", ["uniform", "variable"])
+def test_runtime_checks_off_skips_checks_and_keeps_result(sampling, monkeypatch):
+    """runtime_checks=False skips the check that the record covers the final
+    mesh once (fewer calls of torch.sort, which the check makes once) and the
+    finite check of f's output, and changes nothing else: the same mesh and
+    integral, bit for bit."""
+
+    def f(t):
+        return torch.exp(3 * t) * torch.sin(20 * t)
+
+    results, check_calls = {}, {}
+    for checks in (True, False):
+        solver = adaptive_quadrature(sampling, device="cpu", max_batch=10_000)
+        sort_calls, finite_calls = [], []
+        monkeypatch.setattr(torch, "sort", _counting(torch.sort, sort_calls))
+        monkeypatch.setattr(torch, "isfinite", _counting(torch.isfinite, finite_calls))
+        torch.manual_seed(0)
+        result, state = solver.integrate(
+            f, mesh_init=_bound(0.0), mesh_final=_bound(1.0), runtime_checks=checks
+        )
+        monkeypatch.undo()
+        results[checks] = (result.integral, result.h, state.mesh)
+        check_calls[checks] = (len(sort_calls), len(finite_calls))
+    for a, b in zip(results[True], results[False], strict=True):
+        assert torch.equal(a, b)
+    assert check_calls[False][0] == check_calls[True][0] - 1
+    assert check_calls[False][1] < check_calls[True][1]
+
+
+def _counting(fn, calls):
+    """Wrap fn so each call appends to calls."""
+
+    def wrapper(*args, **kwargs):
+        calls.append(1)
+        return fn(*args, **kwargs)
+
+    return wrapper
 
 
 def _bound(x, dtype=torch.float64):
@@ -183,7 +259,7 @@ def test_bound_gradients_through_a_given_mesh(lo, hi, given_mesh, take_gradient)
         mesh_init=a,
         mesh_final=b,
         take_gradient=take_gradient,
-        max_batch=2 * 23,  # gk21 has 23 nodes per subinterval
+        max_batch=2 * 21,  # gk21 has 21 nodes per subinterval
     )
     if not take_gradient:
         out.integral.sum().backward()
@@ -457,13 +533,23 @@ def test_bound_of_wrong_shape_with_mesh_raises(bound):
         _solver().integrate(f=torch.exp, mesh=_MESH, mesh_final=bound)
 
 
-def test_integrand_output_must_be_two_dimensional():
+@pytest.mark.parametrize("take_gradient", [False, True])
+@pytest.mark.parametrize(
+    ("f", "got"),
+    [
+        (lambda t: torch.exp(t)[:, 0], r"got shape \[\d+\] for"),
+        (lambda t: torch.exp(t).repeat(2, 1), r"got shape \[\d+, 1\] for"),
+    ],
+    ids=["one_dimensional", "two_rows_per_point"],
+)
+def test_integrand_output_must_be_one_row_per_point(f, got, take_gradient):
     """An integrand returning shape [N] instead of [N, D] raises ValueError
-    (the check was an assert, which python -O removes)."""
-    with pytest.raises(ValueError, match="shape"):
-        _solver().integrate(
-            f=lambda t: torch.exp(t)[:, 0], mesh=_MESH, take_gradient=False
-        )
+    (the check was an assert, which python -O removes), and so does one with
+    another number of rows than points, which with take_gradient=True was
+    reshaped into wrong subintervals without an error. The check is in
+    _call_f, which every call of f in the loop goes through."""
+    with pytest.raises(ValueError, match="one row per point; " + got):
+        _solver().integrate(f=f, mesh=_MESH, take_gradient=take_gradient)
 
 
 def test_float32_bound_at_a_float64_mesh_end_replaces_it():
@@ -521,6 +607,95 @@ def test_integrate_options_after_the_bounds_are_keyword_only():
         _solver().integrate(torch.exp, None, _MESH, None, None, True)
 
 
+_BOOL_OPTIONS = [
+    "take_gradient",
+    "enforce_convergence",
+    "runtime_checks",
+    "random_initial_mesh",
+    "trade_speed_for_memory",
+    "record_evaluations",
+    "build_state_mesh",
+]
+#: Values whose truth Python takes silently: "False" is true, the rest false
+#: (None is valid for runtime_checks and enforce_convergence), and a tensor.
+_NOT_BOOLS = ["False", None, 0, [], torch.tensor(True), 1.0]
+
+
+@pytest.mark.parametrize("value", _NOT_BOOLS, ids=repr)
+@pytest.mark.parametrize("option", _BOOL_OPTIONS)
+def test_integrate_true_or_false_options_reject_other_values(option, value):
+    """An integrate option that must be True or False raises TypeError naming
+    it and the value, before f is called; None is valid for runtime_checks
+    and enforce_convergence. It is named before the batch size is checked:
+    take_gradient="False" with max_batch=10 raised that 10 is below one
+    subinterval, a check of take_gradient=True."""
+    if value is None and option in ("runtime_checks", "enforce_convergence"):
+        pytest.skip("None means the default")
+    calls = []
+    with pytest.raises(TypeError, match=f"{option} must be True or False, got"):
+        _solver().integrate(
+            lambda t: calls.append(t) or torch.exp(t),
+            mesh=_MESH,
+            max_batch=10,
+            **({"take_gradient": False} | {option: value}),
+        )
+    assert calls == []
+
+
+@pytest.mark.parametrize("value", _NOT_BOOLS, ids=repr)
+@pytest.mark.parametrize(
+    "option",
+    [
+        "limit_benchmark_time",
+        "use_absolute_error_ratio",
+        "runtime_checks",
+        "output_speed_info",
+    ],
+)
+def test_constructor_true_or_false_options_reject_other_values(option, value):
+    """A constructor option that must be True or False raises TypeError naming
+    it and the value."""
+    with pytest.raises(TypeError, match=f"{option} must be True or False, got"):
+        adaptive_quadrature("uniform", "gk21", device="cpu", **{option: value})
+
+
+@pytest.mark.parametrize(
+    ("true", "false"), [(True, False), (np.True_, np.False_)], ids=["bool", "numpy"]
+)
+def test_true_or_false_options_take_numpy_bools(true, false):
+    """NumPy bools are True or False: every such option accepts them, in the
+    constructor and in integrate, and the integral is the same as with
+    Python bools."""
+    results = []
+    for t, f in ((True, False), (true, false)):
+        solver = adaptive_quadrature(
+            "uniform",
+            "gk21",
+            device="cpu",
+            max_batch=10_000,
+            limit_benchmark_time=t,
+            use_absolute_error_ratio=t,
+            runtime_checks=t,
+            output_speed_info=f,
+        )
+        torch.manual_seed(0)
+        results.append(
+            solver.integrate(
+                torch.exp,
+                mesh_init=_bound(0.0),
+                mesh_final=_bound(1.0),
+                take_gradient=f,
+                enforce_convergence=t,
+                runtime_checks=t,
+                random_initial_mesh=t,
+                trade_speed_for_memory=f,
+                record_evaluations=t,
+                build_state_mesh=t,
+            )[0].integral
+        )
+    assert torch.equal(results[0], results[1])
+
+
 def test_solver_usable_after_a_raising_call():
     """A call whose integrand raises leaves the solver usable: the next call
     gives the exact integral."""
@@ -552,6 +727,36 @@ def test_bounds_equal_to_mesh_ends_leave_it_unchanged():
     assert with_bounds.n_start_steps == alone.n_start_steps == 8
     assert torch.equal(with_bounds.integral, alone.integral)
     assert torch.equal(with_bounds_state.mesh, alone_state.mesh)
+
+
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_a_mesh_alone_is_used_as_given(take_gradient):
+    """Without bounds a given mesh is not cut: the call starts from the mesh
+    tensor itself (no copy) and its ends are the bounds, and a mesh that
+    requires grad gets the gradient of the integral of w e^t with respect to
+    its points: -w e^a at the first, w e^b at the last, about 0 inside (both
+    neighbors' contributions depend on an inner point)."""
+    solver = _solver()
+    starts = []
+    setup_initial_mesh = solver._setup_initial_mesh
+
+    def spy(mesh, *args):
+        starts.append(mesh)
+        return setup_initial_mesh(mesh, *args)
+
+    solver._setup_initial_mesh = spy
+    mesh = _MESH.clone().requires_grad_()
+    out, _ = solver.integrate(
+        f=lambda t: 2 * torch.exp(t), mesh=mesh, take_gradient=take_gradient
+    )
+    assert starts[0] is mesh
+    assert torch.equal(out.mesh_init, _MESH[0])
+    assert torch.equal(out.mesh_final, _MESH[-1])
+    if not take_gradient:
+        out.integral.sum().backward()
+    expected = torch.zeros_like(_MESH)
+    expected[0], expected[-1] = -2 * math.exp(0.0), 2 * math.exp(4.0)
+    assert torch.allclose(mesh.grad, expected, rtol=1e-9, atol=1e-8)
 
 
 @pytest.mark.parametrize(
@@ -722,7 +927,7 @@ _NAN_SIDE_IDS = ["nan_left", "nan_right"]
 @pytest.mark.parametrize(("sampling", "method"), _NONFINITE_CASES, ids=_NONFINITE_IDS)
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 def test_nonfinite_integrand_does_not_hang(nan_f, sampling, method, take_gradient):
-    """With ``error_on_nonfinite=False`` a NaN-returning integrand must
+    """With ``runtime_checks=False`` a NaN-returning integrand must
     terminate (not hang) and return a NaN-containing result, whether the NaN
     falls in the first panels (nan_left) or the last panels (nan_right).
 
@@ -739,7 +944,7 @@ def test_nonfinite_integrand_does_not_hang(nan_f, sampling, method, take_gradien
             mesh_init=torch.tensor([0.0], dtype=torch.float64),
             mesh_final=torch.tensor([1.0], dtype=torch.float64),
             take_gradient=take_gradient,
-            error_on_nonfinite=False,
+            runtime_checks=False,
             # Pin CPU so this NaN-logic regression is deterministic regardless
             # of whether a GPU is visible (NaN handling is device-agnostic).
             device="cpu",
@@ -758,7 +963,7 @@ def test_nonfinite_integrand_does_not_hang(nan_f, sampling, method, take_gradien
 @pytest.mark.parametrize(("sampling", "method"), _NONFINITE_CASES, ids=_NONFINITE_IDS)
 @pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
 def test_nonfinite_integrand_raises_by_default(nan_f, sampling, method, take_gradient):
-    """By default (``error_on_nonfinite=True``) a NaN/Inf integrand raises a
+    """By default (``runtime_checks=True``) a NaN/Inf integrand raises a
     clear, located ``ValueError`` instead of hanging or silently returning NaN,
     for NaN in either the first or last panels.
     """
@@ -798,7 +1003,7 @@ def test_nonfinite_cumulative_error_mode_terminates(nan_f):
             mesh_init=torch.tensor([0.0], dtype=torch.float64),
             mesh_final=torch.tensor([1.0], dtype=torch.float64),
             take_gradient=False,
-            error_on_nonfinite=False,
+            runtime_checks=False,
             use_absolute_error_ratio=False,
             device="cpu",
             max_batch=cached_max_batch(),
@@ -833,15 +1038,15 @@ def test_finite_integrand_unaffected_by_nonfinite_check(take_gradient):
 def test_check_f_output_finite_helper():
     """Unit-test the finiteness helper directly across its branches.
 
-    The helper reads ``self.error_on_nonfinite`` (set from the
-    ``integrate(error_on_nonfinite=...)`` argument), so toggle it on the solver.
+    The helper reads ``self.runtime_checks`` (set from the
+    ``integrate(runtime_checks=...)`` argument), so toggle it on the solver.
     """
     solver = make_uniform_solver("gk21", atol=1e-6, rtol=1e-6)
     nodes = torch.tensor([[0.1], [0.2], [0.3]], dtype=torch.float64)
     good = torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float64)
     bad = torch.tensor([[1.0], [float("nan")], [3.0]], dtype=torch.float64)
 
-    solver.error_on_nonfinite = True
+    solver.runtime_checks = True
     # Finite tensor: never raises.
     solver._check_f_output_finite(good, nodes)
     # Non-finite tensor with the flag on: raises and localizes the offending t.
@@ -850,19 +1055,76 @@ def test_check_f_output_finite_helper():
     assert "0.2" in str(excinfo.value), f"offending t not reported: {excinfo.value}"
 
     # Flag off: no raise (the guard keeps the run alive instead).
-    solver.error_on_nonfinite = False
+    solver.runtime_checks = False
     solver._check_f_output_finite(bad, nodes)
 
     # Bare-scalar branch (e.g. f returning a Python number): finite passes,
     # non-finite raises.
-    solver.error_on_nonfinite = True
+    solver.runtime_checks = True
     solver._check_f_output_finite(1.0, nodes)
     with pytest.raises(ValueError, match=r"non-finite"):
         solver._check_f_output_finite(float("inf"), nodes)
 
 
 # -----------------------------------------------------------------------------
-# The integrand test call receives one point of shape [1, T].
+# A subinterval too narrow to halve: its ends are neighboring floating-point
+# numbers, so its midpoint rounds onto one of them. Splitting it inserted a
+# repeated mesh point: with runtime_checks=True an empty AssertionError, with
+# False a loop that never ended (each turn split the same subinterval again).
+# It is now accepted, in the loop, in the re-check and in the state's mesh.
+# -----------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("sampling", "method"),
+    [("uniform", "dopri5"), ("variable", "interpolatory3_variable")],
+)
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+@pytest.mark.parametrize("runtime_checks", [True, False])
+@pytest.mark.parametrize("take_gradient", TAKE_GRADIENT_VALUES, ids=TAKE_GRADIENT_IDS)
+def test_subinterval_too_narrow_to_halve_ends_the_call(
+    sampling, method, dtype, runtime_checks, take_gradient
+):
+    """A jump with zero tolerances, for methods with a node at each end: the
+    subinterval that starts at the jump fails until it is one ULP wide (its
+    first node is on the other side of the jump). The call ends with
+    converged=False, the state's mesh is strictly increasing, and a call
+    from that state ends the same way. (interpolatory3_variable returns NaN:
+    its weights on a one-ULP subinterval are not finite.)"""
+    solver = adaptive_quadrature(
+        sampling, method, atol=0.0, rtol=0.0, device="cpu", dtype=dtype
+    )
+
+    def jump(t):
+        return torch.sign(t - 0.3)
+
+    def run(**kwargs):
+        return solver.integrate(
+            jump,
+            take_gradient=take_gradient,
+            runtime_checks=runtime_checks,
+            max_batch=10_000,
+            **kwargs,
+        )
+
+    torch.manual_seed(0)
+    result, state = _run_with_timeout(
+        lambda: run(
+            mesh_init=torch.tensor([0.0], dtype=dtype),
+            mesh_final=torch.tensor([1.0], dtype=dtype),
+        )
+    )
+    assert not result.converged
+    assert torch.all(state.mesh[1:] > state.mesh[:-1])
+    # Refined down to the spacing of the floating-point numbers at the jump.
+    assert result.h.min() <= torch.finfo(dtype).eps
+    again, state = _run_with_timeout(lambda: run(state=state))
+    assert not again.converged
+    assert torch.all(state.mesh[1:] > state.mesh[:-1])
+
+
+# -----------------------------------------------------------------------------
+# The first call of the integrand receives the first pass, shaped [N, T].
 # -----------------------------------------------------------------------------
 
 
@@ -871,15 +1133,17 @@ class _StopAfterFirstCall(Exception):
 
 
 @pytest.mark.parametrize("T", [1, 2])
-def test_integrand_test_call_shape(T, monkeypatch):
-    """integrate()'s first call to f (the output check) passes t shaped [1, T].
+def test_first_call_of_f_has_shape_n_by_t(T, monkeypatch):
+    """integrate()'s first call to f passes t shaped [N, T]: the nodes of the
+    first pass (11 subintervals of the default starting mesh), not a separate
+    check of f's output.
 
-    The call used torch.tensor([[mesh_init]]), which only works when mesh_init
-    holds one number: T=1 gave [1, 1], T=2 raised "only one element tensors
-    can be converted to Python scalars". Through the public path T>1 is
-    stopped earlier by the scalar `mesh_init < mesh_final` check in
-    _setup_integral_bounds (T>1 is not supported end to end yet), so for T=2
-    that method is stubbed on this instance to reach the test call.
+    A former one-point output check used torch.tensor([[mesh_init]]), which
+    only works when mesh_init holds one number: T=1 gave [1, 1], T=2 raised
+    "only one element tensors can be converted to Python scalars". Through the
+    public path T>1 is stopped earlier by the scalar `mesh_init < mesh_final`
+    check in _setup_integral_bounds (T>1 is not supported end to end yet), so
+    for T=2 that method is stubbed on this instance to reach the first call.
     """
     solver = make_solver_for_unit_test()
     if T > 1:
@@ -899,4 +1163,4 @@ def test_integrand_test_call_shape(T, monkeypatch):
             mesh_final=torch.ones(T, dtype=torch.float64),
             max_batch=10000,
         )
-    assert shapes == [(1, T)]
+    assert shapes == [(11 * solver.C, T)]

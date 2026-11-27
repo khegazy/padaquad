@@ -22,6 +22,7 @@ positions).
 from __future__ import annotations
 
 import copy
+import weakref
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, NamedTuple, Self
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 
-@dataclass
+@dataclass(frozen=True)
 class _Tableau:
     """
     Fixed node fractions and weights of a uniform method.
@@ -41,11 +42,16 @@ class _Tableau:
     ``b`` rows these are for the Runge-Kutta methods; the Gauss-Kronrod and
     Clenshaw-Curtis methods use the same three arrays.
 
+    Frozen: a method is shared by every solver that uses it (see
+    ``MethodClass.to``), so its fields are never reassigned. Freezing does not
+    stop in-place writes into the tensors, which must not be made either.
+
     Attributes
     ----------
     c : torch.Tensor
-        Node fractions: c[0] = 0 is the start of the subinterval, c[-1] = 1
-        its end. Shape: [C], with C the number of nodes per subinterval.
+        Node fractions in [0, 1], non-decreasing: 0 is the start of the
+        subinterval and 1 its end, which need not be nodes. Shape: [C], with C
+        the number of nodes per subinterval.
     b : torch.Tensor
         Weights of the method; the result on a subinterval of width h is
         h * sum(b * f(t)). Shape: [C].
@@ -57,36 +63,6 @@ class _Tableau:
     c: torch.Tensor
     b: torch.Tensor
     b_error: torch.Tensor
-
-    def to_dtype(self, dtype: torch.dtype) -> None:
-        """Convert all tableau tensors to the specified dtype.
-
-        Mutates in place. Clone the owning method first
-        (``MethodClass.clone()``) if you want to leave the original tensors
-        at their pre-conversion precision (which is irreversibly lossy when
-        going to lower-precision dtypes).
-
-        Parameters
-        ----------
-        dtype : torch.dtype
-            The dtype to convert ``c``, ``b`` and ``b_error`` to.
-        """
-        self.c = self.c.to(dtype)
-        self.b = self.b.to(dtype)
-        self.b_error = self.b_error.to(dtype)
-
-    def to_device(self, device: str | torch.device) -> None:
-        """
-        Move all tableau tensors to the specified device.
-
-        Parameters
-        ----------
-        device : str or torch.device
-            The device to move ``c``, ``b`` and ``b_error`` to.
-        """
-        self.c = self.c.to(device)
-        self.b = self.b.to(device)
-        self.b_error = self.b_error.to(device)
 
 
 class DegreeMeasurement(NamedTuple):
@@ -113,6 +89,13 @@ class DegreeMeasurement(NamedTuple):
     lower_degree: int
     errors: torch.Tensor
     lower_errors: torch.Tensor
+
+
+# Converted methods of each source method, by (device, dtype); see MethodClass.to.
+# The source is held weakly: its conversions go when it does (a copied solver's).
+_CONVERTED: weakref.WeakKeyDictionary[
+    MethodClass, dict[tuple[torch.device, torch.dtype], MethodClass]
+] = weakref.WeakKeyDictionary()
 
 
 class MethodClass(ABC):
@@ -208,9 +191,11 @@ class MethodClass(ABC):
         """
         Node positions of a new subinterval as fractions of its width.
 
-        Non-decreasing, from 0 (the subinterval's left mesh point) to 1 (its
-        right mesh point). The solver places node i of a subinterval
-        [left, right] at ``left + c_i * (right - left)``.
+        Non-decreasing, in [0, 1]: 0 is the subinterval's left mesh point and 1
+        its right mesh point. The ends need not be nodes (Gauss-Kronrod nodes
+        are all interior); the solver takes a subinterval's width from its
+        mesh points. The solver places node i of a subinterval [left, right]
+        at ``left + c_i * (right - left)``.
 
         Returns
         -------
@@ -239,26 +224,61 @@ class MethodClass(ABC):
             ``(b, b_error)``, each of shape [N, C, 1].
         """
 
-    @abstractmethod
-    def to_dtype(self, dtype: torch.dtype) -> None:
+    def to(self, device: str | torch.device, dtype: torch.dtype) -> MethodClass:
         """
-        Convert the method's tensors to ``dtype`` in place.
+        Return this method with its tensors on ``device`` in ``dtype``; built once.
 
-        Parameters
-        ----------
-        dtype : torch.dtype
-            The dtype to convert to.
-        """
+        The converted method is a new object holding copies of the tensors, so it
+        never shares memory with ``self`` and ``self`` is unchanged. It is built
+        on the first call for a ``(self, device, dtype)`` and kept as long as
+        ``self`` lives (in ``_CONVERTED``, the registry entries for the life of
+        the process); every later call returns the same object, which every
+        solver of that method, device and dtype then shares. Do not write into
+        its tensors in place: the change would reach all of those solvers.
 
-    @abstractmethod
-    def to_device(self, device: str | torch.device) -> None:
-        """
-        Move the method's tensors to ``device`` in place.
+        The key is the object ``self``, not its name in a registry, so a
+        solver keeps its method when a registry entry is replaced. Solvers pass
+        their indexed device (``_resolve_device``); ``"cuda"`` and ``"cuda:0"``
+        are two keys. Each tensor is moved to ``device`` before its dtype is
+        changed, so the cast runs on ``device``.
 
         Parameters
         ----------
         device : str or torch.device
-            The device to move to.
+            The device of the converted tensors.
+        dtype : torch.dtype
+            The dtype of the converted tensors.
+
+        Returns
+        -------
+        MethodClass
+            The converted method, of the same class as ``self``.
+        """
+        device = torch.device(device)
+        converted = _CONVERTED.setdefault(self, {})
+        if (device, dtype) not in converted:
+            # setdefault: when two threads build the same method, both return
+            # the one stored.
+            converted.setdefault(
+                (device, dtype),
+                self._map_tensors(lambda t: t.to(device).to(dtype, copy=True)),
+            )
+        return converted[device, dtype]
+
+    @abstractmethod
+    def _map_tensors(self, fn: Callable[[torch.Tensor], torch.Tensor]) -> Self:
+        """
+        Return a shallow copy of the method with ``fn`` applied to each of its tensors.
+
+        Parameters
+        ----------
+        fn : Callable
+            Maps a tensor of the method to the tensor the copy holds instead.
+
+        Returns
+        -------
+        Self
+            The copy; ``self`` is unchanged.
         """
 
     @property
@@ -285,22 +305,23 @@ class MethodClass(ABC):
         Raises
         ------
         ValueError
-            Unless the fractions are 1-D with at least two entries,
-            start at 0, end at 1, and never decrease (repeated values are
-            allowed: dopri5 has two nodes at 1).
+            Unless the fractions are 1-D, all in [0, 1], never decrease
+            (repeated values are allowed), and the
+            last is above the first. The ends 0 and 1 need not be among them:
+            the solver takes a subinterval's width from its mesh points.
         """
         if c is None:
             c = self.node_fractions()
         if not (
             c.ndim == 1
             and len(c) >= 2
-            and float(c[0]) == 0.0
-            and float(c[-1]) == 1.0
+            and bool(((c >= 0) & (c <= 1)).all())
             and bool((c[1:] >= c[:-1]).all())
+            and float(c[-1]) > float(c[0])
         ):
             raise ValueError(
-                f"{type(self).__name__}: node fractions must be 1-D, start at 0, "
-                f"end at 1 and never decrease; got {c.tolist()}"
+                f"{type(self).__name__}: node fractions must be 1-D, in [0, 1], "
+                f"never decrease and not all be equal; got {c.tolist()}"
             )
 
     def measure_degree(
@@ -335,8 +356,9 @@ class MethodClass(ABC):
         ----------
         nodes : torch.Tensor or None
             Node fractions at which to measure a method whose weights depend
-            on the node positions: 1-D, C entries, non-decreasing from 0 to 1.
-            Default: ``node_fractions()``.
+            on the node positions: 1-D, C entries, non-decreasing, from the
+            first to the last of ``node_fractions()`` (0 to 1 for the
+            registered variable methods). Default: ``node_fractions()``.
         tol : float
             Errors at most this large count as exact. The default suits the
             float64 methods of ``UNIFORM_METHODS`` and ``VARIABLE_METHODS``;
@@ -350,7 +372,8 @@ class MethodClass(ABC):
         Raises
         ------
         ValueError
-            If ``nodes`` is malformed or does not have C entries;
+            If ``nodes`` is malformed, does not have C entries, or does not
+            start and end at the first and last node fraction;
             if ``nodes`` differs from the node fractions while the weights
             do not depend on the node positions (the measurement would
             apply the weights at nodes they were not made for); or if no
@@ -379,10 +402,14 @@ class MethodClass(ABC):
         default = self.node_fractions().detach().to("cpu", f64)
         c = default if nodes is None else nodes.detach().to("cpu", f64)
         self._check_node_fractions(c)
-        if c.shape != default.shape:
+        # weights() places a subinterval's first and last node at the first and
+        # last fraction, so nodes that start or end elsewhere would be measured
+        # as another method.
+        if c.shape != default.shape or c[0] != default[0] or c[-1] != default[-1]:
             raise ValueError(
-                f"nodes must have {len(default)} entries (one per node), got "
-                f"shape {tuple(c.shape)}"
+                f"nodes must have {len(default)} entries (one per node) and "
+                f"start and end at the node fractions' first and last values "
+                f"{float(default[0])} and {float(default[-1])}; got {c.tolist()}"
             )
         b, b_error = (w[0, :, 0].to("cpu", f64) for w in self.weights(c[None, :, None]))
         if nodes is not None and not torch.equal(c, default):
@@ -420,21 +447,6 @@ class MethodClass(ABC):
             measured.append((int(failing[0]) - 1, errors))
         (degree, errors), (lower_degree, lower_errors) = measured
         return DegreeMeasurement(degree, lower_degree, errors, lower_errors)
-
-    def clone(self) -> Self:
-        """
-        Return an independent deep copy (no tensor shared with ``self``).
-
-        Each solver works on its own copy of the registry's float64 method, so
-        dtype or device changes on one solver never reach the registry or
-        another solver (lowering the dtype loses precision).
-
-        Returns
-        -------
-        Self
-            The copy, of the same class as ``self``.
-        """
-        return copy.deepcopy(self)
 
 
 class UniformMethodClass(MethodClass):
@@ -477,8 +489,8 @@ class UniformMethodClass(MethodClass):
         ------
         ValueError
             If ``degree`` is not an int >= 0, ``error_exponent`` is not an
-            int >= 2, or the node fractions are not a 1-D tensor of at least
-            two non-decreasing values from 0 to 1.
+            int >= 2, or the node fractions are not a 1-D tensor of
+            non-decreasing values in [0, 1], not all equal.
         """
         super().__init__(degree, error_exponent, references)
         self.tableau = tableau
@@ -518,27 +530,25 @@ class UniformMethodClass(MethodClass):
             self.tableau.b_error.unsqueeze(-1).expand(n_panels, -1, -1),
         )
 
-    def to_dtype(self, dtype: torch.dtype) -> None:
+    def _map_tensors(self, fn: Callable[[torch.Tensor], torch.Tensor]) -> Self:
         """
-        Convert the tableau to ``dtype``.
+        Return a shallow copy with a new tableau of ``fn`` applied to ``c``, ``b`` and ``b_error``.
 
         Parameters
         ----------
-        dtype : torch.dtype
-            The dtype to convert to.
-        """
-        self.tableau.to_dtype(dtype)
+        fn : Callable
+            Maps each tableau tensor to the copy's.
 
-    def to_device(self, device: str | torch.device) -> None:
+        Returns
+        -------
+        Self
+            The copy.
         """
-        Move the tableau to ``device``.
-
-        Parameters
-        ----------
-        device : str or torch.device
-            The device to move to.
-        """
-        self.tableau.to_device(device)
+        converted = copy.copy(self)
+        converted.tableau = _Tableau(
+            fn(self.tableau.c), fn(self.tableau.b), fn(self.tableau.b_error)
+        )
+        return converted
 
 
 class VariableMethodClass(MethodClass):
@@ -552,7 +562,7 @@ class VariableMethodClass(MethodClass):
     ``methods/interpolatory.py``), as each uniform method is an instance with
     its own tableau.
 
-    ``weight_function`` must be a module-level function: ``clone()`` keeps it
+    ``weight_function`` must be a module-level function: ``to()`` keeps it
     by reference, and solvers can then be pickled (a lambda or a local function
     cannot be pickled). It is stored on the instance; assigning it to the class
     instead would make Python pass ``self`` to it.
@@ -560,10 +570,11 @@ class VariableMethodClass(MethodClass):
     Attributes
     ----------
     c : torch.Tensor
-        Node fractions of a new subinterval, non-decreasing from 0 to 1.
+        Node fractions of a new subinterval, non-decreasing in [0, 1].
         Shape: [C].
     weight_function : Callable
-        Maps node positions rescaled to [0, 1], shape [N, C, T], to
+        Maps node positions as fractions of their subinterval, shape
+        [N, C, T], to
         ``(b, b_error)``, each of shape [N, C], in the dtype and on the device
         of its input.
     """
@@ -598,8 +609,8 @@ class VariableMethodClass(MethodClass):
         ------
         ValueError
             If ``degree`` is not an int >= 0, ``error_exponent`` is not an
-            int >= 2, or ``c`` is not a 1-D tensor of at least two
-            non-decreasing values from 0 to 1.
+            int >= 2, or ``c`` is not a 1-D tensor of non-decreasing values in
+            [0, 1], not all equal.
         """
         super().__init__(degree, error_exponent, references)
         self.c = c
@@ -621,8 +632,9 @@ class VariableMethodClass(MethodClass):
         """
         Compute the weights from each subinterval's actual node positions.
 
-        Rescales each subinterval's nodes to [0, 1] (shift so the first node is
-        0, divide by the subinterval's width) and applies ``weight_function``
+        Rescales each subinterval's nodes to fractions of the subinterval, the
+        first and last node to the first and last node fraction (to 0 and 1
+        when the ends are nodes, bit for bit), and applies ``weight_function``
         there. The weights take the dtype and device of ``nodes``.
 
         Parameters
@@ -642,8 +654,9 @@ class VariableMethodClass(MethodClass):
             tensors (a [1, C] result would broadcast silently in the
             weighted sum).
         """
+        c = self.c.to(nodes)
         norm_dt = nodes - nodes[:, 0, None]
-        norm_dt = norm_dt / norm_dt[:, -1, None]
+        norm_dt = c[0] + (c[-1] - c[0]) * norm_dt / norm_dt[:, -1, None]
         b, b_error = self.weight_function(norm_dt)
         expected = norm_dt.shape[:2]
         if b.shape != expected or b_error.shape != expected:
@@ -653,24 +666,23 @@ class VariableMethodClass(MethodClass):
             )
         return b.unsqueeze(-1), b_error.unsqueeze(-1)
 
-    def to_dtype(self, dtype: torch.dtype) -> None:
+    def _map_tensors(self, fn: Callable[[torch.Tensor], torch.Tensor]) -> Self:
         """
-        Convert the node fractions to ``dtype``.
+        Return a shallow copy with ``fn`` applied to the node fractions ``c``.
+
+        The copy shares ``weight_function``, a module-level function that holds
+        no state.
 
         Parameters
         ----------
-        dtype : torch.dtype
-            The dtype to convert to.
-        """
-        self.c = self.c.to(dtype)
+        fn : Callable
+            Maps ``c`` to the copy's.
 
-    def to_device(self, device: str | torch.device) -> None:
+        Returns
+        -------
+        Self
+            The copy.
         """
-        Move the node fractions to ``device``.
-
-        Parameters
-        ----------
-        device : str or torch.device
-            The device to move to.
-        """
-        self.c = self.c.to(device)
+        converted = copy.copy(self)
+        converted.c = fn(self.c)
+        return converted

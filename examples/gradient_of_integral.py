@@ -35,7 +35,7 @@ import torch
 
 from padaquad import adaptive_quadrature, integrate, steps
 
-# Common settings: float64 bounds (padaquad computes in the dtype of the
+# Common settings: float64 bounds (PadaQuad computes in the dtype of the
 # bounds), the CPU, and a fixed batch size, which skips the memory benchmark.
 MESH_INIT = torch.tensor([0.0], dtype=torch.float64)
 MESH_FINAL = torch.tensor([math.pi], dtype=torch.float64)

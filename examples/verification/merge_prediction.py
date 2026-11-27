@@ -8,7 +8,7 @@ neighbouring subintervals are merged when the merged subinterval is predicted to
 pass its tolerance with a margin. With ``merge_rule="predicted"`` (the default)
 the merged subinterval's integral and error estimate are computed from the
 integrand values already stored for the two neighbours, by interpolation; with
-``merge_rule="power_law"`` (padaquad 1.3.0 and 1.4.0) the neighbours' summed
+``merge_rule="power_law"`` (PadaQuad 1.3.0 and 1.4.0) the neighbours' summed
 error is multiplied by ``2**(error_exponent - 1)``. See the user guide, "The
 optimal mesh and the merge rule".
 
@@ -22,7 +22,7 @@ passes when its error is at most the largest of
 - 1.05 times the cold call's error (a cold call already outside the tolerance
   is a limit of the error estimate, not of merging);
 - the sum of the rounding floors ``50 * eps * |Q_i|`` of its subintervals,
-  the accuracy padaquad accepts when the tolerance is below what the dtype can
+  the accuracy PadaQuad accepts when the tolerance is below what the dtype can
   resolve.
 
 The script also checks that ``"predicted"`` costs no more integrand evaluations

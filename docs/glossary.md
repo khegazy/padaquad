@@ -6,7 +6,7 @@ used in prose.
 
 ```{glossary}
 integration variable `t`
-  The variable of integration. padaquad computes $\int_a^b f(t)\,dt$. The code
+  The variable of integration. PadaQuad computes $\int_a^b f(t)\,dt$. The code
   calls it `t`; the documentation calls it "the integration variable `t`". It
   need not be a time.
 
@@ -16,7 +16,7 @@ integrand
   extra arguments `f_args`), never on the running value of the integral.
 
 subinterval
-  One piece of the integration domain $[a, b]$. padaquad splits the domain into
+  One piece of the integration domain $[a, b]$. PadaQuad splits the domain into
   subintervals, applies a quadrature method on each, and adds the results.
 
 mesh
@@ -28,11 +28,12 @@ node
   subinterval.
 
 node fractions
-  The node positions of a method inside a subinterval of width 1, from 0 to 1.
-  A subinterval $[l, r]$ gets its nodes at $l + c_i (r - l)$.
+  The node positions of a method inside a subinterval of width 1, between 0
+  and 1; the ends 0 and 1 need not be nodes. A subinterval $[l, r]$ gets its
+  nodes at $l + c_i (r - l)$.
 
 method
-  A quadrature formula: node fractions plus weights. padaquad's methods are
+  A quadrature formula: node fractions plus weights. PadaQuad's methods are
   listed in `UNIFORM_METHODS` and `VARIABLE_METHODS` (for example `gk21`,
   `cc33`, `dopri5`).
 
@@ -70,12 +71,12 @@ tolerance
 
 error ratio
   A subinterval's error estimate divided by its tolerance. Below 1, the
-  subinterval is accepted; otherwise it is split in half and both halves are
-  evaluated again.
+  subinterval is accepted; otherwise it is split in half (or in four, with
+  `split_rule="accelerate"`) and the pieces are evaluated again.
 
 rounding floor
   The size of the error that float64 or float32 rounding alone makes on a
-  subinterval. padaquad never asks for a tolerance below it, so it stops
+  subinterval. PadaQuad never asks for a tolerance below it, so it stops
   splitting once the error is at rounding level.
 
 warm start

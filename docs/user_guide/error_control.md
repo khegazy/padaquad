@@ -13,7 +13,8 @@ r_k = \frac{|e_k|}{\tau_k}, \qquad
 \tau_k = \max\!\bigl(\text{atol},\ \text{rtol}\,|I|,\ 50\,\varepsilon\,|s_k|\bigr),
 $$ (error-ratio)
 
-is below 1, and split at its midpoint otherwise. Here `atol` and `rtol` are
+is below 1, and split at its midpoint otherwise (or into four pieces,
+{ref}`ug-four-pieces`). Here `atol` and `rtol` are
 the absolute and relative tolerances, $I$ is the integral (see
 {ref}`ug-error-reference` for which value of it), and $\varepsilon$ is the
 machine epsilon of the dtype ($2.2 \times 10^{-16}$ in float64,
@@ -29,10 +30,10 @@ the subinterval rather than the absolute value of the subinterval's
 contribution; it raises the error estimate rather than the tolerance; and it
 applies the floor only when it is larger than the smallest positive double.
 QUADPACK also rescales its error estimate {cite:p}`quadpack_netlib`, which
-padaquad does not.
+PadaQuad does not.
 
 The error estimate measures the embedded method's error, so it is usually much
-larger than the error of the integral padaquad returns, which uses the
+larger than the error of the integral PadaQuad returns, which uses the
 higher-degree method {cite:p}`gonnet2012`, footnote 20. The script
 {doc}`examples/verification/integral_accuracy.py <../auto_examples/verification/integral_accuracy>`
 compares actual errors with the tolerances; for the Gauss-Kronrod and
@@ -60,7 +61,7 @@ $k = d + 2$ against the measured degree of every embedded method.
 
 ### Precision
 
-padaquad runs in float64 (the default) or float32, following the dtype of the
+PadaQuad runs in float64 (the default) or float32, following the dtype of the
 bounds or mesh given to `integrate`. float16 is refused with a `ValueError`:
 its rounding error, about $10^{-3}$, is larger than typical tolerances, so the
 solver could not tell whether a subinterval meets its tolerance.
@@ -68,10 +69,94 @@ solver could not tell whether a subinterval meets its tolerance.
 ### Non-finite values
 
 If the integrand returns NaN or Inf, `integrate` raises a `ValueError` naming
-the offending points (`error_on_nonfinite=True`, the default). With
-`error_on_nonfinite=False`, subintervals with a non-finite error ratio are
+the offending points (`runtime_checks=True`, the default). With
+`runtime_checks=False`, subintervals with a non-finite error ratio are
 accepted instead of split, the non-finite value reaches the returned integral,
-and `converged` is `False`. Either way the run ends.
+and `converged` is `False`. Either way the run ends. `runtime_checks=False`
+also skips the check, made once at the end of the call, that the accepted
+subintervals cover the final mesh once, each with its own width; the finite check costs time and, for
+integrands with many outputs, memory as large as a call's output. The mesh
+itself stays in order by construction, so it is not checked.
+
+(ug-four-pieces)=
+### Splitting into four pieces
+
+A failing subinterval is split at its midpoint (`split_rule="halve"`, the
+default). Where the integrand is far from resolved, both halves usually fail
+again, and the values computed on the subinterval are discarded at every
+level: with `gk21` at `atol=1e-8`, about half of the points at which
+$\sin(2 \times 10^5 t)$ or $\sin(1/(t + 10^{-3}))$ on $[0, 1]$ is evaluated
+belong to subintervals that are then split, and each level costs one more pass
+of the loop.
+
+With `split_rule="accelerate"` (a constructor or `integrate` option), a failing
+subinterval is split into four equal pieces when
+
+- it is itself a piece of a split subinterval (its split count is at least 1),
+  and
+- its error ratio $r$ is at least $2^k$, where $k$ is the method's
+  `error_exponent` (21 for `gk21`, 15 for `gk15`, 7 for `gk7`).
+
+The four pieces are those that two successive halvings make, and they count as
+two halvings in `max_split_depth` and against `max_adaptive_splits` (one
+halving below the cap, the subinterval is halved). Subintervals judged again by
+the re-check of accepted subintervals are halved. With
+`error_norm="failure_fraction"`, whose accept quantity is a fraction rather
+than a ratio, `split_rule="accelerate"` raises `ValueError` (pass
+`split_rule="halve"` or a norm-family `error_norm`).
+
+**Why $2^k$.** The error estimate of a subinterval of width $h$ is dominated by
+the error of the method's embedded lower-degree method, of degree $k - 2$,
+which is
+$C h^k$ with $C$ proportional to the $(k-1)$-th derivative of $f$ there. Where
+that derivative changes little across the subinterval, each half has
+
+$$
+e_{1/2} \approx \frac{e}{2^k}, \qquad r_{1/2} \approx \frac{r}{2^k}
+$$ (half-ratio)
+
+when the tolerance does not depend on $h$ (`atol`, `rtol` times the integral),
+and $r_{1/2} \approx r / 2^{k-1}$ when it is the rounding floor, which shrinks
+with $h$. Both halves would pass, and a four-way split would waste the
+evaluation of two pieces, only if $r_{1/2} < 1$ for both, which
+{eq}`half-ratio` excludes for $r \geq 2^k$: such a subinterval's halves would
+fail and be split anyway, and the four-way split saves their evaluation and a
+pass. This derivation is PadaQuad's own reasoning, not taken from a paper;
+measured, a subinterval's estimate is exactly $2^k$ times each half's for a
+polynomial of degree $k - 1$, for every method.
+
+Before the estimate follows $h^k$ (where the integrand is far from resolved),
+it can fall faster than $2^k$ per halving, and a four-way split can then cost
+points. Measured over 5,024 runs (the 9 integrands below, 15 others, and 3,944
+runs on sines, Gaussians, Runge functions and exponentials; `gk7` to `gk31`,
+`cc17`, `cc33`; `atol` $10^{-4}$ to $10^{-12}$; random starting meshes), 11
+needed more points than halving: 6 because halving had accepted an error above
+10 times the tolerance by accident (5 of them a jump with `gk7`), and 5 by 1.3
+to 6.1 % (`gk7`, `gk15`, `cc17`). None was `gk21`, `gk31` or `cc33`, and no
+error was worse than 10 times halving's or 10 times the tolerance. The saving
+depends on the integrand and the method:
+
+| Runs | `gk21` points / passes | `gk15` | `gk7` | `cc33` |
+|---|---|---|---|---|
+| 9 integrands of the plan (405) | 0.985 / 0.956 | 0.885 / 0.877 | 0.798 / 0.788 | 0.932 / 0.938 |
+| 15 other integrands (675) | 0.982 / 0.962 | 0.963 / 0.882 | 0.828 / 0.733 | 0.984 / 0.916 |
+| smooth families (3,944) | 0.877 / 0.861 | 0.825 / 0.838 | 0.781 / 0.724 | 0.882 / 0.870 |
+
+(totals relative to halving). For `gk21` the saving is in oscillatory
+integrands refined to tight tolerances ($\sin(2 \times 10^4 t)$ at
+`atol=1e-11`: 26 % fewer points, 7 passes instead of 10); integrands with an
+isolated feature (a kink, a peak, a jump), whose failing pieces leave one
+failing piece each, are mostly unchanged.
+
+It does not save time when `f` is cheap: on an A100, a mesh update takes 53
+GPU launches when halving; with `"accelerate"`, every update after the call's
+first split takes 31 more for its test, and 35 more when it splits in four.
+Over 270 runs (the 9 integrands of the plan, `gk7`, `gk15`, `gk21`, `cc17`,
+`cc33`, `atol` $10^{-6}$ to $10^{-10}$, two random starting meshes), the total
+time was 1 % less than halving's: 9 % less where it split in four, 7 % more
+where it did not; `gk21`, which seldom splits in four there, took 5 % more
+(geometric mean) and `gk7` 10 % less. Use it when `f` is expensive and the
+integrand needs many levels of refinement.
 
 (ug-error-norm)=
 ## Integrands with several outputs
@@ -83,12 +168,17 @@ $e_k$, and `error_norm` turns it into one accept-or-split decision:
   $R(e_k)$ of the error vector is compared with
   $\max(\text{atol}, \text{rtol}\, R(I))$. `"2"` is the Euclidean norm, `"max"`
   the largest absolute component, `"rms"` the root-mean-square; a callable must
-  reduce the last axis of a `[..., D]` tensor.
+  reduce the last axis of a `[..., D]` tensor, each row on its own (a
+  subinterval's reduced error is computed once, with the other subintervals of
+  its batch, and kept for every later check of it), and return a
+  tensor of shape `[...]` on the input's device; another output
+  raises `ValueError` where it is first used. That the rows are reduced
+  independently is not checked.
 - `"failure_fraction"`: each component $d$ is compared with its own tolerance
   $\text{atol} + \text{rtol}\,|I_d|$, and the subinterval is accepted when the
   fraction of failing components is at most `mesh_failure_tolerance` (0 means
   every component must pass). This bounds the error of every output, not
-  an aggregate. This scheme is padaquad's own.
+  an aggregate. This scheme is PadaQuad's own.
 
 For $D = 1$ the norm options all reduce to Eq. {eq}`error-ratio`.
 
@@ -96,7 +186,7 @@ For $D = 1$ the norm options all reduce to Eq. {eq}`error-ratio`.
 $\max(\text{epsabs}, \text{epsrel}\cdot\text{norm}(I))$ are those of
 `scipy.integrate.quad_vec` {cite:p}`scipy_quadvec`. The acceptance differs:
 `quad_vec` stops when the *sum* of the errors of all subintervals is below
-one eighth of that tolerance, while padaquad accepts or splits each subinterval
+one eighth of that tolerance, while PadaQuad accepts or splits each subinterval
 by its own error ratio. SciPy has no `"rms"` or `"failure_fraction"` option.
 
 (ug-error-reference)=
@@ -105,9 +195,13 @@ by its own error ratio. SciPy has no `"rms"` or `"failure_fraction"` option.
 The relative tolerance multiplies a reference value of the integral:
 
 - **Absolute mode** (`use_absolute_error_ratio=True`): the whole integral.
-  During the integration only part of it is known, so the solver uses the
-  running total of the subintervals evaluated so far, and early batches get a
-  different tolerance than they would with the final integral. When the
+  During the integration only an estimate of it is known, so the solver uses
+  the running total of the subintervals evaluated so far: with
+  `take_gradient=False` the whole interval, evaluated on the current mesh,
+  which is coarse in the first passes; with `take_gradient=True` also only part
+  of the interval, since each batch is judged as soon as it is evaluated. Early
+  subintervals therefore get a different tolerance than they would with the
+  final integral. When the
   running total is smaller than the final integral, early subintervals are
   refined more than needed. When it is larger, for example when positive and
   negative parts of the integrand cancel, early subintervals are accepted
@@ -127,7 +221,14 @@ The relative tolerance multiplies a reference value of the integral:
 - **Cumulative mode** (`use_absolute_error_ratio=False`): the running integral
   from `mesh_init` through each subinterval, as in ODE solvers. Tolerances then
   change along the domain; where the running integral passes through zero, the
-  relative tolerance vanishes and only `atol` remains.
+  relative tolerance vanishes and only `atol` remains. On a GPU, PyTorch's
+  running sum (`torch.cumsum`) of a single output can differ from one run to
+  the next from about 17,000 subintervals in float64 and 23,000 in float32,
+  and did for every array tried from 40,000 in float64 and 100,000 in float32
+  (measured on an A100 with PyTorch 2.8), so with one output and that many
+  subintervals the error ratios can differ between runs in their last bits,
+  and with them a decision within rounding of the tolerance. With several outputs, on the CPU, or under
+  `torch.use_deterministic_algorithms(True)` this sum is reproducible.
 
 Whatever the mode, `converged` judges every accepted subinterval against the
 final integral ({ref}`ug-convergence`).

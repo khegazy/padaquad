@@ -8,9 +8,9 @@ degree d makes an error on one subinterval of width h that falls like
 h^(d + 2) for a smooth integrand, so a higher degree means fewer subintervals
 for the same accuracy.
 
-This script measures the degree of every method in padaquad from its stored
+This script measures the degree of every method in PadaQuad from its stored
 nodes and weights, and checks it against the degree the method claims
-(``method.degree``). It also checks each method's *error estimate*. padaquad
+(``method.degree``). It also checks each method's *error estimate*. PadaQuad
 estimates the error on a subinterval as the difference between the method and
 a lower-degree method that shares its nodes; the solver assumes that this
 lower-degree method has degree ``error_exponent - 2``, and the script checks

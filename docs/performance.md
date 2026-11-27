@@ -152,87 +152,85 @@ every integrand in under half a minute per run.
 
 The lines under each table are generated from its results file, like the
 tables. The observations below are written by hand from the files measured
-on 2026-11-24 (NVIDIA A100 80 GB and AMD EPYC 7763, PadaQuad commit
-`12ebfef`); check them again whenever a results file changes. Speedups are
-PadaQuad `gk21`'s.
+on 2026-11-26 (NVIDIA A100 80 GB and AMD EPYC 7763, PadaQuad 2.0.0 at commit
+`f8e78b2`, 8 PyTorch threads); check them again whenever a results file
+changes. Speedups are PadaQuad `gk21`'s, with its default options, unless a
+line names the `gk21 accelerate` row.
 
-- **Many subintervals on the GPU: PadaQuad is the fastest of the five on the
-  four integrands that need about 1,000 subintervals.** It takes 42 to 61 ms
-  on `chirp`, `spectrum`, `feature_network` and `feature_network_wide`, where
-  the next fastest library takes 156 and 421 ms (scipy, on the CPU, on `chirp`
-  and `spectrum`) or 326 and 358 ms (quadax, on the two networks). That is 3.7
-  to 84 times as fast as scipy, 5.3 to 12 times as fast as quadax, 9.4 to 38
-  times as fast as diffrax and 130 to 500 times as fast as torchdiffeq. Each
-  of PadaQuad's calls of the integrand evaluates the nodes of every
-  subinterval waiting to be checked; the other libraries evaluate one step or
-  one subinterval at a time.
-- **With fewer subintervals, the gap closes.** On `many_outputs` (126
-  subintervals in quadax, 1,000 outputs) PadaQuad is 3 and 3.9 times as fast
-  as scipy and diffrax and 0.87 times as fast as quadax; on `oscillatory` (64
-  subintervals) it is 0.45 times as fast as scipy and 0.54 times as fast as
-  quadax.
-- **On the CPU, PadaQuad is the fastest on the two expensive networks**: 4.3
-  and 1.7 times as fast as quadax, the next fastest, and 6.1 to 40 times as
-  fast as scipy and diffrax. Each evaluation costs the most there, and
-  PadaQuad evaluates many points per call of the network.
+- **On the GPU, PadaQuad is the fastest of the five on all six integrands that
+  need many subintervals.** `gk21` takes 14.5 to 28.8 ms on `chirp`,
+  `spectrum`, `oscillatory`, `many_outputs`, `feature_network` and
+  `feature_network_wide`. That is 1.1 to 140 times as fast as scipy, 1.3 to 25
+  times as fast as quadax, 9.4 to 72 times as fast as diffrax and 130 to 950
+  times as fast as torchdiffeq. The margin is smallest where the fewest
+  subintervals are needed (`oscillatory`, 64 in quadax: 1.1 times scipy, 1.3
+  times quadax) and largest on the expensive networks (63 and 140 times
+  scipy). Each of PadaQuad's calls of the integrand evaluates the nodes of
+  every subinterval waiting to be checked; the other libraries evaluate one
+  step or one subinterval at a time.
+- **On the CPU, PadaQuad is the fastest on the two networks and on
+  `many_outputs`.** On the networks `gk21` is 5.1 and 2.4 times as fast as
+  quadax, the next fastest library, and 8.3 to 57 times as fast as diffrax and
+  scipy (PadaQuad's own `dopri5` row is faster still there, at a larger error).
+  On `many_outputs` it is 2.8 times as fast as diffrax, 3.9 times as fast as
+  quadax and 5.8 times as fast as scipy.
 - **On cheap integrands on the CPU, diffrax and quadax are faster**: diffrax
-  takes 2.2 ms on `chirp` (PadaQuad 41 ms) and quadax 0.32 ms on
-  `oscillatory` (PadaQuad 12 ms). They compile the whole solve, integrand
+  takes 2.2 ms on `chirp` (PadaQuad 13 ms) and quadax 0.33 ms on
+  `oscillatory` (PadaQuad 8.1 ms). They compile the whole solve, integrand
   included, into one program (that this explains the times is our reading,
-  not a measurement). PadaQuad is still 1.8 times as fast as quadax on
-  `spectrum`, 1.4 and 1.1 times as fast as quadax and diffrax on
-  `many_outputs`, and 3.9 and 7.2 times as fast as scipy on `chirp` and
-  `spectrum`.
-- **On the three integrands that need few subintervals**, PadaQuad takes 5.6
-  to 29 ms, and scipy, quadax and (on the CPU) diffrax are faster, by up to
-  240 times (diffrax on `sharp_peak`, CPU).
-- **Why PadaQuad is slower there** (measured on the same node with
-  `padaquad.integrate` alone; `many_outputs` on the GPU, 35 to 44 ms per
-  call):
-  - The integrand takes 0.6 ms of it. The GPU is busy for 7 ms: one call
-    launches about 1,300 small GPU operations and waits for the GPU 227
-    times (to read a result back, for example whether any subinterval is
-    still waiting, or for a check), so the time is set by Python and these
-    waits, not by the arithmetic.
-  - That cost comes back on every turn of the loop (one call of the
-    integrand, then splitting and recording): about 3 to 4 ms per turn, and 5 to
-    10 turns per integral. The number of turns grows with how many times a
-    subinterval is halved, not with the number of subintervals; quadax's time
-    grows with the number of subintervals, at about 0.15 ms per iteration on
-    this GPU. So PadaQuad wins once each of its turns handles many
-    subintervals (our reading of these numbers: about 20 or more).
-  - The record of accepted subintervals, including the integrand's values at
-    every node (1,000 outputs here), is copied to the CPU after every turn
-    (`result_device="cpu"`, the default) and rebuilt on every insertion: 13 ms
-    of the 35 ms. With `result_device="cuda"` the call takes 22 ms, faster
-    than quadax's 37 ms.
-  - After the loop, PadaQuad builds the mesh it returns for a later call
-    (`state.mesh`), merging subintervals with predicted errors: 2 to 6 ms on
-    every call, although the benchmark does not reuse it.
-  - On the CPU, torch's 128 threads slow these many small operations: with 8
-    threads `many_outputs` takes 39 ms instead of 54 ms, `spectrum` 41 instead
-    of 58, `chirp` 20 instead of 26. The benchmark uses all 128, as XLA does.
-- **PadaQuad's times vary from run to run** more than the other libraries':
-  its slowest of 7 runs is often 2 to 6 times its fastest, and a median can
-  move by 30 to 80 % between two runs (`damped_sine` on the GPU: 6.8 ms on
-  the 40 GB A100, 12 ms here; 7 ms when timed alone on this node). Its time
-  is mostly small operations on the CPU, which react to anything else the
-  machine does (a likely cause, not a measured one).
+  not a measurement). PadaQuad is still 1.6 and 3.5 times as fast as quadax on
+  `chirp` and `spectrum`, and 12 and 14 times as fast as scipy.
+- **On the three integrands that need few subintervals**, PadaQuad takes 5.3
+  to 18 ms on the GPU and 4.3 to 9.1 ms on the CPU, and scipy, quadax and
+  diffrax are faster on most of them, by up to 190 times (diffrax on
+  `sharp_peak`, CPU). On `neural_network_wide`, an expensive integrand, `gk21`
+  is 2.9 times as fast as scipy on the GPU and 1.9 times on the CPU.
+- **Why PadaQuad is slower there** (profiled on the same node with
+  `padaquad.integrate` alone, `gk21`):
+  - A call has a fixed cost: `damped_sine` finishes in one pass and takes
+    4.5 ms on the GPU and 3.4 ms on the CPU, of which the integrand takes
+    0.09 and 0.05 ms. On the GPU the call launches 157 small operations and
+    waits for the GPU 25 times; the GPU is busy for 0.5 ms.
+  - Each further pass (one call of the integrand on every waiting
+    subinterval, then the error control and the mesh update) adds about 2.6 to
+    3.0 ms on the GPU and 1 ms on the CPU, whatever the integrand costs:
+    `sharp_peak` takes 7 passes and 20 ms on the GPU.
+  - quadax spends about 0.15 ms per subinterval on this GPU (its loop runs
+    `max_ninter + 1` iterations: 19.1 ms for 129 on `oscillatory`), and the
+    compiled JAX solvers microseconds on the CPU. So on the GPU PadaQuad wins
+    once a pass handles about 17 to 20 subintervals (our reading of these
+    numbers), and on the CPU only when the integrand is expensive.
+  - The `gk21 accelerate` row is 1.5 ms faster than `gk21` on the GPU and the
+    CPU on `damped_sine` and `neural_network_wide`, where it evaluates the same
+    points: that is the cost of building the mesh for a later call
+    (`build_state_mesh=True`, the default), which a single integral does not
+    need (our inference from equal point counts). Its four-way splits saved
+    evaluations only on `many_outputs` (2,961 instead of 3,381 on the GPU) and,
+    slightly, on `chirp`.
+  - The causes that the earlier version of this page listed (the record copied
+    to the CPU on every pass, kept in order through a dictionary, garbage
+    collection) were fixed in PadaQuad 2.0.0
+    (`docs/issues/per-turn-overhead.md` in the repository); what is left is
+    the cost of many small operations launched from Python in every pass.
+- **Run-to-run spread.** PadaQuad's slowest of 7 runs is within 6 % of its
+  fastest for half of its rows. A few rows have one slow run among the seven
+  (the first run of `chirp` with `dopri5` on the GPU, 96 ms instead of
+  30 ms); the medians are not affected.
 - **ODE solvers can step over narrow features.** On `spectrum`, torchdiffeq's
   and diffrax's errors are $7.6\cdot10^{-6}$ to $1.1\cdot10^{-5}$, about a
   thousand times `atol`, while scipy, quadax and PadaQuad `gk21` stay below
   $10^{-9}$: a step whose error estimate misses a peak skips part of it. On
-  the networks, their errors are $3\cdot10^{-7}$ to $7\cdot10^{-6}$.
-- **Accuracy of PadaQuad.** `gk21`'s error is at most $3\cdot10^{-8}$
+  the networks, their errors are $2.8\cdot10^{-7}$ to $7\cdot10^{-6}$.
+- **Accuracy of PadaQuad.** `gk21`'s error is at most $3.1\cdot10^{-8}$
   (`feature_network`, CPU): a test per subinterval allows a total error of
   many times `atol` ({ref}`perf-tolerance`). PadaQuad `dopri5`'s error is far
-  larger on the integrands with many subintervals, up to $6\cdot10^{-4}$
+  larger on the integrands with many subintervals, up to $5.7\cdot10^{-4}$
   (`spectrum`, CPU): its error estimate is too small there. Use `gk21` for
   them.
-- **Fewer timed runs.** torchdiffeq on `chirp` (GPU and CPU) and `spectrum`
-  (GPU), and torchdiffeq and diffrax on `feature_network_wide` (CPU, 16 and
-  27 s per run) were timed 2 to 6 times instead of 7; the tables say how
-  many.
+- **Fewer timed runs.** torchdiffeq on `chirp` (GPU and CPU), `spectrum` (GPU)
+  and `feature_network_wide` (CPU), and diffrax on `feature_network_wide`
+  (CPU, 27 s per run) were timed 2 to 6 times instead of 7; the tables say
+  how many.
 
 ## Reproduce
 

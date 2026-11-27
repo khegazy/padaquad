@@ -42,24 +42,22 @@ to 11.7 and 106 to 21 ms.
 
 ## What is left
 
-1. **Re-run the Performance page** (`examples/speed_test/run_benchmark.sh` on
-   the 80 GB A100 node) once 2.0.0 is on `main`. Every number on this branch's
-   page, and the Evidence tables of the original audit, predate the changes
-   above.
-2. **Benchmark script changes** (`timing-variation` plan, "Not done"): in
-   `examples/speed_test/library_comparison.py` (done in the merge of 2.0.0,
-   `569484c`: `gc.collect()` before the warm-up, every run's time in the
-   result (`times_s`), `OMP_NUM_THREADS` in the metadata; left:) a warm-up with the
-   timed call's options (including `result_device`), one fixed thread count for
-   every torch-based solver (at most one per physical core; 8 was within 8 % of
-   the fastest for PadaQuad in every case measured) from a command-line option
-   instead of `torch.set_num_threads(len(os.sched_getaffinity(0)))`, the count,
-   CPU set, `OMP_*` and `GOMP_SPINCOUNT` in the metadata, and the range beside
-   the median in PadaQuad's table; in `run_benchmark.sh`, `srun
-   --cpu-bind=cores` when `SLURM_JOB_ID` is set. Both results files are
-   re-measured, so a file without `times_s` need not render. (2.0.0 made the
-   first part in `trade_speed_for_memory.py` and in `torchdiffeq_comparison.py`,
-   since replaced by `library_comparison.py`.)
+1. **Re-run the Performance page.** Done 2026-11-26: measured at `f8e78b2`
+   (PadaQuad 2.0.0 merged into `performance_benchmark`) on the 80 GB A100 node.
+   On the GPU `gk21` is now the fastest of the five libraries on all six
+   integrands that need many subintervals; it still loses where few are needed
+   and, on the CPU, to the compiled JAX solvers on cheap integrands. The page's
+   "Why PadaQuad is slower there" gives the profile: a fixed cost of 4.5 ms (GPU)
+   and 3.4 ms (CPU) for a one-pass call, and 2.6-3.0 ms (GPU) or about 1 ms
+   (CPU) per further pass.
+2. **Benchmark script changes.** Done 2026-11-26 in
+   `examples/speed_test/library_comparison.py` and `run_benchmark.sh`
+   (`569484c` and `f8e78b2`): `gc.collect()` before each case, every run's time
+   (`times_s`), the warm-up calls the same closure as the timed runs,
+   `--torch-threads` (default 8) for PadaQuad and torchdiffeq, the OpenMP
+   variables and the CPU count in the metadata, the range beside the median in
+   PadaQuad's table, and each device run as an `srun --cpu-bind=cores` step. Not
+   done: `GOMP_SPINCOUNT` is recorded only when set, not set by the script.
 3. **A turn without waits (item 12)**, not attempted. The `compiled-turn`
    review found that capture needs fixed shapes and no host reads, while a
    turn's sizes come from its one read and change every turn, so only the

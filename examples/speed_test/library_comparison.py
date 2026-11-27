@@ -126,13 +126,15 @@ NETWORKS = {
 FEATURE_FREQUENCIES = 2.0 ** np.arange(10)  # 1, 2, 4, ..., 512 periods on [0, 1]
 # The timed runs of one (integrand, solver) stop at about this many seconds:
 # after a warm-up run of w seconds, min(--repeats, max(1, TIME_BUDGET_S // w))
-# runs, so a slow solver (torchdiffeq on thousands of steps) is timed once.
+# runs, so a slow solver (torchdiffeq on thousands of steps) is timed fewer
+# times, once when w is above half the budget. For the JAX solvers w includes
+# the compilation.
 TIME_BUDGET_S = 60.0
 # PadaQuad's max_batch per device and integrand: what PadaQuad's memory
 # benchmark (solver.get_max_batch(f=...)) measured on MAX_BATCH_HARDWARE, run
 # once with --measure-max-batch and never during a timed run. 1_000_000_000 is
 # that benchmark's ceiling (memory never limits those integrands). A timed run
-# never reaches these values: no case needs more than about 110,000
+# never reaches these values: no case needs more than about 80,000
 # evaluations in all. On other hardware, measure again and replace the table.
 MAX_BATCH_HARDWARE = {
     "cuda": "NVIDIA A100-SXM4-80GB",
@@ -872,6 +874,12 @@ def render_markdown(results: dict[str, Any]) -> str:
             r = mine.get(f"padaquad {label}")
             if r is None:
                 continue
+            if r["error"] is not None:
+                lines.append(
+                    f"| {label} | {r['max_batch']} | failed: {r['error']} |"
+                    + " |" * (4 + len(LIBRARIES))
+                )
+                continue
             mark = "" if r["converged"] else " †"
             n = r["repeats"]
             runs = "" if n == meta["repeats"] else f" ({n} run{'s' * (n > 1)})"
@@ -913,27 +921,41 @@ def _summary(results: dict[str, Any]) -> str:
         One bullet per PadaQuad row (``PADAQUAD_SOLVERS``) and library.
     """
     rows = results["rows"]
+    atol = results["metadata"]["atol"]
     by_key = {(r["integrand"], r["solver"]): r for r in rows}
     lines = []
     for label in PADAQUAD_SOLVERS:
         for library, solver in LIBRARIES.items():
-            speedups, worse = [], []
+            # Integrands where PadaQuad's error is larger than the library's,
+            # split by whether it still meets the tolerance (a larger error at
+            # rounding level, such as 5e-15 against 2e-15, is no failure).
+            speedups, within, beyond = [], [], []
             for name in results["integrands"]:
                 mine, base = (
                     by_key.get((name, f"padaquad {label}")),
                     by_key.get((name, solver)),
                 )
-                if mine is None or base is None or base["error"] is not None:
+                if mine is None or base is None or mine["error"] or base["error"]:
                     continue
                 speedups.append(base["time_median_s"] / mine["time_median_s"])
                 if mine["abs_error"] > base["abs_error"]:
-                    worse.append(name)
+                    (within if mine["abs_error"] <= atol else beyond).append(name)
             if not speedups:
                 continue
+            parts = []
+            if within:
+                parts.append(
+                    "its error is larger than that library's but within atol on "
+                    + ", ".join(f"`{n}`" for n in within)
+                )
+            if beyond:
+                parts.append(
+                    "its error is larger than that library's and above atol on "
+                    + ", ".join(f"`{n}`" for n in beyond)
+                )
             accuracy = (
-                "its error is at or below that library's on every integrand"
-                if not worse
-                else "its error is larger on " + ", ".join(f"`{n}`" for n in worse)
+                "; ".join(parts)
+                or "its error is at or below that library's on every integrand"
             )
             lines.append(
                 f"- **PadaQuad {label} vs {library}:** speedup from "
@@ -1016,7 +1038,9 @@ def main() -> None:
                 solve = make_solver(library, case, args.device, max_batch, budget)
                 row.update(measure(solve, case.exact, args.device, args.repeats))
             except Exception as e:
-                row.update(error=f"{type(e).__name__}: {e}"[:200], converged=False)
+                # One line without "|", so the message fits in a table cell.
+                message = " ".join(f"{type(e).__name__}: {e}".split()).replace("|", "/")
+                row.update(error=message[:200], converged=False)
             if library.startswith("padaquad"):
                 row["max_batch"] = max_batch
             rows.append(row)

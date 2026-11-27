@@ -98,7 +98,7 @@ the PadaQuad log for them.
   collected before each case and every run's time kept (`times_s`). PadaQuad's
   rows are `PADAQUAD_SOLVERS` (`dopri5`, `gk21`, and `gk21 accelerate`:
   `split_rule="accelerate"`, `build_state_mesh=False`); PadaQuad and
-  torchdiffeq use `--torch-threads` (default `TORCH_THREADS` = 8; the run
+  torchdiffeq use `--torch-threads` (default `TORCH_THREADS`; the run
   script passes `TORCH_THREADS` and runs each device as an `srun
   --cpu-bind=cores` step inside an allocation). JAX's CUDA start-up moves
   torch's current GPU to the last visible one, so `main` sets it back to GPU 0,

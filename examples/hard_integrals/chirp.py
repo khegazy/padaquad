@@ -4,7 +4,7 @@ A chirp
 
 ``f(t) = 2 t sin(10^4 t^2)`` on [0, 1] goes through about 1,600 periods, each
 shorter than the one before: its frequency grows in proportion to t. The
-subintervals must shrink steadily from left to right, and nearly a thousand of
+subintervals must shrink steadily from left to right, and several hundred of
 them are needed. PadaQuad evaluates the nodes of all the subintervals waiting
 to be checked in one call of the integrand.
 

@@ -67,8 +67,8 @@ and the {doc}`examples <auto_examples/index>` show those of
 
 For each case the script records the median wall time of 7 runs after one
 untimed warm-up run (which also compiles the JAX solvers), or of fewer runs
-(at least one; the table says how many) when the warm-up run shows that 7 would
-take more than a minute, with
+(at least one; the table says how many) when the warm-up run, compilation
+included, shows that 7 would take more than a minute, with
 `torch.cuda.synchronize` or `jax.block_until_ready` around each run on a GPU;
 the smallest and largest time; the number of points at which the integrand was
 evaluated (for diffrax, counted while it runs, in an untimed run); whether the
@@ -84,7 +84,7 @@ PadaQuad runs through `padaquad.integrate`, which builds a new solver on every
 call, with `take_gradient=False` and a fixed `max_batch` for each integrand
 and device: the value PadaQuad's memory benchmark (`get_max_batch(f=...)`)
 measured once on the hardware of the results (`MAX_BATCH` in the script), so
-no run measures memory. No case needs more than about 110,000 evaluations in
+no run measures memory. No case needs more than about 80,000 evaluations in
 all, so no call of the integrand is limited by it. The
 benchmark runs on an otherwise idle compute node, never on a shared login
 node.
@@ -114,9 +114,13 @@ integral.
   \sum_k e_k \le \max(\text{atol},\ \text{rtol}\,\|I\|),
   $$ (perf-quadpack)
 
-  with QUADPACK's error estimate, which enlarges the raw difference between
-  the Kronrod and Gauss results by up to a factor of about 200 (`quad_vec`
-  stops at a sum below an eighth of the tolerance {cite:p}`scipy_quadvec`).
+  with QUADPACK's error estimate, which rescales the raw difference $d$
+  between the Kronrod and Gauss results of a subinterval to
+  $s\,\min\bigl(1, (200\,d/s)^{3/2}\bigr)$, where $s$ measures how much the
+  integrand varies over the subinterval {cite:p}`quadpack_netlib`. This enlarges $d$ by up to a
+  factor of 200, and shrinks it only where $d$ is below $200^{-3} s$, about
+  $10^{-7} s$ (`quad_vec` stops at a sum below an eighth of the tolerance
+  {cite:p}`scipy_quadvec`).
 - **PadaQuad** accepts each subinterval on its own when
 
   $$
@@ -133,15 +137,16 @@ choice of tolerances removes them:
 - **Local versus global.** torchdiffeq, diffrax and PadaQuad test each step or
   subinterval on its own, so their total error can reach the number of steps
   or subintervals times `atol`; scipy and quadax bound the sum.
-- **The size of the estimate.** QUADPACK's enlarged estimate is larger than
-  the raw one, so scipy and quadax are the strictest. (An ODE solver
+- **The size of the estimate.** QUADPACK's estimate is larger than the raw
+  one except where the raw one is below about $10^{-7} s$, so scipy and
+  quadax are the strictest. (An ODE solver
   continues with its 5th-order solution while it estimates the error of the
   4th-order one, so its actual error is usually well below its estimate.)
 
 So equal tolerances do not give equal accuracy: **read the errors as well as
 the times.** `atol = 1e-8` is close to scipy's and quadax's default
-($1.49\cdot10^{-8}$), far above float64 rounding, and loose enough for every solver to finish
-every integrand in under half a minute per run.
+($1.49\cdot10^{-8}$), far above float64 rounding, and loose enough for every
+solver to finish every integrand in under half a minute per run.
 
 ## Results
 
@@ -164,12 +169,15 @@ line names the `gk21 accelerate` row.
   times as fast as quadax, 9.4 to 72 times as fast as diffrax and 130 to 950
   times as fast as torchdiffeq. The margin is smallest where the fewest
   subintervals are needed (`oscillatory`, 64 in quadax: 1.1 times scipy, 1.3
-  times quadax) and largest on the expensive networks (63 and 140 times
-  scipy). Each of PadaQuad's calls of the integrand evaluates the nodes of
-  every subinterval waiting to be checked; the other libraries evaluate one
-  step or one subinterval at a time.
-- **On the CPU, PadaQuad is the fastest on the two networks and on
-  `many_outputs`.** On the networks `gk21` is 5.1 and 2.4 times as fast as
+  times quadax) and largest on the two feature networks (63 and 140 times
+  scipy). On `oscillatory` the 13 % lead over scipy is narrow but held in
+  every run: `gk21`'s slowest of 7 runs, 15.9 ms, is below scipy's fastest,
+  16.1 ms (one measurement on one node; scipy runs on the CPU). Each of
+  PadaQuad's calls of the integrand evaluates the nodes of every subinterval
+  waiting to be checked; the other libraries evaluate one step or one
+  subinterval at a time.
+- **On the CPU, PadaQuad is the fastest on the two feature networks and on
+  `many_outputs`.** On these networks `gk21` is 5.1 and 2.4 times as fast as
   quadax, the next fastest library, and 8.3 to 57 times as fast as diffrax and
   scipy (PadaQuad's own `dopri5` row is faster still there, at a larger error).
   On `many_outputs` it is 2.8 times as fast as diffrax, 3.9 times as fast as
@@ -186,25 +194,42 @@ line names the `gk21 accelerate` row.
   `sharp_peak`, CPU). On `neural_network_wide`, an expensive integrand, `gk21`
   is 2.9 times as fast as scipy on the GPU and 1.9 times on the CPU.
 - **Why PadaQuad is slower there** (profiled on the same node with
-  `padaquad.integrate` alone, `gk21`):
+  `padaquad.integrate` alone, `gk21`, in a separate run with the integrand
+  synchronized and timed on each call; its times differ from the tables' by
+  up to 20 %, in both directions):
   - A call has a fixed cost: `damped_sine` finishes in one pass and takes
     4.5 ms on the GPU and 3.4 ms on the CPU, of which the integrand takes
     0.09 and 0.05 ms. On the GPU the call launches 157 small operations and
-    waits for the GPU 25 times; the GPU is busy for 0.5 ms.
+    waits for the GPU 25 times (counted as stream synchronizations, a count
+    that includes any waits of the profile's own timing of the integrand);
+    the GPU is busy for 0.5 ms.
   - Each further pass (one call of the integrand on every waiting
     subinterval, then the error control and the mesh update) adds about 2.6 to
-    3.0 ms on the GPU and 1 ms on the CPU, whatever the integrand costs:
-    `sharp_peak` takes 7 passes and 20 ms on the GPU.
-  - quadax spends about 0.15 ms per subinterval on this GPU (its loop runs
-    `max_ninter + 1` iterations: 19.1 ms for 129 on `oscillatory`), and the
-    compiled JAX solvers microseconds on the CPU. So on the GPU PadaQuad wins
-    once a pass handles about 17 to 20 subintervals (our reading of these
-    numbers), and on the CPU only when the integrand is expensive.
+    3.0 ms on the GPU and 1 ms on the CPU, the integrand's own time included,
+    on `sharp_peak`, `oscillatory` and `chirp`, whose integrand takes 0.2 ms
+    or less per call ((total − one-pass time) / (passes − 1), with the
+    one-pass time of `damped_sine`): `sharp_peak` takes 7 passes and 20 ms on
+    the GPU in the profile.
+  - quadax's loop takes about 0.15 ms per iteration on this GPU, and it runs
+    `max_ninter + 1` iterations whatever the integrand needs: 129 iterations
+    and 19.1 ms on `oscillatory`, where it needed 64 subintervals. With the
+    budgets used here (`QUADAX_MAX_NINTER`, two to four times the subintervals
+    needed), that is about 0.3 ms per needed subinterval on `oscillatory`,
+    `many_outputs` and the feature networks, and 0.5 to 0.6 ms on `chirp` and
+    `spectrum`. The compiled JAX solvers take microseconds or less per step or
+    iteration on the CPU on the cheap integrands. So on the GPU one PadaQuad
+    pass costs about as much as quadax spends on 5 to 10 of the subintervals
+    it needs, and PadaQuad is faster when each of its passes handles more of
+    them than that (our reading of these numbers, not a measurement); on the
+    CPU it is faster only when the integrand is expensive.
   - The `gk21 accelerate` row is 1.5 ms faster than `gk21` on the GPU and the
     CPU on `damped_sine` and `neural_network_wide`, where it evaluates the same
     points: that is the cost of building the mesh for a later call
     (`build_state_mesh=True`, the default), which a single integral does not
-    need (our inference from equal point counts). Its four-way splits saved
+    need (our inference from equal point counts). On the integrands that take
+    several passes, at equal point counts, it is between 2.5 ms slower and
+    1.5 ms faster, so the saving is not a fixed 1.5 ms there (not explained).
+    Its four-way splits saved
     evaluations only on `many_outputs` (2,961 instead of 3,381 on the GPU) and,
     slightly, on `chirp`.
   - The causes that the earlier version of this page listed (the record copied
@@ -214,13 +239,14 @@ line names the `gk21 accelerate` row.
     the cost of many small operations launched from Python in every pass.
 - **Run-to-run spread.** PadaQuad's slowest of 7 runs is within 6 % of its
   fastest for half of its rows. A few rows have one slow run among the seven
-  (the first run of `chirp` with `dopri5` on the GPU, 96 ms instead of
-  30 ms); the medians are not affected.
+  (the fourth run of `feature_network_wide` with `gk21` on the GPU, 245 ms
+  instead of 29 ms; the first of `chirp` with `dopri5` on the GPU, 96 ms
+  instead of 30 ms); the medians are not affected.
 - **ODE solvers can step over narrow features.** On `spectrum`, torchdiffeq's
   and diffrax's errors are $7.6\cdot10^{-6}$ to $1.1\cdot10^{-5}$, about a
   thousand times `atol`, while scipy, quadax and PadaQuad `gk21` stay below
   $10^{-9}$: a step whose error estimate misses a peak skips part of it. On
-  the networks, their errors are $2.8\cdot10^{-7}$ to $7\cdot10^{-6}$.
+  the two feature networks, their errors are $2.8\cdot10^{-7}$ to $7\cdot10^{-6}$.
 - **Accuracy of PadaQuad.** `gk21`'s error is at most $3.1\cdot10^{-8}$
   (`feature_network`, CPU): a test per subinterval allows a total error of
   many times `atol` ({ref}`perf-tolerance`). PadaQuad `dopri5`'s error is far

@@ -50,6 +50,17 @@ def test_jax_form_matches_torch(name: str) -> None:
     )
 
 
+@pytest.mark.parametrize("name", ALL)
+def test_values_keep_the_dtype_and_device_of_the_points(name: str) -> None:
+    """float32 points give float32 values on their device (torch and NumPy):
+    no float64 constant, such as the peak positions of spectrum, promotes them."""
+    f = ALL[name][0]
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    values = f(POINTS.to(device, torch.float32))
+    assert (values.dtype, values.device.type) == (torch.float32, device)
+    assert f(POINTS.numpy().astype(np.float32), xp=np).dtype == np.float32
+
+
 @pytest.mark.parametrize("bounds", [(0.0, 1.0), (0.2, 1.7)])
 @pytest.mark.parametrize("name", hard_integrand_dict)
 def test_exact_solution_matches_quad(name: str, bounds: tuple[float, float]) -> None:

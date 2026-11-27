@@ -27,7 +27,7 @@
 #   UV_CACHE_DIR         uv's download cache (default: next to the environment)
 #   REPEATS              timed runs per case (default 7)
 #   TORCH_THREADS        torch's CPU threads for PadaQuad and torchdiffeq
-#                        (default: the script's TORCH_THREADS, 8)
+#                        (default: the script's TORCH_THREADS)
 #
 # After a run: read the new tables (sphinx-build, or render_markdown in the
 # script), rewrite "What the results show" in docs/performance.md from them,
@@ -74,10 +74,11 @@ run_device() {  # run_device cuda|cpu OUTPUT REPEATS
   local device="$1" out="$2" repeats="$3"
   # In a Slurm allocation, run as one task bound to whole cores, with every CPU
   # and GPU of the node (a step of its own; --overlap lets it share the CPUs
-  # with the step this script runs in).
+  # with the step this script runs in; --export=ALL passes JAX_PLATFORMS and
+  # the rest of the environment even in a job submitted with --export=NONE).
   local launch=()
   if [[ -n "${SLURM_JOB_ID:-}" ]]; then
-    launch=(srun --ntasks=1 --nodes=1 --overlap --cpu-bind=cores
+    launch=(srun --ntasks=1 --nodes=1 --overlap --cpu-bind=cores --export=ALL
       --cpus-per-task="${SLURM_CPUS_ON_NODE:-$(nproc)}")
   fi
   local threads=()

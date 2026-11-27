@@ -617,7 +617,7 @@ def many_outputs_solution(
 
     The integral of ``sin(k*t)`` is ``(cos(k*a) - cos(k*b)) / k``, written as
     ``2 * sin(k*(a + b)/2) * sin(k*(b - a)/2) / k``: the difference of two
-    cosines loses up to 8 digits to cancellation where it is small (k = 710
+    cosines loses about 9 digits to cancellation where it is small (k = 710
     on [0, 1]); the product does not.
 
     Parameters

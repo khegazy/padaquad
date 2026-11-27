@@ -72,9 +72,9 @@ def test_unreadable_file_is_named(tmp_path: Path, content: str) -> None:
 
 
 def _synthetic_results() -> dict:
-    """A results file with known times: padaquad gk21 takes 1 ms, dopri5 2 ms;
-    torchdiffeq 4 ms (timed once), diffrax 8 ms (not converged), scipy 16 ms,
-    quadax raised."""
+    """A results file with known times: padaquad gk21 takes 1 ms, dopri5 2 ms,
+    gk21 accelerate raised; torchdiffeq 4 ms (timed once), diffrax 8 ms (not
+    converged), scipy 16 ms, quadax raised."""
     meta = json.loads(COMMITTED.read_text())["metadata"]
     row = {
         "device": "cpu",
@@ -115,6 +115,7 @@ def _synthetic_results() -> dict:
             "integrand": "f",
             "solver": "padaquad dopri5",
             "time_median_s": 2e-3,
+            "abs_error": 2e-9,  # above the libraries' 1e-9, within atol
             "max_batch": 7,
         },
         {
@@ -122,6 +123,15 @@ def _synthetic_results() -> dict:
             "integrand": "f",
             "solver": "padaquad gk21",
             "time_median_s": 1e-3,
+            "abs_error": 1.0,  # above atol
+            "max_batch": 7,
+        },
+        {
+            **row,
+            "integrand": "f",
+            "solver": "padaquad gk21 accelerate",
+            "converged": False,
+            "error": "OutOfMemoryError: boom",
             "max_batch": 7,
         },
     ]
@@ -165,6 +175,20 @@ def test_one_benchmark_table_and_one_padaquad_table_per_integrand(
     # PadaQuad's table has the range beside the median, like the libraries'.
     assert "| Median time (ms) | Range (ms) |" in padaquad.splitlines()[0]
     assert "| 1 | 0-1e+03 |" in gk21
+    # A PadaQuad row that raised says so, with as many cells as the others,
+    # and is left out of the summary.
+    failed = padaquad.splitlines()[-1]
+    assert failed.startswith("| gk21 accelerate | 7 | failed: OutOfMemoryError")
+    assert failed.count("|") == gk21.count("|")
+    assert "PadaQuad gk21 accelerate vs" not in text
+    # The summary says whether a larger error than a library's meets atol.
+    assert (
+        "- **PadaQuad dopri5 vs torchdiffeq:** speedup from 2x to 2x (below 1x, "
+        "PadaQuad is slower); its error is larger than that library's but within "
+        "atol on `f`." in text
+    )
+    assert "PadaQuad gk21 vs scipy:** speedup from 16x to 16x" in text
+    assert "larger than that library's and above atol on `f`." in text
 
 
 def test_memory_options_render_every_setting_of_every_integrand() -> None:

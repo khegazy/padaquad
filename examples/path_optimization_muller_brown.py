@@ -6,7 +6,7 @@ A chemical reaction moves a molecule from one minimum of its potential energy
 E to another. Along the way it has to climb over a ridge, and the lowest
 pass over the ridge, a saddle point of E, is the transition state that sets
 the reaction rate. This example finds that pass by optimizing a path whose
-loss is an integral along it, computed with padaquad.
+loss is an integral along it, computed with PadaQuad.
 
 The potential is the two-dimensional Müller-Brown surface (Müller and Brown,
 1979). The path, the loss and the optimizer follow the Müller-Brown example of

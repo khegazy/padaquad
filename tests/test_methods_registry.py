@@ -18,7 +18,7 @@ Risks introduced by the split:
     instead of one of the two generic classes (``UniformMethodClass``,
     ``VariableMethodClass``), so it would need handling of its own.
 
-This file pins all four invariants, plus ``_get_method``'s clone isolation
+This file pins all four invariants, plus ``_get_method``'s copy isolation
 and the ``MethodClass`` interface for every registered rule. It is a lightweight registry-shape
 sanity net for any future family addition.
 """
@@ -151,18 +151,19 @@ def _tensors(method) -> list[torch.Tensor]:
 
 
 @pytest.mark.parametrize(("sampling_type", "name"), _registered())
-def test_get_method_returns_independent_clone(sampling_type, name):
+def test_get_method_returns_a_copy_of_the_registry_entry(sampling_type, name):
     """``_get_method`` returns a copy of the registry instance that shares no
-    tensor storage with it, at both dtypes; changing the copy's dtype leaves
-    the registry instance at float64 (clone isolation guarantee).
+    tensor storage with it, at both dtypes, and leaves the registry instance
+    at float64; the copy is the one ``MethodClass.to`` returns for that key.
     """
     canonical = _registry(sampling_type)[name]
     for dtype in (torch.float64, torch.float32):
         instance = _get_method(sampling_type, name, "cpu", dtype)
         assert isinstance(instance, MethodClass)
         assert instance is not canonical, (
-            f"{name}: _get_method returned the singleton, not a clone"
+            f"{name}: _get_method returned the registry instance, not a copy"
         )
+        assert instance is canonical.to("cpu", dtype)
         canonical_ptrs = {t.data_ptr() for t in _tensors(canonical)}
         assert not canonical_ptrs & {t.data_ptr() for t in _tensors(instance)}, (
             f"{name}: a tensor aliases the registry instance"
@@ -175,16 +176,19 @@ def test_get_method_returns_independent_clone(sampling_type, name):
 @pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
 def test_method_interface(sampling_type, name, dtype):
     """Every registered rule implements the MethodClass interface the
-    solvers use: ``node_fractions`` ascending from 0 to 1 with ``n_nodes``
-    entries, and ``weights`` of shape exactly [N, C, 1] whose b sums to 1
+    solvers use: ``node_fractions`` non-decreasing in [0, 1] with ``n_nodes``
+    entries (from 0 to 1 for a variable method, whose weights rescale by the
+    end nodes), and ``weights`` of shape exactly [N, C, 1] whose b sums to 1
     over the nodes of every panel.
     """
     method = _get_method(sampling_type, name, "cpu", dtype)
     c = method.node_fractions()
     assert c.ndim == 1
     assert len(c) == method.n_nodes
-    assert float(c[0]) == 0.0
-    assert float(c[-1]) == 1.0
+    assert torch.all((c >= 0) & (c <= 1))
+    if sampling_type == steps.ADAPTIVE_VARIABLE:
+        assert float(c[0]) == 0.0
+        assert float(c[-1]) == 1.0
     assert torch.all(c[1:] >= c[:-1])
     # N = 4 panels of different widths, nodes at the rule's own fractions.
     left = torch.tensor([0.0, 1.0, 1.5, 4.0], dtype=dtype).unsqueeze(-1)
@@ -221,26 +225,79 @@ def test_factory_can_construct_a_solver_for_every_registered_method():
         assert solver is not None, f"factory failed for variable: {name}"
 
 
-def test_uniform_methods_have_canonical_first_and_last_nodes():
-    """The solver framework computes step length as
-    ``h = t[:, -1] - t[:, 0]`` assuming ``c[0] == 0`` and ``c[-1] == 1``.
-    Methods whose intrinsic nodes are interior (e.g. Gauss-Kronrod) MUST
-    pad with zero-weight endpoint nodes to satisfy this contract;
-    otherwise the integrand is rescaled to the wrong interval.
+@pytest.mark.parametrize(("sampling_type", "name"), _registered())
+def test_every_method_integrates_constants_and_lines_on_an_uneven_mesh(
+    sampling_type, name
+):
+    """Each subinterval's width comes from its mesh points, not from its first
+    and last node, so a method whose nodes are interior (Gauss-Kronrod) gets
+    the width right. This catches the regression that originally produced
+    ``gk21(t) = 0.4978`` instead of ``0.5`` for ``f(t) = t`` (the width was the
+    distance between the outermost nodes)."""
+    solver = adaptive_quadrature(sampling_type, name, device="cpu")
+    mesh = torch.tensor([[0.0], [0.3], [1.0], [2.5]], dtype=torch.float64)
+    nodes = solver._compute_nodes(mesh[:-1], mesh[1:])
+    for y, exact in ((torch.ones_like(nodes), 2.5), (nodes, 2.5**2 / 2)):
+        out = solver._calculate_integral(nodes, y, mesh[:-1], mesh[1:])
+        assert abs(float(out.integral) - exact) < 1e-13, (name, float(out.integral))
+        assert torch.equal(out.h, mesh[1:] - mesh[:-1])
 
-    This test catches the regression that originally produced
-    ``gk21(t) = 0.4978`` instead of ``0.5`` for ``f(t) = t``.
-    """
-    for name, method in UNIFORM_METHODS.items():
-        c = method.tableau.c
-        assert float(c[0]) == 0.0, (
-            f"{name}: c[0] = {float(c[0])}, expected 0.0 "
-            f"(solver assumes step starts at c[0])"
-        )
-        assert float(c[-1]) == 1.0, (
-            f"{name}: c[-1] = {float(c[-1])}, expected 1.0 "
-            f"(solver assumes step ends at c[-1])"
-        )
+
+def _gauss2() -> UniformMethodClass:
+    """The 2-point Gauss-Legendre rule on [0, 1], a method with no node at
+    either end: nodes 1/2 -+ sqrt(3)/6, weights 1/2 each, degree 3 (the roots
+    +-1/sqrt(3) of the Legendre polynomial (3x^2 - 1)/2 and weights 1 on
+    [-1, 1], mapped to [0, 1]; measure_degree confirms it below). The error
+    weights subtract the rectangle rule on the first node (degree 0)."""
+    f64 = torch.float64
+    half_gap = 3**0.5 / 6
+    return UniformMethodClass(
+        degree=3,
+        error_exponent=2,
+        tableau=_Tableau(
+            c=torch.tensor([0.5 - half_gap, 0.5 + half_gap], dtype=f64),
+            b=torch.tensor([0.5, 0.5], dtype=f64),
+            b_error=torch.tensor([0.5 - 1.0, 0.5], dtype=f64),
+        ),
+    )
+
+
+@pytest.mark.parametrize("take_gradient", [False, True])
+def test_a_method_without_end_nodes_integrates(monkeypatch, take_gradient):
+    """A uniform method whose nodes include neither end runs end to end: the
+    integral of a cubic is exact, f is never called at a bound (the test
+    calls included, which use the first node of the first subinterval), and
+    the result lists every evaluated point once, N * C rows, with the values f
+    returned there."""
+    method = _gauss2()
+    measured = method.measure_degree()
+    assert (measured.degree, measured.lower_degree) == (3, 0)
+    monkeypatch.setitem(UNIFORM_METHODS, "gauss2", method)
+    calls = []
+
+    def f(t):
+        calls.append(t.detach().clone())
+        return t**3 + 1.0
+
+    torch.manual_seed(0)
+    solver = adaptive_quadrature("uniform", "gauss2", atol=1e-8, rtol=0, device="cpu")
+    bounds = (
+        torch.tensor([0.0], dtype=torch.float64),
+        torch.tensor([2.0], dtype=torch.float64),
+    )
+    result, state = solver.integrate(
+        f, mesh_init=bounds[0], mesh_final=bounds[1], take_gradient=take_gradient
+    )
+    assert result.converged
+    assert abs(float(result.integral) - 6.0) < 1e-12
+    n = len(result.h)
+    assert result.nodes.shape == (n * 2, 1)
+    assert torch.equal(result.y, result.nodes**3 + 1.0)
+    evaluated = torch.cat(calls)
+    assert not torch.isin(evaluated, bounds[0]).any()
+    assert not torch.isin(evaluated, bounds[1]).any()
+    left = bounds[0] + torch.cumsum(result.h, 0) - result.h
+    assert not torch.isin(result.nodes, left).any()
 
 
 def test_uniform_methods_b_weights_sum_to_one():

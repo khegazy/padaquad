@@ -37,7 +37,7 @@ For each setting the script records the GPU's peak memory above what was
 allocated before the call, during the integration loop (read when each batch is
 recorded, so the work after the loop does not hide it) and over the whole call;
 the process's peak resident memory on the host (sampled every 5 ms); the best
-wall time of ``--repeats`` runs; the final batch size (Actual Batch), the points, calls of f
+wall time of ``--repeats`` runs (every run's time is kept in the JSON); the final batch size (Actual Batch), the points, calls of f
 and subintervals; or that the setting ran out of memory outside a call of f.
 It checks that every setting gives the same integral and subintervals, bit for
 bit, writes everything to ``--out`` as JSON (by default
@@ -50,6 +50,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import gc
 import itertools
 import json
 import math
@@ -333,6 +334,7 @@ def run_example(name: str, repeats: int) -> dict[str, Any]:
     description, build = EXAMPLES[name]
     f, options = build("cuda")
     settings = EXAMPLE_SETTINGS.get(name, SETTINGS)
+    gc.collect()  # every example starts with the garbage of the previous ones collected
     measure(f, options, settings[1])  # warm-up: CUDA and cuBLAS start-up
     rows = []
     reference = None
@@ -341,6 +343,7 @@ def run_example(name: str, repeats: int) -> dict[str, Any]:
         finished = [r for r in runs if r["integral"] is not None]
         row = min(finished or runs, key=lambda r: r["seconds"])
         integral, widths = row.pop("integral"), row.pop("h")
+        row["all seconds"] = [r["seconds"] for r in runs]
         if integral is not None:
             if reference is None:
                 reference = (integral, widths)
@@ -483,6 +486,7 @@ def main() -> None:
         "date": dt.datetime.now(tz=dt.UTC).date().isoformat(),
         "buffer bytes": BUFFER,
         "repeats": args.repeats,
+        "torch threads": torch.get_num_threads(),
     }
     results = {"meta": meta, "examples": {}}
     for name in args.examples:

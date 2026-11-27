@@ -101,14 +101,15 @@ def _simple_integrand(t, *args):
     return t**2 + 1
 
 
-def _assert_integrated(solver, nodes, f_evals, method_output):
+def _assert_integrated(solver, mesh, idxs, nodes, f_evals, method_output):
     """``method_output`` equals one ``_calculate_integral`` call, bit for bit.
 
     The split path integrates each call's completed subintervals separately;
-    each subinterval's numbers depend only on its own nodes and values, so the
+    each subinterval's numbers depend only on its own nodes, values and mesh
+    points (``idxs``: the evaluated subintervals' left mesh points), so the
     result must not depend on where the calls were cut.
     """
-    expected = solver._calculate_integral(nodes, f_evals)
+    expected = solver._calculate_integral(nodes, f_evals, mesh[idxs], mesh[idxs + 1])
     for field in (
         "integral",
         "integral_error",
@@ -182,29 +183,6 @@ class TestFullNodes:
     """Direct calls to ``_evaluate_f_on_full_nodes`` with hand-crafted inputs."""
 
     # -----------------------------------------------------------------------
-    # max_batch < C must assert (max_mesh_steps == 0)
-    # -----------------------------------------------------------------------
-
-    @pytest.mark.tier1
-    @pytest.mark.parametrize(
-        ("method", "max_batch"), _BELOW_C_SWEEP, ids=_BELOW_C_SWEEP_IDS
-    )
-    def test_full_nodes_max_batch_below_C_asserts(self, method, max_batch):
-        """``_evaluate_f_on_full_nodes`` asserts ``max_mesh_steps >= 1``.
-
-        Any ``max_batch < C`` yields ``max_mesh_steps = 0`` and trips the guard.
-        """
-        solver = make_solver_for_unit_test(method)
-        C = solver.C
-        max_mesh_steps = max_batch // C  # always 0 in this range
-        mesh = _make_mesh()
-        step_idxs = _make_step_idxs()
-        with pytest.raises(AssertionError):
-            solver._evaluate_f_on_full_nodes(
-                _simple_integrand, (), mesh, step_idxs, max_mesh_steps
-            )
-
-    # -----------------------------------------------------------------------
     # shapes and values correct
     # -----------------------------------------------------------------------
 
@@ -234,7 +212,7 @@ class TestFullNodes:
         N_expected = min(max_mesh_steps, len(step_idxs))
         assert nodes.shape == (N_expected, C, 1)
         assert f_evals.shape[:2] == (N_expected, C)
-        _assert_integrated(solver, nodes, f_evals, state)
+        _assert_integrated(solver, mesh, returned_idxs, nodes, f_evals, state)
         assert returned_idxs.shape == (N_expected,)
 
         # f_evals should match an independent flat evaluation
@@ -347,7 +325,7 @@ class TestSplitNodes:
         assert f_evals.shape == (n_panels, C, 1)
         assert tracked is None
         assert torch.equal(returned_idxs, step_idxs)
-        _assert_integrated(solver, nodes, f_evals, state)
+        _assert_integrated(solver, mesh, step_idxs, nodes, f_evals, state)
 
     # -----------------------------------------------------------------------
     # Single-batch regime: bit-equal to full_nodes (loop runs exactly once)
@@ -381,7 +359,7 @@ class TestSplitNodes:
             max_batch=n_panels * C,
         )
 
-        _assert_integrated(solver, nodes_split, f_evals_split, state)
+        _assert_integrated(solver, mesh, step_idxs, nodes_split, f_evals_split, state)
         assert torch.equal(nodes_split, nodes_full), "nodes not bit-equal"
         assert torch.equal(f_evals_split, f_evals_full), (
             "f_evals not bit-equal in the single-batch regime"
@@ -426,7 +404,7 @@ class TestSplitNodes:
             max_batch=max_batch,
         )
 
-        _assert_integrated(solver, nodes_split, f_evals_split, state)
+        _assert_integrated(solver, mesh, step_idxs, nodes_split, f_evals_split, state)
         assert torch.equal(nodes_split, nodes_ref), (
             f"nodes not bit-equal: max abs diff = "
             f"{(nodes_split - nodes_ref).abs().max().item():.3e}"
@@ -512,7 +490,7 @@ class TestSplitNodes:
             max_batch=max_batch,
         )
 
-        _assert_integrated(solver, nodes_split, f_evals_split, state)
+        _assert_integrated(solver, mesh, step_idxs, nodes_split, f_evals_split, state)
         assert torch.equal(idxs, step_idxs)
         assert torch.equal(nodes_split, nodes_ref)
         assert torch.allclose(f_evals_split, f_evals_ref, atol=1e-12, rtol=0)
@@ -554,7 +532,7 @@ class TestSplitNodes:
             buffer_bytes=0,
             max_batch=2 * C + 1,
         )
-        _assert_integrated(solver, nodes_split, f_evals_split, state)
+        _assert_integrated(solver, mesh, step_idxs, nodes_split, f_evals_split, state)
         assert f_evals_split.shape == (n_panels, C, 3)
         assert torch.equal(nodes_split, nodes_full)
         assert torch.allclose(f_evals_split, f_evals_full, atol=1e-12, rtol=0)
@@ -598,7 +576,7 @@ class TestSplitNodes:
             max_batch=C + 1,
         )
 
-        _assert_integrated(solver, nodes, f_evals, state)
+        _assert_integrated(solver, mesh, step_idxs, nodes, f_evals, state)
         assert f_evals.shape == (n_panels, C, 1)
         assert isinstance(tracked, tuple)
         assert len(tracked) == 2
@@ -639,7 +617,7 @@ class TestSplitNodes:
         assert nodes.shape == (1, C, 1)
         assert f_evals.shape == (1, C, 1)
         assert returned_idxs.tolist() == [1]
-        _assert_integrated(solver, nodes, f_evals, state)
+        _assert_integrated(solver, mesh, returned_idxs, nodes, f_evals, state)
 
     # -----------------------------------------------------------------------
     # Determinism: same inputs twice -> bit-equal outputs
@@ -724,7 +702,7 @@ class TestIntegration:
             "f": _simple_integrand,
             "f_args": (),
             "mesh": mesh,
-            "mesh_trackers": mesh_trackers,
+            "step_idxs": torch.nonzero(mesh_trackers).flatten(),
             "values_device": CPU,
             "buffer_bytes": 0,
         }
@@ -765,10 +743,16 @@ class TestIntegration:
             solver._batch = max_batch
             nodes_i, f_evals_i, _tracked, idxs_i, method_output = (
                 solver._evaluate_f_on_mesh(
-                    _simple_integrand, (), mesh, mesh_trackers, take_gradient, CPU, 0
+                    _simple_integrand,
+                    (),
+                    mesh,
+                    torch.nonzero(mesh_trackers).flatten(),
+                    take_gradient,
+                    CPU,
+                    0,
                 )
             )
-            _assert_integrated(solver, nodes_i, f_evals_i, method_output)
+            _assert_integrated(solver, mesh, idxs_i, nodes_i, f_evals_i, method_output)
             nodes_acc.append(nodes_i)
             for idx in idxs_i.tolist():
                 completed_panels.add(idx)
@@ -805,7 +789,13 @@ class TestIntegration:
                     break
                 solver._batch = max_batch
                 ni, ei, _tracked, ii, mo = solver._evaluate_f_on_mesh(
-                    _simple_integrand, (), mesh, mesh_trackers, take_gradient, CPU, 0
+                    _simple_integrand,
+                    (),
+                    mesh,
+                    torch.nonzero(mesh_trackers).flatten(),
+                    take_gradient,
+                    CPU,
+                    0,
                 )
                 nodes_acc.append(ni)
                 f_evals_acc.append(ei)
@@ -875,7 +865,7 @@ class TestEndToEnd:
             )
 
     # -----------------------------------------------------------------------
-    # take_gradient=True with max_batch < C must assert at the solver
+    # take_gradient=True with max_batch < C raises ValueError before f
     # -----------------------------------------------------------------------
 
     @pytest.mark.tier1
@@ -883,19 +873,26 @@ class TestEndToEnd:
         ("method", "max_batch"), _BELOW_C_SWEEP, ids=_BELOW_C_SWEEP_IDS
     )
     def test_integrate_take_grad_True_max_batch_below_C_errors(self, method, max_batch):
-        """For take_gradient=True, max_batch < C trips the assertion in
-        _evaluate_f_on_full_nodes."""
+        """For take_gradient=True, a max_batch below one subinterval's C
+        points (constructor's) raises ValueError naming it, the method and C,
+        before f is called."""
         if max_batch == 0:
             pytest.skip("max_batch=0 covered by test_integrate_max_batch_zero_errors")
         f, _, _ = _resolve_integrand("damped_sine")
+        calls = []
         solver = self._solver(method, max_batch=max_batch)
-        with pytest.raises(AssertionError):
+        with pytest.raises(
+            ValueError,
+            match=rf"max_batch {max_batch} is below the {solver.C} points of one "
+            rf"subinterval of {method}: with take_gradient=True",
+        ):
             solver.integrate(
-                f=f,
+                f=lambda t: calls.append(t) or f(t),
                 mesh_init=self.T_INIT,
                 mesh_final=self.T_FINAL,
                 take_gradient=True,
             )
+        assert calls == []
 
     # -----------------------------------------------------------------------
     # Correctness sweep: result matches analytical solution

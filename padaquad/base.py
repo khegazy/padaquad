@@ -17,6 +17,7 @@ The result dataclasses ``IntegrationResult`` and ``MethodOutput`` live in
 from __future__ import annotations
 
 import logging
+import math
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import TYPE_CHECKING, Any
@@ -154,9 +155,9 @@ class SolverBase(ABC, DistributedEnvironment):
             Name of the quadrature method, for example 'gk21' or 'dopri5', in
             any letter case.
         atol : float
-            Absolute tolerance. See :ref:`ug-error-control`.
+            Absolute tolerance, finite and >= 0. See :ref:`ug-error-control`.
         rtol : float
-            Relative tolerance. See :ref:`ug-error-control`.
+            Relative tolerance, finite and >= 0. See :ref:`ug-error-control`.
         y0 : torch.Tensor or None
             Value added to the integral, shape ``[D]``. None uses 0.
         f : callable or None
@@ -175,6 +176,12 @@ class SolverBase(ABC, DistributedEnvironment):
         **distributed_options : Any
             Options for multi-process runs: backend, master_addr, master_port
             and is_slurm.
+
+        Raises
+        ------
+        ValueError
+            If ``atol`` or ``rtol`` is not one number, or is negative or not
+            finite.
         """
         super().__init__(device=device, **distributed_options)
 
@@ -191,8 +198,18 @@ class SolverBase(ABC, DistributedEnvironment):
             self.speed_logger = None
 
         self.method_name = method.lower()
-        self.atol = torch.tensor(atol, dtype=dtype, device=self.device)
-        self.rtol = torch.tensor(rtol, dtype=dtype, device=self.device)
+        # Python floats: an operation rounds them to the dtype of the tensor
+        # they meet, and they need no copy to the device.
+        tolerances = []
+        for name, tol in (("atol", atol), ("rtol", rtol)):
+            try:
+                value = float(tol)
+            except (TypeError, ValueError):  # not one number, e.g. a list
+                value = math.nan
+            if not (math.isfinite(value) and value >= 0.0):
+                raise ValueError(f"{name} must be a finite number >= 0, got {tol!r}")
+            tolerances.append(value)
+        self.atol, self.rtol = tolerances
         # Construction-time defaults; each integrate() call falls back to these
         # when its corresponding argument is None (resolved in _check_variables).
         # The bounds have no default: each call gives its interval.
@@ -200,7 +217,7 @@ class SolverBase(ABC, DistributedEnvironment):
         self.init_y0 = (
             y0.to(self.device)
             if y0 is not None
-            else torch.tensor([0], dtype=dtype, device=self.device)
+            else torch.zeros(1, dtype=dtype, device=self.device)
         )
         self._set_dtype(dtype)
 
@@ -228,14 +245,16 @@ class SolverBase(ABC, DistributedEnvironment):
         self,
         t: torch.Tensor,
         y: torch.Tensor,
+        mesh_left: torch.Tensor,
+        mesh_right: torch.Tensor,
         y0: torch.Tensor | None = None,
     ) -> MethodOutput:
         """
         Compute the integral and error estimate for a batch of subintervals.
 
-        Given the nodes of each subinterval and the integrand values there,
-        applies the method's weights to produce each subinterval's contribution
-        to the integral and its error estimate.
+        Given the nodes of each subinterval, the integrand values there and the
+        subinterval's two mesh points, applies the method's weights to produce
+        each subinterval's contribution to the integral and its error estimate.
 
         Parameters
         ----------
@@ -245,6 +264,10 @@ class SolverBase(ABC, DistributedEnvironment):
         y : torch.Tensor
             Integrand values at the nodes in t. Shape: [N, C, D] (D outputs
             of the integrand).
+        mesh_left : torch.Tensor
+            Left mesh point of each subinterval. Shape: [N, T].
+        mesh_right : torch.Tensor
+            Right mesh point of each subinterval. Shape: [N, T].
         y0 : torch.Tensor or None
             Starting value for the integral accumulator. Shape: [D]. None
             starts from zero.
@@ -312,15 +335,7 @@ class SolverBase(ABC, DistributedEnvironment):
         """
         Set the floating-point precision for all solver tensors.
 
-        Converts atol, rtol and y0 to the new dtype,
-        then calls ``_set_solver_dtype``. Also sets dtype-appropriate assertion
-        tolerances
-        used for internal sanity checks (e.g. verifying that the nodes are in
-        increasing order despite floating-point rounding).
-
-        The assertion tolerances by dtype are:
-            - float64: atol_assert=1e-15, rtol_assert=1e-7
-            - float32: atol_assert=1e-7,  rtol_assert=1e-5
+        Converts y0 to the new dtype, then calls ``_set_solver_dtype``.
 
         float16 is refused (Bug B4): its rounding error, about 1e-3, sits
         *above* typical tolerances, so the solver cannot verify that a
@@ -355,21 +370,6 @@ class SolverBase(ABC, DistributedEnvironment):
 
         self.dtype = dtype
         self.init_y0 = self.init_y0.to(self.dtype)
-
-        # Update integration control error tolerances
-        self.atol = self.atol.to(self.dtype)
-        self.rtol = self.rtol.to(self.dtype)
-
-        # Set assertion tolerances appropriate for this precision level.
-        # These are used in internal sanity checks (e.g., time ordering),
-        # NOT for integration error control (that uses self.atol/self.rtol).
-        if self.dtype == torch.float64:
-            self.atol_assert = 1e-15
-            self.rtol_assert = 1e-7
-        else:  # float32
-            self.atol_assert = 1e-7
-            self.rtol_assert = 1e-5
-
         self._set_solver_dtype(self.dtype)
 
     def set_dtype_by_input(

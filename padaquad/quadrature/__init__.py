@@ -13,8 +13,7 @@ Submodules:
     the main integration loop, error computation, mesh refinement,
     node placement and the integral computation, which reach the
     quadrature method only through its ``MethodClass`` interface.
-    Subclasses set ``sampling_type`` and implement
-    ``_evaluate_adaptive_nodes`` and ``_merge_excess_nodes``.
+    Subclasses set ``sampling_type``.
 
   - ``uniform``: ``UniformAdaptiveQuadrature``, the solver for methods with
     fixed node fractions and weights (Runge-Kutta, Gauss-Kronrod,

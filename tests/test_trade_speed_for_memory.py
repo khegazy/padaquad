@@ -32,11 +32,11 @@ BOUNDS = {
     "mesh_final": torch.tensor([1.0], dtype=torch.float64),
 }
 DEVICES = ["cpu", pytest.param("cuda", marks=needs_cuda)]
-# The calls of f end inside a subinterval for all of these with gk7 (C = 9):
-# below C (5, 7), and not multiples of C (18 is, 23 and 100 are not).
-MAX_BATCHES = [5, 7, 18, 23, 100]
+# The calls of f end inside a subinterval for all of these with gk7 (C = 7)
+# but one: below C (5, 6), and not multiples of C (14 is, 23 and 100 are not).
+MAX_BATCHES = [5, 6, 14, 23, 100]
 # The settings compared with the default. A buffer of 1,000 bytes holds a few
-# gk7 subintervals of one float64 output (72 bytes each); 1e9 holds every pass.
+# gk7 subintervals of one float64 output (56 bytes each); 1e9 holds every pass.
 SETTINGS = {
     "trade": {"trade_speed_for_memory": True},
     "trade_small_buffer": {"trade_speed_for_memory": True, "evaluation_buffer": 1000},
@@ -190,9 +190,9 @@ def _integration_sizes(max_batch, **options):
     calculate = solver._calculate_integral
     evaluate = solver._evaluate_f_on_split_nodes
 
-    def spy_calculate(t, y, y0=None):
+    def spy_calculate(t, y, mesh_left, mesh_right, y0=None):
         sizes.append(len(t))
-        return calculate(t, y, y0)
+        return calculate(t, y, mesh_left, mesh_right, y0)
 
     def spy_evaluate(f, f_args, mesh, step_idxs, *args):
         passes.append(len(step_idxs))
@@ -230,7 +230,7 @@ def test_buffer_bounds_what_waits():
     one call's subintervals (they are integrated as soon as they reach it), and
     fewer integrations run than without a buffer."""
     max_batch, buffer = 23, 1000
-    per_subinterval = 9 * 8  # gk7: C = 9 float64 values of one output
+    per_subinterval = 7 * 8  # gk7: C = 7 float64 values of one output
     sizes, _, C = _integration_sizes(
         max_batch, trade_speed_for_memory=True, evaluation_buffer=buffer
     )
@@ -351,6 +351,53 @@ def test_default_holds_a_pass_once(record):
     assert peak < 1.8 * 1000 * solver.C * 4096 * 8, peak
 
 
+@needs_cuda
+def test_recording_never_copies_the_record():
+    """With the record on the GPU (result_device=None), recording a pass's
+    accepted subintervals allocates at most their values once (the copy of a
+    view of the pass's array) and the record's contributions and error
+    estimates, whatever values the record already holds: the record is
+    appended to, not merged into a new array (which allocated all its values
+    again on every pass). The passes of test_default_holds_a_pass_once: 500
+    of 1000 subintervals accepted (kept rows, a view, copied), then all 1000
+    halves (the pass's array itself, no copy)."""
+    freqs = torch.linspace(1.0, 2.0, 4096, dtype=torch.float64, device="cuda")
+
+    def f(t):
+        return torch.sin(t * freqs * (1 + 20000 * (t > 0.5)))
+
+    mesh = torch.linspace(0.0, 1.0, 1001, dtype=torch.float64, device="cuda")[:, None]
+    solver = adaptive_quadrature(
+        "uniform", method="gk21", device="cuda", atol=1e-10, rtol=1e-10
+    )
+    grown = []
+    record_results = solver._record_results
+
+    def measured(**kwargs):
+        torch.cuda.synchronize()
+        before = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        record = record_results(**kwargs)
+        torch.cuda.synchronize()
+        values = kwargs["results"].y.nbytes
+        sums = 2 * record["mesh_quadratures"].nbytes  # contributions, errors
+        grown.append((torch.cuda.max_memory_allocated() - before, values, sums))
+        return record
+
+    solver._record_results = measured
+    solver.integrate(
+        f,
+        mesh=mesh,
+        take_gradient=False,
+        max_batch=230,
+        max_adaptive_splits=1,
+        result_device=None,
+    )
+    assert len(grown) == 2
+    for grow, values, sums in grown:
+        assert grow < values + 1.1 * sums, (grow, values, sums)
+
+
 @pytest.mark.parametrize("device", DEVICES)
 @pytest.mark.parametrize("record", [True, False])
 def test_one_call_pass_keeps_f_output_intact(device, record):
@@ -378,15 +425,15 @@ def test_one_call_pass_keeps_f_output_intact(device, record):
 
 
 def test_keep_rows_in_place(monkeypatch):
-    """_keep_rows with in_place moves the kept rows to the front of x, in
-    blocks (here of 3 rows, so the last block is shorter), and returns a view
-    of x equal to indexing; without in_place, or for an x that requires grad
-    or is a view, it indexes and leaves x unchanged."""
+    """_keep_rows with in_place moves the kept rows (ascending positions) to
+    the front of x, in blocks (here of 3 rows, so the last block is shorter),
+    and returns a view of x equal to indexing; without in_place, or for an x
+    that requires grad or is a view, it indexes and leaves x unchanged."""
     import padaquad.quadrature.base as qbase
 
     g = torch.Generator().manual_seed(0)
     x = torch.randn(20, 4, 3, generator=g)
-    keep = torch.rand(20, generator=g) < 0.6
+    keep = torch.nonzero(torch.rand(20, generator=g) < 0.6).flatten()
     expected = x[keep].clone()
     monkeypatch.setattr(qbase, "_BLOCK_BYTES", 3 * 4 * 3 * x.element_size())
     copied = qbase._keep_rows(x, keep, in_place=False)
@@ -401,7 +448,7 @@ def test_keep_rows_in_place(monkeypatch):
     kept = qbase._keep_rows(x, keep, in_place=True)
     assert torch.equal(kept, expected)
     assert kept.data_ptr() == x.data_ptr()
-    assert len(qbase._keep_rows(x, torch.zeros(20, dtype=torch.bool), True)) == 0
+    assert len(qbase._keep_rows(x, torch.zeros(0, dtype=torch.long), True)) == 0
 
 
 def test_pass_array_out_of_memory_names_the_remedies(monkeypatch):
@@ -551,8 +598,10 @@ def test_warning_on_first_call_only(name, caplog):
             "evaluation_buffer": 10**6,
             "result_device": None,
         },
+        # No state's mesh is built, so its merge rule does not matter.
+        {"record_evaluations": False, "build_state_mesh": False},
     ],
-    ids=["default", "trade_same_device"],
+    ids=["default", "trade_same_device", "no_record_no_state_mesh"],
 )
 def test_no_warning(options, caplog):
     solver = adaptive_quadrature("uniform", method="gk21", device="cpu")

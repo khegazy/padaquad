@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import math
 
 import pytest
@@ -18,7 +19,14 @@ from _helpers import (
     needs_cuda,
 )
 
-from padaquad import VARIABLE_METHODS, adaptive_quadrature, integrand_dict, integrate
+from padaquad import (
+    UNIFORM_METHODS,
+    VARIABLE_METHODS,
+    adaptive_quadrature,
+    integrand_dict,
+    integrate,
+)
+from padaquad.methods import UniformMethodClass, _Tableau
 
 #: The merge rules whose meshes are checked end to end: the default and the
 #: 1.3.0 and 1.4.0 one ("sum" merges pairs whose merged step fails, by design).
@@ -35,90 +43,133 @@ SMALL_BATCH = 100_000
 class TestPruneExcessT:
     """Tests for AdaptiveQuadrature._prune_excess_mesh."""
 
-    def _make_t(self, solver, t_start, t_end, N):
-        """Create [N, C, 1] time tensor with uniform steps."""
-        boundaries = torch.linspace(t_start, t_end, N + 1, dtype=torch.float64)
-        return solver._compute_nodes(
-            boundaries[:-1].unsqueeze(-1), boundaries[1:].unsqueeze(-1)
-        )
+    def _make_mesh(self, t_start, t_end, N):
+        """Create an [N + 1, 1] mesh of N equal subintervals."""
+        return torch.linspace(t_start, t_end, N + 1, dtype=torch.float64).unsqueeze(-1)
 
     def test_no_pairs_below_cut(self):
         """All error_ratios_2steps above remove_cut: no pruning."""
         solver = make_solver_for_unit_test()
-        t = self._make_t(solver, 0.0, 1.0, 4)
+        mesh = self._make_mesh(0.0, 1.0, 4)
         ss = torch.ones(4, 1, dtype=torch.float64)
         se = torch.ones(4, 1, dtype=torch.float64) * 0.01
         er2 = torch.tensor([0.5, 0.8, 0.3])  # All > 0.1
 
-        t_p, _ss_p, _se_p = solver._prune_excess_mesh(t, ss, se, er2, solver.remove_cut)
+        m_p, ss_p, se_p = solver._prune_excess_mesh(
+            mesh, ss, se, er2, solver.remove_cut
+        )
 
-        assert t_p.shape[0] == 4
-        assert torch.equal(t_p, t)
+        assert torch.equal(m_p, mesh)
+        assert torch.equal(ss_p, ss)
+        assert torch.equal(se_p, se)
 
     def test_one_pair_pruned(self):
-        """First pair below cut: output has N-1 steps."""
+        """First pair below cut: its shared mesh point goes, N-1 subintervals."""
         solver = make_solver_for_unit_test()
-        t = self._make_t(solver, 0.0, 1.0, 4)
+        mesh = self._make_mesh(0.0, 1.0, 4)
         ss = torch.ones(4, 1, dtype=torch.float64)
         se = torch.ones(4, 1, dtype=torch.float64) * 0.01
         er2 = torch.tensor([0.01, 0.8, 0.9])  # Pair 0 below the cut 0.1
 
-        t_p, _, _ = solver._prune_excess_mesh(t, ss, se, er2, solver.remove_cut)
+        m_p, ss_p, se_p = solver._prune_excess_mesh(
+            mesh, ss, se, er2, solver.remove_cut
+        )
 
-        assert t_p.shape[0] == 3
+        assert torch.equal(m_p, mesh[[0, 2, 3, 4]])
+        assert ss_p.shape[0] == se_p.shape[0] == 3
 
     def test_empty_error_ratios(self):
         """Single step (empty 2steps array): returns unchanged."""
         solver = make_solver_for_unit_test()
-        t = self._make_t(solver, 0.0, 1.0, 1)
+        mesh = self._make_mesh(0.0, 1.0, 1)
         ss = torch.ones(1, 1, dtype=torch.float64)
         se = torch.ones(1, 1, dtype=torch.float64) * 0.01
         er2 = torch.tensor([])
 
-        t_p, _ss_p, _se_p = solver._prune_excess_mesh(t, ss, se, er2, solver.remove_cut)
+        m_p, _ss_p, _se_p = solver._prune_excess_mesh(
+            mesh, ss, se, er2, solver.remove_cut
+        )
 
-        assert t_p.shape[0] == 1
-        assert torch.equal(t_p, t)
+        assert torch.equal(m_p, mesh)
 
     def test_nonfinite_pair_ratio_not_merged(self):
         """A NaN or Inf pair ratio (non-finite step error) never merges."""
         solver = make_solver_for_unit_test()
-        t = self._make_t(solver, 0.0, 1.0, 5)
+        mesh = self._make_mesh(0.0, 1.0, 5)
         ss = torch.ones(5, 1, dtype=torch.float64)
         se = torch.ones(5, 1, dtype=torch.float64) * 0.01
         er2 = torch.tensor([float("nan"), 0.8, float("inf"), 0.8])
 
-        t_p, _, _ = solver._prune_excess_mesh(t, ss, se, er2, solver.remove_cut)
+        m_p, _, _ = solver._prune_excess_mesh(mesh, ss, se, er2, solver.remove_cut)
 
-        assert torch.equal(t_p, t)
+        assert torch.equal(m_p, mesh)
 
     def test_no_adjacent_merges(self):
         """Adjacent pairs both below cut: _rec_remove prevents double merge."""
         solver = make_solver_for_unit_test()
-        t = self._make_t(solver, 0.0, 1.0, 5)
+        mesh = self._make_mesh(0.0, 1.0, 5)
         ss = torch.ones(5, 1, dtype=torch.float64)
         se = torch.ones(5, 1, dtype=torch.float64) * 0.01
         er2 = torch.tensor([0.01, 0.01, 0.8, 0.01])  # Pairs 0,1 adjacent
 
-        t_p, _, _ = solver._prune_excess_mesh(t, ss, se, er2, solver.remove_cut)
+        m_p, _, _ = solver._prune_excess_mesh(mesh, ss, se, er2, solver.remove_cut)
 
         # Only non-adjacent pairs merged: pair 0 and pair 3 (indices 0 and 3)
-        # Pair 1 blocked by adjacency. Result: 5 - 2 = 3 steps
-        assert t_p.shape[0] == 3
+        # Pair 1 blocked by adjacency. Result: 5 - 2 = 3 subintervals, whose
+        # shared mesh points 1 and 4 are gone.
+        assert torch.equal(m_p, mesh[[0, 2, 3, 5]])
 
     def test_mesh_quadratures_accumulated(self):
-        """After merge, sum of pair equals sum of originals."""
+        """After merge, sum of pair equals sum of originals; inputs unchanged."""
         solver = make_solver_for_unit_test()
-        t = self._make_t(solver, 0.0, 1.0, 3)
+        mesh = self._make_mesh(0.0, 1.0, 3)
         ss = torch.tensor([[1.0], [2.0], [3.0]], dtype=torch.float64)
-        se = torch.ones(3, 1, dtype=torch.float64) * 0.01
+        se = torch.tensor([[0.1], [0.2], [0.3]], dtype=torch.float64)
         er2 = torch.tensor([0.01, 0.8])  # Pair 0 below cut
 
-        _, ss_p, _ = solver._prune_excess_mesh(t, ss, se, er2, solver.remove_cut)
+        _, ss_p, se_p = solver._prune_excess_mesh(mesh, ss, se, er2, solver.remove_cut)
 
         assert ss_p.shape[0] == 2
         # Merged: 1+2=3, remaining: 3
-        assert torch.allclose(ss_p[0], torch.tensor([3.0], dtype=torch.float64))
+        assert torch.equal(
+            ss_p[:, 0], torch.tensor([1.0 + 2.0, 3.0], dtype=torch.float64)
+        )
+        assert torch.equal(
+            se_p[:, 0], torch.tensor([0.1 + 0.2, 0.3], dtype=torch.float64)
+        )
+        assert torch.equal(ss[:, 0], torch.tensor([1.0, 2.0, 3.0], dtype=torch.float64))
+
+    @needs_cuda
+    def test_copies_only_the_kept_rows(self):
+        """Each array's kept rows are selected and the merged pairs' right rows
+        added to them: the GPU holds the two merged arrays and one array of
+        added rows at a time, not a whole copy of each input as well (the
+        merge copied each input before selecting its kept rows). The sums are
+        those of the pairs, bit for bit, at random places in a long mesh."""
+        n, d = 4000, 512
+        g = torch.Generator().manual_seed(0)
+        solver = adaptive_quadrature("uniform", "bosh3", device="cuda")
+        mesh = self._make_mesh(0.0, 1.0, n).cuda()
+        ss = torch.randn(n, d, generator=g, dtype=torch.float64).cuda()
+        se = torch.rand(n, d, generator=g, dtype=torch.float64).cuda()
+        er2 = torch.where(torch.rand(n - 1, generator=g) < 0.3, 0.0, 1.0).cuda()
+        merged = torch.where(solver._rec_remove(er2 < solver.remove_cut))[0]
+        torch.cuda.synchronize()
+        before = torch.cuda.memory_allocated()
+        torch.cuda.reset_peak_memory_stats()
+        m_p, ss_p, se_p = solver._prune_excess_mesh(
+            mesh, ss, se, er2, solver.remove_cut
+        )
+        torch.cuda.synchronize()
+        row = d * 8
+        held = ss_p.nbytes + se_p.nbytes + len(merged) * row
+        assert torch.cuda.max_memory_allocated() - before < held + 0.05 * n * row
+        keep = torch.ones(n + 1, dtype=torch.bool, device="cuda")
+        keep[merged + 1] = False
+        for x, x_p in ((ss, ss_p), (se, se_p)):
+            expected = x.index_put((merged,), x[merged] + x[merged + 1])[keep[:-1]]
+            assert torch.equal(x_p, expected)
+        assert torch.equal(m_p, mesh[keep])
 
     @pytest.mark.parametrize("method", ["bosh3", "dopri5", "gk21", "cc17"])
     def test_merge_inputs_per_rule(self, method):
@@ -129,19 +180,20 @@ class TestPruneExcessT:
         cutoff remove_cut; the prediction is positive for sin(3t), so an
         implementation that dropped it would fail."""
         sizes = {}
+        mesh = self._make_mesh(0.0, 1.0, 3)
         for rule in ("sum", "power_law", "predicted"):
             solver = make_solver_for_unit_test(method, merge_rule=rule)
-            t = self._make_t(solver, 0.0, 1.0, 3)
+            t = solver._compute_nodes(mesh[:-1], mesh[1:])
             y = torch.sin(3 * t)
             b, _ = solver.method.weights(t)
-            q = (t[:, -1] - t[:, 0]) * (b * y).sum(1)
-            sizes[rule] = solver._merge_inputs(t, y, q)
+            q = (mesh[1:] - mesh[:-1]) * (b * y).sum(1)
+            sizes[rule] = solver._merge_inputs(y, q, mesh)
         k = make_solver_for_unit_test(method).method.error_exponent
         assert sizes["sum"] == (None, REMOVE_CUT)
         assert sizes["power_law"] == (None, REMOVE_CUT / 2 ** (k - 1))
         merge_prediction, cut = sizes["predicted"]
         assert cut == REMOVE_CUT
-        predicted = solver._predict_merged_errors(t, y, q)
+        predicted = solver._predict_merged_errors(y, q, mesh)
         assert torch.all(predicted > 0)
         assert torch.equal(merge_prediction, predicted)
 
@@ -156,12 +208,7 @@ class TestGetOptimalTStepBarriers:
 
     def _make_record(self, solver, N, integral_val=1.0, error_scale=0.001):
         """Build a record dict with N uniform steps in [0, 1]."""
-        boundaries = torch.linspace(0, 1, N + 1, dtype=torch.float64)
-        t = solver._compute_nodes(
-            boundaries[:-1].unsqueeze(-1), boundaries[1:].unsqueeze(-1)
-        )
         return {
-            "nodes": t,
             "mesh_quadratures": torch.ones(N, 1, dtype=torch.float64)
             * (integral_val / N),
             "mesh_quadrature_errors": torch.ones(N, 1, dtype=torch.float64)
@@ -364,7 +411,10 @@ def test_pair_ratio_is_merged_step_ratio(use_absolute_error_ratio, error_norm):
     err = torch.tensor([[1e-11, 3e-11], [2e-11, 1e-11]], dtype=torch.float64)
     integral = quad.sum(0)
     _, pair, _ = solver._compute_error_ratios(
-        mesh_quadrature_errors=err, mesh_quadratures=quad, integral=integral
+        mesh_quadrature_errors=err,
+        mesh_quadratures=quad,
+        integral=integral,
+        pair_errors=err[:-1] + err[1:],
     )
     merged, _, merged_per_dim = solver._compute_error_ratios(
         mesh_quadrature_errors=err.sum(0, keepdim=True),
@@ -406,6 +456,88 @@ def test_repeated_warm_starts_prune_to_a_fixed_point(method, merge_rule):
     assert sizes[-1] <= 0.6 * sizes[0], sizes
 
 
+@pytest.mark.parametrize("device", ["cpu", pytest.param("cuda", marks=needs_cuda)])
+@pytest.mark.parametrize("take_gradient", [False, True])
+@pytest.mark.parametrize(
+    ("sampling", "method"),
+    [("uniform", "gk21"), ("variable", "interpolatory3_variable")],
+)
+def test_build_state_mesh_false_skips_only_the_mesh(
+    sampling, method, take_gradient, device, monkeypatch
+):
+    """build_state_mesh=False does not build the optimal mesh and returns
+    state.mesh = None; the result, the batch size and the gradient equal the
+    default call's bit for bit. A later call with that state and no bounds
+    raises a ValueError that names the switch; with bounds it starts from a
+    fresh mesh with the state's batch size, as a call without a state does."""
+    w = torch.tensor([1.3], dtype=torch.float64, device=device, requires_grad=True)
+    a, b = (torch.tensor([x], dtype=torch.float64) for x in (0.0, 1.0))
+
+    def f(t):
+        return w * torch.sin(9 * t) + t
+
+    def call(build_state_mesh, **kwargs):
+        solver = adaptive_quadrature(
+            sampling, method, atol=1e-9, rtol=1e-9, device=device, dtype=torch.float64
+        )
+        built = []
+        get_optimal_mesh = solver._get_optimal_mesh
+        monkeypatch.setattr(
+            solver,
+            "_get_optimal_mesh",
+            lambda **k: built.append(1) or get_optimal_mesh(**k),
+        )
+        torch.manual_seed(0)
+        w.grad = None
+        result, state = solver.integrate(
+            f,
+            mesh_init=a,
+            mesh_final=b,
+            take_gradient=take_gradient,
+            build_state_mesh=build_state_mesh,
+            **kwargs,
+        )
+        if not take_gradient:
+            result.integral.sum().backward()
+        return solver, result, state, w.grad.clone(), len(built)
+
+    _, default, default_state, default_grad, n_built = call(True, max_batch=SMALL_BATCH)
+    solver, skipped, state, grad, n_skipped = call(False, max_batch=SMALL_BATCH)
+    assert (n_built, n_skipped) == (1, 0)
+    assert state.mesh is None and default_state.mesh is not None
+    assert (state.max_batch, state.max_batch_converged) == (
+        default_state.max_batch,
+        default_state.max_batch_converged,
+    )
+    assert torch.equal(grad, default_grad)
+    for field in dataclasses.fields(default):
+        x, y = getattr(default, field.name), getattr(skipped, field.name)
+        if isinstance(x, torch.Tensor):
+            assert torch.equal(x, y), field.name
+        elif isinstance(x, tuple):
+            assert all(map(torch.equal, x, y)), field.name
+        else:
+            assert x == y, field.name
+
+    with pytest.raises(ValueError, match="build_state_mesh=False"):
+        solver.integrate(f, state=state, take_gradient=take_gradient)
+    # With bounds: a fresh mesh and the state's (given, so fixed) batch size.
+    _, from_state, _, _, _ = call(True, state=state)
+    assert torch.equal(from_state.integral, default.integral)
+    assert from_state.n_start_steps == default.n_start_steps
+
+    _, one_shot_state = integrate(
+        f,
+        mesh_init=a,
+        mesh_final=b,
+        device=device,
+        max_batch=SMALL_BATCH,
+        take_gradient=False,
+        build_state_mesh=False,
+    )
+    assert one_shot_state.mesh is None
+
+
 @pytest.mark.parametrize("n_steps", [1, 2])
 def test_optimal_mesh_of_one_or_two_steps(n_steps):
     """One step has no pair to merge; an over-resolved pair merges into one
@@ -413,7 +545,6 @@ def test_optimal_mesh_of_one_or_two_steps(n_steps):
     solver = make_solver_for_unit_test(atol=1e-3, rtol=1e-3)
     mesh = torch.linspace(0.0, 1.0, n_steps + 1, dtype=torch.float64).unsqueeze(-1)
     mesh_opt = solver._get_optimal_mesh(
-        nodes=solver._compute_nodes(mesh[:-1], mesh[1:]),
         mesh_quadratures=torch.full((n_steps, 1), 1.0 / n_steps, dtype=torch.float64),
         mesh_quadrature_errors=torch.full((n_steps, 1), 1e-12, dtype=torch.float64),
         integral=torch.tensor([1.0], dtype=torch.float64),
@@ -429,11 +560,11 @@ def test_optimal_mesh_of_one_or_two_steps(n_steps):
 
 
 def _record(solver, edges, f):
-    """Nodes, values and contributions of the subintervals between ``edges``."""
+    """Values and contributions of the subintervals between ``edges``."""
     nodes = solver._compute_nodes(edges[:-1], edges[1:])
     y = f(nodes)
     b, _ = solver.method.weights(nodes)
-    return nodes, y, (nodes[:, -1] - nodes[:, 0]) * (b * y).sum(1)
+    return y, (edges[1:] - edges[:-1]) * (b * y).sum(1)
 
 
 def _all_solvers():
@@ -449,8 +580,8 @@ def _all_solvers():
 def test_merged_pair_weights_exact_for_polynomials(rho):
     """Interpolating each neighbor through its U distinct nodes is exact for a
     polynomial of degree U - 1, so the predicted merged integral and error
-    estimate equal the merged subinterval's own, to rounding, for every method
-    and width ratio."""
+    estimate, from the values at the neighbors' C nodes, equal the merged
+    subinterval's own, to rounding, for every method and width ratio."""
     generator = torch.Generator().manual_seed(1)
     a, b = 0.2, 1.3
     m = a + (b - a) / (1.0 + rho)
@@ -465,10 +596,8 @@ def test_merged_pair_weights_exact_for_polynomials(rho):
 
         edges = torch.tensor([[a], [m], [b]], dtype=torch.float64)
         halves = solver._compute_nodes(edges[:-1], edges[1:])  # [2, C, 1]
-        weights, first = solver._merged_pair_weights(
-            torch.tensor([rho], dtype=torch.float64)
-        )
-        y = poly(halves[..., 0])[:, first]  # [2, U]
+        weights = solver._merged_pair_weights(torch.tensor([rho], dtype=torch.float64))
+        y = poly(halves[..., 0])  # [2, C]
         predicted = (b - a) * (weights[0, 0] @ y[0] + weights[0, 1] @ y[1])  # [2]
 
         merged = solver._compute_nodes(edges[:1], edges[2:])
@@ -482,6 +611,43 @@ def test_merged_pair_weights_exact_for_polynomials(rho):
             solver.method_name,
             rho,
         )
+
+
+def test_predicted_with_a_repeated_node_fraction(monkeypatch):
+    """A method may repeat a node fraction (its values there are equal): the
+    vectors give the repeat weight 0 and apply to the values as stored.
+    Simpson's rule with its middle node written twice (weights 1/3 + 1/3)
+    predicts the same merged errors as Simpson's rule, to rounding."""
+    third, sixth = 1.0 / 3.0, 1.0 / 6.0
+    rules = {
+        "simpson": ([0.0, 0.5, 1.0], [sixth, 4 * sixth, sixth], [2 * third]),
+        "simpson_twice": (
+            [0.0, 0.5, 0.5, 1.0],
+            [sixth, third, third, sixth],
+            [third] * 2,
+        ),
+    }
+    edges = torch.tensor([[0.0], [0.2], [0.45], [0.5], [1.0]], dtype=torch.float64)
+    predicted = {}
+    for name, (c, b, middle) in rules.items():
+        c, b = (
+            torch.tensor(c, dtype=torch.float64),
+            torch.tensor(b, dtype=torch.float64),
+        )
+        # Simpson minus the trapezoidal rule
+        b_error = torch.tensor([-third, *middle, -third], dtype=torch.float64)
+        method = UniformMethodClass(
+            degree=3, error_exponent=3, tableau=_Tableau(c=c, b=b, b_error=b_error)
+        )
+        monkeypatch.setitem(UNIFORM_METHODS, name, method)
+        solver = make_solver_for_unit_test(name)
+        y, q = _record(solver, edges, lambda t: torch.exp(3 * t) * torch.sin(7 * t))
+        predicted[name] = solver._predict_merged_errors(y, q, edges)
+    weights = solver._merged_pair_weights(torch.tensor([1.0, 2.5], dtype=torch.float64))
+    assert torch.all(weights[..., 2] == 0)  # the repeat
+    assert torch.allclose(
+        predicted["simpson_twice"], predicted["simpson"], rtol=1e-13, atol=0
+    )
 
 
 def _lorentz_5(t):
@@ -625,26 +791,13 @@ def test_predicted_falls_back_to_power_law_for_vector_t(caplog):
     power-law cutoff is used and a warning says so."""
     solver = make_solver_for_unit_test("gk21")
     edges = torch.stack([torch.linspace(0, 1, 4), torch.linspace(0, 2, 4)], dim=-1)
-    nodes = solver._compute_nodes(edges[:-1].double(), edges[1:].double())
     y = torch.ones(3, solver.C, 1, dtype=torch.float64)
     zeros = torch.zeros(3, 1, dtype=torch.float64)
     with caplog.at_level("WARNING", logger="padaquad"):
-        merge_prediction, cut = solver._merge_inputs(nodes, y, zeros)
+        merge_prediction, cut = solver._merge_inputs(y, zeros, edges.double())
     assert merge_prediction is None
     assert cut == REMOVE_CUT / 2 ** (solver.method.error_exponent - 1)
     assert "merge_rule='power_law'" in caplog.text
-
-
-def test_predicted_needs_nodes_at_the_fractions():
-    """The prediction assumes every node sits at the method's node fractions;
-    a record that breaks this is refused rather than mispredicted."""
-    solver = make_solver_for_unit_test("gk21")
-    edges = torch.linspace(0, 1, 4, dtype=torch.float64).unsqueeze(-1)
-    nodes = solver._compute_nodes(edges[:-1], edges[1:]).clone()
-    nodes[1, 5, 0] += 1e-3
-    y = torch.ones(3, solver.C, 1, dtype=torch.float64)
-    with pytest.raises(ValueError, match="node fractions"):
-        solver._predict_merged_errors(nodes, y, torch.ones(3, 1, dtype=torch.float64))
 
 
 def test_predicted_detaches_and_caches():
@@ -655,11 +808,11 @@ def test_predicted_detaches_and_caches():
     solver = make_solver_for_unit_test("gk21")
     edges = torch.tensor([0.0, 0.25, 0.5, 1.0], dtype=torch.float64).unsqueeze(-1)
     theta = torch.tensor(3.0, dtype=torch.float64, requires_grad=True)
-    nodes, y, q = _record(solver, edges, lambda t: torch.sin(theta * t))
-    first = solver._predict_merged_errors(nodes, y, q)
+    y, q = _record(solver, edges, lambda t: torch.sin(theta * t))
+    first = solver._predict_merged_errors(y, q, edges)
     assert not first.requires_grad
-    assert len(solver._merge_weight_cache) == 3  # ratios 1 and 2, and the indices
-    assert torch.equal(solver._predict_merged_errors(nodes, y, q), first)
+    assert len(solver._merge_weight_cache) == 2  # ratios 1 and 2
+    assert torch.equal(solver._predict_merged_errors(y, q, edges), first)
 
     solver._set_dtype(torch.float32)
     assert solver._merge_weight_cache == {}
@@ -685,58 +838,94 @@ def test_predicted_chunking_matches_one_pass():
         nodes = whole._compute_nodes(edges[:-1], edges[1:])
         y = torch.stack([torch.sin(5 * nodes[..., 0]), torch.exp(nodes[..., 0])], -1)
         b, _ = whole.method.weights(nodes)
-        h = nodes[:, -1] - nodes[:, 0]
+        h = edges[1:] - edges[:-1]
         q = h * (b * y).sum(1)
         scale = h * (b.abs() * y.abs()).sum(1)
         pieces = make_solver_for_unit_test(name)
         pieces._MERGE_CHUNK, pieces._RATIO_BLOCK, pieces._MERGE_CACHE_SIZE = 7, 5, 3
         difference = (
-            pieces._predict_merged_errors(nodes, y, q)
-            - whole._predict_merged_errors(nodes, y, q)
+            pieces._predict_merged_errors(y, q, edges)
+            - whole._predict_merged_errors(y, q, edges)
         ).abs()
         assert torch.all(difference <= 1e-13 * (scale[:-1] + scale[1:])), name
 
 
 @pytest.mark.parametrize("n_outputs", [1, 4])
 def test_predicted_works_in_bounded_chunks(monkeypatch, n_outputs):
-    """The node-position check and the prediction run on _MERGE_CHUNK // D
-    pairs at a time (spied through _compute_nodes, which the check calls once
-    per chunk), so their float64 temporaries have the same size for any record
-    and any D, and the result equals that of one pass to rounding. Before
-    b1dd7a6 the check ran on the whole record (peak 3.0 times the size of y at
-    D = 1, gk21, 10^6 subintervals); before 6f1a0dc a chunk held _MERGE_CHUNK
-    pairs for any D (peak 5.0 times y at D = 256)."""
+    """The prediction runs on _MERGE_CHUNK // D pairs at a time (spied through
+    _cached_merged_pair_weights, called once per chunk), so its float64
+    temporaries have the same size for any record and any D, and the result
+    equals that of one pass to rounding. Before 6f1a0dc a chunk held
+    _MERGE_CHUNK pairs for any D (peak 5.0 times y at D = 256)."""
     solver = make_solver_for_unit_test("gk21")
     solver._MERGE_CHUNK = 8
     edges = torch.linspace(0.0, 1.0, 31, dtype=torch.float64).unsqueeze(-1)
     frequencies = torch.arange(1.0, n_outputs + 1.0, dtype=torch.float64)
-    nodes, y, q = _record(solver, edges, lambda t: torch.sin(3 * t * frequencies))
-    whole = make_solver_for_unit_test("gk21")._predict_merged_errors(nodes, y, q)
-    rows = []
-    compute_nodes = solver._compute_nodes
+    y, q = _record(solver, edges, lambda t: torch.sin(3 * t * frequencies))
+    whole = make_solver_for_unit_test("gk21")._predict_merged_errors(y, q, edges)
+    calls = []
+    cached_weights = solver._cached_merged_pair_weights
 
-    def spy(left, right):
-        rows.append(len(left))
-        return compute_nodes(left, right)
+    def spy(keys):
+        calls.append(len(keys))
+        return cached_weights(keys)
 
-    monkeypatch.setattr(solver, "_compute_nodes", spy)
-    pieces = solver._predict_merged_errors(nodes, y, q)
-    assert len(rows) > 1
-    assert max(rows) <= 8 // n_outputs + 1
+    monkeypatch.setattr(solver, "_cached_merged_pair_weights", spy)
+    pieces = solver._predict_merged_errors(y, q, edges)
+    assert len(calls) == math.ceil(29 / (8 // n_outputs))  # 29 pairs
     assert torch.allclose(pieces, whole, rtol=0, atol=1e-14 * float(q.abs().max()))
 
 
-def test_predicted_node_check_is_relative_to_each_subinterval():
-    """A node off its fraction is refused also in a subinterval near 0 of a
-    mesh that reaches 1e6: one tolerance for the whole record, 16 eps times the
-    largest |node|, is 3.6e-9 there, 3.6e-6 of the first subinterval's width."""
+@pytest.mark.parametrize("dtype", [torch.float64, torch.float32])
+def test_predicted_does_not_depend_on_the_values_layout(dtype):
+    """The record keeps f's output as it is when one call covers the pass, so
+    an integrand that returns a transposed [N, D] tensor gives values whose
+    slowest dimension is D. The prediction from them equals the prediction
+    from the same values stored contiguously, bit for bit: a product on the
+    strided values rounded differently (up to 4e-13, relative, at D = 1000
+    in float64)."""
     solver = make_solver_for_unit_test("gk21")
-    edges = torch.tensor([[0.0], [1e-3], [1.0], [1e6]], dtype=torch.float64)
-    nodes = solver._compute_nodes(edges[:-1], edges[1:]).clone()
-    nodes[0, 5, 0] += 1e-9
-    y = torch.ones(3, solver.C, 1, dtype=torch.float64)
-    with pytest.raises(ValueError, match="node fractions"):
-        solver._predict_merged_errors(nodes, y, torch.ones(3, 1, dtype=torch.float64))
+    generator = torch.Generator().manual_seed(3)
+    widths = torch.rand(40, generator=generator, dtype=torch.float64) + 0.05
+    edges = torch.cat([torch.zeros(1, dtype=torch.float64), widths.cumsum(0)])
+    edges = (edges / edges[-1]).unsqueeze(-1)
+    y = torch.randn(40, solver.C, 1000, generator=generator, dtype=dtype)
+    q = torch.randn(40, 1000, generator=generator, dtype=dtype)
+    transposed = y.permute(2, 0, 1).contiguous().permute(1, 2, 0)
+    assert torch.equal(
+        solver._predict_merged_errors(transposed, q, edges),
+        solver._predict_merged_errors(y, q, edges),
+    )
+
+
+def test_pair_errors_in_the_dtype_of_the_error_estimates(monkeypatch):
+    """A float64 solver given float32 values has a float32 prediction and
+    float64 error estimates; the pair errors are their sum in float64,
+    prediction + e_i + e_{i+1}, bit for bit (adding the estimates into the
+    float32 prediction in place rounded the pair errors to float32 and changed
+    merges at the cutoff)."""
+    solver = make_solver_for_unit_test("gk21")
+    generator = torch.Generator().manual_seed(4)
+    edges = torch.linspace(0.0, 1.0, 41, dtype=torch.float64).unsqueeze(-1)
+    y = torch.randn(40, solver.C, 3, generator=generator, dtype=torch.float32)
+    q = torch.randn(40, 3, generator=generator, dtype=torch.float64)
+    e = torch.rand(40, 3, generator=generator, dtype=torch.float64) * 1e-3
+    seen = {}
+    compute = solver._compute_error_ratios
+
+    def spy(**kwargs):
+        if kwargs.get("pair_errors") is not None:
+            seen["pair_errors"] = kwargs["pair_errors"].clone()
+        return compute(**kwargs)
+
+    monkeypatch.setattr(solver, "_compute_error_ratios", spy)
+    solver._get_optimal_mesh(
+        mesh_quadratures=q, mesh_quadrature_errors=e, integral=q.sum(0), mesh=edges, y=y
+    )
+    prediction = solver._predict_merged_errors(y, q, edges)
+    assert prediction.dtype == torch.float32
+    assert seen["pair_errors"].dtype == torch.float64
+    assert torch.equal(seen["pair_errors"], prediction + e[:-1] + e[1:])
 
 
 def test_predicted_refuses_pairs_without_a_finite_width_ratio():
@@ -747,8 +936,8 @@ def test_predicted_refuses_pairs_without_a_finite_width_ratio():
     prediction, so it is never merged; the other pairs are unaffected."""
     solver = make_solver_for_unit_test("gk21")
     edges = torch.tensor([[0.0], [1e-310], [1.0], [2.0]], dtype=torch.float64)
-    nodes, y, q = _record(solver, edges, torch.exp)
-    predicted = solver._predict_merged_errors(nodes, y, q)
+    y, q = _record(solver, edges, torch.exp)
+    predicted = solver._predict_merged_errors(y, q, edges)
     assert torch.isposinf(predicted[0]).all()
     assert torch.isfinite(predicted[1]).all()
 
@@ -759,7 +948,7 @@ def test_cache_eviction_gives_the_uncached_prediction():
     chunk's ratios several times (no other test reaches that branch). The
     prediction must equal that of a solver whose cache never fills, also on a
     second pass that starts from the evicted cache, and the cache must stay
-    within its bound (plus the entry that holds the distinct-node indices)."""
+    within its bound."""
     # Widths 1, 1, 2, 2, 1, 4, 4, 0.5, 8, ...: ratios 1, 2, 1/2, 4, 1/8, ...
     widths = torch.tensor(
         [1, 1, 2, 2, 1, 4, 4, 0.5, 8, 8, 3, 3, 1, 0.25, 0.25, 5], dtype=torch.float64
@@ -768,13 +957,13 @@ def test_cache_eviction_gives_the_uncached_prediction():
     edges = (edges / edges[-1]).unsqueeze(-1)
     small = make_solver_for_unit_test("gk21")
     small._MERGE_CHUNK, small._MERGE_CACHE_SIZE = 3, 4
-    nodes, y, q = _record(small, edges, lambda t: torch.sin(9 * t) + t**2)
-    expected = make_solver_for_unit_test("gk21")._predict_merged_errors(nodes, y, q)
+    y, q = _record(small, edges, lambda t: torch.sin(9 * t) + t**2)
+    expected = make_solver_for_unit_test("gk21")._predict_merged_errors(y, q, edges)
     scale = float((q.abs()[:-1] + q.abs()[1:]).max())
     for _ in range(2):
-        got = small._predict_merged_errors(nodes, y, q)
+        got = small._predict_merged_errors(y, q, edges)
         assert torch.allclose(got, expected, rtol=0, atol=1e-14 * scale)
-        assert len(small._merge_weight_cache) <= small._MERGE_CACHE_SIZE + 1
+        assert len(small._merge_weight_cache) <= small._MERGE_CACHE_SIZE
 
 
 @pytest.mark.parametrize("error_norm", ["2", "failure_fraction"])
@@ -869,9 +1058,8 @@ def test_float32_predicted_merges_where_power_law_does_not():
 @pytest.mark.parametrize("offset", [-1e3, 1e3])
 def test_predicted_far_from_the_origin(dtype, offset):
     """On [offset, offset + 1/2], widths far below |t| on either side of 0:
-    the node check accepts the solver's own records (its scale is each
-    subinterval's largest |node|), and four warm calls merge 64 subintervals
-    to fewer than 16 and pass the warm-start check. The warm calls pass no
+    four warm calls merge 64 subintervals to fewer than 16 and pass the
+    warm-start check. The warm calls pass no
     bounds and stay on [offset, offset + 1/2]."""
     a, b = offset, offset + 0.5
     mesh = torch.linspace(a, b, 65, dtype=dtype).unsqueeze(-1)
@@ -913,7 +1101,7 @@ def test_nan_integrand_does_not_break_the_prediction():
     optimal = optimal.cpu()[:, 0]
     assert torch.isfinite(optimal).all()
     assert torch.all(optimal[1:] > optimal[:-1])
-    predicted = solver._predict_merged_errors(*_record(solver, mesh, f))
+    predicted = solver._predict_merged_errors(*_record(solver, mesh, f), mesh)
     assert torch.isnan(predicted[:, 1]).any()
     assert torch.isfinite(predicted[:, 0]).all()
 
@@ -952,7 +1140,7 @@ def test_predicted_on_gpu_with_either_result_device():
             max_batch=out_cpu_state.max_batch,
             take_gradient=False,
         )
-        cached = [v for k, v in gpu._merge_weight_cache.items() if k is not None]
+        cached = list(gpu._merge_weight_cache.values())
         assert cached
         assert all(v.device.type == result_device for v in cached)
         assert out_gpu_state.mesh.device.type == "cuda"

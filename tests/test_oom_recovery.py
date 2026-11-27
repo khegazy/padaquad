@@ -289,7 +289,9 @@ def test_split_pairs_nodes_with_values_after_oom(method, max_batch, limit_share)
     # Every node evaluated once, and each subinterval integrated from its own
     # values, as one _calculate_integral call would.
     assert sum(b for b in oom.batch_sizes if b <= oom.limit) == n_subintervals * C
-    expected = solver._calculate_integral(nodes, f_evals)
+    expected = solver._calculate_integral(
+        nodes, f_evals, mesh[step_idxs], mesh[step_idxs + 1]
+    )
     assert torch.equal(method_output.mesh_quadratures, expected.mesh_quadratures)
     assert torch.equal(method_output.integral, expected.integral)
 
@@ -370,11 +372,7 @@ class TestIntegrateOOMRecovery:
         )
 
         def broken(t, *args):
-            # Only multi-point batches fail, so the one-point warm-up call in
-            # integrate() passes and the error comes from the batch loop.
-            if t.shape[0] > 1:
-                raise RuntimeError("shape mismatch in f")
-            return torch.ones((1, 1), dtype=t.dtype, device=t.device)
+            raise RuntimeError("shape mismatch in f")
 
         with pytest.raises(RuntimeError, match="shape mismatch in f"):
             solver.integrate(broken, mesh_init=T_INIT, mesh_final=T_FINAL)

@@ -737,7 +737,7 @@ def test_reading_never_below_input_and_output(fake):
     reader = fake.solver._peak_memory_reader()
     for n in (1, 1000, 10**5):
         M, _ = fake.solver._measure_call(
-            f, (), NODE.unsqueeze(0), n, reader.reset, reader.read, 0.9
+            f, (), NODE.unsqueeze(0), n, reader.reset, reader.read
         )
         assert 16 * n == M * GB
 
@@ -958,7 +958,7 @@ def test_real_linux_malloc_trim_recovers_reused_memory():
         return torch.zeros((t.shape[0], 1), dtype=t.dtype)
 
     def measure(r):
-        M, _ = solver._measure_call(f, (), NODE.unsqueeze(0), 1, r.reset, r.read, 0.9)
+        M, _ = solver._measure_call(f, (), NODE.unsqueeze(0), 1, r.reset, r.read)
         return M * GB
 
     first = measure(reader)
@@ -1302,7 +1302,7 @@ def test_messages_when_measuring(caplog, monkeypatch):
 
 def test_slow_integrand_gradient_path_completes(monkeypatch):
     """Regression: a slow f used to stop the search at small N, and an
-    estimate tied to N gave gk21 (23 points per panel) a batch below one panel
+    estimate tied to N gave gk21 (then 23 points per panel) a batch below one panel
     on the take_gradient=True path, which then failed its assertion. c is now
     measured, so the batch comes from the fit and integrate() completes."""
     clock = FakeClock()
@@ -1509,8 +1509,9 @@ def test_gpu_oom_after_n_100_keeps_measured_cost(monkeypatch):
         return torch.ones((t.shape[0], 1), dtype=t.dtype, device=t.device)
 
     node = torch.zeros(1, dtype=torch.float64, device="cuda:0")
-    # Warm-up, as integrate() does: a cold first call (kernel loading) can
-    # take more than 0.1 s, after which the CUDA reader steps 2x, not 10x.
+    # Warm-up, as get_max_batch(f=...) does: a cold first call (kernel
+    # loading) can take more than 0.1 s, after which the CUDA reader steps 2x,
+    # not 10x.
     f(node.reshape(1, 1))
     calls.clear()
     solver._setup_memory_checks(f, node, take_gradient=False, total_mem_usage=0.9)
@@ -1569,7 +1570,7 @@ def test_gpu_benchmark_leaves_no_state(monkeypatch):
 
     warm = node.reshape(1, 1)
     (warm @ warm.T).sum()  # matmul: allocates cuBLAS's persistent workspace
-    f(warm)  # warm-up, as integrate() does
+    f(warm)  # warm-up, as get_max_batch(f=...) does
     # The benchmark runs gc.collect(); collect first so garbage left by earlier
     # tests is not counted as memory the benchmark freed.
     gc.collect()
@@ -1832,7 +1833,7 @@ def test_batch_capped_at_largest_test_call_where_reuse_is_missed(
 def test_batch_cap_at_least_one_subinterval(monkeypatch):
     """A slow f whose search ends at N = 4 (three reliable readings, then the
     1 s limit) on a reader that misses reused memory: the cap is not the
-    largest test call, 4, but the C = 23 nodes of one gk21 subinterval, the
+    largest test call, 4, but the C = 21 nodes of one gk21 subinterval, the
     smallest batch the take_gradient=True path can evaluate. Catches: a cap
     below one subinterval, which made that path fail its assertion."""
     solver = make_solver_for_unit_test(method_name="gk21")
@@ -1841,7 +1842,7 @@ def test_batch_cap_at_least_one_subinterval(monkeypatch):
     calls = stub_calls(solver, monkeypatch, lambda n: 2**20 * n, seconds=lambda n: 2.0)
     benchmark(solver, None)
     assert calls == [1, 2, 4]
-    assert solver.get_max_batch() == solver.C == 23
+    assert solver.get_max_batch() == solver.C == 21
 
 
 def test_limit_benchmark_time_is_a_solver_option():
@@ -1897,7 +1898,7 @@ def test_cost_convergence_waits_for_fit_ready(fake, monkeypatch, caplog):
     """A GPU-like reader (10 KB floor, counts reused memory) and calls of
     0.2 s, so N doubles. The call at N = 2 reads 1 MiB (a workspace f
     allocates only in that call, as for a kernel first used at two points;
-    integrate()'s one-point call absorbs only what N = 1 allocates); every
+    get_max_batch's one-point call absorbs only what N = 1 allocates); every
     other call reads 1 KiB per point. From N = 16 on the readings are
     reliable and the cost per point is constant, so the convergence stop
     alone would end the search at N = 64. The fit uses every reliable
@@ -1921,19 +1922,18 @@ def test_cost_convergence_waits_for_fit_ready(fake, monkeypatch, caplog):
     assert "did not allow a fit" not in caplog.text
 
 
-def test_out_of_memory_retry_shrinks_the_failed_batch(fake, monkeypatch):
-    """integrate() without max_batch: the test call of 10 points (stubbed, so
-    f is not called) gives a batch size of 10, not converged, so the first
-    pass of 44 points (11 subintervals of bosh3's 4 nodes) runs whole. f runs
-    out of memory above 29 points; each retry shrinks the batch that failed,
-    44 -> 33 -> 25 (then the 19 points left), and 25 is the converged batch
-    size. Catches: a retry that does not shrink the failed batch itself."""
-    stub_calls(fake.solver, monkeypatch, lambda n: 2**20 * n)
+def test_out_of_memory_retry_shrinks_the_failed_batch(fake):
+    """integrate() without max_batch: the test call of 10 points runs and
+    gives a batch size of 10, not converged, so the first pass of 44 points
+    (11 subintervals of bosh3's 4 nodes) runs whole. f runs out of memory
+    above 29 points; each retry shrinks the batch that failed, 44 -> 33 -> 25
+    (then the 19 points left), and 25 is the converged batch size. Catches: a
+    retry that does not shrink the failed batch itself."""
     f = CostIntegrand(fake.memory, fake.clock, oom_from=30)
     result, result_state = fake.solver.integrate(
         f, mesh_init=T_INIT, mesh_final=T_FINAL, take_gradient=False
     )
-    assert f.calls == [1, 44, 33, 25, 19]  # after the one-point check
+    assert f.calls == [10, 44, 33, 25, 19]
     assert (result_state.max_batch, result_state.max_batch_converged) == (25, True)
     assert float(result.integral.sum()) == pytest.approx(1.0)
 
@@ -1942,7 +1942,7 @@ def test_reuse_cap_never_raises_out_of_memory_cap(monkeypatch):
     """On a reader that misses reused memory, a heavy f (8 MiB per call) runs
     out of memory at N = 10 after one reading at N = 1. The out-of-memory cap
     is int(0.75 * 10) = 7 points; the cap at the largest test call is raised
-    to one gk21 subinterval, 23 points, which is more than the call that
+    to one gk21 subinterval, 21 points, which is more than the call that
     failed. The smaller of the two holds: the batch is 7. Catches: the cap at
     the largest test call replacing the out-of-memory cap instead of taking
     the minimum."""
@@ -2060,6 +2060,22 @@ def test_get_max_batch_with_f_validates_its_arguments(kwargs, monkeypatch):
     calls = _fake_benchmark(solver, monkeypatch)
     with pytest.raises(ValueError, match=r"get_max_batch|total_mem_usage|shape"):
         solver.get_max_batch(**kwargs)
+    assert calls == []
+
+
+@pytest.mark.parametrize("error", [torch.OutOfMemoryError, MemoryError])
+def test_get_max_batch_one_point_out_of_memory(error, monkeypatch):
+    """The one-point call goes through _call_f, like every call of f in
+    integrate: an out-of-memory error of either kind on one point is raised as
+    torch.OutOfMemoryError saying that the batch cannot be reduced."""
+    solver = adaptive_quadrature("uniform", "gk21", device="cpu")
+    calls = _fake_benchmark(solver, monkeypatch)
+
+    def f(t):
+        raise error("simulated")
+
+    with pytest.raises(torch.OutOfMemoryError, match="on 1 points ran out of memory"):
+        solver.get_max_batch(f=f, t=_T)
     assert calls == []
 
 

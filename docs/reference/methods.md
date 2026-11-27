@@ -13,8 +13,8 @@ which is generated from these dictionaries.
    The methods of the uniform-sampling solver, by name: ``adaptive_heun``,
    ``fehlberg2``, ``bosh3``, ``dopri5`` (Runge-Kutta); ``gk7``, ``gk15``,
    ``gk21``, ``gk31`` (Gauss-Kronrod); ``cc5``, ``cc9``, ``cc17``, ``cc33``,
-   ``cc65`` (Clenshaw-Curtis). Each solver uses its own copy, so changing a
-   solver's precision never changes these objects.
+   ``cc65`` (Clenshaw-Curtis). A solver uses a copy converted to its device
+   and dtype (``MethodClass.to``), so these objects never change.
 
 .. py:data:: VARIABLE_METHODS
    :type: dict[str, MethodClass]
@@ -30,7 +30,7 @@ which is generated from these dictionaries.
 .. currentmodule:: padaquad.methods
 
 .. autoclass:: MethodClass
-   :members: measure_degree, node_fractions, weights, n_nodes, order, clone
+   :members: measure_degree, node_fractions, weights, n_nodes, order, to
 
 .. autoclass:: UniformMethodClass
 

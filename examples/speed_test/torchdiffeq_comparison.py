@@ -9,7 +9,8 @@ The comparison shows what that buys, and what it costs, on this machine.
 
 For every integrand and every tolerance (atol = rtol), each solver integrates
 over [0, 1] several times. The script records the median wall time (one
-warm-up call excluded), the spread (smallest and largest time), the number of
+warm-up call excluded), the spread (smallest and largest time; every run's time
+is kept in the JSON), the number of
 integrand evaluations (points at which f was evaluated) and the absolute error
 against the exact answer. The two libraries apply the tolerance differently
 (torchdiffeq per step against ``atol + rtol |y|``; PadaQuad per subinterval
@@ -31,6 +32,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import gc
 import itertools
 import json
 import os
@@ -172,6 +174,7 @@ def measure(
 ) -> dict[str, Any]:
     """Time one (solver, integrand, tolerance) case: warm-up excluded."""
     counted = CountingIntegrand(f)
+    gc.collect()  # every case starts with the garbage of the previous ones collected
     run_once(solver, counted, tol, device)  # warm-up, not timed
     times, evaluations, value = [], 0, 0.0
     for _ in range(repeats):
@@ -187,6 +190,7 @@ def measure(
         "time_median_s": statistics.median(times),
         "time_min_s": min(times),
         "time_max_s": max(times),
+        "times_s": times,
         "evaluations": evaluations,
         "abs_error": abs(value - exact),
     }
@@ -234,6 +238,13 @@ def metadata(device: str) -> dict[str, Any]:
         ),
         "cpu_count": os.cpu_count(),
         "torch_threads": torch.get_num_threads(),
+        # The CPUs the process may run on and the thread variable that set
+        # torch_threads, if any: the thread count changes the times (user
+        # guide, "CPU threads").
+        "cpu_affinity": (
+            len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else None
+        ),
+        "omp_num_threads": os.environ.get("OMP_NUM_THREADS"),
         "platform": platform.platform(),
         "python": platform.python_version(),
         "torch": torch.__version__,

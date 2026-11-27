@@ -14,7 +14,11 @@ $s = \lfloor\sqrt{N_\text{init}}\rfloor$, the domain is cut into $s$ equal
 segments, and each segment receives $s + 1$ mesh points: at random positions
 (sorted) by default, or evenly spaced with `random_initial_mesh=False`. The
 mesh has $s(s+1)$ points and $s(s+1) - 1$ subintervals (`result.n_start_steps`
-reports the number).
+reports the number), unless rounding puts a point on or below an earlier one:
+in float32, in float64 far from 0, or with about $10^5$ points or more (the
+random positions are drawn as float32 numbers, with 24 random bits). Such a
+point is dropped, so the mesh is always strictly increasing and may have fewer
+subintervals than $s(s+1) - 1$.
 
 The random positions are the default because evenly spaced subintervals can
 line up with evenly spaced features of the integrand, such as the zeros of a
@@ -32,7 +36,7 @@ it ({ref}`ug-reuse`).
 
 After the integration converges, PadaQuad builds the optimal mesh,
 `state.mesh`, the mesh a later call starts from when the state is passed as
-`state=` ({ref}`ug-reuse`). Pairs of neighbouring subintervals
+`state=` ({ref}`ug-reuse`), unless the call passes `build_state_mesh=False`. Pairs of neighbouring subintervals
 whose merged subinterval is predicted to pass with a margin are merged, so that a
 mesh finer than needed shrinks, and subintervals that failed are split. The
 merged subinterval is not evaluated during this step; the next call evaluates it.
@@ -50,8 +54,8 @@ $$ (merge-condition)
 where `merge_rule` sets $P$ and the cutoff $\texttt{remove\_cut}'$.
 
 **`merge_rule="predicted"` (the default).** Every method places its nodes at
-fixed fractions of a subinterval, including both ends, and the integrand values
-at those nodes are already stored. On each neighbour, PadaQuad replaces the
+fixed fractions of a subinterval, and the integrand values at those nodes are
+already stored. On each neighbour, PadaQuad replaces the
 integrand by the polynomial through that neighbour's values (barycentric
 interpolation, {cite:t}`berrut2004`, Eqs. (3.2) and (4.2)), evaluates it at the
 nodes the merged subinterval would have, and applies the method's weights. This

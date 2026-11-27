@@ -1,5 +1,8 @@
 # Multi-coordinate integration variable (T > 1) is untested end to end and blocked in `integrate()`
 
+Status: open. Re-checked on 2026-11-26 (commit `ddd0a8f`, PadaQuad 2.0.0,
+torch 2.8.0): the blocker below still stops every `T > 1` call.
+
 ## Summary
 
 PadaQuad is built so that the integration variable `t` can have more than one
@@ -18,10 +21,8 @@ vector-valued integrands has never been defined or documented.
 ## Evidence that T > 1 is intended
 
 - The shape convention throughout the code is `nodes: [N, C, T]` and mesh barriers `[M, T]` (`CLAUDE.md`: "T: dimensionality of time (usually 1, but supports multi-D)").
-- The ordering checks in `padaquad/quadrature/base.py` are written for any `T`.
-  - The rule for any `T` is "consecutive barriers are distinct".
-  - The monotonic check runs only when `T == 1` (around lines 778–787, with the comment "multi-dimensional path" at line 780, and 1963–1967).
-- The random initial mesh places sub-barriers "on the line for any T" (around line 1949): the straight segment from $a$ to $b$.
+- The check of a given mesh in `_setup_integral_bounds` (`padaquad/quadrature/base.py`) is written for any `T`: increasing points for `T == 1`, distinct consecutive points otherwise. (The per-pass order checks of the mesh and the nodes were removed in 2.0.0; the mesh is in order by construction.)
+- The random initial mesh (`_setup_initial_mesh`) places sub-barriers "on the line for any T": the straight segment from $a$ to $b$. Its 2.0.0 removal of repeated points compares coordinates (`mesh[1:] > mesh[:-1]`, then `.any(-1)`); for `T > 1` it has never run.
 - Unit tests exercise `T = 2` directly, without going through `integrate()`:
   - `tests/test_adaptive_steps.py` (vector-mesh splitting, around lines 244–330 and 547)
   - `tests/test_sorted_insert.py:24`
@@ -48,31 +49,36 @@ s.integrate(
     mesh_final=torch.tensor([1.0, 2.0]),
     max_batch=10000,
 )
-# RuntimeError: Boolean value of Tensor with more than one value is ambiguous   (base.py:1843)
+# RuntimeError: Boolean value of Tensor with more than one value is ambiguous
 
 # Path 2: explicit mesh
 mesh = torch.stack([torch.linspace(0, 1, 5), torch.linspace(0, 2, 5)], -1).double()
 s.integrate(f, mesh=mesh, max_batch=10000)
-# RuntimeError: Boolean value of Tensor with more than one value is ambiguous   (base.py:1834)
+# RuntimeError: Boolean value of Tensor with more than one value is ambiguous
 ```
 
-(torch 2.8.0, PadaQuad 1.3.0.)
+(torch 2.8.0, PadaQuad 2.0.0 at `ddd0a8f`: both paths stop at the same line
+of `_setup_integral_bounds`, `if not mesh_init < mesh_final:`; with a mesh and
+no bounds, the bounds are the mesh's ends.)
 
-A second blocker sat behind this one: the integrand check call built its point with
-`torch.tensor([[mesh_init]])`, which fails for `T > 1`. That is fixed in 1.3.0
-(commit "fix: build the integrand test call as [1, T] from mesh_init").
+A second blocker sat behind this one in 1.2: the integrand check call built its
+point with `torch.tensor([[mesh_init]])`, which fails for `T > 1`. It was fixed
+in 1.3.0, and the check call was removed in 2.0.0. The test calls of
+`integrate` without `max_batch` take their point from `_compute_nodes`, shape
+`[1, T]`.
 
 ## What T = 2 computes once the assert is bypassed
 
 These results come from replacing `_setup_integral_bounds` on the solver instance (in
-memory) so that it returns the bounds unchecked. The path is $(x, y) = (s, 2s)$ for
+memory) so that it returns the bounds unchecked, with PadaQuad 1.3.0; they were not
+re-run on 2.0.0, whose loop and record changed. The path is $(x, y) = (s, 2s)$ for
 $s \in [0, 1]$, with `max_batch=10000`:
 
 | Integrand | Result | Meaning |
 |---|---|---|
 | `D = 1`, $f = xy$ (uniform `gk21`; variable `adaptive_heun`; `take_gradient` True and False) | `[0.6667, 1.3333]` | $\left(\int f\,dx,\ \int f\,dy\right) = \left(\tfrac{2}{3}, \tfrac{4}{3}\right)$, one integral per coordinate. Correct for that reading. |
 | `D = 2 = T`, $F = (x, y)$ | `[0.5, 2.0]` | $\left(\int F_1\,dx,\ \int F_2\,dy\right)$: the components are paired one-to-one, **not** summed into the line integral $\int F\cdot dr = 2.5$. |
-| `D = 3` | `RuntimeError: The size of tensor a (2) must match the size of tensor b (3)` at `padaquad/quadrature/base.py:128` (`_RK_integral`) | `_RK_integral` multiplies the panel width `h` (`[N, T]`) by the weighted sum of `f` (`[N, D]`). The two shapes only combine when `D` is 1 or `T`. |
+| `D = 3` | `RuntimeError: The size of tensor a (2) must match the size of tensor b (3)` in `_RK_integral` (`padaquad/quadrature/base.py`) | `_RK_integral` multiplies the panel width `h` (`[N, T]`) by the weighted sum of `f` (`[N, D]`). The two shapes only combine when `D` is 1 or `T`. |
 
 Analytic check of row 1: along the path, $f = 2s^2$, $dx = ds$ and $dy = 2\,ds$, so
 $\int f\,dx = \int_0^1 2s^2\,ds = 2/3$ and $\int f\,dy = \int_0^1 4s^2\,ds = 4/3$.
@@ -80,13 +86,14 @@ $\int f\,dx = \int_0^1 2s^2\,ds = 2/3$ and $\int f\,dy = \int_0^1 4s^2\,ds = 4/3
 ## Other known limits
 
 - `_RK_integral`'s docstring says `RK_steps` has shape `[N, D]`. For `T > 1` with `D = 1` it is `[N, T]`.
-- `_get_mesh_indices` keys barriers by their coordinate tuple, so a path that passes through the same point twice would collide.
-- The memory-benchmark path (no `max_batch`) has not been run with `T > 1`.
+- (Fixed in 2.0.0.) `_get_mesh_indices` keyed mesh points by their coordinate tuple, so a path that passes through the same point twice would collide. The record now carries each subinterval's integer mesh index and compares no coordinates.
+- The test calls of `integrate` without `max_batch` (2.0.0; the memory benchmark now runs only in `get_max_batch(f=...)`) have not been run with `T > 1`.
+- `_splittable` (2.0.0: a subinterval too narrow to halve is accepted, not split) is written for any `T` (a piece has width zero when its ends are equal in every coordinate), and is unit-tested with `T = 2` (`tests/test_adaptive_steps.py`), but has not run end to end with `T > 1`; nor has the snap of a bound within rounding of a mesh end in `_setup_integral_bounds`.
 - `merge_rule="predicted"` falls back to `"power_law"` with a warning when `T > 1` (`_merge_inputs`); only a unit test reaches that path, because `integrate()` fails first.
 
 ## What is needed
 
 1. **Decide what the integral means for `T > 1`.** Options include per-coordinate integrals $\int f\,dx_k$, the scalar line integral $\int f\,|dr|$, or the vector line integral $\int F\cdot dr$. Document the choice, including which `D` are allowed.
 2. **Replace the scalar `mesh_init < mesh_final` check with the existing any-T pattern:** require distinct endpoints for any `T`, and require ordering only when `T == 1`.
-3. **Add end-to-end `T = 2` tests** through `integrate()`, with analytic answers, for both sampling types and both `take_gradient` modes, plus one test without `max_batch` to exercise the memory benchmark.
+3. **Add end-to-end `T = 2` tests** through `integrate()`, with analytic answers, for both sampling types and both `take_gradient` modes, plus one test without `max_batch` to exercise the test calls.
 4. **Fix the `_RK_integral` docstring shapes.**

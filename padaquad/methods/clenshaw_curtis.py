@@ -22,8 +22,8 @@ Two properties PadaQuad uses:
    Sec. 6 :cite:p:`gonnet2012`, discusses nested Clenshaw-Curtis pairs in
    general.
 2. The nodes include both ends of the subinterval (:math:`x_0 = 1` and
-   :math:`x_n = -1` map to node fractions 1 and 0), so no padding is needed,
-   unlike Gauss-Kronrod.
+   :math:`x_n = -1` map to node fractions 1 and 0), unlike the Gauss-Kronrod
+   nodes, which are all interior.
 
 References
 ----------

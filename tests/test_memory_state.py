@@ -1,14 +1,18 @@
 """Tests for the batch size of ``integrate`` and the state it returns.
 
 Without ``max_batch`` or a ``state``, ``integrate`` calls ``f`` on 10, 100 and
-1,000 copies of one point, stopping at the order of its first pass, and starts
-from the largest that ran. While the batch size has not converged, a call of ``f`` that
-needs more points tries 10 times as many; an out-of-memory error shrinks it by
-0.75 and makes it converged. ``result_state`` carries the mesh and the batch
-size to the next call. With ``take_gradient=True`` an out-of-memory error in a
-backward pass puts back the gradients the call added (found by walking each
-batch's autograd graph) and restarts the integral, or raises
-``BackwardOutOfMemoryError`` when they cannot all be found.
+1,000 copies of one point (the first node of the first subinterval), stopping
+at the order of its first pass, and starts from the largest that ran; a test
+call that runs out of memory is repeated at 0.5 times its size up to 10 points
+and 0.75 above, never below one subinterval with ``take_gradient=True``. No
+other call of ``f`` is made for anything but the integration. While the batch
+size has not converged, a call of ``f`` that needs more points tries 10 times
+as many; an out-of-memory error shrinks it by 0.75 and makes it converged.
+``result_state`` carries the mesh and the batch size to the next call. With
+``take_gradient=True`` an out-of-memory error in a backward pass puts back the
+gradients the call added (found by walking each batch's autograd graph) and
+restarts the integral, or raises ``BackwardOutOfMemoryError`` when they cannot
+all be found.
 
 Every test runs on the CPU with simulated out-of-memory errors, except the
 check before a backward pass, which needs the GPU's peak-memory counter.
@@ -69,28 +73,33 @@ def even_mesh(n_subintervals: int) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("take_gradient", [False, True])
 @pytest.mark.parametrize(
     ("n_subintervals", "test_calls"),
-    [(11, [10, 100]), (46, [10, 100, 1000]), (500, [10, 100, 1000])],
+    [(11, [10, 100]), (48, [10, 100, 1000]), (500, [10, 100, 1000])],
 )
 def test_test_calls_stop_at_1000_or_the_order_of_the_first_pass(
-    n_subintervals, test_calls, caplog
+    n_subintervals, test_calls, take_gradient, caplog
 ):
-    """After the one-point output check, f is called on 10, 100 and 1,000
-    points, stopping at the largest power of 10 not above the first pass (gk21:
-    23 nodes per subinterval, so 253, 1,058 and 11,500 points). The first call
-    of the pass is then the whole pass, or 10 times the last test call (10,000
-    of the 11,500 points). No memory benchmark runs and none of its messages is
+    """f is first called on 10, 100 and 1,000 points, stopping at the largest
+    power of 10 not above the first pass (gk21: 21 nodes per subinterval, so
+    231, 1,008 and 10,500 points). The first call of the pass is then the whole
+    pass, or 10 times the last test call (10,000 of the 10,500 points; with
+    take_gradient=True whole subintervals, 9,996), and the rest of the pass
+    follows in one call. No memory benchmark runs and none of its messages is
     logged."""
     f = Recorder()
     with caplog.at_level(logging.WARNING):
         result, result_state = solver().integrate(
-            f, mesh=even_mesh(n_subintervals), take_gradient=False
+            f, mesh=even_mesh(n_subintervals), take_gradient=take_gradient
         )
-    first_pass = 23 * n_subintervals
-    first_call = min(first_pass, 10 * test_calls[-1])
-    assert f.sizes[: len(test_calls) + 1] == [1, *test_calls]
-    passes = f.sizes[len(test_calls) + 1 :]
+    first_pass = 21 * n_subintervals
+    first_call = min(
+        first_pass,
+        10 * test_calls[-1] // 21 * 21 if take_gradient else 10 * test_calls[-1],
+    )
+    assert f.sizes[: len(test_calls)] == test_calls
+    passes = f.sizes[len(test_calls) :]
     assert passes[0] == first_call
     if first_call < first_pass:  # the rest of the first pass
         assert passes[1] == first_pass - first_call
@@ -100,29 +109,151 @@ def test_test_calls_stop_at_1000_or_the_order_of_the_first_pass(
     assert "measuring how much memory" not in caplog.text
 
 
-def test_failed_test_call_shrinks_until_one_runs():
-    """A test call of 100 points runs out of memory (limit 60): it is repeated
-    at 75 and 56 points; 56 runs and becomes the converged batch size. No
-    larger test call follows, and every later batch is at most 56 points."""
-    f = Recorder(limit=60)
+@pytest.mark.parametrize(
+    ("limit", "take_gradient", "test_calls", "batch", "later_calls"),
+    [
+        # Above 10 points each failed test call shrinks by 0.75 (rounded half
+        # to even); 56 runs. The first pass then runs in calls of 56 points,
+        # or of 2 whole subintervals (42 points) with take_gradient=True.
+        (60, False, [10, 100, 75, 56], 56, 56),
+        (60, True, [10, 100, 75, 56], 56, 42),
+        # Up to 10 points by 0.5: 10 -> 5 -> 2 (round(2.5) = 2).
+        (9, False, [10, 5], 5, 5),
+        (4, False, [10, 5, 2], 2, 2),
+    ],
+)
+def test_failed_test_call_shrinks_until_one_runs(
+    limit, take_gradient, test_calls, batch, later_calls
+):
+    """A test call that runs out of memory is repeated at 0.75 times its size
+    above 10 points and 0.5 times up to 10, until one runs; it becomes the
+    converged batch size, no larger test call follows, and the integration
+    calls f on at most that many points."""
+    f = Recorder(limit=limit)
     result, result_state = solver().integrate(
-        f, mesh_init=A, mesh_final=B, take_gradient=False
+        f, mesh_init=A, mesh_final=B, take_gradient=take_gradient
     )
-    assert f.sizes[:5] == [1, 10, 100, 75, 56]
-    assert max(f.sizes[5:]) <= 56
-    assert (result_state.max_batch, result_state.max_batch_converged) == (56, True)
+    assert f.sizes[: len(test_calls)] == test_calls
+    assert max(f.sizes[len(test_calls) :]) == later_calls
+    assert (result_state.max_batch, result_state.max_batch_converged) == (batch, True)
     assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
+
+
+@pytest.mark.parametrize(
+    ("method", "limit", "test_calls"),
+    [("gk21", 21, [10, 100, 75, 56, 42, 32, 24, 21]), ("cc65", 70, [10, 100, 75, 65])],
+)
+def test_integrand_that_holds_one_subinterval_runs_with_take_gradient(
+    method, limit, test_calls
+):
+    """With take_gradient=True an integrand that holds one subinterval (C
+    points) but not two integrates: the test calls shrink no further than C
+    points (0.75 x 24 = 18 for gk21 and 0.75 x 75 = 56 for cc65 become C), so
+    the batch size never converges below one subinterval. On main they did, and
+    the first batch, of no whole subinterval, raised AssertionError."""
+    s = solver(method)
+    f = Recorder(limit=limit)
+    result, result_state = s.integrate(f, mesh_init=A, mesh_final=B, take_gradient=True)
+    assert f.sizes[: len(test_calls)] == test_calls
+    assert max(f.sizes[len(test_calls) :]) == s.C
+    assert (result_state.max_batch, result_state.max_batch_converged) == (s.C, True)
+    assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
+
+
+@pytest.mark.parametrize(
+    ("limit", "test_calls"),
+    [(20, [10, 100, 75, 56, 42, 32, 24, 21]), (9, [10])],
+)
+def test_test_calls_raise_when_one_subinterval_does_not_fit(limit, test_calls):
+    """With take_gradient=True, when C points do not fit (gk21: 21), the test
+    calls raise torch.OutOfMemoryError saying that a call holds at least one
+    subinterval, and f is not called again: after a failed call shrunk to C
+    points, and at once after a failed call of fewer than C points (10), where
+    C points would only fail again at the cost of more evaluations of f."""
+    f = Recorder(limit=limit)
+    with pytest.raises(torch.OutOfMemoryError, match=r"one subinterval \(21 points\)"):
+        solver().integrate(f, mesh_init=A, mesh_final=B, take_gradient=True)
+    assert f.sizes == test_calls
+
+
+START_CASES = {
+    "max_batch": {"mesh_init": A, "mesh_final": B, "max_batch": 10**6},
+    "state": "state",
+    "default_mesh": {"mesh_init": A, "mesh_final": B},
+    **{f"mesh_{n}": {"mesh": even_mesh(n)} for n in (1, 3, 50, 500)},
+}
+
+
+@pytest.mark.parametrize("limit", [math.inf, 60])
+@pytest.mark.parametrize("take_gradient", [False, True])
+@pytest.mark.parametrize(
+    ("sampling", "method"),
+    [
+        ("uniform", "gk21"),
+        ("uniform", "bosh3"),
+        ("uniform", "cc17"),
+        ("variable", "interpolatory3_variable"),
+    ],
+)
+@pytest.mark.parametrize("start", list(START_CASES))
+def test_f_is_called_for_the_integration_and_the_test_calls_only(
+    start, sampling, method, take_gradient, limit
+):
+    """The calls of f before the first pass are exactly the test calls: none
+    with max_batch or a state; else 10, 100 and 1,000 points while not above
+    the first pass (none below 10 points), or, when f runs out of memory above
+    60 points, 10, 100, 75 and 56. The points of the calls that ran after them
+    are exactly C per subinterval the integration evaluated: no other call of
+    f is made, whatever the start (small and large first passes) and for both
+    values of take_gradient. Without an out-of-memory error, the first call
+    of the first pass is the whole pass, at most 10 times the largest test
+    call (whole subintervals with take_gradient=True)."""
+    s = adaptive_quadrature(sampling, method, device="cpu", atol=1e-8, rtol=1e-8)
+    kwargs = START_CASES[start]
+    if kwargs == "state":
+        _, state = s.integrate(Recorder(), mesh_init=A, mesh_final=B)
+        kwargs = {"state": state}
+    evaluate = s._evaluate_f_on_mesh
+    subintervals = [0]
+    f = Recorder(limit)
+    before_first_pass = []
+
+    def spy(*args, **kw):
+        if not before_first_pass:
+            before_first_pass.append(len(f.sizes))
+        out = evaluate(*args, **kw)
+        subintervals[0] += len(out[0])
+        return out
+
+    s._evaluate_f_on_mesh = spy
+    torch.manual_seed(0)
+    result, _ = s.integrate(f, take_gradient=take_gradient, **kwargs)
+    # bosh3's error estimate from a state's mesh is 4.5e-6 off at rtol 1e-8.
+    assert math.isclose(float(result.integral), EXACT, abs_tol=1e-5)
+    first_pass = s.C * result.n_start_steps
+    test_calls = []
+    if start not in ("max_batch", "state"):
+        test_calls = [n for n in (10, 100, 1000) if n <= first_pass]
+        if limit == 60 and 100 in test_calls:
+            test_calls = [10, 100, 75, 56]
+    k = before_first_pass[0]
+    assert f.sizes[:k] == test_calls
+    ran = [n for n in f.sizes[k:] if n <= limit]
+    assert sum(ran) == s.C * subintervals[0]
+    if math.isinf(limit) and test_calls:
+        cap = 10 * test_calls[-1]
+        assert f.sizes[k] == min(first_pass, cap // s.C * s.C if take_gradient else cap)
 
 
 @pytest.mark.parametrize("trade_speed_for_memory", [False, True])
 def test_batch_grows_tenfold_per_call_until_out_of_memory(trade_speed_for_memory):
-    """A state with batch size 100, not converged, and a pass of 11,500 points
-    (500 gk21 subintervals). Calls of 1,000, 10,000, then the 500 left,
+    """A state with batch size 100, not converged, and a pass of 11,508 points
+    (548 gk21 subintervals). Calls of 1,000, 10,000, then the 508 left,
     whether the values stay on the device or not (``trade_speed_for_memory``); with a
     limit of 3,000 points the call of 10,000 fails and shrinks by 0.75 per
     retry until it fits, and the state converges. Both give the right
     integral."""
-    state = IntegrationState(even_mesh(500), 100, False)
+    state = IntegrationState(even_mesh(548), 100, False)
     f = Recorder()
     result, result_state = solver().integrate(
         f,
@@ -131,7 +262,7 @@ def test_batch_grows_tenfold_per_call_until_out_of_memory(trade_speed_for_memory
         trade_speed_for_memory=trade_speed_for_memory,
     )
     assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
-    assert f.sizes[1:4] == [1000, 10000, 500]
+    assert f.sizes[:3] == [1000, 10000, 508]
     assert (result_state.max_batch, result_state.max_batch_converged) == (
         10000,
         False,
@@ -152,33 +283,32 @@ def test_batch_grows_tenfold_per_call_until_out_of_memory(trade_speed_for_memory
 
 def test_given_max_batch_is_fixed_and_converged():
     """A max_batch given to the call or to the constructor is used as it is
-    (no test calls, no growth) and returned as converged; given with a state,
+    (no growth) and returned as converged; given with a state,
     it replaces the state's."""
     f = Recorder()
     result, result_state = solver().integrate(
         f, mesh=even_mesh(46), max_batch=50, take_gradient=False
     )
-    assert f.sizes[0] == 1
-    assert max(f.sizes[1:]) <= 50
+    assert max(f.sizes) <= 50
     assert (result_state.max_batch, result_state.max_batch_converged) == (50, True)
     f = Recorder()
     result, result_state = solver(max_batch=40).integrate(
         f, mesh=even_mesh(46), take_gradient=False
     )
-    assert max(f.sizes[1:]) <= 40
+    assert max(f.sizes) <= 40
     assert result_state.max_batch_converged
     f = Recorder()
     state = IntegrationState(even_mesh(46), 5000, False)
     result, result_state = solver().integrate(
         f, state=state, max_batch=30, take_gradient=False
     )
-    assert max(f.sizes[1:]) <= 30
+    assert max(f.sizes) <= 30
     assert (result_state.max_batch, result_state.max_batch_converged) == (30, True)
 
 
 def test_state_carries_mesh_and_batch_size_to_the_next_call():
-    """The next call starts from the state's mesh and batch size: no test
-    calls, and its first pass covers the mesh's subintervals. The state's
+    """The next call starts from the state's mesh and batch size: its first
+    pass covers the mesh's subintervals. The state's
     batch size beats the constructor's max_batch."""
     first, first_state = solver().integrate(
         Recorder(), mesh_init=A, mesh_final=B, take_gradient=False
@@ -186,8 +316,33 @@ def test_state_carries_mesh_and_batch_size_to_the_next_call():
     f = Recorder()
     second, _ = solver(max_batch=7).integrate(f, state=first_state, take_gradient=False)
     assert second.n_start_steps == len(first_state.mesh) - 1
-    assert f.sizes[1] == min(23 * second.n_start_steps, 10 * first_state.max_batch)
+    assert f.sizes[0] == min(21 * second.n_start_steps, 10 * first_state.max_batch)
     assert math.isclose(float(second.integral), EXACT, abs_tol=1e-9)
+
+
+def test_state_batch_below_one_subinterval_with_take_gradient():
+    """A take_gradient=False call may converge on a batch size below one
+    subinterval's 21 points (here the given max_batch=10). A take_gradient=True
+    call from its state raises ValueError before f is called, since its
+    batches hold whole subintervals and PadaQuad does not exceed a batch size
+    known to fit; a max_batch of 21 given with the state, or the same batch
+    size not converged (it may grow), runs."""
+    _, state = solver().integrate(
+        Recorder(), mesh_init=A, mesh_final=B, take_gradient=False, max_batch=10
+    )
+    assert (state.max_batch, state.max_batch_converged) == (10, True)
+    f = Recorder()
+    with pytest.raises(
+        ValueError, match="The state batch size 10 is below the 21 points"
+    ):
+        solver().integrate(f, state=state, take_gradient=True)
+    assert f.sizes == []
+    for kwargs in (
+        {"state": state, "max_batch": 21},
+        {"state": dataclasses.replace(state, max_batch_converged=False)},
+    ):
+        result, _ = solver().integrate(Recorder(), take_gradient=True, **kwargs)
+        assert math.isclose(float(result.integral), EXACT, abs_tol=1e-9)
 
 
 def test_state_and_mesh_together_raise():
@@ -239,8 +394,8 @@ class GradIntegrand:
         self.v = torch.tensor([0.7], dtype=torch.float64, requires_grad=True)
         self.forward_limit, self.backward_limit = forward_limit, backward_limit
         self.function, self.sizes = function, []
-        # The backward passes of these batches (counted from 1, one-point
-        # calls excluded) run out of memory too, whatever their size.
+        # The backward passes of these batches (counted from 1) run out of
+        # memory too, whatever their size.
         self.fail, self.batches = set(fail), 0
 
     def __call__(self, t):
@@ -253,9 +408,9 @@ class GradIntegrand:
             y = self.w * torch.sin(40 * t)
         if bool((t > 0.9).any()):
             y = y + self.v * torch.clamp(t - 0.9, min=0)
-        self.batches += len(t) > 1
+        self.batches += 1
         if y.requires_grad and (
-            len(t) > self.backward_limit or (len(t) > 1 and self.batches in self.fail)
+            len(t) > self.backward_limit or self.batches in self.fail
         ):
             y.register_hook(self._fail)
         return y
@@ -288,7 +443,7 @@ def grads(f):
     return float(f.w.grad), float(f.v.grad)
 
 
-GROWING = IntegrationState(even_mesh(500), 100, False)  # passes of 11,500 points
+GROWING = IntegrationState(even_mesh(500), 100, False)  # passes of 10,500 points
 
 
 def test_forward_out_of_memory_is_retried_with_gradients():
@@ -306,11 +461,11 @@ def test_forward_out_of_memory_is_retried_with_gradients():
 def test_backward_out_of_memory_restarts_without_double_counting(
     pass_parameters, caplog
 ):
-    """The backward pass of the batch of 10,000 points fails after the batch of
-    1,000 already added its gradient. The gradients this call added are put
+    """The backward pass of the batch of 9,513 points fails after the batch of
+    987 already added its gradient. The gradients this call added are put
     back (found by the graph walk; v appears only in that later batch) and the
     integral restarts with batches 0.75 times smaller (whole subintervals of
-    23 points: 9,890 fails, then 7,406 and 5,543, then 4,140 runs): the
+    21 points: 9,513 fails, then 7,119 and 5,334, then 3,990 runs): the
     gradients equal one integral's, not more. A gradient held before the call is kept
     and added to."""
     f = GradIntegrand(backward_limit=5000)
@@ -338,7 +493,7 @@ def test_custom_autograd_function_needs_parameters():
     state = info.value.state
     assert torch.equal(state.mesh, GROWING.mesh)
     assert state.max_batch_converged
-    assert state.max_batch == 7418
+    assert state.max_batch == 7135  # 0.75 x 9,513, the batch that failed
     f.w.grad = f.v.grad = None
     f.backward_limit = math.inf
     solver().integrate(f, state=state)

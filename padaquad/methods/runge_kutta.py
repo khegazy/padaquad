@@ -93,25 +93,30 @@ _BOGACKI_SHAMPINE = UniformMethodClass(
     ),
 )
 
-# Dormand-Prince: fifth-order RK, 7 nodes per subinterval (two at the right
-# end). Tableau transcribed from torchdiffeq (_impl/dopri5.py at commit
-# 657943a); c and b match SciPy's RK45 (rk.py, v1.18.1, lines 541-552).
-# Dormand and Prince 1980 not checked.
+# Dormand-Prince: fifth-order RK, 5 nodes per subinterval. Tableau transcribed
+# from torchdiffeq (_impl/dopri5.py at commit 657943a; the same numbers in
+# torchdiffeq 0.2.5); c and b match SciPy's RK45 (rk.py, v1.18.1, lines
+# 541-552). Dormand and Prince 1980 not checked. As an ODE tableau it has 7
+# stages, c = [0, 1/5, 3/10, 4/5, 8/9, 1, 1]: the stage at 1/5 has weight 0 in
+# b and in b_error, and the two stages at 1 evaluate the integrand at the same
+# point. As a quadrature method the first is dropped and the second folded into
+# one node at 1: b there is 11/84 + 0, and b_error is
+# (11/84 - 649/6300) + (-1/60) = (825 - 649 - 105)/6300 = 71/6300 (derivation,
+# exact rationals; b - b_error = 754/6300 = 649/6300 + 1/60, the embedded
+# weights of the two stages at 1 added).
 _DORMAND_PRINCE_SHAMPINE = UniformMethodClass(
     references=("torchdiffeq", "scipy_quadvec"),
     degree=4,
     error_exponent=5,  # embedded fourth-order method, degree 3
     tableau=_Tableau(
-        c=torch.tensor(
-            [0.0, 1.0 / 5, 3.0 / 10, 4.0 / 5, 8.0 / 9, 1.0, 1.0], dtype=torch.float64
-        ),
+        c=torch.tensor([0.0, 3.0 / 10, 4.0 / 5, 8.0 / 9, 1.0], dtype=torch.float64),
         b=torch.tensor(
-            [35 / 384, 0, 500 / 1113, 125 / 192, -2187 / 6784, 11 / 84, 0],
+            [35 / 384, 500 / 1113, 125 / 192, -2187 / 6784, 11 / 84],
             dtype=torch.float64,
         ),
         # b_error = b - b_embedded, with the embedded fourth-order set
         # 1951/21600, 0, 22642/50085, 451/720, -12231/42400, 649/6300, 1/60
-        # taken from torchdiffeq. Its published source was not found (a search
+        # (per ODE stage) taken from torchdiffeq. Its published source was not found (a search
         # snippet suggests Shampine 1986, not checked). SciPy's RK45 uses a
         # different embedded set (5179/57600, ...). Both satisfy the fourth-order
         # conditions (checked with exact fractions); as quadrature methods both
@@ -119,12 +124,10 @@ _DORMAND_PRINCE_SHAMPINE = UniformMethodClass(
         b_error=torch.tensor(
             [
                 35 / 384 - 1951 / 21600,
-                0,
                 500 / 1113 - 22642 / 50085,
                 125 / 192 - 451 / 720,
                 -2187 / 6784 - -12231 / 42400,
-                11 / 84 - 649 / 6300,
-                -1.0 / 60.0,
+                71 / 6300,
             ],
             dtype=torch.float64,
         ),

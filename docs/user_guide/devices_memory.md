@@ -15,6 +15,125 @@ The solver computes in the dtype of the bounds or mesh given to `integrate`,
 float64 or float32. A float32 tensor such as `torch.tensor([1.0])` therefore
 makes the integration run in float32.
 
+(ug-cpu-threads)=
+### CPU threads
+
+A call of `integrate` is a sequence of many small tensor operations in every
+pass: the calls of `f`, the error control, the mesh update and the record.
+PyTorch can split one operation among several CPU threads, which speeds up a
+large operation and slows down a small one, because starting the threads costs
+time and idle threads keep their cores busy while they wait for work. The
+thread count therefore matters on the CPU, and also with a GPU solver, whose
+record (with the default `result_device="cpu"`) and state's mesh are built on
+the host.
+
+`torch.get_num_threads()` returns the count. PyTorch's default follows the CPUs
+the process may run on: on the node measured below (64 cores with two hardware
+threads each, 128 logical CPUs) it was 64 for a process allowed every logical
+CPU, and 8 for a process allowed 8, also when those were the two hardware
+threads of 4 cores. Set the count before the first integral, with
+`torch.set_num_threads(n)` in Python or `OMP_NUM_THREADS=n` in the environment
+before Python starts, and choose the CPUs the process gets: `taskset` on one
+machine, `srun -c` on a Slurm cluster. On this node,
+`srun -c 16 --cpu-bind=cores` gave a job step 8 whole cores (16 logical CPUs),
+and `srun -c 8 --cpu-bind=cores` gave 4 cores, on which PyTorch's default was 8
+threads. This runs 8 threads on 8 cores (both hardware threads of each, unlike
+the rows below):
+
+```bash
+srun -c 16 --cpu-bind=cores --export=ALL,OMP_NUM_THREADS=8 python run.py
+```
+
+PadaQuad itself never changes the thread count or the settings of Python's
+garbage collector, and outside a distributed job (several processes joined by
+`torch.distributed`) it sets no environment variable. Its only use of the
+collector is a `gc.collect()` after an out-of-memory error, before it retries
+with fewer points: it frees objects that refer to each other in a cycle and
+may still hold the failed call's tensors. The same collection runs at the end
+of the memory benchmark of `get_max_batch(f=...)` and before an integral is
+restarted after an out-of-memory error in a backward pass.
+
+The tables are measurements on one node type, one PyTorch version and four
+integrands: the median time of 30 calls in ms, with the shortest and longest
+in parentheses, on one NERSC Perlmutter GPU node (one AMD EPYC 7763 with 64
+cores; an NVIDIA A100 with 40 GB), PyTorch 2.8.0, Python 3.12, PadaQuad commit
+`3eb4507`. Each call: `gk21`, `atol=1e-8`, `rtol=0`, `error_norm="max"`,
+float64, `max_batch=1_000_000`, `take_gradient=False`, after
+`torch.manual_seed(0)`; one process per row, with one call of each integrand
+before its 30 timed ones. The rows:
+
+- "n on n cores": `taskset` to n cores, one logical CPU of each (with the GPU
+  solver, the cores beside the GPU, except for 64), `OMP_NUM_THREADS=n`, and
+  each thread pinned to one core (`OMP_PLACES=cores`, `OMP_PROC_BIND=close`);
+- "not pinned": the same without the pinning variables;
+- "8, all CPUs": `OMP_NUM_THREADS=8` and nothing else;
+- "64, default": nothing set (64 threads, all 128 logical CPUs allowed);
+- "128": `OMP_NUM_THREADS=128`, two threads per core.
+
+The integrands, on [0, 1]:
+
+- `exp(-t) sin(40 t)`: 11 subintervals, one pass of 231 points;
+- `sin(k t)` for 1,000 values of k from 1 to 100 (1,000 outputs): 13
+  subintervals, 2 passes, 315 points with 1,000 values each;
+- `sin(1 / (t + 0.001))`: 76 subintervals, 11 passes, 2,961 points;
+- `sin(200,000 t)`: 13,036 subintervals, 13 passes, 547,281 points.
+
+On the GPU the random starting mesh differs, so the last two had 77 and 13,737
+subintervals there.
+
+**CPU solver**
+
+| Threads | `exp(-t) sin(40 t)` | 1,000 outputs | `sin(1 / (t + 0.001))` | `sin(200,000 t)` |
+|---|---|---|---|---|
+| 1 on 1 core | 2.70 (2.68-3.01) | 6.67 (6.63-6.89) | 11.5 (11.4-12.5) | 31.7 (27.0-37.4) |
+| 2 on 2 cores | 2.68 (2.64-3.17) | 5.64 (5.51-5.88) | 11.3 (11.2-12.3) | 26.6 (22.8-30.9) |
+| 4 on 4 cores | 2.68 (2.63-2.96) | 5.13 (4.94-5.40) | 11.5 (11.3-12.4) | 23.4 (20.5-27.6) |
+| 8 on 8 cores | 2.85 (2.72-3.12) | 5.23 (4.98-5.43) | 12.1 (11.6-12.8) | 23.0 (20.6-26.9) |
+| 8 on 8 cores, not pinned | 2.66 (2.63-2.99) | 5.07 (4.92-5.44) | 12.0 (11.5-14.4) | 22.9 (20.4-24.5) |
+| 16 on 16 cores | 2.99 (2.94-3.19) | 5.72 (5.68-5.82) | 12.6 (12.5-13.6) | 24.2 (21.9-27.4) |
+| 32 on 32 cores | 3.00 (2.97-3.25) | 6.00 (5.96-6.30) | 12.8 (12.8-13.9) | 24.9 (23.5-26.3) |
+| 64 on 64 cores | 3.03 (2.99-3.26) | 6.44 (6.38-6.69) | 12.7 (12.7-13.7) | 26.3 (24.1-34.0) |
+| 64, default | 2.70 (2.66-3.02) | 6.07 (6.03-6.23) | 12.8 (12.8-14.0) | 30.6 (27.9-76.8) |
+| 128 | 3.67 (3.63-14.3) | 7.77 (7.57-7.81) | 15.9 (15.9-40.8) | 36.8 (32.9-47.3) |
+
+**GPU solver**
+
+| Threads | `exp(-t) sin(40 t)` | 1,000 outputs | `sin(1 / (t + 0.001))` | `sin(200,000 t)` |
+|---|---|---|---|---|
+| 1 on 1 core | 4.30 (4.28-4.58) | 7.61 (7.54-8.14) | 30.9 (30.8-32.5) | 30.0 (29.9-32.9) |
+| 8 on 8 cores | 4.31 (4.28-4.76) | 7.63 (7.54-9.04) | 31.9 (31.0-34.0) | 29.7 (28.7-31.1) |
+| 8, all CPUs | 4.30 (4.28-5.45) | 7.89 (7.62-8.14) | 32.2 (31.0-36.3) | 30.0 (29.0-31.5) |
+| 16 on 16 cores | 4.29 (4.26-4.62) | 8.10 (8.07-8.35) | 34.0 (33.8-34.2) | 31.1 (30.9-32.5) |
+| 64 on 64 cores | 4.32 (4.28-4.83) | 8.40 (8.33-9.42) | 34.3 (34.1-34.5) | 32.0 (31.9-33.4) |
+| 64, default | 4.35 (4.32-5.68) | 8.75 (8.25-10.2) | 35.1 (34.4-40.1) | 34.6 (34.4-36.9) |
+| 128 | 4.38 (4.34-4.69) | 10.1 (10.0-10.8) | 35.9 (35.5-42.5) | 35.8 (35.6-47.9) |
+
+What they show:
+
+- **The number of threads.** With few values per pass (`exp(-t) sin(40 t)`
+  and `sin(1 / (t + 0.001))`), 1 to 4 threads were within 2 % of the fastest
+  on the CPU; PyTorch's default of 64 took up to 14 % longer and 128 up to
+  41 % longer. With many values per pass (1,000 outputs and
+  `sin(200,000 t)`), 4 to 8 threads were within 4 % of the fastest; 1 thread
+  took up to 38 % longer, the default up to 34 % and 128 up to 60 %. With the
+  default, the longest of the 30 calls of `sin(200,000 t)` took 2.5 times
+  their median, against at most 1.3 times with n threads on n cores. With the
+  GPU solver, 1 to 8 threads were within 5 % of the fastest on every
+  integrand, and the default took up to 17 % longer.
+- **Pinning threads to cores** was separated from the thread count in two
+  comparisons, and did not help: with 8 threads on 8 cores, pinned took 0.2
+  to 7 % longer than not pinned; 64 threads pinned one per core, against the
+  default's 64 on all 128 logical CPUs, changed the median by -14 % to +12 %
+  depending on the integrand. With the GPU solver, 8 threads pinned beside
+  the GPU and 8 on all CPUs were within 3.3 % of each other.
+- **Two threads per core** were measured only as 128 threads on 64 cores, the
+  slowest row of both tables. Several threads sharing fewer cores, such as
+  PyTorch's default of 8 threads on the 4 cores of `srun -c 8
+  --cpu-bind=cores`, were not timed.
+- Every row returned the same integral, bit for bit.
+
+Time a few thread counts on your own integral before a long run.
+
 (ug-memory)=
 ## Batch size and the memory benchmark
 
@@ -24,11 +143,19 @@ integrand. The number of points per call is the batch size, `max_batch`.
 **How `integrate` chooses it.** A `max_batch` given to the call (or to the
 constructor, when no `state` is given) is used as it is and never grows. A
 `state` (the state an earlier call returned, {ref}`ug-reuse`) gives the batch
-size to start from. With neither, the integrand is called, forward only, on 10,
-100 and 1,000 copies of the lower bound, stopping at the order of the first
-pass (for the default starting mesh of gk21, 253 points: calls of 10 and 100),
-and the batch size starts at the largest that ran. These calls read no memory; they only
-check that the integrand runs.
+size to start from. With neither, the integrand is called, forward only, on
+10, 100 and 1,000 copies of one point, stopping at the order of the first pass
+(for the default starting mesh of gk21, 231 points: calls of 10 and 100), and
+the batch size starts at the largest that ran. These test calls read no memory
+and their values are discarded; they only check that the integrand runs, at
+the cost of 10, 110 or 1,110 points per call (none when the first pass has
+fewer than 10 points). The point is the first node of the first subinterval,
+which the first pass evaluates too, so it is never a bound that a method
+without nodes at the ends of its subintervals leaves out (gk21 and the other
+Gauss-Kronrod methods), where the integrand may be singular. A test call that
+runs out of memory is repeated at half its size up to 10 points and at three
+quarters of it above, until one runs; the batch size has then converged (see
+below), and no larger test call follows.
 
 **How it grows.** While the batch size has not converged, a call of the
 integrand that has more points waiting than the batch size tries 10 times as
@@ -43,7 +170,18 @@ GPU: 0.6 s more than a run with the right batch size from the start, 1.4 s
 from a cold call).
 
 **With `take_gradient=True`.** PadaQuad backpropagates every batch right after
-evaluating it. On a GPU, before each backward pass it compares the memory
+evaluating it, so a call of the integrand evaluates whole subintervals: a
+batch size that does not grow, a given `max_batch` or the converged batch size
+of a state, must be at least the points of one subinterval (21 for gk21), or
+the call raises `ValueError` before the integrand is called. (With
+`take_gradient=False` a call may end inside a subinterval, so any batch size
+works, and the state of such a call can hold a converged batch size below
+it; pass `max_batch` to a `take_gradient=True` call started from that state.)
+The test calls then shrink no further than one subinterval: when a test call of
+one subinterval's points or fewer runs out of memory (the 10-point call, for a
+method with more than 10 points per subinterval), the call raises
+`torch.OutOfMemoryError` at once, without a larger call that could only fail too.
+On a GPU, before each backward pass it compares the memory
 still usable (keeping `1 - total_mem_usage` of the total free) with what the
 backward pass is predicted to need: the batch's forward peak memory, times the
 ratio of backward to forward peak memory the previous batch measured (1 for
@@ -86,8 +224,19 @@ error from the integrand is raised unchanged.
   an out-of-memory error. On a CPU an allocation that does not fit can get the
   process killed instead (Linux accepts most allocations and kills the process
   when memory runs out), and a GPU driver that falls back to system memory
-  (NVIDIA's on Windows) slows down instead of failing. PadaQuad is meant for
-  GPUs; on a CPU, pass `max_batch` when memory matters.
+  (NVIDIA's on Windows) slows down instead of failing. The test calls start
+  at 10 points, and every later call is at most 10 times one that ran.
+  PadaQuad is meant for GPUs; on a CPU, pass `max_batch` when memory matters.
+- *Failed calls.* A call that runs out of memory shrinks by a quarter, about 8
+  failed calls per factor of 10 between its size and the limit; since no call
+  is more than 10 times one that ran, reaching the limit costs a few failed
+  calls once per state (for an integrand that holds 60 points, the test calls
+  of 100 and 75 points with the default starting mesh of gk21). Pass
+  `max_batch` or the state to avoid them.
+- *Small batch sizes.* Test calls of up to 10 points halve when they fail, so
+  an integrand that holds 9 points gets the batch size 5 (10 failed, 5 ran),
+  and one that holds 3 points gets 2; the batch size then never grows. Pass
+  `max_batch` when such an integrand matters.
 - *Memory is not kept free.* The forward calls fill the memory until they
   fail; other processes on the same GPU can run out of memory meanwhile.
   `total_mem_usage` limits only the check before a backward pass.
@@ -207,7 +356,7 @@ was measured on Linux or on a GPU.
 
 13. *An out-of-memory error can leave too small a batch.* An out-of-memory
     error during the benchmark at N points caps the batch at 0.75·N, which can
-    be below the nodes of one subinterval (gk21, with 23 nodes, running out of
+    be below the nodes of one subinterval (gk21, with 21 nodes, running out of
     memory at N = 10 gives 7). `integrate(take_gradient=True)` then fails,
     because it evaluates whole subintervals.
 14. *A wrong reason near 1e9 points.* When the calls double near 1e9 points,
@@ -295,8 +444,65 @@ device. It works independently of the other options.
 
 | Value | Speed | GPU memory | Host memory |
 |---|---|---|---|
-| `"cpu"` (default) | Copying values to the host takes time that grows with their size; for integrands with many outputs it is most of the run time. | Holds only the values waiting for their quadrature calculation. | Holds the values of every accepted subinterval. |
+| `"cpu"` (default) | Copying values to the host takes time that grows with their size; for integrands with many outputs it is most of the run time. | Holds only the values waiting for their quadrature calculation, and, until the end of the call, the small per-subinterval results of the accepted subintervals: nodes, widths, contributions, error estimates and error ratios (with `gk21` in float64, about 200 bytes per subinterval for one output). | Holds the values of every accepted subinterval. |
 | `None` | Fastest, since nothing is copied. `None` means the solver device. | Holds the values of every accepted subinterval until the end, which gives the highest peak. | Nothing. |
+
+(ug-end-of-call-memory)=
+#### Memory at the end of a call
+
+After the last pass, PadaQuad puts the accepted subintervals in the order of
+the mesh, checks the integral, builds the state's mesh and assembles the
+result, all on `result_device`. Below, R is the size of the recorded integrand
+values (one value per subinterval, node and output, plus the tracked
+variables), and a peak is the most memory the device held during the call
+above what it held before. All numbers are float64, on Perlmutter GPU nodes
+(A100 40 GB, PyTorch 2.8).
+
+**A GPU solver with the record on another device** (measured with the record
+on a second A100, exact allocator numbers; on the host the same steps run):
+
+- **Several passes**, the usual case: 2.0 R (2.00 to 2.06 R for records of
+  16 to 126 MiB, `gk21` and `bosh3`, 512 and 10,000 outputs). The values come
+  in one array per pass and are copied into one array in the order of the
+  mesh, so both exist for a moment.
+- **One pass** (for example a call that starts from a state): 1.2 R for the
+  Gauss-Kronrod methods, whose nodes are all inside the subintervals, such as
+  the default `gk21` (275 MiB record), since the values that came to
+  `result_device` become `result.y` without a copy; 2.1 R for `bosh3`
+  (52 MiB), whose subintervals share their end nodes, so that `result.y`
+  lists each shared node once, in a new array.
+- **Small records.** The merge prediction that builds the state's mesh works
+  in blocks and holds up to 5.5 MiB, whatever the record's size; for a record
+  of a few MiB this sets the peak (3.2 R for a 2.1 MiB `bosh3` record).
+- **Methods with few nodes.** The contributions and error estimates hold one
+  number per subinterval and output, 1/C of R for a method with C nodes, and
+  building the state's mesh holds the values and up to four such arrays:
+  3.0 R for `adaptive_heun` (2 nodes; 13 to 511 MiB). For `bosh3` with
+  `error_norm="failure_fraction"` it was 3.1 R (845 MiB), in cumulative mode
+  2.5 R (142 MiB). `build_state_mesh=False` skips this.
+- **`record_evaluations=False`**: no values are kept; the peak is 0.1 R for
+  `gk21` and 0.5 R for `bosh3` of the values that were not kept.
+- **One output** (D = 1): the nodes, widths and error ratios are as large as
+  the values; the peak was 1,170 bytes per subinterval for `gk21`, 354 for
+  `bosh3` and 258 for `adaptive_heun` (about 2,000 subintervals).
+
+On the host itself (`result_device="cpu"`, GPU solver, Linux's peak resident
+size `VmHWM`), records of 200 MiB and more agree: 1.24 R for one pass of
+`gk21` (275 MiB), 2.03 R for `bosh3` (210 and 624 MiB), 2.0 R for 3.9 GB of
+`bosh3` values; several passes of `gk21` gave 1.85 R (252 MiB), since a page
+of the array in mesh order counts only once written while the arrays copied
+into it are freed one by one. Records of 6 to 35 MiB gave 1.2 to 3.1 R,
+varying between repeats of the same call.
+
+**The record on the solver's device** (`result_device` equal to the solver's
+device, for example a CPU solver with the default `result_device="cpu"`): the
+values are copied when `result.y` is assembled, also for one pass of a
+Gauss-Kronrod method, since there they may be the very tensor `f` returned.
+The peak then includes the integration's own arrays: on the solver's A100,
+2.4 R for one pass of `gk21` (275 MiB), 2.1 R for several passes (16 MiB),
+2.5 R for one pass of `bosh3` (52 MiB) and 2.8 R with removals (126 MiB); for
+a CPU solver (`VmHWM`), 2.3 to 2.4 R for `gk21` (252 and 275 MiB) and 2.6 to 2.8 R
+for `bosh3` (210 and 624 MiB), and 2.4 to 4.2 R for records of 6 to 35 MiB.
 
 The result `loss_fxn` receives for each batch has its `y` and
 `tracked_variables` on `result_device` with `trade_speed_for_memory=True`, and
@@ -331,7 +537,8 @@ given; later calls that pass the state stay quiet) when:
 - `trade_speed_for_memory=True` and the integrand's output requires grad (from
   its parameters or from bounds that require grad): the autograd graph keeps
   what `f` saved for its backward pass on the GPU until the integral is
-  differentiated, so moving the values may save little;
+  differentiated, so moving the values may save little (logged at the end of
+  the call, once the integral is known to require grad);
 - `record_evaluations=False` with the solver's default `merge_rule="predicted"`.
 
 (ug-pass-array-oom)=

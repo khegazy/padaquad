@@ -72,7 +72,7 @@ cd padaquad
 pip install -e .
 ```
 
-Runtime dependencies: Python 3.11+, PyTorch, NumPy, SciPy, einops, psutil.
+Runtime dependencies: Python 3.11+, PyTorch, NumPy, SciPy, psutil.
 
 **For developers:**
 
@@ -153,11 +153,18 @@ print(round(float(result.integral), 4), round(float(half.integral), 4))  # 0.776
 | only the batch size (another interval or your own mesh) | the bounds or your mesh, and `max_batch=state.max_batch` (then fixed), or `state=dataclasses.replace(state, mesh=None)` with the bounds |
 | nothing | the bounds, or a mesh |
 
+Building `state.mesh` takes a few milliseconds after the integration. A call
+whose mesh no later call starts from can skip it with
+`build_state_mesh=False`: its `state.mesh` is then `None`, and a later call
+given that state keeps the batch size but needs both bounds and starts from a
+fresh mesh.
+
 A call needs a `mesh`, a `state` with a mesh, or both bounds. Bounds inside the
 mesh cut it; a bound outside it extends it, and the integration refines the new
 subinterval. Without `max_batch` or a state, the first call tries a few small
-batches and then lets the batch size grow by factors of 10 until the integrand
-runs out of memory; a state carries what it found to the next call.
+batches (test calls on copies of one point, whose values are discarded) and
+then lets the batch size grow by factors of 10 until the integrand runs out of
+memory; a state carries what it found to the next call.
 
 <!-- include-end: reuse -->
 More, including several integrals per step, checkpoints and when not to reuse
@@ -306,9 +313,10 @@ the same text. In short:
 
 2. **Batched evaluation.** The nodes of a batch of subintervals are stacked
    into one tensor and the integrand is called once on all of them. Unless
-   `max_batch` is given, the batch size starts small and grows by factors of
-   10 whenever more points are waiting, until the integrand runs out of memory;
-   then it shrinks and stops growing.
+   `max_batch` is given, the batch size starts from test calls of 10, 100
+   and 1,000 points (on copies of one point; their values are discarded) and
+   grows by factors of 10 whenever more points are waiting, until the
+   integrand runs out of memory; then it shrinks and stops growing.
 
 3. **Error estimate per subinterval.** Each method computes the integral of a
    subinterval twice: with its own weights and with a lower-degree method on
@@ -316,7 +324,8 @@ the same text. In short:
    $|e| / \max(\text{atol}, \text{rtol} \cdot |I|)$, where $I$ is the
    integral (per output element, $|e_d| / (\text{atol} + \text{rtol} \cdot
    |I_d|)$ with `error_norm="failure_fraction"`), decides: below 1 the
-   subinterval is accepted, otherwise it is split at its midpoint.
+   subinterval is accepted, otherwise it is split at its midpoint (or into
+   four equal pieces, with `split_rule="accelerate"`).
 
 4. **Refinement.** Batches of evaluation and splitting alternate until every
    subinterval is accepted, or until `max_adaptive_splits` stops the

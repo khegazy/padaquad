@@ -21,8 +21,10 @@ bypassed when a chunk of pairs has more than 256 ratios. The CHANGELOG entry of
 ## Evidence (measured)
 
 Re-measured 2026-11-26 (commit `71e10ab` on branch `optimal_mesh_cost`, A100
-node `nid001109`, GPU solver with the record on the CPU, 8 CPU threads,
-`impl/many_ratios.py` of the optimal-mesh-cost plan): f = e^{-t} sin 40t, gk21
+node `nid001109`, GPU solver with the record on the CPU, 8 CPU threads, the
+script `many_ratios.py` of the optimal-mesh-cost plan, in a scratch directory
+deleted on 2026-11-26; the plan itself was deleted once done and is in commit
+`3033e24`, `docs/issues/2026-11-25-speedup-optimal-mesh-cost-plan.md`): f = e^{-t} sin 40t, gk21
 and cc65, `atol = rtol = 1e-8`, a cold call from `N_init_steps=10_000` random
 subintervals (5,050 subintervals at the end) and a warm call from its state
 (`state=state`), medians of 4 seeds. Time of `_get_optimal_mesh`:

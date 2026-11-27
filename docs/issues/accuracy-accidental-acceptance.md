@@ -82,8 +82,9 @@ for name, (f, method, exact) in cases.items():
 ```
 
 What the runs show (the full sweep over tolerances and methods, and the
-per-subinterval errors, are `d7.py` and `d7b.py` in
-`$SCRATCH/padaquad_speedup_plans/split-waste/impl/`):
+per-subinterval errors, came from two scripts in a scratch directory that was
+deleted on 2026-11-26; the code above reproduces the `atol=1e-8` rows, and the
+other rows change only `atol`, the method or the integrand):
 
 1. **sin(2e5 t), gk21, `atol=1e-8`, seed 0**: error 2.2e-5 over 13,036
    subintervals. Against the exact integral of each subinterval (mpmath, 40

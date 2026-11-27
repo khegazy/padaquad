@@ -51,8 +51,8 @@ a node of a piece down to that piece (the "carrier" of
 once done, in commit `3033e24`). Counted on
 `b43da3d` by wrapping `f` (the points of `f` within 2 ULP of a node of a
 subinterval rejected in the previous pass; the plan's 9 integrands on [0, 1],
-seed 0, `atol=1e-8`, `rtol=0`, halving; script
-`$SCRATCH/padaquad_speedup_plans/split-waste/impl/carrier.py`):
+seed 0, `atol=1e-8`, `rtol=0`, halving; the script, `carrier.py`, was in a
+scratch directory deleted on 2026-11-26):
 
 | Method | Share of the points of f a carrier would fill |
 |---|---|

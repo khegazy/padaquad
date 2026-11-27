@@ -81,10 +81,9 @@ the world size is above 1 (see `docs/issues/multi-gpu-backward-oom-restart.md`).
 
 ## Evidence
 
-The script `dist_group.py` (kept in
-`/pscratch/sd/k/khegazy/padaquad_speedup_plans/robustness-fixes/impl/`) runs one
-process with the gloo backend on the CPU, with the environment that `torchrun`
-would set for one process:
+A script (`dist_group.py`, in a scratch directory deleted on 2026-11-26; the
+steps below say what it did) ran one process with the gloo backend on the CPU,
+with the environment that `torchrun` would set for one process:
 
 ```bash
 RANK=0 LOCAL_RANK=0 WORLD_SIZE=1 MASTER_ADDR=127.0.0.1 MASTER_PORT=29535 \
@@ -161,10 +160,10 @@ a job that is not distributed. Before CUDA is initialized, PyTorch does not
 cache that count (`torch/cuda/__init__.py`, `device_count`: "Do not cache the
 device count prior to CUDA initialization") and asks NVML for it, which loads
 `libnvidia-ml.so.1` through `ctypes`. Measured with the script
-`construct_cost.py` of the review of the `timing-variation` plan
-(`/pscratch/sd/k/khegazy/padaquad_speedup_plans/timing-variation/adv/`; 200
-constructions of a CPU solver in a fresh process with CUDA visible but not
-initialized; `asis` is the code, `fix` skips the call when `local_rank` is 0):
+`construct_cost.py` of the review of the `timing-variation` plan (in a scratch
+directory deleted on 2026-11-26; 200 constructions of a CPU solver in a fresh
+process with CUDA visible but not initialized; `asis` is the code, `fix`
+skips the call when `local_rank` is 0):
 
 - 11.0 objects left in reference cycles per construction as the code is, and
   0.0 with the call skipped (measured again for this issue on a login node,

@@ -3,7 +3,7 @@ Sphinx extension: render the measured tables of the documentation from results f
 
 The numbers on the Performance page come only from the files
 ``docs/performance/results_<device>.json`` (for example ``results_cpu.json``,
-``results_cuda.json``), which ``examples/speed_test/torchdiffeq_comparison.py``
+``results_cuda.json``), which ``examples/speed_test/library_comparison.py``
 writes; those of the user guide's memory options from
 ``docs/performance/memory_options.json``, which
 ``examples/speed_test/trade_speed_for_memory.py`` writes. At every build this
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 
 ROOT = Path(__file__).resolve().parents[2]
 RESULTS_DIR = ROOT / "docs" / "performance"
-BENCHMARK = ROOT / "examples" / "speed_test" / "torchdiffeq_comparison.py"
+BENCHMARK = ROOT / "examples" / "speed_test" / "library_comparison.py"
 OUTPUT = ROOT / "docs" / "reference" / "generated" / "performance_table.md"
 MEMORY_RESULTS = RESULTS_DIR / "memory_options.json"
 MEMORY_SCRIPT = ROOT / "examples" / "speed_test" / "trade_speed_for_memory.py"

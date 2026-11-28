@@ -80,19 +80,48 @@ the PadaQuad log for them.
   (`docs/_ext/methods_table.py`, from the registries; tested by
   `tests/test_docs_methods_table.py`) and the Performance table
   (`docs/_ext/performance_table.py`, from `docs/performance/results_<device>.json`,
-  written by `examples/speed_test/torchdiffeq_comparison.py`; one section per
+  written by `examples/speed_test/library_comparison.py`; one section per
   file, tested by `tests/test_docs_performance_table.py`), and, by the same
   extension, the memory options tables of the user guide (from
   `docs/performance/memory_options.json`, written by
   `examples/speed_test/trade_speed_for_memory.py`).
+- **Benchmark** (Performance page): `examples/speed_test/run_benchmark.sh`
+  (`setup` once, then `run`) on an otherwise idle 80 GB A100 compute node
+  (`-C "gpu&hbm80g"`), never a login node; it builds `$SCRATCH/padaquad_bench`
+  (uv, CUDA torch and JAX, `.[bench]`) and writes `results_cuda.json` then
+  `results_cpu.json`. PadaQuad vs torchdiffeq, diffrax, scipy (NumPy
+  integrands, CPU) and quadax at `atol = 1e-8`, `rtol = 0`, max norm (the
+  page's "One tolerance for all" explains why). Mostly integrands that need
+  many subintervals (the user's choice: PadaQuad's intended case), listed in
+  `MANY_SUBINTERVALS`, plus three in `FEW_SUBINTERVALS` for contrast; a solver
+  whose warm-up run is slow is timed fewer times (`TIME_BUDGET_S`); garbage is
+  collected before each case and every run's time kept (`times_s`). PadaQuad's
+  rows are `PADAQUAD_SOLVERS` (`dopri5`, `gk21`, and `gk21 accelerate`:
+  `split_rule="accelerate"`, `build_state_mesh=False`); PadaQuad and
+  torchdiffeq use `--torch-threads` (default `TORCH_THREADS`; the run
+  script passes `TORCH_THREADS` and runs each device as an `srun
+  --cpu-bind=cores` step inside an allocation). JAX's CUDA start-up moves
+  torch's current GPU to the last visible one, so `main` sets it back to GPU 0,
+  where PadaQuad's index-less `"cuda"` and JAX's first device are.
+  PadaQuad's `max_batch` per device and integrand is the table `MAX_BATCH`,
+  measured once on the 80 GB A100 node (`--measure-max-batch`, PadaQuad's
+  `get_max_batch`); the script refuses other hardware (`MAX_BATCH_HARDWARE`),
+  so re-measure there. quadax's `max_ninter` per integrand in
+  `QUADAX_MAX_NINTER` (its loop runs all `max_ninter + 1` iterations, so
+  re-measure it when integrands change). Commit the results from a clean tree
+  (they record the commit; the results files themselves do not count as dirty)
+  and rewrite "What the results show" in `docs/performance.md` by hand. The
+  script imports JAX/diffrax/quadax/torchdiffeq only inside functions (the docs
+  build imports it).
 - README sections reused on the site are marked
   `<!-- include-start: NAME -->` / `<!-- include-end: NAME -->`; the Python
   blocks of the README and of `docs/development/adding_a_method.md`
   (`DOCUMENTS` in `tests/test_examples_run.py`) run in that test unless
   preceded by `<!-- not-tested -->`.
 - The gallery runs the scripts listed in `filename_pattern` (`docs/conf.py`):
-  the `examples/*.py` tutorials and `examples/verification/*.py`; matplotlib
-  figures become the cards' thumbnails.
+  the `examples/*.py` tutorials, `examples/hard_integrals/*.py` and
+  `examples/verification/*.py`; matplotlib figures become the cards'
+  thumbnails.
 
 mypy runs with every function annotated and every body checked
 (`disallow_untyped_defs`, `check_untyped_defs`, `disallow_any_generics`,
@@ -147,7 +176,7 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_error_masks.py` | Vector-error machinery (norms, `failure_fraction`, rounding floor) in float32 and float64; the float tolerances act as 0-d tensors of the values' dtype, bit for bit (CPU and CUDA); pair errors set only the pair ratio; the record is judged by the reduced errors of acceptance, bit for bit the batch's ratios and masks (every `error_norm`, both modes, a NaN row); a callable `error_norm` whose output is not a tensor of the input's shape without its last axis, on its device, raises `ValueError` in `_reduce_norm` (an [N, 1] output, a list, another device; also through `integrate`); an integer output is accepted and integrates bit for bit as the same norm cast to the dtype |
 | `test_evaluate_f_on_mesh.py` | `_evaluate_f_on_mesh` and its two evaluation paths; the returned `MethodOutput` equals one `_calculate_integral` call bit for bit however the calls of `f` were cut |
 | `test_trade_speed_for_memory.py` | `trade_speed_for_memory`, `evaluation_buffer`, `record_evaluations`: the same calls of `f`, mesh and integral (bit for bit) with every setting, for every `max_batch`, uniform and variable, CPU and CUDA; when the values are integrated (once per pass, per call, per buffer); the values' device in every result `loss_fxn` receives; lower GPU peak; the `ValueError`s; the three warnings, on the first call only (no state), none for `result_device` on the solver's device; without values, `state.mesh` is the `power_law` one; every feature unchanged; the default holds a pass once (GPU peak < 1.8 × the pass's values); an out-of-memory error at the pass's array names the remedies; `_keep_rows` in place equals indexing |
-| `test_examples_run.py` | Runs `examples/*.py` (with output markers, or self-checking with asserts: `SELF_CHECKING_EXAMPLES`, `MPLBACKEND=Agg`), every script in `examples/verification/`, and every ```python block of the files in its `DOCUMENTS` (the README, `docs/development/adding_a_method.md`; except blocks preceded by `<!-- not-tested -->`) |
+| `test_examples_run.py` | Runs `examples/*.py` and `examples/hard_integrals/*.py` (with output markers, or self-checking with asserts: `SELF_CHECKING_EXAMPLES`, `MPLBACKEND=Agg`), every script in `examples/verification/`, and every ```python block of the files in its `DOCUMENTS` (the README, `docs/development/adding_a_method.md`; except blocks preceded by `<!-- not-tested -->`) |
 | `test_max_adaptive_splits.py` | The `max_adaptive_splits` depth cap; with `split_rule="accelerate"`, the same K 2^n subintervals in fewer passes |
 | `test_memory_benchmark.py` | The memory benchmark, `_setup_memory_checks`; `get_max_batch(f=..., t=...)` (measurement, argument checks, `evaluation_buffer` kept free twice) and the measured `result.max_batch` |
 | `test_memory_state.py` | The batch size of `integrate` and the state: the test calls (10, 100, 1,000, stopping at the order of the first pass; 0.75 above 10 points and 0.5 up to 10 after an out-of-memory error; with `take_gradient=True` not below C, and `torch.OutOfMemoryError` when a call of C points or fewer fails, at once after a failed 10-point call for C > 10), the calls of `f` are exactly the test calls plus C per evaluated subinterval (every start, both `take_gradient`, with simulated out-of-memory errors), growth by 10, a given `max_batch`, the state's mesh and batch size (a converged one below C refused with `take_gradient=True`, before `f`; with `max_batch=21` or not converged it runs); backward out-of-memory restarts |
@@ -158,8 +187,9 @@ solver) and **unit** (one function at a time with hand-crafted inputs):
 | `test_recheck_accepted_panels.py` | Re-check of accepted steps against the drifting tolerance (with `take_gradient=False` the drift is between passes: `_cancelling_peak` hides its cancelling part in a narrow peak the first passes miss); `enforce_convergence` (default `not take_gradient`, True with `take_gradient=True` raises, False turns it off); a fixed `error_integral_reference` dropped once every step is accepted (converges, never evaluates a step twice, split cap, CUDA, `failure_fraction`, NaN); the norm family's record carries each step's `reduced_errors` into every re-check and the final check; the re-check with `split_rule="accelerate"` (fewer passes, no step evaluated twice) |
 | `test_solver_isolation.py` | Solvers of different dtypes keep their own tables; the registry is never changed; `MethodClass.to` returns one shared copy per (method, device, dtype), sharing no memory with its source, dropped with its source (deep copies and pickles of a solver, CUDA); `_Tableau` frozen; no integration writes into a method's tensors (version counters); a replaced registry entry reaches new solvers only; `_integration_on_device` restores the solver's method object, and leaves the solver's device and method when the conversion raises (CUDA) |
 | `test_tracked_variables.py` | The `tracked_variables` feature |
-| `test_docs_performance_table.py` | The Performance page's rendering of `docs/performance/results_*.json`: no file, one, two (name order, hardware headings), unreadable files named in the error; the memory options tables from `docs/performance/memory_options.json` (every setting of every integrand, the field's `EXAMPLE_SETTINGS` in order of `max_batch`, defaults first, missing and unreadable files) |
+| `test_docs_performance_table.py` | The Performance page's rendering of `docs/performance/results_*.json`: no file, one, two (name order, hardware headings), unreadable files named in the error; per integrand a library table and a PadaQuad table with one speedup column per library († not converged, — raised; a range from fewer timed runs says how many); the memory options tables from `docs/performance/memory_options.json` (every setting of every integrand, the field's `EXAMPLE_SETTINGS` in order of `max_batch`, defaults first, missing and unreadable files) |
 | `test_split_statistics.py` | `n_start_steps` / `n_start_steps_split` / `max_split_depth` on integrands with known answers; `converged` against a hand-computed tolerance check (absolute and cumulative, with `y0`), in `failure_fraction` mode (including a NaN component), against the final integral, and its warning (numbers, output component, remedies; subintervals too narrow to halve named by place, without `state=`: a jump with zero tolerances in float64 and float32, 1/(t - 0.5)^2 near 0.5 with `atol=1e-6`, and both kinds with a cap in one call); `max_adaptive_splits` type check; `split_rule="accelerate"`: validation, exact integrals (Lorentzian, jump, sin(2e4 t); gk21, gk15, gk7, cc17; both `take_gradient`), fewer points and passes on sin(2e4 t), unchanged on a kink, independent of `max_batch` (uniform and variable, with and without `trade_speed_for_memory`), warm start (absolute, cumulative, float32), `failure_fraction` raises (constructor, call, a per-call `error_norm`; a per-call norm-family `error_norm` allows it), bound and parameter gradients, no four-way test before the first split, no extra points where one halving suffices (T_{k-1}(2t - 1) on one starting subinterval, gk15, gk21, cc33; failed with the former threshold 1e4) |
+| `test_hard_integrands.py` | Every integrand of `integrand_dict` / `hard_integrand_dict` agrees across torch, NumPy and JAX (`xp`); the hard ones' exact solutions match `scipy.integrate.quad` on two intervals; gk21 reaches `atol = 1e-8` on each |
 
 **Snapshot tests** are the regression net for internal refactors: the
 file `tests/test_snapshots_data.json` pins `integral`, `integral_error`,
@@ -193,7 +223,8 @@ padaquad/
 │   ├── uniform.py           # UniformAdaptiveQuadrature
 │   └── variable.py          # VariableAdaptiveQuadrature
 ├── _frontend.py           # user-facing integrate() and adaptive_quadrature() (build a solver, run it)
-├── examples.py            # integrand_dict (test integrands) + wolf_schlegel
+├── examples.py            # integrand_dict, hard_integrand_dict (test integrands,
+│                          #   any array module via xp=) + wolf_schlegel
 └── distributed.py         # multi-GPU / SLURM support (internal)
 ```
 
@@ -246,9 +277,12 @@ from padaquad import (
     UniformAdaptiveQuadrature,  # concrete uniform-sampling solver
     VariableAdaptiveQuadrature,  # concrete variable-sampling solver
     IntegrationResult,  # return-type dataclass
+    IntegrationState,  # second value of integrate(): mesh and batch size to reuse
+    BackwardOutOfMemoryError,  # a backward pass that cannot be retried smaller
     UNIFORM_METHODS,  # registry of uniform method names
     VARIABLE_METHODS,  # registry of variable method names
     integrand_dict,
+    hard_integrand_dict,  # harder test integrands (many subintervals)
     wolf_schlegel,  # test integrands with analytical solutions
     steps,  # sampling-mode enum
 )
@@ -788,5 +822,7 @@ the tolerance). Plan, evidence and the adversarial reviews: the commits of PR
 ## Dependencies
 
 - **Runtime**: torch, numpy, scipy, psutil.
-- **Dev**: pytest, pytest-cov, mypy, pre-commit, ruff, typos,
-  torchdiffeq (for the speed-test benchmark only).
+- **Dev**: pytest, pytest-cov, mypy, pre-commit, ruff, typos, matplotlib
+  (the example scripts' figures).
+- **Docs**: Sphinx and its extensions, matplotlib (the gallery's figures).
+- **Bench** (`.[bench]`, benchmark only): torchdiffeq, jax, diffrax, quadax.

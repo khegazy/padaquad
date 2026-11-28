@@ -4,6 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **A benchmark against four libraries, with a run script.** `examples/speed_test/library_comparison.py` (renamed from `torchdiffeq_comparison.py`) compares PadaQuad with torchdiffeq, diffrax, scipy's `quad` and quadax on 9 integrands at one tolerance (`atol = 1e-8`, `rtol = 0`, max norm), with PadaQuad at a batch size measured once per integrand on the benchmark hardware (`MAX_BATCH`), so no run measures memory. PadaQuad has three rows: `dopri5` and `gk21` with their defaults, and `gk21` with `split_rule="accelerate"` and `build_state_mesh=False`, as one would call it for a single integral; PadaQuad and torchdiffeq use 8 PyTorch threads (`--torch-threads`). Six of them need hundreds to thousands of subintervals (a chirp, 200 sharp peaks, 100 periods, 1,000 outputs, and two expensive networks of sine and cosine features), the case PadaQuad is built for; three need few, for contrast. `examples/speed_test/run_benchmark.sh` builds the environment once and runs the GPU and CPU benchmarks on a compute node; the `bench` extra lists the compared libraries (torchdiffeq moves there from `dev`). The Performance page shows, per integrand, a table of the libraries and a table of PadaQuad's methods with one speedup column per library, measured with PadaQuad 2.0.0 on an NVIDIA A100 (80 GB) and an AMD EPYC 7763, explains how each library's tolerance works, and gives a profile of where PadaQuad's time goes when it is slower.
+- **`hard_integrand_dict`**: `oscillatory`, `chirp`, `sharp_peak`, `spectrum` (200 sharp peaks), `kink` and `many_outputs` (1,000 outputs), with exact solutions for any bounds. `sharp_peak` takes one peak position or a sequence of them. The integrands of `integrand_dict` and `hard_integrand_dict` take the array module as the keyword argument `xp` (`torch` by default, `numpy` or `jax.numpy`).
+- **Examples**: a "Harder integrals" group (one script per integrand of `hard_integrand_dict`, with a plot of where the subintervals became small), integrating a neural network and its gradient, and optimizing a reaction path on the Müller-Brown potential with popcornn's PVRE loss.
+
+### Changed
+
+- **Homepage**: no install block; "What PadaQuad is for" and the comparison with other libraries (now with diffrax and quadax) appear below the four buttons, and the separate "What PadaQuad is for" page is removed.
+
 ## [2.0.0] - 2026-11-26
 
 This release removes the solver's hidden warm-start state and the memory benchmark that ran before every `integrate` call without `max_batch` (it took longer than many integrals). A call reuses an earlier call's mesh and batch size only when they are passed to it (`result, state = solver.integrate(...)`, then `state=state`), so no call can change what another call reuses, and every call says which interval it integrates. See "Reusing the mesh and batch size" in the README and the user guide.

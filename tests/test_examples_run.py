@@ -1,12 +1,11 @@
 """Run example scripts end-to-end to catch documentation rot.
 
-Phase 6 added two example scripts (``examples/quadrature_basics.py``
-and ``examples/gradient_of_integral.py``) as user-facing tutorials.
-They live outside ``tests/`` and are not exercised by the rest of
-the test suite, so a future API rename or signature change could
-silently break them. These tests subprocess each example and assert
-non-zero output and a 0 exit code, plus a few markers to confirm the
-specific scripted assertions inside each example were reached.
+The gallery's scripts (``examples/*.py``, ``examples/hard_integrals/*.py``
+and ``examples/verification/*.py``) live outside ``tests/`` and are not
+exercised by the rest of the test suite, so a future API rename or signature
+change could silently break them. These tests run each one in a subprocess and
+assert a 0 exit code; for the first two tutorials they also check a few
+markers of their output.
 
 The examples are also useful as integration smoke tests that exercise:
 
@@ -110,9 +109,12 @@ def test_gradient_of_integral_runs_and_assertions_pass():
 
 
 # Gallery scripts that check their own results with assert statements and
-# draw figures.
+# draw figures: the tutorials and every harder-integral example.
 SELF_CHECKING_EXAMPLES = [
     EXAMPLES_DIR / "gradient_as_output.py",
+    EXAMPLES_DIR / "neural_network_integral.py",
+    EXAMPLES_DIR / "path_optimization_muller_brown.py",
+    *sorted((EXAMPLES_DIR / "hard_integrals").glob("[!_]*.py")),
 ]
 
 

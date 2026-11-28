@@ -5,5 +5,4 @@
 
 install
 quickstart
-what_it_is_for
 ```

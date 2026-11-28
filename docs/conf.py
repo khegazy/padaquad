@@ -79,11 +79,13 @@ intersphinx_mapping = {
 sphinx_gallery_conf = {
     "examples_dirs": str(ROOT / "examples"),
     "gallery_dirs": "auto_examples",
-    # Only the tutorial scripts and the verification scripts; examples/pode and
-    # examples/speed_test are not part of the gallery.
+    # The tutorial scripts, the harder integrals and the verification scripts;
+    # examples/pode and examples/speed_test are not part of the gallery.
     "filename_pattern": (
         r"/(quadrature_basics|gradient_of_integral|gradient_as_output"
+        r"|neural_network_integral|path_optimization_muller_brown"
         r"|polynomial_degree|integral_accuracy|merge_prediction)\.py$"
+        r"|/hard_integrals/[^_][^/]*\.py$"
     ),
     "ignore_pattern": r"(pode|speed_test)",
     "download_all_examples": False,

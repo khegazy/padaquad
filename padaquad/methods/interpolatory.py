@@ -90,9 +90,10 @@ _INTERPOLATORY_3 = VariableMethodClass(
 
 
 # Registry of the variable-sampling solver, keyed by name: methods that are
-# valid at the node positions that solver produces. Instances, cloned per
-# solver by ``_get_method``. ``adaptive_heun`` is the uniform heun object
-# (see the module docstring).
+# valid at the node positions that solver produces. A solver uses its
+# method's copy for its device and dtype (``MethodClass.to``, built once and
+# shared by every such solver; the registry is never changed).
+# ``adaptive_heun`` is the uniform heun object (see the module docstring).
 INTERPOLATORY_METHODS: dict[str, MethodClass] = {
     "adaptive_heun": _ADAPTIVE_HEUN,
     "interpolatory3_variable": _INTERPOLATORY_3,
